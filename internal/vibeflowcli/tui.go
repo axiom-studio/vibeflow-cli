@@ -50,7 +50,21 @@ var (
 	statusError   = lipgloss.NewStyle().Foreground(errorColor)
 
 	helpStyle = lipgloss.NewStyle().Foreground(dimColor)
+
+	asciiBanner = accentColor
+	copyrightStyle = lipgloss.NewStyle().Foreground(dimColor)
 )
+
+// bannerText is the 3D ASCII art for "VibeFlow" displayed on TUI startup.
+const bannerText = `
+ __      __ _  _            _____  _
+ \ \    / /(_)| |          |  ___|| |
+  \ \  / /  _ | |__    ___ | |_   | |  ___  __      __
+   \ \/ /  | ||  _ \  / _ \|  _|  | | / _ \ \ \ /\ / /
+    \  /   | || |_) ||  __/| |    | || (_) | \ V  V /
+     \/    |_||_.__/  \___||_|    |_| \___/   \_/\_/`
+
+const copyrightText = "by axiomstudio.ai | Copyright 2026"
 
 // SessionRow represents a session displayed in the TUI.
 type SessionRow struct {
@@ -1221,8 +1235,9 @@ func (m Model) View() string {
 		height = 24
 	}
 
-	// Title bar.
-	title := titleStyle.Render("vibeflow-cli — Session Manager")
+	// ASCII banner.
+	bannerStyle := lipgloss.NewStyle().Foreground(asciiBanner).Bold(true)
+	title := bannerStyle.Render(bannerText) + "\n" + copyrightStyle.Render("  "+copyrightText)
 
 	// Error/warning line (optional).
 	var errLine string
@@ -1291,8 +1306,8 @@ func (m Model) View() string {
 		rightWidth = 20
 	}
 
-	// Available height for columns: total minus title, title-margin, error, help.
-	usedLines := 3 // title(1) + titleStyle.MarginBottom(1) + help(1)
+	// Available height for columns: total minus banner, copyright, gap, help.
+	usedLines := 10 // banner(7) + copyright(1) + gap(1) + help(1)
 	if errLine != "" {
 		usedLines++
 	}
