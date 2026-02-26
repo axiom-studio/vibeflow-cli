@@ -1047,7 +1047,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	// For vibeflow sessions, send the init prompt to kick off autonomous work.
 	if result.SessionType == "vibeflow" && vibeflowSessionID != "" {
 		initMsg := fmt.Sprintf(
-			"Start vibeflow autonomous session for project '%s' as %s persona.",
+			"Initialize a vibeflow session for project %s with persona \"%s\" and follow the agent prompt.",
 			projectName, result.Persona,
 		)
 		// Brief delay to let the agent CLI start and be ready for input.
