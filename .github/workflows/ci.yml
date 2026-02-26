@@ -72,5 +72,6 @@ jobs:
             **Commit**: ${{ github.sha }}
             **Date**: ${{ github.event.head_commit.timestamp }}
           files: |
-            dist/vibeflow_*.*
+            dist/vibeflow_*.tar.gz
+            dist/vibeflow_*.zip
             dist/checksums.txt
