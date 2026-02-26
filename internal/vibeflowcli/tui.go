@@ -815,7 +815,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	if result.WorkDir != "" {
 		workDir = result.WorkDir
 	}
-	name := sessionid.GenerateSessionID()
+	name := sessionid.GenerateSessionID(workDir)
 	provider := result.ProviderKey
 	branch := result.Branch
 
@@ -1112,7 +1112,7 @@ func (m Model) createSession(_ tea.Msg) tea.Msg {
 		_ = CleanupStaleSession(workDir)
 	}
 
-	name := sessionid.GenerateSessionID()
+	name := sessionid.GenerateSessionID(workDir)
 
 	// Use default provider from config.
 	provider := m.config.DefaultProvider

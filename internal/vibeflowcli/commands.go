@@ -81,8 +81,8 @@ func launchCmd() *cobra.Command {
 				return fmt.Errorf("provider %q binary %q not found on PATH", provider, prov.Binary)
 			}
 
-			name := sessionid.GenerateSessionID()
 			workDir := "."
+			name := sessionid.GenerateSessionID(workDir)
 
 			if worktree && wm != nil {
 				wtName := worktreeName
