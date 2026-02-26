@@ -115,7 +115,7 @@ func DefaultConfig() *Config {
 			"gemini": {
 				Name:               "Google Gemini CLI",
 				Binary:             "gemini",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} -sandbox=none{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: false,
