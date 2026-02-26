@@ -231,6 +231,13 @@ func parseCodexBearerTokenEnvVar(content string) string {
 	return ""
 }
 
+// cleanEnvToken strips surrounding brackets, quotes, and whitespace from
+// an environment variable value. Users sometimes paste tokens wrapped in
+// [...] or "..." from config files or documentation.
+func cleanEnvToken(val string) string {
+	return strings.Trim(val, "[]\"' \t\n\r")
+}
+
 // ResolveProviderEnvVars returns the environment variables needed for the
 // given provider, reading from saved config and codex config as needed.
 // Returns the env var map and the name of any env var that still needs a
@@ -246,12 +253,12 @@ func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]str
 		// Check saved config first, then current environment.
 		if cfg.SavedEnvVars != nil {
 			if val, ok := cfg.SavedEnvVars[envVarName]; ok && val != "" {
-				env[envVarName] = val
+				env[envVarName] = cleanEnvToken(val)
 				return env, ""
 			}
 		}
 		if val := os.Getenv(envVarName); val != "" {
-			env[envVarName] = val
+			env[envVarName] = cleanEnvToken(val)
 			return env, ""
 		}
 		return env, envVarName
@@ -260,12 +267,12 @@ func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]str
 		// Check saved config first, then current environment.
 		if cfg.SavedEnvVars != nil {
 			if val, ok := cfg.SavedEnvVars[geminiKey]; ok && val != "" {
-				env[geminiKey] = val
+				env[geminiKey] = cleanEnvToken(val)
 				return env, ""
 			}
 		}
 		if val := os.Getenv(geminiKey); val != "" {
-			env[geminiKey] = val
+			env[geminiKey] = cleanEnvToken(val)
 			return env, ""
 		}
 		return env, geminiKey

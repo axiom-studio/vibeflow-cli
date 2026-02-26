@@ -539,6 +539,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			case "enter":
 				if w.envTokenValue != "" {
 					w.editingEnvToken = false
+					// Strip surrounding brackets/quotes that may have been pasted.
+					w.envTokenValue = strings.Trim(w.envTokenValue, "[]\"' ")
 					// Save to env vars and persist in config.
 					if w.envVars == nil {
 						w.envVars = make(map[string]string)
