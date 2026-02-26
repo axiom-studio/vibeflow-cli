@@ -1,8 +1,6 @@
 package vibeflowcli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,17 +11,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-)
 
-// generateLocalSessionID creates a session ID in the same format as the
-// VibeFlow server: session-YYYYMMDD-HHMMSS-<8-char-hex>. Used as fallback
-// when the server is unreachable and for non-VibeFlow sessions.
-func generateLocalSessionID() string {
-	now := time.Now()
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("session-%s-%s", now.Format("20060102-150405"), hex.EncodeToString(b))
-}
+	"vibeflow-cli/sessionid"
+)
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
@@ -825,7 +815,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	if result.WorkDir != "" {
 		workDir = result.WorkDir
 	}
-	name := generateLocalSessionID()
+	name := sessionid.GenerateSessionID()
 	provider := result.ProviderKey
 	branch := result.Branch
 
@@ -1122,7 +1112,7 @@ func (m Model) createSession(_ tea.Msg) tea.Msg {
 		_ = CleanupStaleSession(workDir)
 	}
 
-	name := generateLocalSessionID()
+	name := sessionid.GenerateSessionID()
 
 	// Use default provider from config.
 	provider := m.config.DefaultProvider

@@ -8,6 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
+
+	"vibeflow-cli/sessionid"
 )
 
 // initSubcommands registers all CLI subcommands on the root command.
@@ -79,7 +81,7 @@ func launchCmd() *cobra.Command {
 				return fmt.Errorf("provider %q binary %q not found on PATH", provider, prov.Binary)
 			}
 
-			name := generateLocalSessionID()
+			name := sessionid.GenerateSessionID()
 			workDir := "."
 
 			if worktree && wm != nil {
