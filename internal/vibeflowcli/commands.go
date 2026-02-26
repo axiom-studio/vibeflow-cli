@@ -18,6 +18,7 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(listCmd())
 	root.AddCommand(switchCmd())
 	root.AddCommand(killCmd())
+	root.AddCommand(deleteCmd())
 	root.AddCommand(worktreesCmd())
 	root.AddCommand(checkCmd())
 	root.AddCommand(configCmd())
@@ -267,6 +268,47 @@ func killCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Session %q killed.\n", name)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&cleanupWorktree, "cleanup-worktree", false, "Also remove the git worktree")
+	return cmd
+}
+
+// --- delete (alias for kill) ---
+
+func deleteCmd() *cobra.Command {
+	var cleanupWorktree bool
+
+	cmd := &cobra.Command{
+		Use:   "delete <session-name>",
+		Short: "Delete (kill) a session",
+		Long:  "Delete a session by name. This is an alias for the 'kill' command.",
+		Args:  cobra.ExactArgs(1),
+		Aliases: []string{"rm"},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfgPath, _ := cmd.Flags().GetString("config")
+			_, tmux, store, wm, _, err := loadComponents(cfgPath)
+			if err != nil {
+				return err
+			}
+
+			name := args[0]
+			if err := tmux.KillSession(name); err != nil {
+				return fmt.Errorf("delete session: %w", err)
+			}
+
+			if meta, found, _ := store.Get(name); found {
+				RemoveSessionFile(meta.WorkingDir)
+				if cleanupWorktree && meta.WorktreePath != "" && wm != nil {
+					if err := wm.Remove(meta.WorktreePath, true); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree: %v\n", err)
+					}
+				}
+				_ = store.Remove(name)
+			}
+
+			fmt.Printf("Session %q deleted.\n", name)
 			return nil
 		},
 	}
