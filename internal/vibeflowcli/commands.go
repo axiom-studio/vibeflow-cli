@@ -105,12 +105,27 @@ func launchCmd() *cobra.Command {
 				command = prov.Binary
 			}
 
+			// Resolve provider env vars (e.g. codex bearer token).
+			envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
+			if missingVar != "" {
+				return fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
+			}
+			sessionEnv := prov.Env
+			if len(envVars) > 0 {
+				if sessionEnv == nil {
+					sessionEnv = make(map[string]string)
+				}
+				for k, v := range envVars {
+					sessionEnv[k] = v
+				}
+			}
+
 			if err := tmux.CreateSessionWithOpts(SessionOpts{
 				Name:     name,
 				Provider: provider,
 				WorkDir:  workDir,
 				Command:  command,
-				Env:      prov.Env,
+				Env:      sessionEnv,
 				Branch:   branch,
 				Project:  cfg.DefaultProject,
 			}); err != nil {

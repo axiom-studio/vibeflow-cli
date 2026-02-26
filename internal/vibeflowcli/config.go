@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,7 @@ type Config struct {
 	ViewMode         string                `yaml:"view_mode"` // "flat" or "grouped" (default: flat)
 	ErrorRecovery    ErrorRecoveryConfig   `yaml:"error_recovery"`
 	DirectoryHistory []string              `yaml:"directory_history,omitempty"`
+	SavedEnvVars     map[string]string     `yaml:"saved_env_vars,omitempty"`
 }
 
 // AddDirectoryToHistory adds a directory to the front of the history list,
@@ -186,4 +188,72 @@ func CheckServerReachable(serverURL string) error {
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// ReadCodexBearerTokenEnvVar reads ~/.codex/config.toml and returns the
+// bearer_token_env_var value from the [mcp_servers.vibeflow] section.
+// Returns "" if the file or key is not found.
+func ReadCodexBearerTokenEnvVar() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil {
+		return ""
+	}
+	return parseCodexBearerTokenEnvVar(string(data))
+}
+
+// parseCodexBearerTokenEnvVar extracts bearer_token_env_var from a TOML
+// string. Looks for the key under the [mcp_servers.vibeflow] section.
+func parseCodexBearerTokenEnvVar(content string) string {
+	inVibeflowSection := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || trimmed[0] == '#' {
+			continue
+		}
+		// Detect section headers.
+		if trimmed[0] == '[' {
+			inVibeflowSection = trimmed == "[mcp_servers.vibeflow]"
+			continue
+		}
+		if inVibeflowSection {
+			parts := strings.SplitN(trimmed, "=", 2)
+			if len(parts) == 2 && strings.TrimSpace(parts[0]) == "bearer_token_env_var" {
+				val := strings.TrimSpace(parts[1])
+				val = strings.Trim(val, "\"'")
+				return val
+			}
+		}
+	}
+	return ""
+}
+
+// ResolveProviderEnvVars returns the environment variables needed for the
+// given provider, reading from saved config and codex config as needed.
+// Returns the env var map and the name of any env var that still needs a
+// value (empty string if all are resolved).
+func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]string, missingEnvVar string) {
+	env = make(map[string]string)
+	if providerKey != "codex" {
+		return env, ""
+	}
+	envVarName := ReadCodexBearerTokenEnvVar()
+	if envVarName == "" {
+		return env, ""
+	}
+	// Check saved config first, then current environment.
+	if cfg.SavedEnvVars != nil {
+		if val, ok := cfg.SavedEnvVars[envVarName]; ok && val != "" {
+			env[envVarName] = val
+			return env, ""
+		}
+	}
+	if val := os.Getenv(envVarName); val != "" {
+		env[envVarName] = val
+		return env, ""
+	}
+	return env, envVarName
 }

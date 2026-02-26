@@ -605,7 +605,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.worktrees != nil {
 				repoRoot = m.worktrees.RepoRoot()
 			}
-			m.wizard = NewWizardModel(m.registry, repoRoot, m.worktrees, m.client, m.config.DefaultProject, m.config.DirectoryHistory)
+			m.wizard = NewWizardModel(m.registry, repoRoot, m.worktrees, m.client, m.config.DefaultProject, m.config.DirectoryHistory, m.config)
 			m.activeView = ViewWizard
 			return m, nil
 		case "d":
@@ -968,6 +968,16 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		)
 		escaped := strings.ReplaceAll(initPrompt, "'", "'\\''")
 		command += fmt.Sprintf(" -p '%s'", escaped)
+	}
+
+	// Merge wizard-resolved env vars (e.g. codex bearer token) into provider env.
+	if result.EnvVars != nil {
+		if result.Provider.Env == nil {
+			result.Provider.Env = make(map[string]string)
+		}
+		for k, v := range result.EnvVars {
+			result.Provider.Env[k] = v
+		}
 	}
 
 	err = m.tmux.CreateSessionWithOpts(SessionOpts{

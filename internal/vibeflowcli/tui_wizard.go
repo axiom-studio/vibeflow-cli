@@ -20,6 +20,7 @@ const (
 	StepProject
 	StepPersona
 	StepProvider
+	StepEnvToken
 	StepBranch
 	StepWorktree
 	StepPermissions
@@ -56,6 +57,7 @@ type WizardResult struct {
 	SpecifiedWorkDir     string // User-specified working directory (when WorktreeSpecifyDir).
 	ReuseSessionID       string // Session ID from a previous conflict to reuse via session_init.
 	WorkDir              string // Project root directory selected in StepWorkDir.
+	EnvVars              map[string]string // Extra env vars to set on the tmux session.
 }
 
 // WizardModel is a Bubble Tea sub-model for multi-step session creation.
@@ -89,6 +91,7 @@ type WizardModel struct {
 	repoRoot         string   // Initial repo root from caller.
 	registry         *ProviderRegistry // Provider registry for re-loading on dir change.
 	client           *Client           // API client (may be nil).
+	config           *Config           // Config for saved env vars and persisting.
 
 	// Selections.
 	selectedSessionType int
@@ -118,6 +121,12 @@ type WizardModel struct {
 	specifiedWorkDir    string // User-specified working directory path.
 	editingSpecWorkDir  bool   // True when text input for specified work dir is active.
 	specifiedWorkDirErr string // Validation error for specified work dir.
+
+	// Env token input (StepEnvToken).
+	envTokenVarName string // Name of the env var to prompt for (e.g. "MCP_TOKEN").
+	envTokenValue   string // User-entered value for the env var.
+	editingEnvToken bool   // True when text input for env token is active.
+	envVars         map[string]string // Resolved env vars to pass to session.
 
 	result WizardResult
 }
@@ -149,7 +158,7 @@ func defaultPersonas() []personaEntry {
 
 // NewWizardModel creates a wizard pre-loaded with providers and branches.
 // wm may be nil if not in a git repository. client may be nil if API is unavailable.
-func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, client *Client, defaultProject string, dirHistory []string) WizardModel {
+func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, client *Client, defaultProject string, dirHistory []string, cfg *Config) WizardModel {
 	// Build provider list.
 	allProviders := registry.List()
 	entries := make([]providerEntry, 0, len(allProviders))
@@ -215,6 +224,7 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		repoRoot:          repoRoot,
 		registry:          registry,
 		client:            client,
+		config:            cfg,
 	}
 }
 
@@ -509,6 +519,45 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			return w, nil
 		}
 
+		// Text input mode for env token value.
+		if w.editingEnvToken {
+			switch msg.String() {
+			case "enter":
+				if w.envTokenValue != "" {
+					w.editingEnvToken = false
+					// Save to env vars and persist in config.
+					if w.envVars == nil {
+						w.envVars = make(map[string]string)
+					}
+					w.envVars[w.envTokenVarName] = w.envTokenValue
+					if w.config != nil {
+						if w.config.SavedEnvVars == nil {
+							w.config.SavedEnvVars = make(map[string]string)
+						}
+						w.config.SavedEnvVars[w.envTokenVarName] = w.envTokenValue
+						_ = SaveConfig(w.config, ConfigPath())
+					}
+					w.step = StepBranch
+					w.cursor = 0
+				}
+			case "esc":
+				w.editingEnvToken = false
+				w.envTokenValue = ""
+				w.step = StepProvider
+				w.cursor = w.selectedProvider
+			case "backspace":
+				if len(w.envTokenValue) > 0 {
+					w.envTokenValue = w.envTokenValue[:len(w.envTokenValue)-1]
+				}
+			default:
+				ch := msg.String()
+				if len(ch) == 1 && ch[0] >= ' ' && ch[0] <= '~' {
+					w.envTokenValue += ch
+				}
+			}
+			return w, nil
+		}
+
 		switch msg.String() {
 		case "up", "k":
 			if w.cursor > 0 {
@@ -553,7 +602,7 @@ func (w WizardModel) View() string {
 	b.WriteString("\n\n")
 
 	// Step indicator.
-	steps := []string{"Directory", "Type", "Project", "Persona", "Provider", "Branch", "Worktree", "Permissions", "Confirm"}
+	steps := []string{"Directory", "Type", "Project", "Persona", "Provider", "Env", "Branch", "Worktree", "Permissions", "Confirm"}
 	var stepLine strings.Builder
 	for i, s := range steps {
 		if WizardStep(i) == w.step {
@@ -687,6 +736,13 @@ func (w WizardModel) View() string {
 				b.WriteString(fmt.Sprintf("%s%s\n", cursor, name))
 			}
 		}
+
+	case StepEnvToken:
+		b.WriteString(fmt.Sprintf("Enter value for %s:\n\n", w.envTokenVarName))
+		b.WriteString(fmt.Sprintf("  %s: %s", w.envTokenVarName, w.envTokenValue))
+		b.WriteString(lipgloss.NewStyle().Foreground(accentColor).Render("█"))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("enter: confirm  esc: back"))
 
 	case StepBranch:
 		if w.editingBranch {
@@ -851,6 +907,8 @@ func (w WizardModel) listLen() int {
 		return len(w.personas)
 	case StepProvider:
 		return len(w.providers)
+	case StepEnvToken:
+		return 1
 	case StepBranch:
 		return len(w.branches)
 	case StepWorktree:
@@ -925,8 +983,24 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			w.editingBinary = true
 			return w, nil
 		}
+		// Check if provider needs env token (e.g. codex bearer_token_env_var).
+		pe := w.providers[w.cursor]
+		env, missing := ResolveProviderEnvVars(w.config, pe.key)
+		if missing != "" {
+			w.envTokenVarName = missing
+			w.envTokenValue = ""
+			w.editingEnvToken = true
+			w.envVars = env
+			w.step = StepEnvToken
+			return w, nil
+		}
+		w.envVars = env
 		w.step = StepBranch
 		w.cursor = 0
+	case StepEnvToken:
+		// Re-enter editing if not already done.
+		w.editingEnvToken = true
+		return w, nil
 	case StepBranch:
 		w.selectedBranch = w.cursor
 		if w.cursor == 0 {
@@ -1031,6 +1105,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			CustomBaseDir:        w.customBaseDir,
 			SpecifiedWorkDir:     w.specifiedWorkDir,
 			WorkDir:              w.selectedWorkDir,
+			EnvVars:              w.envVars,
 		}
 		w.done = true
 	}
@@ -1129,6 +1204,9 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 			w.step = StepSessionType
 			w.cursor = w.selectedSessionType
 		}
+	case StepEnvToken:
+		w.step = StepProvider
+		w.cursor = w.selectedProvider
 	case StepBranch:
 		w.step = StepProvider
 		w.cursor = w.selectedProvider
