@@ -941,14 +941,14 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 
 	// For vibeflow sessions with integrated providers (e.g. Claude), pass the
-	// init prompt via the CLI's -p flag so the agent starts autonomously.
+	// init prompt as a positional argument so the agent starts autonomously.
 	if result.SessionType == "vibeflow" && vibeflowSessionID != "" && result.Provider.VibeFlowIntegrated {
 		initPrompt := fmt.Sprintf(
 			"Initialize a vibeflow session for project %s with persona %q and follow the agent prompt.",
 			projectName, result.Persona,
 		)
 		escaped := strings.ReplaceAll(initPrompt, "'", "'\\''")
-		command += fmt.Sprintf(" -p '%s'", escaped)
+		command += fmt.Sprintf(" '%s'", escaped)
 	}
 
 	// Merge wizard-resolved env vars (e.g. codex bearer token) into provider env.
