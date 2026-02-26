@@ -16,6 +16,7 @@ type SessionMeta struct {
 	TmuxSession       string    `json:"tmux_session"`
 	Provider          string    `json:"provider"`
 	Project           string    `json:"project"`
+	Persona           string    `json:"persona,omitempty"`
 	Branch            string    `json:"branch"`
 	WorktreePath      string    `json:"worktree_path,omitempty"`
 	WorkingDir        string    `json:"working_dir"`

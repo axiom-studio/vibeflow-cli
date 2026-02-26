@@ -56,6 +56,7 @@ var (
 type SessionRow struct {
 	Name          string
 	Project       string
+	Persona       string
 	Provider      string
 	Branch        string
 	WorktreePath  string
@@ -250,12 +251,13 @@ func (m Model) refreshSessions() tea.Msg {
 			Status:       sessionStatus(ts.Attached),
 			TmuxAttached: ts.Attached,
 		}
-		// Enrich with store metadata (provider, branch, worktree).
+		// Enrich with store metadata (provider, branch, worktree, persona).
 		if meta, ok := storeMeta[ts.Name]; ok {
 			row.Provider = meta.Provider
 			row.Branch = meta.Branch
 			row.WorktreePath = meta.WorktreePath
 			row.Project = meta.Project
+			row.Persona = meta.Persona
 			row.WorkingDir = meta.WorkingDir
 		}
 		if recoveredNames[ts.Name] {
@@ -999,6 +1001,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			TmuxSession:       tmuxName,
 			Provider:          provider,
 			Project:           projectName,
+			Persona:           result.Persona,
 			Branch:            branch,
 			WorktreePath:      worktreePath,
 			WorkingDir:        workDir,
@@ -1462,6 +1465,29 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 		b.WriteString("  " + indent + line)
 	}
 	b.WriteString("\n")
+
+	// Subtitle line: branch, persona, project (dim, indented).
+	var parts []string
+	if s.Branch != "" {
+		parts = append(parts, s.Branch)
+	}
+	if s.Persona != "" {
+		parts = append(parts, s.Persona)
+	}
+	if s.Project != "" {
+		parts = append(parts, s.Project)
+	}
+	if len(parts) > 0 {
+		subtitle := strings.Join(parts, " · ")
+		subtitleStyle := lipgloss.NewStyle().Foreground(dimColor)
+		// Align with the name text (after indicator + provider dot).
+		pad := "    " + indent
+		if s.Provider != "" {
+			pad += "  "
+		}
+		b.WriteString(pad + subtitleStyle.Render(subtitle))
+		b.WriteString("\n")
+	}
 }
 
 // renderDetailPanel renders the right column with metadata for the selected session.
