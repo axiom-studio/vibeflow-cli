@@ -237,23 +237,39 @@ func parseCodexBearerTokenEnvVar(content string) string {
 // value (empty string if all are resolved).
 func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]string, missingEnvVar string) {
 	env = make(map[string]string)
-	if providerKey != "codex" {
-		return env, ""
-	}
-	envVarName := ReadCodexBearerTokenEnvVar()
-	if envVarName == "" {
-		return env, ""
-	}
-	// Check saved config first, then current environment.
-	if cfg.SavedEnvVars != nil {
-		if val, ok := cfg.SavedEnvVars[envVarName]; ok && val != "" {
+	switch providerKey {
+	case "codex":
+		envVarName := ReadCodexBearerTokenEnvVar()
+		if envVarName == "" {
+			return env, ""
+		}
+		// Check saved config first, then current environment.
+		if cfg.SavedEnvVars != nil {
+			if val, ok := cfg.SavedEnvVars[envVarName]; ok && val != "" {
+				env[envVarName] = val
+				return env, ""
+			}
+		}
+		if val := os.Getenv(envVarName); val != "" {
 			env[envVarName] = val
 			return env, ""
 		}
-	}
-	if val := os.Getenv(envVarName); val != "" {
-		env[envVarName] = val
+		return env, envVarName
+	case "gemini":
+		const geminiKey = "GEMINI_API_KEY"
+		// Check saved config first, then current environment.
+		if cfg.SavedEnvVars != nil {
+			if val, ok := cfg.SavedEnvVars[geminiKey]; ok && val != "" {
+				env[geminiKey] = val
+				return env, ""
+			}
+		}
+		if val := os.Getenv(geminiKey); val != "" {
+			env[geminiKey] = val
+			return env, ""
+		}
+		return env, geminiKey
+	default:
 		return env, ""
 	}
-	return env, envVarName
 }
