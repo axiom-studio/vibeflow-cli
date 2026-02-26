@@ -185,6 +185,14 @@ func (tm *TmuxManager) CreateSession(name, workDir, command string) error {
 // options including environment variables and provider-prefixed naming.
 func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 	fullName := tm.FullSessionName(opts.Provider, opts.Name)
+
+	// If a tmux session with the same name already exists (e.g. stale session
+	// from a previous attempt that reused the same .vibeflow-session ID), kill
+	// it before creating a fresh one.
+	if tm.HasSession(fullName) {
+		_, _ = tm.run("kill-session", "-t", fullName)
+	}
+
 	args := []string{"new-session", "-d", "-s", fullName, "-c", opts.WorkDir}
 
 	// Set environment variables via tmux -e flags.
