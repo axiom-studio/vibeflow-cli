@@ -4,6 +4,7 @@ import (
 	"embed"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // agentDocsFS embeds the agent markdown templates from agentdocs/.
@@ -20,10 +21,20 @@ var providerDocFile = map[string]string{
 	"gemini": "GEMINI.md",
 }
 
-// EnsureAgentDoc checks whether the agent-specific markdown file exists in
-// workDir. If missing, it writes the bundled template so the agent picks it
-// up on startup. Returns the filename written (empty if already present or
-// no mapping exists for the provider).
+// vibeflowSectionMarker is the heading used to identify the vibeflow rules
+// section in agent instruction files. All embedded templates use this heading.
+const vibeflowSectionMarker = "## vibeflow Agent Session Rules"
+
+// EnsureAgentDoc ensures the agent-specific markdown file in workDir contains
+// the vibeflow session rules section.
+//
+// If the file does not exist, the full bundled template is written.
+// If the file exists but lacks the vibeflow section, the section is appended
+// (preserving existing user content).
+// If the file exists and already contains the vibeflow section, no changes
+// are made.
+//
+// Returns the filename written/updated (empty if no changes or no mapping).
 func EnsureAgentDoc(workDir, providerKey string) string {
 	docFile, ok := providerDocFile[providerKey]
 	if !ok {
@@ -31,18 +42,45 @@ func EnsureAgentDoc(workDir, providerKey string) string {
 	}
 
 	destPath := filepath.Join(workDir, docFile)
-	if _, err := os.Stat(destPath); err == nil {
-		return "" // already exists
-	}
-
-	data, err := agentDocsFS.ReadFile("agentdocs/" + docFile)
+	template, err := agentDocsFS.ReadFile("agentdocs/" + docFile)
 	if err != nil {
 		return ""
 	}
 
-	if err := os.WriteFile(destPath, data, 0644); err != nil {
-		return ""
+	existing, readErr := os.ReadFile(destPath)
+	if readErr != nil {
+		// File doesn't exist — write the full template.
+		if err := os.WriteFile(destPath, template, 0644); err != nil {
+			return ""
+		}
+		return docFile
 	}
 
+	// File exists — check if vibeflow section is already present.
+	content := string(existing)
+	if strings.Contains(content, vibeflowSectionMarker) {
+		return "" // already has vibeflow section
+	}
+
+	// Extract the vibeflow section from the template and append it.
+	section := extractVibeflowSection(string(template))
+	if section == "" {
+		return "" // template has no vibeflow section (shouldn't happen)
+	}
+
+	content = strings.TrimRight(content, "\n") + "\n\n" + section + "\n"
+	if err := os.WriteFile(destPath, []byte(content), 0644); err != nil {
+		return ""
+	}
 	return docFile
+}
+
+// extractVibeflowSection returns the vibeflow rules section from a template
+// string, starting from the vibeflowSectionMarker heading to the end.
+func extractVibeflowSection(template string) string {
+	idx := strings.Index(template, vibeflowSectionMarker)
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimRight(template[idx:], "\n")
 }
