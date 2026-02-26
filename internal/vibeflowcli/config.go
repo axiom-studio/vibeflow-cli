@@ -147,6 +147,9 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	// Migrate built-in provider configs to current defaults.
+	migrateProviders(cfg, path)
+
 	// Environment variable overrides
 	if v := os.Getenv("VIBEFLOW_URL"); v != "" {
 		cfg.ServerURL = v
@@ -156,6 +159,41 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// migrateProviders updates built-in provider configs to current defaults.
+// Removes stale VIBEFLOW_ env vars from provider Env sections and syncs
+// launch templates for built-in providers (claude, codex, gemini).
+func migrateProviders(cfg *Config, path string) {
+	defaults := DefaultConfig()
+	dirty := false
+
+	for key, prov := range cfg.Providers {
+		defProv, isBuiltin := defaults.Providers[key]
+		if !isBuiltin {
+			continue
+		}
+
+		// Sync launch template to current default.
+		if prov.LaunchTemplate != defProv.LaunchTemplate {
+			prov.LaunchTemplate = defProv.LaunchTemplate
+			dirty = true
+		}
+
+		// Remove stale VIBEFLOW_ env vars that agents don't read.
+		for k := range prov.Env {
+			if strings.HasPrefix(k, "VIBEFLOW_") {
+				delete(prov.Env, k)
+				dirty = true
+			}
+		}
+
+		cfg.Providers[key] = prov
+	}
+
+	if dirty {
+		_ = SaveConfig(cfg, path)
+	}
 }
 
 // SaveConfig writes config to the given path.
