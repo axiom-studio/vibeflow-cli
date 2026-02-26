@@ -72,6 +72,7 @@ type TmuxSession struct {
 	ID        string
 	Windows   int
 	Attached  bool
+	PaneDead  bool
 	CreatedAt string
 }
 
@@ -138,12 +139,16 @@ func (tm *TmuxManager) EnsureServer() error {
 	} {
 		_, _ = tm.run("set", "-s", opt.key, opt.val)
 	}
+	// Keep dead panes alive so the user can see why the agent command
+	// exited. Without this, sessions whose command exits immediately
+	// are destroyed and disappear from the session list.
+	_, _ = tm.run("set", "-g", "remain-on-exit", "on")
 	return nil
 }
 
 // ListSessions returns all vibeflow-prefixed tmux sessions.
 func (tm *TmuxManager) ListSessions() ([]TmuxSession, error) {
-	out, err := tm.run("list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_windows}\t#{session_attached}\t#{session_created_string}")
+	out, err := tm.run("list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_windows}\t#{session_attached}\t#{session_created_string}\t#{pane_dead}")
 	if err != nil {
 		// tmux writes error messages to combined output; err.Error() is just "exit status 1".
 		combined := out + " " + err.Error()
@@ -158,7 +163,7 @@ func (tm *TmuxManager) ListSessions() ([]TmuxSession, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 5)
+		parts := strings.SplitN(line, "\t", 6)
 		if len(parts) < 5 {
 			continue
 		}
@@ -166,11 +171,13 @@ func (tm *TmuxManager) ListSessions() ([]TmuxSession, error) {
 		if !strings.HasPrefix(name, sessionPrefix) {
 			continue
 		}
+		paneDead := len(parts) >= 6 && parts[5] == "1"
 		sessions = append(sessions, TmuxSession{
 			Name:      name,
 			ID:        parts[1],
 			Windows:   atoi(parts[2]),
 			Attached:  parts[3] == "1",
+			PaneDead:  paneDead,
 			CreatedAt: parts[4],
 		})
 	}
@@ -234,6 +241,11 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 	if err != nil {
 		return fmt.Errorf("create session %q: %w", fullName, err)
 	}
+
+	// Keep dead panes visible so the user can see why the agent exited.
+	// Set per-session as well as globally in EnsureServer because the
+	// global setting is lost when the server restarts (no prior sessions).
+	_, _ = tm.run("set-option", "-t", fullName, "remain-on-exit", "on")
 
 	// Configure vibeflow-themed status bar for this session.
 	_ = tm.ConfigureStatusBar(fullName, StatusBarOpts{

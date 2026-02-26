@@ -253,7 +253,7 @@ func (m Model) refreshSessions() tea.Msg {
 		shortName := strings.TrimPrefix(ts.Name, sessionPrefix)
 		row := SessionRow{
 			Name:         shortName,
-			Status:       sessionStatus(ts.Attached),
+			Status:       sessionStatus(ts.Attached, ts.PaneDead),
 			TmuxAttached: ts.Attached,
 		}
 		// Enrich with store metadata (provider, branch, worktree, persona).
@@ -299,10 +299,10 @@ func (m Model) refreshSessions() tea.Msg {
 	return sessionsMsg{sessions: rows}
 }
 
-func sessionStatus(attached bool) string {
-	// All live tmux sessions are "running" — the process inside the pane is
-	// active regardless of whether a client is viewing it. "attached" is
-	// shown separately in the detail panel.
+func sessionStatus(attached, paneDead bool) string {
+	if paneDead {
+		return "exited"
+	}
 	if attached {
 		return "attached"
 	}
@@ -1427,6 +1427,9 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	case "waiting":
 		indicator = "●"
 		indStyle = statusWaiting
+	case "exited":
+		indicator = "●"
+		indStyle = statusError
 	case "error":
 		indicator = "●"
 		indStyle = statusError
@@ -1754,6 +1757,8 @@ func renderStatus(status string) string {
 		return statusIdle.Render("idle")
 	case "waiting":
 		return statusWaiting.Render("waiting")
+	case "exited":
+		return statusError.Render("exited")
 	case "error":
 		return statusError.Render("error")
 	default:
