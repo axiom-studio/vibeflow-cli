@@ -122,6 +122,9 @@ func launchCmd() *cobra.Command {
 				}
 			}
 
+			// Ensure agent-specific markdown doc exists in the working directory.
+			EnsureAgentDoc(workDir, provider)
+
 			if err := tmux.CreateSessionWithOpts(SessionOpts{
 				Name:     name,
 				Provider: provider,

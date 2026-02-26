@@ -970,6 +970,14 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		}
 	}
 
+	// Ensure agent-specific markdown doc exists in the working directory
+	// so the agent picks up vibeflow session rules on startup.
+	if result.SessionType == "vibeflow" {
+		if docFile := EnsureAgentDoc(workDir, provider); docFile != "" {
+			m.logger.Info("copied agent doc %s to %s", docFile, workDir)
+		}
+	}
+
 	err = m.tmux.CreateSessionWithOpts(SessionOpts{
 		Name:     name,
 		Provider: provider,
