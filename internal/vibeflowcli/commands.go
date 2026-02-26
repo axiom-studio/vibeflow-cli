@@ -82,7 +82,7 @@ func launchCmd() *cobra.Command {
 			}
 
 			workDir := "."
-			name := sessionid.GenerateSessionID("")
+			name := sessionid.GenerateSessionID(workDir)
 
 			if worktree && wm != nil {
 				wtName := worktreeName
