@@ -1,0 +1,19 @@
+# Binary
+vibeflow
+
+# GoReleaser
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+*.test
+*.out
