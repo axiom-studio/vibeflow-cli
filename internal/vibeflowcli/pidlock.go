@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // PIDLockPath returns the default PID lock file path (~/.vibeflow-cli/vibeflow.pid).
@@ -78,8 +77,8 @@ func readPIDLock(path string) (int, bool) {
 	if err != nil || pid <= 0 {
 		return 0, false
 	}
-	// Signal 0 checks process existence without actually sending a signal.
-	if err := syscall.Kill(pid, 0); err != nil {
+	// Check process existence (platform-specific).
+	if !processAlive(pid) {
 		return 0, false // Process is dead — stale PID file.
 	}
 	return pid, true

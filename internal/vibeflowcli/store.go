@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -181,7 +180,7 @@ func (s *Store) withLock(fn func([]SessionMeta) ([]SessionMeta, error)) ([]Sessi
 	if err := flockWithTimeout(lf, 5*time.Second); err != nil {
 		return nil, fmt.Errorf("acquire lock: %w", err)
 	}
-	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer flockRelease(lf) //nolint:errcheck
 
 	// Read current data.
 	sessions, err := s.readFile()
@@ -232,18 +231,3 @@ func (s *Store) writeFile(sessions []SessionMeta) error {
 	return os.WriteFile(s.path, data, 0600)
 }
 
-// flockWithTimeout tries to acquire an exclusive flock, retrying until
-// the timeout elapses.
-func flockWithTimeout(f *os.File, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("flock timeout after %s", timeout)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
