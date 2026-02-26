@@ -120,7 +120,19 @@ func RenderLaunchCommand(tmpl string, vars LaunchTemplateVars) (string, error) {
 // sessions without hitting "no server running" errors on the first call.
 func (tm *TmuxManager) EnsureServer() error {
 	_, err := tm.run("start-server")
-	return err
+	if err != nil {
+		return err
+	}
+	// Configure server-level settings that aren't loaded from the user's
+	// tmux.conf (since we use a custom socket). These enable clipboard
+	// and terminal passthrough so Cmd+V paste works on macOS.
+	for _, opt := range []struct{ key, val string }{
+		{"set-clipboard", "on"},
+		{"allow-passthrough", "on"},
+	} {
+		_, _ = tm.run("set", "-s", opt.key, opt.val)
+	}
+	return nil
 }
 
 // ListSessions returns all vibeflow-prefixed tmux sessions.
