@@ -286,8 +286,10 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.workDirErr = ""
 			default:
 				ch := msg.String()
-				if len(ch) == 1 && isValidPathChar(ch[0]) {
-					w.workDirInput += ch
+				for _, r := range ch {
+					if isValidPathChar(byte(r)) {
+						w.workDirInput += string(r)
+					}
 				}
 				w.workDirErr = ""
 			}
@@ -314,8 +316,10 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 			default:
 				ch := msg.String()
-				if len(ch) == 1 && isValidBranchChar(ch[0]) {
-					w.newBranchName += ch
+				for _, r := range ch {
+					if isValidBranchChar(byte(r)) {
+						w.newBranchName += string(r)
+					}
 				}
 			}
 			return w, nil
@@ -349,8 +353,12 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 			default:
 				ch := msg.String()
-				if len(ch) == 1 && isValidPathChar(ch[0]) {
-					w.binaryPath += ch
+				for _, r := range ch {
+					if isValidPathChar(byte(r)) {
+						w.binaryPath += string(r)
+					}
+				}
+				if len(ch) > 0 {
 					w.binaryPathErr = ""
 				}
 			}
@@ -390,7 +398,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				return w, nil
 			default:
 				ch := msg.String()
-				if len(ch) == 1 {
+				if len(ch) >= 1 {
 					w.projectFilter += ch
 					w.rebuildProjectFilter()
 					w.cursor = 0
@@ -416,9 +424,11 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 			default:
 				ch := msg.String()
-				// Only accept valid worktree name characters.
-				if len(ch) == 1 && isValidNameChar(ch[0]) {
-					w.worktreeName += ch
+				// Accept valid worktree name characters (supports paste).
+				for _, r := range ch {
+					if isValidNameChar(byte(r)) {
+						w.worktreeName += string(r)
+					}
 				}
 			}
 			return w, nil
@@ -463,8 +473,10 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.customDirErr = ""
 			default:
 				ch := msg.String()
-				if len(ch) == 1 && isValidPathChar(ch[0]) {
-					w.customBaseDir += ch
+				for _, r := range ch {
+					if isValidPathChar(byte(r)) {
+						w.customBaseDir += string(r)
+					}
 				}
 				w.customDirErr = ""
 			}
@@ -511,8 +523,10 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.specifiedWorkDirErr = ""
 			default:
 				ch := msg.String()
-				if len(ch) == 1 && isValidPathChar(ch[0]) {
-					w.specifiedWorkDir += ch
+				for _, r := range ch {
+					if isValidPathChar(byte(r)) {
+						w.specifiedWorkDir += string(r)
+					}
 				}
 				w.specifiedWorkDirErr = ""
 			}
@@ -551,8 +565,11 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 			default:
 				ch := msg.String()
-				if len(ch) == 1 && ch[0] >= ' ' && ch[0] <= '~' {
-					w.envTokenValue += ch
+				// Accept multi-character input (e.g. pasted text via Cmd+V / Ctrl+V).
+				for _, r := range ch {
+					if r >= ' ' && r <= '~' {
+						w.envTokenValue += string(r)
+					}
 				}
 			}
 			return w, nil
