@@ -917,7 +917,9 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 
 	// For vibeflow sessions, pass the init prompt so the agent starts autonomously.
 	// Claude and Codex take the prompt as a positional argument; Gemini uses -p.
-	if result.SessionType == "vibeflow" && vibeflowSessionID != "" {
+	// Always append for vibeflow sessions — even if session_init failed, the
+	// agent has MCP access and will call session_init itself on startup.
+	if result.SessionType == "vibeflow" {
 		initPrompt := fmt.Sprintf(
 			"Initialize a vibeflow session for project %s with persona %q and follow the agent prompt.",
 			projectName, result.Persona,
@@ -939,6 +941,14 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		}
 		for k, v := range result.EnvVars {
 			result.Provider.Env[k] = v
+		}
+	}
+
+	// Ensure agent-specific markdown doc exists in the working directory
+	// so the agent picks up vibeflow session rules on startup.
+	if result.SessionType == "vibeflow" {
+		if docFile := EnsureAgentDoc(workDir, provider); docFile != "" {
+			m.logger.Info("copied agent doc %s to %s", docFile, workDir)
 		}
 	}
 

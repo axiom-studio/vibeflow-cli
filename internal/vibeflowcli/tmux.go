@@ -199,11 +199,10 @@ func (tm *TmuxManager) CreateSession(name, workDir, command string) error {
 func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 	fullName := tm.FullSessionName(opts.Provider, opts.Name)
 
-	// If a tmux session with the same name already exists (e.g. stale session
-	// from a previous attempt that reused the same .vibeflow-session ID), kill
-	// it before creating a fresh one.
+	// If a tmux session with the same name already exists, refuse to
+	// overwrite it. Sessions must coexist — deletion is user-initiated only.
 	if tm.HasSession(fullName) {
-		_, _ = tm.run("kill-session", "-t", fullName)
+		return fmt.Errorf("session %q already exists — use 'vibeflow delete' to remove it first", fullName)
 	}
 
 	args := []string{"new-session", "-d", "-s", fullName, "-c", opts.WorkDir}
