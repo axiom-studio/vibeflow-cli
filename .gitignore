@@ -17,3 +17,6 @@ Thumbs.db
 # Go
 *.test
 *.out
+
+# VibeFlow session files
+.vibeflow-session*

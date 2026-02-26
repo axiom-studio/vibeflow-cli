@@ -524,14 +524,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					if m.store != nil {
 						if meta, found, _ := m.store.Get(row.Name); found {
-							RemoveSessionFile(meta.WorkingDir)
+							RemoveSessionFile(meta.WorkingDir, meta.Persona)
 							if meta.WorktreePath != "" && m.worktrees != nil && m.config.Worktree.CleanupOnKill == "always" {
 								_ = m.worktrees.Remove(meta.WorktreePath, true)
 							}
 						}
 						_ = m.store.Remove(row.Name)
 					} else {
-						RemoveSessionFile(".")
+						RemoveSessionFile(".", "")
 					}
 					return m, m.refreshSessions
 				}
@@ -749,7 +749,8 @@ func (m Model) updateConflict(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Use the directory from the conflict result (not CWD) to ensure
 		// the correct .vibeflow-session file is removed.
 		conflictDir := filepath.Dir(cm.Conflict().FilePath)
-		_ = CleanupStaleSession(conflictDir)
+		conflictPersona := cm.Conflict().Persona
+		_ = CleanupStaleSession(conflictDir, conflictPersona)
 		if m.pendingWizard != nil {
 			result := *m.pendingWizard
 			if result.SessionType == "vibeflow" && oldSessionID != "" {
@@ -800,13 +801,13 @@ func (m Model) launchFromWizard(result WizardResult) tea.Msg {
 	// Check for conflicts before launching (current-dir and specified-dir modes).
 	switch result.WorktreeChoice {
 	case WorktreeCurrent:
-		conflict := CheckConflict(workDir, m.tmux)
+		conflict := CheckConflict(workDir, result.Persona, m.tmux)
 		if conflict.Status != NoConflict {
 			return conflictDetectedMsg{conflict: conflict, wizardResult: result}
 		}
 	case WorktreeSpecifyDir:
 		if result.SpecifiedWorkDir != "" {
-			conflict := CheckConflict(result.SpecifiedWorkDir, m.tmux)
+			conflict := CheckConflict(result.SpecifiedWorkDir, result.Persona, m.tmux)
 			if conflict.Status != NoConflict {
 				return conflictDetectedMsg{conflict: conflict, wizardResult: result}
 			}
@@ -899,9 +900,9 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		// Try to reuse an existing session ID (from conflict modal or file).
 		reuseID := result.ReuseSessionID
 		if reuseID == "" {
-			if existingID, _, _ := readSessionFileID(workDir); existingID != "" {
+			if existingID, _, _ := readSessionFileID(workDir, result.Persona); existingID != "" {
 				reuseID = existingID
-				m.logger.Info("read existing session ID from .vibeflow-session: %s", existingID)
+				m.logger.Info("read existing session ID from .vibeflow-session-%s: %s", result.Persona, existingID)
 			}
 		}
 		if reuseID != "" {
@@ -912,8 +913,8 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			m.logger.Info("generated local session ID: %s", vibeflowSessionID)
 		}
 		name = vibeflowSessionID
-		// Ensure .vibeflow-session exists so the agent can read it on startup.
-		_ = WriteSessionFileIfNeeded(workDir, vibeflowSessionID)
+		// Ensure .vibeflow-session-{persona} exists so the agent can read it on startup.
+		_ = WriteSessionFileIfNeeded(workDir, result.Persona, vibeflowSessionID)
 	}
 
 	// Render launch command.
@@ -1004,7 +1005,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		sessionFileID = vibeflowSessionID
 	}
 	if result.Provider.SessionFile != "" {
-		_ = WriteSessionFileIfNeeded(workDir, sessionFileID)
+		_ = WriteSessionFileIfNeeded(workDir, result.Persona, sessionFileID)
 	}
 
 	// Persist metadata.
@@ -1037,8 +1038,8 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 func (m Model) createSession(_ tea.Msg) tea.Msg {
 	workDir := m.config.ResolveWorkDir("")
 
-	// Check for session conflicts before launching.
-	conflict := CheckConflict(workDir, m.tmux)
+	// Check for session conflicts before launching (non-wizard path uses empty persona).
+	conflict := CheckConflict(workDir, "", m.tmux)
 	switch conflict.Status {
 	case ActiveConflict:
 		// If worktrees are available, auto-create a worktree instead of blocking.
@@ -1050,9 +1051,9 @@ func (m Model) createSession(_ tea.Msg) tea.Msg {
 		}
 	case ExternalConflict:
 		// External session (not managed by TUI) — treat as stale for non-wizard path.
-		_ = CleanupStaleSession(workDir)
+		_ = CleanupStaleSession(workDir, "")
 	case StaleConflict:
-		_ = CleanupStaleSession(workDir)
+		_ = CleanupStaleSession(workDir, "")
 	}
 
 	name := sessionid.GenerateSessionID(workDir)
@@ -1116,8 +1117,9 @@ func (m Model) createSession(_ tea.Msg) tea.Msg {
 
 	// Write session file if the provider uses one.
 	// Only write if the file doesn't already contain this session ID.
+	// Non-wizard path uses empty persona (legacy .vibeflow-session).
 	if provCfg.SessionFile != "" {
-		_ = WriteSessionFileIfNeeded(workDir, name)
+		_ = WriteSessionFileIfNeeded(workDir, "", name)
 	}
 
 	// Persist session metadata to store.
