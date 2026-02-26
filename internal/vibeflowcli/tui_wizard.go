@@ -15,7 +15,8 @@ import (
 type WizardStep int
 
 const (
-	StepSessionType WizardStep = iota
+	StepWorkDir WizardStep = iota
+	StepSessionType
 	StepProject
 	StepPersona
 	StepProvider
@@ -54,6 +55,7 @@ type WizardResult struct {
 	CustomBaseDir        string // Custom base directory for worktree (when WorktreeCustom).
 	SpecifiedWorkDir     string // User-specified working directory (when WorktreeSpecifyDir).
 	ReuseSessionID       string // Session ID from a previous conflict to reuse via session_init.
+	WorkDir              string // Project root directory selected in StepWorkDir.
 }
 
 // WizardModel is a Bubble Tea sub-model for multi-step session creation.
@@ -76,6 +78,17 @@ type WizardModel struct {
 
 	// Persona data.
 	personas         []personaEntry
+
+	// Directory selection (StepWorkDir).
+	dirHistory       []string // Recent directories from config.
+	dirOpts          []string // Display options: "[+] Enter new path" + history entries.
+	selectedWorkDir  string   // Resolved working directory path.
+	editingWorkDir   bool     // True when text input for new directory is active.
+	workDirInput     string   // Text input for new directory.
+	workDirErr       string   // Validation error for directory.
+	repoRoot         string   // Initial repo root from caller.
+	registry         *ProviderRegistry // Provider registry for re-loading on dir change.
+	client           *Client           // API client (may be nil).
 
 	// Selections.
 	selectedSessionType int
@@ -136,7 +149,7 @@ func defaultPersonas() []personaEntry {
 
 // NewWizardModel creates a wizard pre-loaded with providers and branches.
 // wm may be nil if not in a git repository. client may be nil if API is unavailable.
-func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, client *Client, defaultProject string) WizardModel {
+func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, client *Client, defaultProject string, dirHistory []string) WizardModel {
 	// Build provider list.
 	allProviders := registry.List()
 	entries := make([]providerEntry, 0, len(allProviders))
@@ -180,8 +193,12 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		filtered[i] = i
 	}
 
+	// Build directory options: "[+] Enter new path" + history entries.
+	dirOpts := []string{"[+] Enter new path"}
+	dirOpts = append(dirOpts, dirHistory...)
+
 	return WizardModel{
-		step:              StepSessionType,
+		step:              StepWorkDir,
 		sessionTypeOpts:   []string{"Vanilla", "VibeFlow"},
 		projects:          projects,
 		filteredProjects:  filtered,
@@ -193,6 +210,11 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		existingWorktrees: existingWts,
 		worktreeOpts:      []string{"New worktree", "Specify directory", "Current directory"},
 		permissionOpts:    []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
+		dirHistory:        dirHistory,
+		dirOpts:           dirOpts,
+		repoRoot:          repoRoot,
+		registry:          registry,
+		client:            client,
 	}
 }
 
@@ -209,6 +231,59 @@ func (w WizardModel) Result() WizardResult { return w.result }
 func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Text input mode for working directory path.
+		if w.editingWorkDir {
+			switch msg.String() {
+			case "enter":
+				dir := w.workDirInput
+				if dir == "" {
+					w.workDirErr = "path cannot be empty"
+					return w, nil
+				}
+				if strings.HasPrefix(dir, "~/") {
+					if home, err := os.UserHomeDir(); err == nil {
+						dir = filepath.Join(home, dir[2:])
+						w.workDirInput = dir
+					}
+				}
+				info, err := os.Stat(dir)
+				if err != nil {
+					w.workDirErr = "directory does not exist"
+					return w, nil
+				}
+				if !info.IsDir() {
+					w.workDirErr = "path is not a directory"
+					return w, nil
+				}
+				if !isGitRepo(dir) {
+					w.workDirErr = "not a git repository"
+					return w, nil
+				}
+				w.workDirErr = ""
+				w.editingWorkDir = false
+				w.selectedWorkDir = dir
+				w.reloadBranchesForDir(dir)
+				w.step = StepSessionType
+				w.cursor = 0
+			case "esc":
+				w.editingWorkDir = false
+				w.workDirInput = ""
+				w.workDirErr = ""
+			case "backspace":
+				if len(w.workDirInput) > 0 {
+					w.workDirInput = w.workDirInput[:len(w.workDirInput)-1]
+				}
+				w.workDirErr = ""
+			default:
+				ch := msg.String()
+				if len(ch) == 1 && isValidPathChar(ch[0]) {
+					w.workDirInput += ch
+				}
+				w.workDirErr = ""
+			}
+			return w, nil
+		}
+
 		// Text input mode for new branch name.
 		if w.editingBranch {
 			switch msg.String() {
@@ -478,7 +553,7 @@ func (w WizardModel) View() string {
 	b.WriteString("\n\n")
 
 	// Step indicator.
-	steps := []string{"Type", "Project", "Persona", "Provider", "Branch", "Worktree", "Permissions", "Confirm"}
+	steps := []string{"Directory", "Type", "Project", "Persona", "Provider", "Branch", "Worktree", "Permissions", "Confirm"}
 	var stepLine strings.Builder
 	for i, s := range steps {
 		if WizardStep(i) == w.step {
@@ -496,6 +571,38 @@ func (w WizardModel) View() string {
 	b.WriteString("\n\n")
 
 	switch w.step {
+	case StepWorkDir:
+		if w.editingWorkDir {
+			b.WriteString("Enter project directory path:\n\n")
+			b.WriteString(fmt.Sprintf("  Path: %s", w.workDirInput))
+			b.WriteString(lipgloss.NewStyle().Foreground(accentColor).Render("█"))
+			if w.workDirErr != "" {
+				b.WriteString("\n")
+				b.WriteString(lipgloss.NewStyle().Foreground(errorColor).Render("  " + w.workDirErr))
+			}
+			b.WriteString("\n\n")
+			b.WriteString(helpStyle.Render("enter: confirm  esc: cancel  (supports ~/...)"))
+		} else {
+			b.WriteString("Select project directory:\n\n")
+			for i, opt := range w.dirOpts {
+				cursor := "  "
+				if i == w.cursor {
+					cursor = "> "
+				}
+				if i == 0 {
+					// "[+] Enter new path" — render with accent color.
+					b.WriteString(fmt.Sprintf("%s%s\n", cursor, lipgloss.NewStyle().Foreground(accentColor).Render(opt)))
+				} else {
+					// History entry — show directory path, check if valid.
+					label := opt
+					if !isGitRepo(opt) {
+						label += lipgloss.NewStyle().Foreground(dimColor).Render(" (not found)")
+					}
+					b.WriteString(fmt.Sprintf("%s%s\n", cursor, label))
+				}
+			}
+		}
+
 	case StepSessionType:
 		b.WriteString("Select session type:\n\n")
 		descriptions := []string{
@@ -678,6 +785,9 @@ func (w WizardModel) View() string {
 
 	case StepConfirm:
 		b.WriteString("Confirm session:\n\n")
+		if w.selectedWorkDir != "" {
+			b.WriteString(fmt.Sprintf("  Directory:     %s\n", w.selectedWorkDir))
+		}
 		sessionType := "Vanilla"
 		if w.selectedSessionType == 1 {
 			sessionType = "VibeFlow (managed)"
@@ -731,6 +841,8 @@ func (w WizardModel) View() string {
 
 func (w WizardModel) listLen() int {
 	switch w.step {
+	case StepWorkDir:
+		return len(w.dirOpts)
 	case StepSessionType:
 		return len(w.sessionTypeOpts)
 	case StepProject:
@@ -754,6 +866,25 @@ func (w WizardModel) listLen() int {
 
 func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 	switch w.step {
+	case StepWorkDir:
+		if w.cursor == 0 {
+			// "[+] Enter new path" — open text input.
+			cwd, _ := os.Getwd()
+			w.workDirInput = cwd
+			w.workDirErr = ""
+			w.editingWorkDir = true
+			return w, nil
+		}
+		// History entry selected — validate and advance.
+		dir := w.dirOpts[w.cursor]
+		if !isGitRepo(dir) {
+			// Directory no longer valid — ignore selection.
+			return w, nil
+		}
+		w.selectedWorkDir = dir
+		w.reloadBranchesForDir(dir)
+		w.step = StepSessionType
+		w.cursor = 0
 	case StepSessionType:
 		w.selectedSessionType = w.cursor
 		if w.cursor == 1 { // VibeFlow
@@ -899,6 +1030,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			ExistingWorktreePath: existingPath,
 			CustomBaseDir:        w.customBaseDir,
 			SpecifiedWorkDir:     w.specifiedWorkDir,
+			WorkDir:              w.selectedWorkDir,
 		}
 		w.done = true
 	}
@@ -974,8 +1106,11 @@ func (w WizardModel) findWorktreeForBranch(branch string) string {
 
 func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 	switch w.step {
-	case StepSessionType:
+	case StepWorkDir:
 		w.cancelled = true
+	case StepSessionType:
+		w.step = StepWorkDir
+		w.cursor = 0
 	case StepProject:
 		w.projectFilterActive = false
 		w.projectFilter = ""
@@ -1017,6 +1152,30 @@ func (w WizardModel) resolvedBranch() string {
 		return w.newBranchName
 	}
 	return w.branches[w.selectedBranch]
+}
+
+// reloadBranchesForDir re-fetches git branches and worktree info for a new directory.
+func (w *WizardModel) reloadBranchesForDir(dir string) {
+	branches := listGitBranches(dir)
+	if len(branches) == 0 {
+		branches = []string{"main"}
+	}
+	branches = append([]string{"[+] Create new branch"}, branches...)
+	w.branches = branches
+
+	// Rebuild worktree map for the new directory.
+	wm, err := NewWorktreeManager(dir, ".claude/worktrees")
+	if err == nil && wm != nil {
+		w.existingWorktrees = wm.BranchWorktreeMap()
+	} else {
+		w.existingWorktrees = nil
+	}
+}
+
+// isGitRepo checks whether the given directory is inside a git repository.
+func isGitRepo(dir string) bool {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree")
+	return cmd.Run() == nil
 }
 
 // providerKeys returns sorted provider keys from the registry.

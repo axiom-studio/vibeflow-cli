@@ -28,18 +28,34 @@ type ErrorRecoveryConfig struct {
 
 // Config holds all vibeflow-cli configuration.
 type Config struct {
-	ServerURL       string                `yaml:"server_url"`
-	APIToken        string                `yaml:"api_token"`
-	DefaultProject  string                `yaml:"default_project"`
-	DefaultWorkDir  string                `yaml:"default_work_dir"`
-	TmuxSocket      string                `yaml:"tmux_socket"`
-	PollInterval    int                   `yaml:"poll_interval_seconds"`
-	ClaudeBinary    string                `yaml:"claude_binary"`
-	Providers       map[string]Provider   `yaml:"providers"`
-	Worktree        WorktreeConfig        `yaml:"worktree"`
-	DefaultProvider string                `yaml:"default_provider"`
-	ViewMode        string                `yaml:"view_mode"` // "flat" or "grouped" (default: flat)
-	ErrorRecovery   ErrorRecoveryConfig   `yaml:"error_recovery"`
+	ServerURL        string                `yaml:"server_url"`
+	APIToken         string                `yaml:"api_token"`
+	DefaultProject   string                `yaml:"default_project"`
+	DefaultWorkDir   string                `yaml:"default_work_dir"`
+	TmuxSocket       string                `yaml:"tmux_socket"`
+	PollInterval     int                   `yaml:"poll_interval_seconds"`
+	ClaudeBinary     string                `yaml:"claude_binary"`
+	Providers        map[string]Provider   `yaml:"providers"`
+	Worktree         WorktreeConfig        `yaml:"worktree"`
+	DefaultProvider  string                `yaml:"default_provider"`
+	ViewMode         string                `yaml:"view_mode"` // "flat" or "grouped" (default: flat)
+	ErrorRecovery    ErrorRecoveryConfig   `yaml:"error_recovery"`
+	DirectoryHistory []string              `yaml:"directory_history,omitempty"`
+}
+
+// AddDirectoryToHistory adds a directory to the front of the history list,
+// removing any duplicate and capping at 10 entries.
+func (c *Config) AddDirectoryToHistory(dir string) {
+	for i, d := range c.DirectoryHistory {
+		if d == dir {
+			c.DirectoryHistory = append(c.DirectoryHistory[:i], c.DirectoryHistory[i+1:]...)
+			break
+		}
+	}
+	c.DirectoryHistory = append([]string{dir}, c.DirectoryHistory...)
+	if len(c.DirectoryHistory) > 10 {
+		c.DirectoryHistory = c.DirectoryHistory[:10]
+	}
 }
 
 // ResolveWorkDir returns the working directory to use. Priority:

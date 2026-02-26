@@ -587,7 +587,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.worktrees != nil {
 				repoRoot = m.worktrees.RepoRoot()
 			}
-			m.wizard = NewWizardModel(m.registry, repoRoot, m.worktrees, m.client, m.config.DefaultProject)
+			m.wizard = NewWizardModel(m.registry, repoRoot, m.worktrees, m.client, m.config.DefaultProject, m.config.DirectoryHistory)
 			m.activeView = ViewWizard
 			return m, nil
 		case "d":
@@ -756,6 +756,9 @@ func (m Model) updateWorktreeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 // launchFromWizard checks for conflicts and either launches or shows the conflict modal.
 func (m Model) launchFromWizard(result WizardResult) tea.Msg {
 	workDir := "."
+	if result.WorkDir != "" {
+		workDir = result.WorkDir
+	}
 
 	// Check for conflicts before launching (current-dir and specified-dir modes).
 	switch result.WorktreeChoice {
@@ -788,20 +791,32 @@ type autoAttachMsg struct{ name string }
 // executeLaunch performs the actual session creation after conflict resolution.
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	workDir := m.config.ResolveWorkDir("")
+	if result.WorkDir != "" {
+		workDir = result.WorkDir
+	}
 	name := fmt.Sprintf("session-%d", time.Now().Unix())
 	provider := result.ProviderKey
 	branch := result.Branch
+
+	// Resolve the WorktreeManager to use — if the wizard selected a different
+	// directory than the TUI's default, create a temporary manager for it.
+	wm := m.worktrees
+	if result.WorkDir != "" && (wm == nil || wm.RepoRoot() != result.WorkDir) {
+		if newWM, err := NewWorktreeManager(result.WorkDir, m.config.Worktree.BaseDir); err == nil {
+			wm = newWM
+		}
+	}
 
 	// Handle worktree selection.
 	var worktreePath string
 	switch result.WorktreeChoice {
 	case WorktreeNew:
-		if m.worktrees != nil {
+		if wm != nil {
 			wtName := result.WorktreeName
 			if wtName == "" {
 				wtName = fmt.Sprintf("%s-%s-%d", provider, branch, time.Now().Unix())
 			}
-			wtPath, wtErr := m.worktrees.CreateBranch(wtName, branch, result.NewBranch)
+			wtPath, wtErr := wm.CreateBranch(wtName, branch, result.NewBranch)
 			if wtErr != nil {
 				return sessionsMsg{err: fmt.Errorf("create worktree: %w", wtErr)}
 			}
@@ -814,12 +829,12 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			worktreePath = result.ExistingWorktreePath
 		}
 	case WorktreeCustom:
-		if m.worktrees != nil && result.CustomBaseDir != "" {
+		if wm != nil && result.CustomBaseDir != "" {
 			wtName := result.WorktreeName
 			if wtName == "" {
 				wtName = fmt.Sprintf("%s-%s-%d", provider, branch, time.Now().Unix())
 			}
-			wtPath, wtErr := m.worktrees.CreateBranchInDir(result.CustomBaseDir, wtName, branch, result.NewBranch)
+			wtPath, wtErr := wm.CreateBranchInDir(result.CustomBaseDir, wtName, branch, result.NewBranch)
 			if wtErr != nil {
 				return sessionsMsg{err: fmt.Errorf("create worktree in custom dir: %w", wtErr)}
 			}
@@ -978,6 +993,12 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			VibeFlowSessionID: vibeflowSessionID,
 			CreatedAt:         time.Now(),
 		})
+	}
+
+	// Save working directory to history for quick access in future sessions.
+	if result.WorkDir != "" {
+		m.config.AddDirectoryToHistory(result.WorkDir)
+		_ = SaveConfig(m.config, ConfigPath())
 	}
 
 	// For vibeflow sessions, send the init prompt to kick off autonomous work.
