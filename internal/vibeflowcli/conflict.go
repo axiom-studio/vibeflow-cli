@@ -26,18 +26,18 @@ import (
 type ConflictStatus int
 
 const (
-	// NoConflict means no .vibeflow-session file was found.
+	// NoConflict means no session file was found for the given persona.
 	NoConflict ConflictStatus = iota
-	// ActiveConflict means a .vibeflow-session file exists and the
-	// corresponding tmux session is still running.
+	// ActiveConflict means a session file exists and the corresponding
+	// tmux session is still running.
 	ActiveConflict
-	// StaleConflict means a .vibeflow-session file exists but the
-	// tmux session is no longer running.
+	// StaleConflict means a session file exists but the tmux session
+	// is no longer running.
 	StaleConflict
-	// ExternalConflict means a .vibeflow-session file exists but has no
-	// tmux_session info — it was likely written by a vanilla agent session
-	// (e.g. claude or codex run directly in a terminal without vibeflow-cli).
-	// The session may still be running outside of tmux management.
+	// ExternalConflict means a session file exists but has no tmux_session
+	// info — it was likely written by a vanilla agent session (e.g. claude
+	// or codex run directly in a terminal without vibeflow-cli). The session
+	// may still be running outside of tmux management.
 	ExternalConflict
 )
 
@@ -61,21 +61,29 @@ func (cs ConflictStatus) String() string {
 type ConflictResult struct {
 	Status      ConflictStatus
 	SessionID   string // Vibeflow session ID from the file.
+	Persona     string // Persona from filename suffix or file content.
 	Provider    string // Parsed from extended format, defaults to "claude".
 	TmuxSession string // Full tmux session name (e.g. "vibeflow_claude-session-xxx").
-	FilePath    string // Full path to the .vibeflow-session file.
+	FilePath    string // Full path to the session file.
 }
 
-// sessionFileName is the well-known file used to mark an active session.
-const sessionFileName = ".vibeflow-session"
+// sessionFileForPersona returns the session filename for the given persona.
+// Empty persona uses the legacy ".vibeflow-session" name (for vanilla sessions).
+// Non-empty persona uses ".vibeflow-session-{persona}" (for vibeflow sessions).
+func sessionFileForPersona(persona string) string {
+	if persona == "" {
+		return ".vibeflow-session"
+	}
+	return ".vibeflow-session-" + persona
+}
 
-// CheckConflict reads the .vibeflow-session file in dir and determines
-// whether another session is actively using the directory.
+// CheckConflict reads the persona-specific session file in dir and determines
+// whether another session is actively using the directory for this persona.
 //
 // The function is side-effect-free — the caller decides how to handle
 // the result (e.g., show a modal, auto-cleanup, etc.).
-func CheckConflict(dir string, tmux *TmuxManager) ConflictResult {
-	fp := filepath.Join(dir, sessionFileName)
+func CheckConflict(dir, persona string, tmux *TmuxManager) ConflictResult {
+	fp := filepath.Join(dir, sessionFileForPersona(persona))
 
 	data, err := os.ReadFile(fp)
 	if err != nil {
@@ -94,6 +102,7 @@ func CheckConflict(dir string, tmux *TmuxManager) ConflictResult {
 
 	result := ConflictResult{
 		SessionID:   sessionID,
+		Persona:     persona,
 		Provider:    provider,
 		TmuxSession: tmuxSession,
 		FilePath:    fp,
@@ -126,43 +135,73 @@ func CheckConflict(dir string, tmux *TmuxManager) ConflictResult {
 	return result
 }
 
-// CleanupStaleSession removes the .vibeflow-session file from dir.
-// Call this after confirming the session is stale (no active tmux session).
-func CleanupStaleSession(dir string) error {
-	return os.Remove(filepath.Join(dir, sessionFileName))
+// CheckAllSessions scans a directory for all .vibeflow-session* files and
+// returns a ConflictResult for each one. This is used by the TUI to show
+// coexisting sessions from different personas as informational.
+func CheckAllSessions(dir string, tmux *TmuxManager) []ConflictResult {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	const prefix = ".vibeflow-session"
+	var results []ConflictResult
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) || e.IsDir() {
+			continue
+		}
+
+		// Extract persona from suffix: ".vibeflow-session-developer" → "developer"
+		persona := ""
+		if len(name) > len(prefix) && name[len(prefix)] == '-' {
+			persona = name[len(prefix)+1:]
+		}
+
+		result := CheckConflict(dir, persona, tmux)
+		if result.Status != NoConflict {
+			results = append(results, result)
+		}
+	}
+	return results
 }
 
-// WriteSessionFile writes a .vibeflow-session file to dir containing only the
-// bare session ID. Coding agents read this file to obtain their session ID, so
-// no additional metadata (provider, tmux name) is stored here.
-func WriteSessionFile(dir, sessionID string) error {
-	return os.WriteFile(filepath.Join(dir, sessionFileName), []byte(sessionID+"\n"), 0600)
+// CleanupStaleSession removes the persona-specific session file from dir.
+// Call this after confirming the session is stale (no active tmux session).
+func CleanupStaleSession(dir, persona string) error {
+	return os.Remove(filepath.Join(dir, sessionFileForPersona(persona)))
+}
+
+// WriteSessionFile writes a persona-specific session file to dir containing
+// only the bare session ID. Coding agents read this file to obtain their
+// session ID, so no additional metadata (provider, tmux name) is stored here.
+func WriteSessionFile(dir, persona, sessionID string) error {
+	return os.WriteFile(filepath.Join(dir, sessionFileForPersona(persona)), []byte(sessionID+"\n"), 0600)
 }
 
 // WriteSessionFileIfNeeded writes the session file only when the file does not
 // already contain the given session ID. This prevents unnecessary overwrites
 // that could race with a coding agent reading the file.
-func WriteSessionFileIfNeeded(dir, sessionID string) error {
-	existing, _, _ := readSessionFileID(dir)
+func WriteSessionFileIfNeeded(dir, persona, sessionID string) error {
+	existing, _, _ := readSessionFileID(dir, persona)
 	if existing == sessionID {
 		return nil // file already contains the correct session ID
 	}
-	return WriteSessionFile(dir, sessionID)
+	return WriteSessionFile(dir, persona, sessionID)
 }
 
-// RemoveSessionFile removes the .vibeflow-session file from dir.
-// Unlike CleanupStaleSession this is a no-op if the file doesn't exist.
-func RemoveSessionFile(dir string) {
-	_ = os.Remove(filepath.Join(dir, sessionFileName))
+// RemoveSessionFile removes the persona-specific session file from dir.
+// This is a no-op if the file doesn't exist.
+func RemoveSessionFile(dir, persona string) {
+	_ = os.Remove(filepath.Join(dir, sessionFileForPersona(persona)))
 }
 
-// readSessionFileID reads the .vibeflow-session file from dir and returns
-// the session ID, provider, and tmux session name if the file exists and
-// contains a valid session ID. Returns empty strings if the file is missing
-// or invalid. This is used by executeLaunch to reuse an existing session ID
-// without going through the conflict modal.
-func readSessionFileID(dir string) (sessionID, provider, tmuxSession string) {
-	data, err := os.ReadFile(filepath.Join(dir, sessionFileName))
+// readSessionFileID reads the persona-specific session file from dir and
+// returns the session ID, provider, and tmux session name if the file exists
+// and contains a valid session ID. Returns empty strings if the file is missing
+// or invalid.
+func readSessionFileID(dir, persona string) (sessionID, provider, tmuxSession string) {
+	data, err := os.ReadFile(filepath.Join(dir, sessionFileForPersona(persona)))
 	if err != nil {
 		return "", "", ""
 	}
@@ -180,6 +219,7 @@ func readSessionFileID(dir string) (sessionID, provider, tmuxSession string) {
 //	session-20260224-052842-a35d47a1                                    (single line — provider defaults to "claude")
 //	session-20260224-052842-a35d47a1\nprovider=codex                   (extended with provider)
 //	session-20260224-052842-a35d47a1\ntmux_session=vibeflow_claude-... (extended with full tmux name)
+//	session-20260224-052842-a35d47a1\npersona=developer                (extended with persona)
 func parseSessionFile(content string) (sessionID, provider, tmuxSession string) {
 	provider = "claude" // default for backwards compatibility
 
@@ -204,6 +244,8 @@ func parseSessionFile(content string) (sessionID, provider, tmuxSession string) 
 				tmuxSession = v
 			}
 		}
+		// persona= is parsed but not returned here — the persona is
+		// determined by the filename suffix, not the file content.
 	}
 
 	return sessionID, provider, tmuxSession

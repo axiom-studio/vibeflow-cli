@@ -159,7 +159,7 @@ func launchCmd() *cobra.Command {
 			_ = tmux.BindSessionKeys(tmuxName)
 
 			if prov.SessionFile != "" {
-				_ = WriteSessionFileIfNeeded(workDir, name)
+				_ = WriteSessionFileIfNeeded(workDir, "", name)
 			}
 
 			_ = store.Add(SessionMeta{
@@ -277,7 +277,7 @@ func killCmd() *cobra.Command {
 			}
 
 			if meta, found, _ := store.Get(name); found {
-				RemoveSessionFile(meta.WorkingDir)
+				RemoveSessionFile(meta.WorkingDir, meta.Persona)
 				if cleanupWorktree && meta.WorktreePath != "" && wm != nil {
 					if err := wm.Remove(meta.WorktreePath, true); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree: %v\n", err)
@@ -318,7 +318,7 @@ func deleteCmd() *cobra.Command {
 			}
 
 			if meta, found, _ := store.Get(name); found {
-				RemoveSessionFile(meta.WorkingDir)
+				RemoveSessionFile(meta.WorkingDir, meta.Persona)
 				if cleanupWorktree && meta.WorktreePath != "" && wm != nil {
 					if err := wm.Remove(meta.WorktreePath, true); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree: %v\n", err)
@@ -401,7 +401,7 @@ func checkCmd() *cobra.Command {
 				dir = args[0]
 			}
 
-			result := CheckConflict(dir, tmux)
+			result := CheckConflict(dir, "", tmux)
 			switch result.Status {
 			case NoConflict:
 				fmt.Println("No conflicts detected.")
