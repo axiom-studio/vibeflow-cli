@@ -969,6 +969,17 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		command = result.Provider.Binary
 	}
 
+	// For vibeflow sessions with integrated providers (e.g. Claude), pass the
+	// init prompt via the CLI's -p flag so the agent starts autonomously.
+	if result.SessionType == "vibeflow" && vibeflowSessionID != "" && result.Provider.VibeFlowIntegrated {
+		initPrompt := fmt.Sprintf(
+			"Initialize a vibeflow session for project %s with persona %q and follow the agent prompt.",
+			projectName, result.Persona,
+		)
+		escaped := strings.ReplaceAll(initPrompt, "'", "'\\''")
+		command += fmt.Sprintf(" -p '%s'", escaped)
+	}
+
 	err = m.tmux.CreateSessionWithOpts(SessionOpts{
 		Name:     name,
 		Provider: provider,
@@ -1042,21 +1053,6 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	if result.WorkDir != "" {
 		m.config.AddDirectoryToHistory(result.WorkDir)
 		_ = SaveConfig(m.config, ConfigPath())
-	}
-
-	// For vibeflow sessions, send the init prompt to kick off autonomous work.
-	if result.SessionType == "vibeflow" && vibeflowSessionID != "" {
-		initMsg := fmt.Sprintf(
-			"Initialize a vibeflow session for project %s with persona \"%s\" and follow the agent prompt.",
-			projectName, result.Persona,
-		)
-		// Brief delay to let the agent CLI start and be ready for input.
-		time.Sleep(3 * time.Second)
-		if err := m.tmux.SendKeys(tmuxName, initMsg); err != nil {
-			m.logger.Warn("send init prompt to %s: %v", tmuxName, err)
-		} else {
-			m.logger.Info("sent init prompt to %s", tmuxName)
-		}
 	}
 
 	// Stay in the TUI — refresh the session list so the new session appears.
