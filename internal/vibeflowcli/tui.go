@@ -912,35 +912,16 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		}
 	}
 
-	// Inject vibeflow agent prompt and env vars BEFORE tmux session creation
-	// so the agent reads them on first boot.
-	if result.SessionType == "vibeflow" {
-		// Build vibeflow environment variables for the tmux session.
-		vibeflowEnv := map[string]string{
-			"VIBEFLOW_SESSION_ID": vibeflowSessionID,
-			"VIBEFLOW_PROJECT":    projectName,
-			"VIBEFLOW_PERSONA":    result.Persona,
-			"VIBEFLOW_SERVER_URL": m.config.ServerURL,
-		}
-		// Merge with existing provider env (vibeflow vars take precedence).
-		if result.Provider.Env == nil {
-			result.Provider.Env = vibeflowEnv
+	// Inject vibeflow agent prompt BEFORE tmux session creation
+	// so the agent reads it on first boot.
+	if result.SessionType == "vibeflow" && agentPrompt != "" {
+		if result.Provider.VibeFlowIntegrated {
+			// Claude provider: append to CLAUDE.md (preserve existing content).
+			injectClaudeMD(workDir, agentPrompt, projectName, result.Persona, vibeflowSessionID)
 		} else {
-			for k, v := range vibeflowEnv {
-				result.Provider.Env[k] = v
-			}
-		}
-
-		// Write agent prompt to the working directory.
-		if agentPrompt != "" {
-			if result.Provider.VibeFlowIntegrated {
-				// Claude provider: append to CLAUDE.md (preserve existing content).
-				injectClaudeMD(workDir, agentPrompt, projectName, result.Persona, vibeflowSessionID)
-			} else {
-				// Non-Claude providers: write .vibeflow-prompt file.
-				promptPath := filepath.Join(workDir, ".vibeflow-prompt")
-				_ = os.WriteFile(promptPath, []byte(agentPrompt), 0600)
-			}
+			// Non-Claude providers: write .vibeflow-prompt file.
+			promptPath := filepath.Join(workDir, ".vibeflow-prompt")
+			_ = os.WriteFile(promptPath, []byte(agentPrompt), 0600)
 		}
 	}
 
