@@ -35,6 +35,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 		return nil, nil, nil, nil, nil, fmt.Errorf("load config: %w", err)
 	}
 	tmux := NewTmuxManager(cfg.TmuxSocket)
+	tmux.SetLogger(NewLogger())
 	store := NewStore()
 	registry := NewProviderRegistry(cfg)
 

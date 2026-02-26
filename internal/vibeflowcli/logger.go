@@ -48,6 +48,11 @@ func (l *Logger) Close() {
 	}
 }
 
+// Debug writes a debug-level message.
+func (l *Logger) Debug(format string, args ...interface{}) {
+	l.write("DEBUG", format, args...)
+}
+
 // Info writes an info-level message.
 func (l *Logger) Info(format string, args ...interface{}) {
 	l.write("INFO", format, args...)

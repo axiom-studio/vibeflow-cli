@@ -16,6 +16,12 @@ const sessionPrefix = "vibeflow_"
 type TmuxManager struct {
 	socketName    string
 	supportsPopup bool // true if tmux >= 3.2 (display-popup support)
+	logger        *Logger
+}
+
+// SetLogger attaches a logger to the TmuxManager for debug output.
+func (tm *TmuxManager) SetLogger(l *Logger) {
+	tm.logger = l
 }
 
 // NewTmuxManager creates a manager with an optional custom socket.
@@ -204,6 +210,24 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 
 	if opts.Command != "" {
 		args = append(args, opts.Command)
+	}
+
+	// Log the full spawn command for debugging.
+	if tm.logger != nil {
+		// Build the full command line as it would appear in a shell.
+		fullArgs := append([]string{"tmux", "-L", tm.socketName}, args...)
+		// Redact env var values to avoid leaking secrets.
+		var redacted []string
+		for _, a := range fullArgs {
+			if strings.HasPrefix(a, "GEMINI_API_KEY=") || strings.HasPrefix(a, "MCP_TOKEN=") || strings.HasPrefix(a, "VIBEFLOW_TOKEN=") {
+				parts := strings.SplitN(a, "=", 2)
+				redacted = append(redacted, parts[0]+"=<redacted>")
+			} else {
+				redacted = append(redacted, a)
+			}
+		}
+		tm.logger.Debug("spawn %s: %s", opts.Provider, strings.Join(redacted, " "))
+		tm.logger.Info("spawn session %q provider=%s workdir=%s command=%q", fullName, opts.Provider, opts.WorkDir, opts.Command)
 	}
 
 	_, err := tm.run(args...)

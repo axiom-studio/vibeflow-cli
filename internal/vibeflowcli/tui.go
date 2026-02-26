@@ -124,6 +124,7 @@ type Model struct {
 func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *WorktreeManager, store *Store, registry *ProviderRegistry, projectID int64) Model {
 	logger := NewLogger()
 	logger.Info("vibeflow-cli started (server=%s, project=%s)", cfg.ServerURL, cfg.DefaultProject)
+	tmux.SetLogger(logger)
 	errorRegistry := NewErrorPatternRegistry()
 	healthMonitor := NewHealthMonitor(errorRegistry, tmux, cfg.ErrorRecovery, logger)
 	return Model{
