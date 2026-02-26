@@ -985,12 +985,13 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 
 	// Write session file — use server session ID if available.
+	// Only write if the file doesn't already contain this session ID.
 	sessionFileID := name
 	if vibeflowSessionID != "" {
 		sessionFileID = vibeflowSessionID
 	}
 	if result.Provider.SessionFile != "" {
-		_ = WriteSessionFile(workDir, sessionFileID, provider, tmuxName)
+		_ = WriteSessionFileIfNeeded(workDir, sessionFileID)
 	}
 
 	// Register session with vibeflow server (best-effort).
@@ -1171,8 +1172,9 @@ func (m Model) createSession(_ tea.Msg) tea.Msg {
 	m.logger.Info("session created: %s (provider=%s, workdir=%s)", tmuxName, provider, workDir)
 
 	// Write session file if the provider uses one.
+	// Only write if the file doesn't already contain this session ID.
 	if provCfg.SessionFile != "" {
-		_ = WriteSessionFile(workDir, name, provider, tmuxName)
+		_ = WriteSessionFileIfNeeded(workDir, name)
 	}
 
 	// Persist session metadata to store.

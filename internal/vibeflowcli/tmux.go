@@ -249,6 +249,21 @@ func (tm *TmuxManager) KillSession(name string) error {
 	return err
 }
 
+// FindSessionBySessionID searches running vibeflow tmux sessions for one
+// whose name contains sessionID. Returns the full tmux session name or "".
+func (tm *TmuxManager) FindSessionBySessionID(sessionID string) string {
+	sessions, err := tm.ListSessions()
+	if err != nil {
+		return ""
+	}
+	for _, s := range sessions {
+		if strings.Contains(s.Name, sessionID) {
+			return s.Name
+		}
+	}
+	return ""
+}
+
 // HasSession checks if a session exists.
 // name can be either a short name (prefix is added) or a full tmux name.
 func (tm *TmuxManager) HasSession(name string) bool {

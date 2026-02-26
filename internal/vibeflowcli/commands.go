@@ -121,7 +121,7 @@ func launchCmd() *cobra.Command {
 			_ = tmux.BindSessionKeys(tmuxName)
 
 			if prov.SessionFile != "" {
-				_ = WriteSessionFile(workDir, name, provider, tmuxName)
+				_ = WriteSessionFileIfNeeded(workDir, name)
 			}
 
 			_ = store.Add(SessionMeta{

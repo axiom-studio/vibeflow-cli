@@ -83,12 +83,25 @@ func CheckConflict(dir string, tmux *TmuxManager) ConflictResult {
 		FilePath:    fp,
 	}
 
-	// Determine conflict type based on whether we have tmux session info.
-	if tmuxSession == "" {
-		// No tmux_session line — written by a vanilla agent session (not
-		// managed by vibeflow-cli). The session may still be running.
-		result.Status = ExternalConflict
-	} else if tmux != nil && tmux.HasSession(tmuxSession) {
+	// Determine conflict type.
+	//
+	// If the file contains an explicit tmux_session= line (old format), use
+	// it directly. Otherwise search running vibeflow tmux sessions for one
+	// whose name contains this session ID.
+	if tmuxSession == "" && tmux != nil {
+		if found := tmux.FindSessionBySessionID(sessionID); found != "" {
+			tmuxSession = found
+			result.TmuxSession = found
+			// Extract provider from tmux name (vibeflow_{provider}-{name}).
+			if after, ok := strings.CutPrefix(found, sessionPrefix); ok {
+				if idx := strings.Index(after, "-"); idx > 0 {
+					result.Provider = after[:idx]
+				}
+			}
+		}
+	}
+
+	if tmuxSession != "" && tmux != nil && tmux.HasSession(tmuxSession) {
 		result.Status = ActiveConflict
 	} else {
 		result.Status = StaleConflict
@@ -103,17 +116,22 @@ func CleanupStaleSession(dir string) error {
 	return os.Remove(filepath.Join(dir, sessionFileName))
 }
 
-// WriteSessionFile writes a .vibeflow-session file to dir with the given
-// session ID, provider, and full tmux session name.
-func WriteSessionFile(dir, sessionID, provider, tmuxSession string) error {
-	content := sessionID
-	if provider != "" && provider != "claude" {
-		content += "\nprovider=" + provider
+// WriteSessionFile writes a .vibeflow-session file to dir containing only the
+// bare session ID. Coding agents read this file to obtain their session ID, so
+// no additional metadata (provider, tmux name) is stored here.
+func WriteSessionFile(dir, sessionID string) error {
+	return os.WriteFile(filepath.Join(dir, sessionFileName), []byte(sessionID+"\n"), 0600)
+}
+
+// WriteSessionFileIfNeeded writes the session file only when the file does not
+// already contain the given session ID. This prevents unnecessary overwrites
+// that could race with a coding agent reading the file.
+func WriteSessionFileIfNeeded(dir, sessionID string) error {
+	existing, _, _ := readSessionFileID(dir)
+	if existing == sessionID {
+		return nil // file already contains the correct session ID
 	}
-	if tmuxSession != "" {
-		content += "\ntmux_session=" + tmuxSession
-	}
-	return os.WriteFile(filepath.Join(dir, sessionFileName), []byte(content+"\n"), 0600)
+	return WriteSessionFile(dir, sessionID)
 }
 
 // RemoveSessionFile removes the .vibeflow-session file from dir.
