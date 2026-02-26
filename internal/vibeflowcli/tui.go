@@ -2,7 +2,6 @@ package vibeflowcli
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -872,19 +871,16 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		}
 	}
 
-	// For VibeFlow managed sessions, call session_init to get a server-
-	// generated session ID and the autonomous agent prompt.
+	// For VibeFlow managed sessions, ensure a valid .vibeflow-session file
+	// exists before spawning. The agent will call session_init itself via MCP
+	// on startup to register with the server and get the full agent prompt.
 	var vibeflowSessionID string
-	var vibeflowProjectID int64
-	var agentPrompt string
 	projectName := m.config.DefaultProject
-	if result.SessionType == "vibeflow" && m.client != nil {
+	if result.SessionType == "vibeflow" {
 		if result.ProjectName != "" {
 			projectName = result.ProjectName
 		}
-		// If no ReuseSessionID was set (e.g. no conflict modal), read
-		// .vibeflow-session from the target workDir as a fallback so we
-		// reuse the existing server session instead of creating a duplicate.
+		// Try to reuse an existing session ID (from conflict modal or file).
 		reuseID := result.ReuseSessionID
 		if reuseID == "" {
 			if existingID, _, _ := readSessionFileID(workDir); existingID != "" {
@@ -892,38 +888,16 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 				m.logger.Info("read existing session ID from .vibeflow-session: %s", existingID)
 			}
 		}
-		initResult, initErr := m.client.SessionInit(SessionInitRequest{
-			ProjectName:      projectName,
-			SessionID:        reuseID,
-			Persona:          result.Persona,
-			GitBranch:        branch,
-			WorkingDirectory: workDir,
-			AgentType:        provider,
-		})
-		if initErr != nil {
-			m.logger.Warn("session_init failed (falling back to local ID): %v", initErr)
+		if reuseID != "" {
+			vibeflowSessionID = reuseID
 		} else {
-			vibeflowSessionID = initResult.SessionID
-			vibeflowProjectID = initResult.ProjectID
-			agentPrompt = initResult.Prompt
-			// Use server-generated session ID as the local name so the format
-			// matches vanilla Claude launches (session-YYYYMMDD-HHMMSS-hex).
-			name = vibeflowSessionID
-			m.logger.Info("session_init: got server session %s (project_id=%d, prompt_len=%d)", vibeflowSessionID, vibeflowProjectID, len(agentPrompt))
+			// Generate a fresh session ID locally.
+			vibeflowSessionID = sessionid.GenerateSessionID(workDir)
+			m.logger.Info("generated local session ID: %s", vibeflowSessionID)
 		}
-	}
-
-	// Inject vibeflow agent prompt BEFORE tmux session creation
-	// so the agent reads it on first boot.
-	if result.SessionType == "vibeflow" && agentPrompt != "" {
-		if result.Provider.VibeFlowIntegrated {
-			// Claude provider: append to CLAUDE.md (preserve existing content).
-			injectClaudeMD(workDir, agentPrompt, projectName, result.Persona, vibeflowSessionID)
-		} else {
-			// Non-Claude providers: write .vibeflow-prompt file.
-			promptPath := filepath.Join(workDir, ".vibeflow-prompt")
-			_ = os.WriteFile(promptPath, []byte(agentPrompt), 0600)
-		}
+		name = vibeflowSessionID
+		// Ensure .vibeflow-session exists so the agent can read it on startup.
+		_ = WriteSessionFileIfNeeded(workDir, vibeflowSessionID)
 	}
 
 	// Render launch command.
@@ -1007,20 +981,6 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		_ = WriteSessionFileIfNeeded(workDir, sessionFileID)
 	}
 
-	// Register session with vibeflow server (best-effort).
-	if vibeflowSessionID != "" && m.client != nil {
-		regErr := m.client.SessionRegister(SessionRegisterRequest{
-			SessionID:        vibeflowSessionID,
-			ProjectID:        vibeflowProjectID,
-			WorkingDirectory: workDir,
-			GitBranch:        branch,
-			GitWorktreePath:  worktreePath,
-		})
-		if regErr != nil {
-			m.logger.Warn("session_register failed: %v", regErr)
-		}
-	}
-
 	// Persist metadata.
 	if m.store != nil {
 		_ = m.store.Add(SessionMeta{
@@ -1046,47 +1006,6 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	// Stay in the TUI — refresh the session list so the new session appears.
 	// The user can attach later via Enter key.
 	return m.refreshSessions()
-}
-
-// vibeflowSection is the marker used to delimit vibeflow-injected content in CLAUDE.md.
-const vibeflowSection = "<!-- vibeflow-agent-prompt -->"
-
-// injectClaudeMD appends the vibeflow agent prompt to the CLAUDE.md file in dir.
-// If the file already contains a vibeflow section, it is replaced. Existing
-// user content outside the section markers is preserved.
-func injectClaudeMD(dir, prompt, project, persona, sessionID string) {
-	mdPath := filepath.Join(dir, "CLAUDE.md")
-
-	section := fmt.Sprintf(
-		"%s\n# VibeFlow Agent Session\n\n"+
-			"- **Project**: %s\n"+
-			"- **Persona**: %s\n"+
-			"- **Session ID**: %s\n\n"+
-			"%s\n%s\n",
-		vibeflowSection, project, persona, sessionID, prompt, vibeflowSection,
-	)
-
-	existing, err := os.ReadFile(mdPath)
-	if err != nil {
-		// No existing CLAUDE.md — write fresh.
-		_ = os.WriteFile(mdPath, []byte(section), 0600)
-		return
-	}
-
-	content := string(existing)
-	// Replace existing vibeflow section if present.
-	if idx := strings.Index(content, vibeflowSection); idx >= 0 {
-		endIdx := strings.Index(content[idx+len(vibeflowSection):], vibeflowSection)
-		if endIdx >= 0 {
-			// Remove old section (including both markers).
-			end := idx + len(vibeflowSection) + endIdx + len(vibeflowSection)
-			content = content[:idx] + content[end:]
-		}
-	}
-
-	// Append new section to preserved content.
-	content = strings.TrimRight(content, "\n") + "\n\n" + section
-	_ = os.WriteFile(mdPath, []byte(content), 0600)
 }
 
 func (m Model) createSession(_ tea.Msg) tea.Msg {
