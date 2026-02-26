@@ -726,7 +726,10 @@ func (m Model) updateConflict(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Pass the old session ID for server-side reuse when the session
 		// type is vibeflow (allows the server to resume the session).
 		oldSessionID := cm.Conflict().SessionID
-		_ = CleanupStaleSession(".")
+		// Use the directory from the conflict result (not CWD) to ensure
+		// the correct .vibeflow-session file is removed.
+		conflictDir := filepath.Dir(cm.Conflict().FilePath)
+		_ = CleanupStaleSession(conflictDir)
 		if m.pendingWizard != nil {
 			result := *m.pendingWizard
 			if result.SessionType == "vibeflow" && oldSessionID != "" {
@@ -874,9 +877,19 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		if result.ProjectName != "" {
 			projectName = result.ProjectName
 		}
+		// If no ReuseSessionID was set (e.g. no conflict modal), read
+		// .vibeflow-session from the target workDir as a fallback so we
+		// reuse the existing server session instead of creating a duplicate.
+		reuseID := result.ReuseSessionID
+		if reuseID == "" {
+			if existingID, _, _ := readSessionFileID(workDir); existingID != "" {
+				reuseID = existingID
+				m.logger.Info("read existing session ID from .vibeflow-session: %s", existingID)
+			}
+		}
 		initResult, initErr := m.client.SessionInit(SessionInitRequest{
 			ProjectName:      projectName,
-			SessionID:        result.ReuseSessionID,
+			SessionID:        reuseID,
 			Persona:          result.Persona,
 			GitBranch:        branch,
 			WorkingDirectory: workDir,

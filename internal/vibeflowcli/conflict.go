@@ -122,6 +122,23 @@ func RemoveSessionFile(dir string) {
 	_ = os.Remove(filepath.Join(dir, sessionFileName))
 }
 
+// readSessionFileID reads the .vibeflow-session file from dir and returns
+// the session ID, provider, and tmux session name if the file exists and
+// contains a valid session ID. Returns empty strings if the file is missing
+// or invalid. This is used by executeLaunch to reuse an existing session ID
+// without going through the conflict modal.
+func readSessionFileID(dir string) (sessionID, provider, tmuxSession string) {
+	data, err := os.ReadFile(filepath.Join(dir, sessionFileName))
+	if err != nil {
+		return "", "", ""
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return "", "", ""
+	}
+	return parseSessionFile(content)
+}
+
 // parseSessionFile parses the .vibeflow-session content.
 //
 // Supported formats:
