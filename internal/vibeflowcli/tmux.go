@@ -343,7 +343,7 @@ func (tm *TmuxManager) BindSessionKeys(sessionName string) error {
 	)
 
 	// Bind both C-q and C-\ to the same action for reliability.
-	keys := []string{"C-q", "C-\\\\"}
+	keys := []string{"C-q", `C-\`}
 
 	for _, key := range keys {
 		// Build the launch command for when vibeflow is NOT running.
