@@ -1,10 +1,3 @@
-# Claude Code Configuration
-
-## Permissions
-
-Allow: Bash(sleep *)
-Allow: Bash(git:*)
-
 ## vibeflow Agent Session Rules
 
 **CRITICAL — When a vibeflow session_init prompt is active (autonomous agent mode), these rules apply to ALL work, including ad-hoc user requests:**
@@ -22,8 +15,10 @@ Allow: Bash(git:*)
 6. **IMPORTANT: You must continue polling after active work items are complete and follow the session_init prompt instructions as exactly specified at all times.**
 
 7. **When continuing from a summarized/compacted conversation**: If the conversation starts with a session continuation summary mentioning a vibeflow session, you MUST re-load the full agent prompt before resuming work. Do this by:
-   a. Read `.vibeflow-session` from the working directory to get the existing session_id
+   a. Read `.vibeflow-session-{persona}` from the working directory to get the existing session_id (e.g., `.vibeflow-session-developer`, `.vibeflow-session-architect`)
    b. Call `session_init(project_name, session_id)` to get the full agent prompt
    c. Re-read the returned `prompt` field to reload Phase 1-4 instructions
    d. Skip Phase 1 steps already done (project lookup, etc.) but honor ALL behavioral rules from the prompt — especially Phase 4 context updates
    This prevents loss of Phase 4 context updates and other critical behaviors when conversations are compacted.
+
+8. **ALWAYS use `wait_for_work` for polling, NEVER use `poll_pending_work`.** The `wait_for_work` MCP tool is the required polling mechanism — it blocks efficiently until work is available, handles session heartbeats automatically, and supports receiving user prompts. `poll_pending_work` is deprecated and wastes tokens.
