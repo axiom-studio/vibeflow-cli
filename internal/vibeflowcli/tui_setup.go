@@ -164,8 +164,14 @@ func (m SetupModel) updateURL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	default:
-		if len(msg.String()) == 1 {
-			m.urlInput += msg.String()
+		// Only accept actual rune input (typed or pasted); ignore special keys
+		// like arrows whose String() would be "left", "right", etc.
+		if msg.Type == tea.KeyRunes {
+			for _, r := range msg.Runes {
+				if r >= ' ' && r <= '~' {
+					m.urlInput += string(r)
+				}
+			}
 		}
 	}
 	return m, nil
@@ -174,7 +180,7 @@ func (m SetupModel) updateURL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m SetupModel) updateToken(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		m.cfg.APIToken = m.tokenInput
+		m.cfg.APIToken = strings.Trim(m.tokenInput, "[]\"' \t\n\r")
 		m.validating = true
 		m.err = nil
 		client := NewClient(m.cfg.ServerURL, m.cfg.APIToken)
@@ -189,8 +195,12 @@ func (m SetupModel) updateToken(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	default:
-		if len(msg.String()) == 1 {
-			m.tokenInput += msg.String()
+		if msg.Type == tea.KeyRunes {
+			for _, r := range msg.Runes {
+				if r >= ' ' && r <= '~' {
+					m.tokenInput += string(r)
+				}
+			}
 		}
 	}
 	return m, nil
@@ -254,8 +264,12 @@ func (m SetupModel) updateCreateProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	default:
-		if len(msg.String()) == 1 {
-			m.newProjectInput += msg.String()
+		if msg.Type == tea.KeyRunes {
+			for _, r := range msg.Runes {
+				if r >= ' ' && r <= '~' {
+					m.newProjectInput += string(r)
+				}
+			}
 		}
 	}
 	return m, nil

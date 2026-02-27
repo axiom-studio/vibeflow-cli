@@ -481,7 +481,7 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 		project = "default"
 	}
 	statusRight := fmt.Sprintf(
-		"#[fg=#555555]C-q:#[fg=#a9b1d6]Menu #[fg=#555555]|#[fg=#555555] C-\\:#[fg=#a9b1d6]Menu #[fg=#555555]| #[fg=#00d4aa]%s ",
+		"#[fg=#555555]Ctrl+q:#[fg=#a9b1d6]Menu #[fg=#555555]|#[fg=#555555] Ctrl+\\:#[fg=#a9b1d6]Menu #[fg=#555555]| #[fg=#00d4aa]%s ",
 		project,
 	)
 

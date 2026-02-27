@@ -123,6 +123,11 @@ type WizardModel struct {
 	projectFilterActive bool
 	projectErr          string // error from API fetch
 
+	// Branch filtering.
+	branchFilter       string
+	branchFilterActive bool
+	filteredBranches   []int // indices into branches slice (always includes index 0 = "[+] Create new")
+
 	// Text input state.
 	worktreeName    string // Custom name entered by user.
 	editingName     bool   // True when text input for worktree name is active.
@@ -218,6 +223,12 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		filtered[i] = i
 	}
 
+	// Build initial filtered branch indices (all branches).
+	filteredBr := make([]int, len(branches))
+	for i := range branches {
+		filteredBr[i] = i
+	}
+
 	// Build directory options: "[+] Enter new path" + history entries.
 	dirOpts := []string{"[+] Enter new path"}
 	dirOpts = append(dirOpts, dirHistory...)
@@ -232,6 +243,7 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		personas:          defaultPersonas(),
 		providers:         entries,
 		branches:          branches,
+		filteredBranches:  filteredBr,
 		existingWorktrees: existingWts,
 		worktreeOpts:      []string{"New worktree", "Specify directory", "Current directory"},
 		permissionOpts:    []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
@@ -301,13 +313,14 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.workDirErr = ""
 			default:
-				ch := msg.String()
-				for _, r := range ch {
-					if isValidPathChar(byte(r)) {
-						w.workDirInput += string(r)
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if isValidPathChar(byte(r)) {
+							w.workDirInput += string(r)
+						}
 					}
+					w.workDirErr = ""
 				}
-				w.workDirErr = ""
 			}
 			return w, nil
 		}
@@ -331,10 +344,11 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.newBranchName = w.newBranchName[:len(w.newBranchName)-1]
 				}
 			default:
-				ch := msg.String()
-				for _, r := range ch {
-					if isValidBranchChar(byte(r)) {
-						w.newBranchName += string(r)
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if isValidBranchChar(byte(r)) {
+							w.newBranchName += string(r)
+						}
 					}
 				}
 			}
@@ -368,13 +382,12 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.binaryPathErr = ""
 				}
 			default:
-				ch := msg.String()
-				for _, r := range ch {
-					if isValidPathChar(byte(r)) {
-						w.binaryPath += string(r)
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if isValidPathChar(byte(r)) {
+							w.binaryPath += string(r)
+						}
 					}
-				}
-				if len(ch) > 0 {
 					w.binaryPathErr = ""
 				}
 			}
@@ -413,9 +426,12 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.cursor = min(w.cursor+1, len(w.filteredProjects)-1)
 				return w, nil
 			default:
-				ch := msg.String()
-				if len(ch) >= 1 {
-					w.projectFilter += ch
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if r >= ' ' && r <= '~' {
+							w.projectFilter += string(r)
+						}
+					}
 					w.rebuildProjectFilter()
 					w.cursor = 0
 				}
@@ -439,11 +455,11 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.worktreeName = w.worktreeName[:len(w.worktreeName)-1]
 				}
 			default:
-				ch := msg.String()
-				// Accept valid worktree name characters (supports paste).
-				for _, r := range ch {
-					if isValidNameChar(byte(r)) {
-						w.worktreeName += string(r)
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if isValidNameChar(byte(r)) {
+							w.worktreeName += string(r)
+						}
 					}
 				}
 			}
@@ -488,13 +504,14 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.customDirErr = ""
 			default:
-				ch := msg.String()
-				for _, r := range ch {
-					if isValidPathChar(byte(r)) {
-						w.customBaseDir += string(r)
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if isValidPathChar(byte(r)) {
+							w.customBaseDir += string(r)
+						}
 					}
+					w.customDirErr = ""
 				}
-				w.customDirErr = ""
 			}
 			return w, nil
 		}
@@ -538,13 +555,14 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.specifiedWorkDirErr = ""
 			default:
-				ch := msg.String()
-				for _, r := range ch {
-					if isValidPathChar(byte(r)) {
-						w.specifiedWorkDir += string(r)
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if isValidPathChar(byte(r)) {
+							w.specifiedWorkDir += string(r)
+						}
 					}
+					w.specifiedWorkDirErr = ""
 				}
-				w.specifiedWorkDirErr = ""
 			}
 			return w, nil
 		}
@@ -582,12 +600,57 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.envTokenValue = w.envTokenValue[:len(w.envTokenValue)-1]
 				}
 			default:
-				ch := msg.String()
-				// Accept multi-character input (e.g. pasted text via Cmd+V / Ctrl+V).
-				for _, r := range ch {
-					if r >= ' ' && r <= '~' {
-						w.envTokenValue += string(r)
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if r >= ' ' && r <= '~' {
+							w.envTokenValue += string(r)
+						}
 					}
+				}
+			}
+			return w, nil
+		}
+
+		// Branch filtering mode (activated by "/" on StepBranch).
+		if w.branchFilterActive {
+			switch msg.String() {
+			case "esc":
+				if w.branchFilter != "" {
+					w.branchFilter = ""
+					w.rebuildBranchFilter()
+				} else {
+					w.branchFilterActive = false
+				}
+			case "enter":
+				w.branchFilterActive = false
+				if len(w.filteredBranches) > 0 {
+					return w.advance()
+				}
+			case "backspace":
+				if len(w.branchFilter) > 0 {
+					w.branchFilter = w.branchFilter[:len(w.branchFilter)-1]
+					w.rebuildBranchFilter()
+					if w.cursor >= len(w.filteredBranches) {
+						w.cursor = max(0, len(w.filteredBranches)-1)
+					}
+				}
+			case "up", "k":
+				if w.cursor > 0 {
+					w.cursor--
+				}
+				return w, nil
+			case "down", "j":
+				w.cursor = min(w.cursor+1, len(w.filteredBranches)-1)
+				return w, nil
+			default:
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if r >= ' ' && r <= '~' {
+							w.branchFilter += string(r)
+						}
+					}
+					w.rebuildBranchFilter()
+					w.cursor = 0
 				}
 			}
 			return w, nil
@@ -604,6 +667,14 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			return w.advance()
 		case "esc":
 			return w.goBack()
+		case "/":
+			// Activate search/filter on StepBranch.
+			if w.step == StepBranch {
+				w.branchFilterActive = true
+				w.branchFilter = ""
+				w.rebuildBranchFilter()
+				w.cursor = 0
+			}
 		}
 	}
 	return w, nil
@@ -796,14 +867,54 @@ func (w WizardModel) View() string {
 			if wtCount > 0 {
 				header += lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" (%d with worktrees)", wtCount))
 			}
-			b.WriteString(header + "\n\n")
-			for i, br := range w.branches {
+			b.WriteString(header)
+			b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" [%d total]", len(w.branches)-1)))
+			b.WriteString("\n")
+
+			// Show filter input if active, or hint.
+			if w.branchFilterActive {
+				b.WriteString(fmt.Sprintf("  Filter: %s", w.branchFilter))
+				b.WriteString(lipgloss.NewStyle().Foreground(accentColor).Render("█"))
+				if len(w.filteredBranches) <= 1 {
+					b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("  (no matches)"))
+				} else {
+					b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf("  (%d matches)", len(w.filteredBranches)-1)))
+				}
+			} else if w.branchFilter != "" {
+				b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf("  Filtered: %q (%d matches)", w.branchFilter, len(w.filteredBranches)-1)))
+			}
+			b.WriteString("\n")
+
+			// Scrolling viewport: show at most 15 items centered on cursor.
+			const maxVisible = 15
+			total := len(w.filteredBranches)
+			startIdx := 0
+			endIdx := total
+			if total > maxVisible {
+				startIdx = w.cursor - maxVisible/2
+				if startIdx < 0 {
+					startIdx = 0
+				}
+				endIdx = startIdx + maxVisible
+				if endIdx > total {
+					endIdx = total
+					startIdx = endIdx - maxVisible
+				}
+			}
+
+			if startIdx > 0 {
+				b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf("  ▲ %d more above\n", startIdx)))
+			}
+
+			for vi := startIdx; vi < endIdx; vi++ {
+				branchIdx := w.filteredBranches[vi]
+				br := w.branches[branchIdx]
 				cursor := "  "
-				if i == w.cursor {
+				if vi == w.cursor {
 					cursor = "> "
 				}
 				label := br
-				if i == 0 {
+				if branchIdx == 0 {
 					// First item is "[+] Create new branch" — render with accent color.
 					label = lipgloss.NewStyle().Foreground(accentColor).Render(br)
 				} else if wtPath := w.findWorktreeForBranch(br); wtPath != "" {
@@ -815,6 +926,10 @@ func (w WizardModel) View() string {
 					label += " " + lipgloss.NewStyle().Foreground(dimColor).Render("[wt: "+shortPath+"]")
 				}
 				b.WriteString(fmt.Sprintf("%s%s\n", cursor, label))
+			}
+
+			if endIdx < total {
+				b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf("  ▼ %d more below\n", total-endIdx)))
 			}
 		}
 
@@ -926,7 +1041,13 @@ func (w WizardModel) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("j/k: navigate  enter: select  esc: back/cancel"))
+	if w.step == StepBranch && w.branchFilterActive {
+		b.WriteString(helpStyle.Render("type to filter  enter: select  esc: clear filter  j/k: navigate"))
+	} else if w.step == StepBranch {
+		b.WriteString(helpStyle.Render("j/k: navigate  /: filter  enter: select  esc: back"))
+	} else {
+		b.WriteString(helpStyle.Render("j/k: navigate  enter: select  esc: back/cancel"))
+	}
 	return b.String()
 }
 
@@ -945,7 +1066,7 @@ func (w WizardModel) listLen() int {
 	case StepEnvToken:
 		return 1
 	case StepBranch:
-		return len(w.branches)
+		return len(w.filteredBranches)
 	case StepWorktree:
 		return len(w.worktreeOpts)
 	case StepPermissions:
@@ -1037,13 +1158,21 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		w.editingEnvToken = true
 		return w, nil
 	case StepBranch:
-		w.selectedBranch = w.cursor
-		if w.cursor == 0 {
+		// Map cursor through filter to actual branch index.
+		if w.cursor >= len(w.filteredBranches) {
+			return w, nil
+		}
+		actualIdx := w.filteredBranches[w.cursor]
+		w.selectedBranch = actualIdx
+		if actualIdx == 0 {
 			// "[+] Create new branch" selected — prompt for branch name.
 			w.newBranchName = ""
 			w.editingBranch = true
 			return w, nil
 		}
+		// Clear filter state after selection.
+		w.branchFilter = ""
+		w.branchFilterActive = false
 		// Rebuild worktree options based on selected branch.
 		w.rebuildWorktreeOpts()
 		w.step = StepWorktree
@@ -1165,6 +1294,26 @@ func (w *WizardModel) rebuildProjectFilter() {
 	}
 }
 
+// rebuildBranchFilter updates filteredBranches based on the current branchFilter text.
+// Index 0 ("[+] Create new branch") is always included.
+func (w *WizardModel) rebuildBranchFilter() {
+	if w.branchFilter == "" {
+		w.filteredBranches = make([]int, len(w.branches))
+		for i := range w.branches {
+			w.filteredBranches[i] = i
+		}
+		return
+	}
+	lower := strings.ToLower(w.branchFilter)
+	w.filteredBranches = w.filteredBranches[:0]
+	w.filteredBranches = append(w.filteredBranches, 0) // always keep "[+] Create new branch"
+	for i := 1; i < len(w.branches); i++ {
+		if strings.Contains(strings.ToLower(w.branches[i]), lower) {
+			w.filteredBranches = append(w.filteredBranches, i)
+		}
+	}
+}
+
 // max returns the larger of a or b.
 func max(a, b int) int {
 	if a > b {
@@ -1247,7 +1396,14 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.cursor = w.selectedProvider
 	case StepWorktree:
 		w.step = StepBranch
-		w.cursor = w.selectedBranch
+		// Restore cursor to the position in the filtered list.
+		w.cursor = 0
+		for i, idx := range w.filteredBranches {
+			if idx == w.selectedBranch {
+				w.cursor = i
+				break
+			}
+		}
 	case StepPermissions:
 		w.step = StepWorktree
 		w.cursor = w.selectedWorktree
@@ -1275,6 +1431,14 @@ func (w *WizardModel) reloadBranchesForDir(dir string) {
 	}
 	branches = append([]string{"[+] Create new branch"}, branches...)
 	w.branches = branches
+
+	// Reset branch filter.
+	w.branchFilter = ""
+	w.branchFilterActive = false
+	w.filteredBranches = make([]int, len(branches))
+	for i := range branches {
+		w.filteredBranches[i] = i
+	}
 
 	// Rebuild worktree map for the new directory.
 	wm, err := NewWorktreeManager(dir, ".claude/worktrees")
