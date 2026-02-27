@@ -85,21 +85,24 @@ func TestEnsureAgentDoc_FileDoesNotExist(t *testing.T) {
 func TestEnsureAgentDoc_FileExistsWithVibeflowSection(t *testing.T) {
 	dir := t.TempDir()
 
-	// Write a file that already contains the vibeflow section.
-	existing := "# My Project\n\n## vibeflow Agent Session Rules\n\nExisting rules.\n"
+	// Write a file with user content + the current bundled vibeflow section
+	// (matching content = no update needed).
+	template, _ := agentDocsFS.ReadFile("agentdocs/CLAUDE.md")
+	bundledSection := extractVibeflowSection(string(template))
+	existing := "# My Project\n\n" + bundledSection + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(existing), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	got := EnsureAgentDoc(dir, "claude")
 	if got != "" {
-		t.Errorf("expected empty (no-op), got: %q", got)
+		t.Errorf("expected empty (no-op for matching section), got: %q", got)
 	}
 
 	// Verify file was NOT modified.
 	data, _ := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
 	if string(data) != existing {
-		t.Error("file should not have been modified")
+		t.Error("file should not have been modified when section matches bundled")
 	}
 }
 
@@ -184,6 +187,54 @@ func TestEnsureAgentDoc_IdempotentOnSecondCall(t *testing.T) {
 	data2, _ := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
 	if string(data1) != string(data2) {
 		t.Error("file should not change on second call")
+	}
+}
+
+func TestEnsureAgentDoc_UpdatesStaleSection(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a file with an outdated vibeflow section.
+	stale := "# My Project\n\nCustom rules here.\n\n## vibeflow Agent Session Rules\n\nOld stale rules from v1.\n"
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(stale), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := EnsureAgentDoc(dir, "claude")
+	if got != "CLAUDE.md" {
+		t.Fatalf("expected CLAUDE.md (updated stale section), got: %q", got)
+	}
+
+	// Verify the file was updated.
+	data, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// User content before the marker should be preserved.
+	if !strings.Contains(content, "# My Project") {
+		t.Error("user content before marker should be preserved")
+	}
+	if !strings.Contains(content, "Custom rules here.") {
+		t.Error("user content before marker should be preserved")
+	}
+
+	// Old stale content should be gone.
+	if strings.Contains(content, "Old stale rules from v1.") {
+		t.Error("stale vibeflow section should have been replaced")
+	}
+
+	// New bundled section should be present.
+	if !strings.Contains(content, vibeflowSectionMarker) {
+		t.Error("updated file should contain vibeflow section marker")
+	}
+
+	// Read the bundled template to compare the section.
+	template, _ := agentDocsFS.ReadFile("agentdocs/CLAUDE.md")
+	bundledSection := extractVibeflowSection(string(template))
+	installedSection := extractVibeflowSection(content)
+	if installedSection != bundledSection {
+		t.Error("installed section should match bundled section after update")
 	}
 }
 

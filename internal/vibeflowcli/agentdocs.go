@@ -74,17 +74,32 @@ func EnsureAgentDoc(workDir, providerKey string) string {
 
 	// File exists — check if vibeflow section is already present.
 	content := string(existing)
+	bundledSection := extractVibeflowSection(string(template))
 	if strings.Contains(content, vibeflowSectionMarker) {
-		return "" // already has vibeflow section
+		// Section exists — check if it matches the bundled version.
+		installedSection := extractVibeflowSection(content)
+		if installedSection == bundledSection {
+			return "" // already up to date
+		}
+		// Stale section — replace it while preserving user content above.
+		if bundledSection == "" {
+			return ""
+		}
+		markerIdx := strings.Index(content, vibeflowSectionMarker)
+		userContent := strings.TrimRight(content[:markerIdx], "\n")
+		content = userContent + "\n\n" + bundledSection + "\n"
+		if err := os.WriteFile(destPath, []byte(content), 0644); err != nil {
+			return ""
+		}
+		return docFile
 	}
 
 	// Extract the vibeflow section from the template and append it.
-	section := extractVibeflowSection(string(template))
-	if section == "" {
+	if bundledSection == "" {
 		return "" // template has no vibeflow section (shouldn't happen)
 	}
 
-	content = strings.TrimRight(content, "\n") + "\n\n" + section + "\n"
+	content = strings.TrimRight(content, "\n") + "\n\n" + bundledSection + "\n"
 	if err := os.WriteFile(destPath, []byte(content), 0644); err != nil {
 		return ""
 	}
