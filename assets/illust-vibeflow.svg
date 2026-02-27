@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 450" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="720" y2="450" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#080c16"/>
+      <stop offset="1" stop-color="#0c1424"/>
+    </linearGradient>
+    <linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a2640"/>
+      <stop offset="1" stop-color="#131c2c"/>
+    </linearGradient>
+      <filter id="gl" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="18"/></filter>
+    <clipPath id="av1"><rect x="8" y="8" width="36" height="36" rx="8"/></clipPath>
+    <clipPath id="av2"><rect x="8" y="8" width="36" height="36" rx="8"/></clipPath>
+    <clipPath id="av3"><rect x="8" y="8" width="36" height="36" rx="8"/></clipPath>
+    <clipPath id="av4"><rect x="8" y="8" width="36" height="36" rx="8"/></clipPath>
+  </defs>
+
+  <rect width="720" height="450" fill="url(#bg)"/>
+  <circle cx="300" cy="200" r="160" fill="#00a99d" opacity=".03" filter="url(#gl)"/>
+  <circle cx="550" cy="350" r="100" fill="#7c3aed" opacity=".025" filter="url(#gl)"/>
+
+  <!-- Grid -->
+  <g opacity=".03" stroke="#00a99d" stroke-width=".5">
+    <line x1="0" y1="90" x2="720" y2="90"/><line x1="0" y1="180" x2="720" y2="180"/>
+    <line x1="0" y1="270" x2="720" y2="270"/><line x1="0" y1="360" x2="720" y2="360"/>
+    <line x1="120" y1="0" x2="120" y2="450"/><line x1="240" y1="0" x2="240" y2="450"/>
+    <line x1="360" y1="0" x2="360" y2="450"/><line x1="480" y1="0" x2="480" y2="450"/>
+    <line x1="600" y1="0" x2="600" y2="450"/>
+  </g>
+
+  <!-- Browser chrome -->
+  <rect x="24" y="20" width="672" height="410" rx="12" fill="#131c2c" stroke="#253350" stroke-width="1"/>
+  <rect x="24" y="20" width="672" height="30" rx="12" fill="#1a2640"/>
+  <rect x="24" y="38" width="672" height="12" fill="#1a2640"/>
+  <circle cx="44" cy="35" r="4" fill="#f43f5e" opacity=".7"/>
+  <circle cx="58" cy="35" r="4" fill="#f59e0b" opacity=".7"/>
+  <circle cx="72" cy="35" r="4" fill="#10b981" opacity=".7"/>
+  <rect x="200" y="30" width="120" height="10" rx="5" fill="#253350"/>
+
+  <!-- Top nav bar -->
+  <rect x="24" y="52" width="672" height="24" fill="#1a2640" opacity=".6"/>
+  <text x="40" y="67" font-family="system-ui,sans-serif" font-size="7.5" fill="#00a99d" font-weight="600">VibeFlow</text>
+  <text x="95" y="67" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">/ axiomcloud</text>
+
+  <!-- Tab bar -->
+  <rect x="24" y="76" width="672" height="22" fill="#111827"/>
+  <text x="44" y="90" font-family="system-ui,sans-serif" font-size="6.5" fill="#00a99d" font-weight="500">Team Chats</text>
+  <rect x="40" y="96" width="48" height="1.5" fill="#00a99d" rx="1"/>
+  <text x="110" y="90" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Kanban Board</text>
+  <text x="180" y="90" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Features</text>
+  <text x="230" y="90" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Todos</text>
+  <text x="270" y="90" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Issues</text>
+  <text x="310" y="90" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Pending QA</text>
+
+  <!-- Left sidebar: Team personas -->
+  <rect x="24" y="98" width="190" height="332" fill="#111827"/>
+  <line x1="214" y1="98" x2="214" y2="430" stroke="#253350" stroke-width="1"/>
+
+  <!-- Persona 1: Alex - Active/selected -->
+  <g transform="translate(32, 108)">
+    <rect width="174" height="58" rx="8" fill="#1a2640" stroke="#00a99d" stroke-width="1"/>
+    <!-- Avatar placeholder -->
+    <image x="8" y="8" width="36" height="36" clip-path="url(#av1)" href="data:image/jpeg;base64,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" preserveAspectRatio="xMidYMid slice"/>
+    <text x="52" y="22" font-family="system-ui,sans-serif" font-size="7.5" fill="#e0e6ef" font-weight="500">Sr. Software Engineer</text>
+    <text x="52" y="33" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Alex</text>
+    <text x="52" y="46" font-family="system-ui,sans-serif" font-size="5.5" fill="#6b7a90" opacity=".7">Updated issue #420...</text>
+    <circle cx="160" cy="16" r="3" fill="#10b981" opacity=".9"/>
+    <text x="152" y="15" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">14s ago</text>
+  </g>
+
+  <!-- Persona 2: Aria -->
+  <g transform="translate(32, 176)">
+    <rect width="174" height="58" rx="8" fill="#1a2640" stroke="#253350" stroke-width=".8"/>
+    <image x="8" y="8" width="36" height="36" clip-path="url(#av2)" href="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAAAAAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCABIAEgDASIAAhEBAxEB/8QAGwAAAgMBAQEAAAAAAAAAAAAAAAQDBQYBAgf/xAA1EAACAQMDAQYFAQcFAAAAAAABAgMABBESITEFBhNBUWGBFCIycZGhBxUjJKKxwUNSYoLR/8QAGAEAAwEBAAAAAAAAAAAAAAAAAQIDAAT/xAAdEQACAgMBAQEAAAAAAAAAAAAAAQIRAyExEiIT/9oADAMBAAIRAxEAPwDRRXDyLGUjB1oGOxIGftTrOIo9RBJyBt5mqt2VY4N0TMY3+nxPFNTSN8CpfAY6c5Gy78+lQU3bHcOFhA/eRh8Y9sVJSXTpdcbqHVwp2K7j80n2tvWsezN9Kj6ZHTukPqxx/bNPjdxTYslToQvO3XS7a4kiiguLlI20tLEBoz44JO9aLp97bdRtEurSTXG3sQfIjwNZzp0HwVh8JHaIdCDQCB/E8yfPmu9ntPTu09901QEjuIEuVjHCNwQPIUI5PTopPF5VmmuZe4gaULq042pOLqLSxO3wzRsEyNRyC3ltTN87paO8Zwwxj80nbTyGeNpXC5zkamxweSTinJE9peSyziGS2dTuO8H0n/NFRTSvdXfd200TIBg5bhseAz50VjCPULiVLlI0kZF05JA5OftTLySiyjbJDtpDHgjzNQdQuZYJkWORY1K5LHG5zxvTcLs1vG7/AFMoJ+9B7tFZL4WjvT5CyMDIXxjfOcHfas/+0mXT2dijzgyXA/RSa0ZmWKJ5ZGwiKWJ9BVH1fp563Y67hFkmh3ihBwqMcZB8zjbJ9hQj8qmTStiPQrp722tZZ1nWbu9JCJqDAbf9ffakLC/mj/aX/M/IpY2wHI04IG/jv41c9Lla0in+J0GRGOUVcHJPlUqdHa9hV+pRRllYyxyISrqxYHGefD9fSpw02zoybikaW4XVARhjuv0881BBFCJQ0LyOyuVckk42Ox9dxXbKaXvHt55O8Zd1fTgnzBxtkZG4869BkyzRvMA51YWPbPnx6VZbObhHdxIzSs0baigVHVScZyDx7UUvdTAgxgTE5yCzN4HJG3HH60VjEzYJ3wa8Oa9VG5+asEhvifhVTGdcqD2zk/2pTpV0sl5fRHlJQfyP/RXeq3Ah+GwpZizFQCN2xgD+qqezN7+8biSazli7zS2NsnGfXHj+lJIpBaL6+tIzcQ3QHzI4U/8AIHbBq0jI+HaRvpUEn7CqK/vC4Kwq6yMg0gkcgj18s/inxdPBB80EmgKQWVlOM7Z5pNDNMjsrr+Ts74gMzmRiC2PrJwP0H4pyx6gsrLAY2Bxz4bk7cb+1UPSmu7CxWG5tZNayx/NrU7asr47Ajx+9a3u4w+RGmQdjpGapDhKemKdQuEhjZO7BdsAMQMAnjJ9jRTTwxO2p0BbjPjRTiCNQtyTUuailYYxQGFL2zN2I2ikEc8RJjcjIGRgg1j+0N/d9N6lHbvegTqoZ2hJxg8Agj3963KHevkfWLxuodWurt/8AUkJX0UbAfgCj5TApNF1+9nkmE3xB70jlY8+21S3PU3vVhiW4uo2iKsWdwic+K8kVlY8B8+op6MKBkYFZYkN+jo+swdLnMqm8u1liXQREiYBK/TljvjfOKuBvVN2au3u+z1lNKcyd3oY+qnH+KtlajSRNtvpJ4UV5DUVqNZTyvvjNRlqKKUdnGY6GxzpOPxXx0cb80UU0RGczg03FICMkiiinQD6j2M27MWx/3PIf6jV2DRRSmO6jmiiiiKf/2Q==" preserveAspectRatio="xMidYMid slice"/>
+    <text x="52" y="22" font-family="system-ui,sans-serif" font-size="7.5" fill="#e0e6ef" font-weight="500">Sr. Product Manager</text>
+    <text x="52" y="33" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Mei</text>
+    <text x="52" y="46" font-family="system-ui,sans-serif" font-size="5.5" fill="#6b7a90" opacity=".7">Frontend: Add style...</text>
+    <circle cx="160" cy="16" r="3" fill="#10b981" opacity=".9"/>
+    <text x="152" y="15" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">10s ago</text>
+  </g>
+
+  <!-- Persona 3: Morgan -->
+  <g transform="translate(32, 244)">
+    <rect width="174" height="58" rx="8" fill="#1a2640" stroke="#253350" stroke-width=".8"/>
+    <image x="8" y="8" width="36" height="36" clip-path="url(#av3)" href="data:image/jpeg;base64,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" preserveAspectRatio="xMidYMid slice"/>
+    <text x="52" y="22" font-family="system-ui,sans-serif" font-size="7.5" fill="#e0e6ef" font-weight="500">Sr. Architect</text>
+    <text x="52" y="33" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Morgan</text>
+    <text x="52" y="46" font-family="system-ui,sans-serif" font-size="5.5" fill="#6b7a90" opacity=".7">Published log for...</text>
+    <circle cx="160" cy="16" r="3" fill="#10b981" opacity=".9"/>
+    <text x="155" y="15" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">just now</text>
+  </g>
+
+  <!-- Persona 4: Quinn -->
+  <g transform="translate(32, 312)">
+    <rect width="174" height="58" rx="8" fill="#1a2640" stroke="#253350" stroke-width=".8"/>
+    <image x="8" y="8" width="36" height="36" clip-path="url(#av4)" href="data:image/jpeg;base64,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" preserveAspectRatio="xMidYMid slice"/>
+    <text x="52" y="22" font-family="system-ui,sans-serif" font-size="7.5" fill="#e0e6ef" font-weight="500">Sr. QA Lead</text>
+    <text x="52" y="33" font-family="system-ui,sans-serif" font-size="6.5" fill="#6b7a90">Quinn</text>
+    <text x="52" y="46" font-family="system-ui,sans-serif" font-size="5.5" fill="#6b7a90" opacity=".7">QA verified issue...</text>
+    <circle cx="160" cy="16" r="3" fill="#10b981" opacity=".9"/>
+    <text x="155" y="15" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">just now</text>
+  </g>
+
+  <!-- Right panel: Chat messages -->
+  <!-- Header -->
+  <rect x="214" y="98" width="482" height="32" fill="#1a2640" opacity=".4"/>
+  <text x="230" y="118" font-family="system-ui,sans-serif" font-size="8" fill="#e0e6ef" font-weight="500">Alex</text>
+  <text x="255" y="118" font-family="system-ui,sans-serif" font-size="7" fill="#6b7a90">Senior Software Engineer</text>
+
+  <!-- Agent connected message -->
+  <g transform="translate(228, 140)">
+    <rect x="20" y="0" width="260" height="28" rx="6" fill="#1a2640" stroke="#253350" stroke-width=".8"/>
+    <circle cx="10" cy="14" r="8" fill="#253350"/>
+    <text x="10" y="17" font-family="system-ui" font-size="7" fill="#00a99d" text-anchor="middle">⚡</text>
+    <text x="28" y="11" font-family="system-ui,sans-serif" font-size="6" fill="#10b981" font-weight="500">Alex connected</text>
+    <text x="28" y="22" font-family="monospace" font-size="5.5" fill="#6b7a90">Working on main branch, remote git@github.com:axiom-studio</text>
+  </g>
+
+  <!-- User message (right aligned, teal) -->
+  <g transform="translate(400, 180)">
+    <rect width="276" height="30" rx="6" fill="#00a99d" opacity=".15" stroke="#00a99d" stroke-width=".5"/>
+    <text x="10" y="13" font-family="system-ui,sans-serif" font-size="6.5" fill="#e0e6ef" opacity=".9">change setup instructions for codex so we do not</text>
+    <text x="10" y="24" font-family="system-ui,sans-serif" font-size="6.5" fill="#e0e6ef" opacity=".9">refer to codex.md but to AGENTS.md</text>
+    <text x="256" y="24" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">7:30 PM</text>
+  </g>
+
+  <!-- Agent response messages (left aligned, dark cards) -->
+  <g transform="translate(228, 222)">
+    <circle cx="10" cy="14" r="8" fill="#253350"/>
+    <text x="10" y="17" font-family="system-ui" font-size="7" fill="#00a99d" text-anchor="middle">⚡</text>
+    <rect x="22" y="0" width="340" height="20" rx="5" fill="#00a99d" opacity=".08" stroke="#00a99d" stroke-width=".5"/>
+    <text x="30" y="13" font-family="system-ui,sans-serif" font-size="6" fill="#00a99d">Created issue #420 — Update Codex setup instructions to reference AGENTS.md</text>
+    <text x="340" y="13" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">7:31 PM</text>
+  </g>
+
+  <g transform="translate(228, 250)">
+    <rect x="22" y="0" width="340" height="20" rx="5" fill="#00a99d" opacity=".08" stroke="#00a99d" stroke-width=".5"/>
+    <text x="30" y="13" font-family="system-ui,sans-serif" font-size="6" fill="#00a99d">Updated issue #420 — AGENTS.md instead of codex.md →</text>
+    <text x="306" y="13" font-family="system-ui,sans-serif" font-size="6" fill="#e0e6ef" font-weight="600">planning</text>
+    <text x="340" y="13" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">7:31 PM</text>
+  </g>
+
+  <g transform="translate(228, 278)">
+    <rect x="22" y="0" width="340" height="20" rx="5" fill="#00a99d" opacity=".08" stroke="#00a99d" stroke-width=".5"/>
+    <text x="30" y="13" font-family="system-ui,sans-serif" font-size="6" fill="#00a99d">Updated issue #420 — AGENTS.md instead of codex.md →</text>
+    <text x="306" y="13" font-family="system-ui,sans-serif" font-size="6" fill="#e0e6ef" font-weight="600">implementing</text>
+    <text x="340" y="13" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">7:31 PM</text>
+  </g>
+
+  <g transform="translate(228, 306)">
+    <rect x="22" y="0" width="340" height="20" rx="5" fill="#10b981" opacity=".08" stroke="#10b981" stroke-width=".5"/>
+    <text x="30" y="13" font-family="system-ui,sans-serif" font-size="6" fill="#10b981">Updated issue #420 — AGENTS.md instead of codex.md →</text>
+    <text x="306" y="13" font-family="system-ui,sans-serif" font-size="6" fill="#10b981" font-weight="600">done ✓</text>
+    <text x="340" y="13" font-family="system-ui,sans-serif" font-size="4.5" fill="#6b7a90">7:31 PM</text>
+  </g>
+
+  <!-- Typing indicator -->
+  <g transform="translate(228, 340)">
+    <circle cx="10" cy="10" r="8" fill="#253350"/>
+    <text x="10" y="13" font-family="system-ui" font-size="7" fill="#00a99d" text-anchor="middle">⚡</text>
+    <circle cx="30" cy="10" r="2" fill="#6b7a90" opacity=".5">
+      <animate attributeName="opacity" values=".3;.8;.3" dur="1.2s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="38" cy="10" r="2" fill="#6b7a90" opacity=".5">
+      <animate attributeName="opacity" values=".3;.8;.3" dur="1.2s" begin=".2s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="46" cy="10" r="2" fill="#6b7a90" opacity=".5">
+      <animate attributeName="opacity" values=".3;.8;.3" dur="1.2s" begin=".4s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- Chat input bar -->
+  <rect x="214" y="396" width="482" height="34" fill="#1a2640" opacity=".5"/>
+  <rect x="226" y="402" width="400" height="22" rx="6" fill="#111827" stroke="#253350" stroke-width=".8"/>
+  <text x="238" y="416" font-family="system-ui,sans-serif" font-size="6.5" fill="#4a5a72">Send a message to this agent...</text>
+  <rect x="640" y="402" width="40" height="22" rx="6" fill="#00a99d"/>
+  <text x="660" y="416" font-family="system-ui,sans-serif" font-size="7" fill="#fff" text-anchor="middle" font-weight="600">Send</text>
+</svg>
