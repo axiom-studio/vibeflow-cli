@@ -13,10 +13,6 @@
 
 # vibeflow-cli
 
-<p align="center">
-  <img src="assets/illust-vibeflow.svg" alt="VibeFlow — AI Coding Session Manager" width="600" />
-</p>
-
 A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, and Google Gemini CLI sessions from a single TUI — with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
 
 ## Supported Agents
@@ -28,6 +24,19 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | **Google Gemini CLI** | `gemini` | `--yolo` | `-p` flag |
 
 All three agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
+
+### VibeFlow Terminal UI
+
+
+<p align="center">
+  <img src="assets/vibeflow-cli-tui.png" alt="VibeFlow — AI Coding Session Manager" width="600" />
+</p>
+
+### VibeFlow Service connected autonomous mode
+
+<p align="center">
+  <img src="assets/illust-vibeflow.svg" alt="VibeFlow — AI Coding Session Manager" width="600" />
+</p>
 
 ## Features
 
