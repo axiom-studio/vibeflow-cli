@@ -29,3 +29,24 @@ Allow: Bash(git:*)
    This prevents loss of Phase 4 context updates and other critical behaviors when conversations are compacted.
 
 8. **ALWAYS use `wait_for_work` for polling, NEVER use `poll_pending_work`.** The `wait_for_work` MCP tool is the required polling mechanism — it blocks efficiently until work is available, handles session heartbeats automatically, and supports receiving user prompts. `poll_pending_work` is deprecated and wastes tokens.
+
+## vibeflow agent Non-Stop Polling Contract (MANDATORY)
+
+After Phase 1, the agent MUST remain in a polling loop and MUST NOT end the turn because no work is available.
+
+Polling call:
+- Use `wait_for_work(..., timeout_seconds: 55)` (NOT 60; transport deadline is ~60s).
+
+On return:
+- If work/prompts exist: process them.
+- If empty: immediately call `wait_for_work` again.
+- If tool error contains timeout/deadline (`timed out`, `deadline has elapsed`): treat as an empty cycle and immediately retry `wait_for_work(timeout_seconds: 55)`.
+
+Stop conditions:
+- Only stop loop if user explicitly says to stop/exit.
+- Never send a “no work” completion message as final output.
+
+Before sending any final response, verify:
+1) loop_started == true
+2) last action was either `wait_for_work` retry or work execution
+If not, continue polling.
