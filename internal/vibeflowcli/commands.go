@@ -35,6 +35,7 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(switchCmd())
 	root.AddCommand(killCmd())
 	root.AddCommand(deleteCmd())
+	root.AddCommand(restartCmd())
 	root.AddCommand(worktreesCmd())
 	root.AddCommand(checkCmd())
 	root.AddCommand(configCmd())
@@ -333,6 +334,133 @@ func deleteCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&cleanupWorktree, "cleanup-worktree", false, "Also remove the git worktree")
+	return cmd
+}
+
+// --- restart ---
+
+func restartCmd() *cobra.Command {
+	var skipPermissions bool
+
+	cmd := &cobra.Command{
+		Use:   "restart <session-name>",
+		Short: "Restart a session (kill and re-launch with same settings)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfgPath, _ := cmd.Flags().GetString("config")
+			cfg, tmux, store, _, registry, err := loadComponents(cfgPath)
+			if err != nil {
+				return err
+			}
+
+			_ = tmux.EnsureServer()
+
+			name := args[0]
+			meta, found, err := store.Get(name)
+			if err != nil {
+				return fmt.Errorf("read store: %w", err)
+			}
+			if !found {
+				return fmt.Errorf("session %q not found in store", name)
+			}
+
+			// Kill the existing tmux session (ignore error if already dead).
+			_ = tmux.KillSession(meta.TmuxSession)
+
+			// Resolve provider from stored metadata.
+			provider := meta.Provider
+			if provider == "" {
+				provider = cfg.DefaultProvider
+			}
+			if provider == "" {
+				provider = "claude"
+			}
+
+			prov, ok := registry.Get(provider)
+			if !ok {
+				return fmt.Errorf("unknown provider %q", provider)
+			}
+			if !registry.IsAvailable(provider) {
+				return fmt.Errorf("provider %q binary %q not found on PATH", provider, prov.Binary)
+			}
+
+			workDir := meta.WorkingDir
+			if workDir == "" {
+				workDir = "."
+			}
+			branch := meta.Branch
+			if branch == "" {
+				branch = "main"
+			}
+
+			command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
+				WorkDir:         workDir,
+				ServerURL:       cfg.ServerURL,
+				SkipPermissions: skipPermissions,
+				Binary:          prov.Binary,
+			})
+			if err != nil || command == "" {
+				command = prov.Binary
+			}
+
+			// Resolve provider env vars.
+			envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
+			if missingVar != "" {
+				return fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
+			}
+			sessionEnv := prov.Env
+			if len(envVars) > 0 {
+				if sessionEnv == nil {
+					sessionEnv = make(map[string]string)
+				}
+				for k, v := range envVars {
+					sessionEnv[k] = v
+				}
+			}
+
+			// Ensure agent docs exist in the working directory.
+			EnsureAllAgentDocs(workDir)
+
+			if err := tmux.CreateSessionWithOpts(SessionOpts{
+				Name:     name,
+				Provider: provider,
+				WorkDir:  workDir,
+				Command:  command,
+				Env:      sessionEnv,
+				Branch:   branch,
+				Project:  cfg.DefaultProject,
+			}); err != nil {
+				return err
+			}
+
+			tmuxName := tmux.FullSessionName(provider, name)
+
+			// Re-bind session keys.
+			_ = tmux.BindSessionKeys(tmuxName)
+
+			if prov.SessionFile != "" {
+				_ = WriteSessionFileIfNeeded(workDir, meta.Persona, name)
+			}
+
+			// Update store entry with new timestamp.
+			_ = store.Add(SessionMeta{
+				Name:              name,
+				TmuxSession:       tmuxName,
+				Provider:          provider,
+				Project:           meta.Project,
+				Persona:           meta.Persona,
+				Branch:            branch,
+				WorktreePath:      meta.WorktreePath,
+				WorkingDir:        workDir,
+				VibeFlowSessionID: meta.VibeFlowSessionID,
+				CreatedAt:         time.Now(),
+			})
+
+			fmt.Printf("Session %q restarted (provider: %s, branch: %s)\n", name, provider, branch)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&skipPermissions, "skip-permissions", false, "Skip permission prompts (autonomous mode)")
 	return cmd
 }
 
