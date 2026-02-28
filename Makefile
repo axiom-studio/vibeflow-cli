@@ -9,7 +9,7 @@ LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X m
 
 all: build
 
-build:
+build: sync-agent-docs
 	go build $(LDFLAGS) -o $(BINARY_NAME) $(CMD_DIR)
 
 clean:
@@ -22,7 +22,7 @@ test:
 vet:
 	go vet ./...
 
-install:
+install: sync-agent-docs
 	go install $(LDFLAGS) $(CMD_DIR)
 
 snapshot:
