@@ -155,6 +155,11 @@ func (tm *TmuxManager) EnsureServer() error {
 	} {
 		_, _ = tm.run("set", "-s", opt.key, opt.val)
 	}
+	// Enable mouse support so users can select and copy text with the
+	// mouse. Without this, mouse selection is not available in tmux
+	// sessions. Users can hold Shift (Linux) or Option (macOS) to
+	// bypass tmux and use native terminal selection.
+	_, _ = tm.run("set", "-g", "mouse", "on")
 	// Keep dead panes alive so the user can see why the agent command
 	// exited. Without this, sessions whose command exits immediately
 	// are destroyed and disappear from the session list.
