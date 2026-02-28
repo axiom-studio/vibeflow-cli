@@ -38,6 +38,7 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(worktreesCmd())
 	root.AddCommand(checkCmd())
 	root.AddCommand(configCmd())
+	root.AddCommand(agentDocCmd())
 }
 
 // --- helpers shared by subcommands ---
@@ -439,6 +440,25 @@ func configCmd() *cobra.Command {
 				return fmt.Errorf("setup wizard: %w", err)
 			}
 			return nil
+		},
+	}
+}
+
+// --- agent-doc ---
+
+func agentDocCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "agent-doc <provider>",
+		Short: "Print the embedded agent doc template to stdout",
+		Long:  "Print the embedded agent instruction file (CLAUDE.md, AGENTS.md, or GEMINI.md) for the given provider to stdout.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			content, err := GetAgentDoc(args[0])
+			if err != nil {
+				return err
+			}
+			_, err = os.Stdout.Write(content)
+			return err
 		},
 	}
 }

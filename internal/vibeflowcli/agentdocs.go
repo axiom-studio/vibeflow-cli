@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"embed"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,16 @@ var providerDocFile = map[string]string{
 // vibeflowSectionMarker is the heading used to identify the vibeflow rules
 // section in agent instruction files. All embedded templates use this heading.
 const vibeflowSectionMarker = "## vibeflow Agent Session Rules"
+
+// GetAgentDoc returns the embedded agent doc template content for the given
+// provider key. Returns an error if the provider is unknown.
+func GetAgentDoc(providerKey string) ([]byte, error) {
+	docFile, ok := providerDocFile[providerKey]
+	if !ok {
+		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini)", providerKey)
+	}
+	return agentDocsFS.ReadFile("agentdocs/" + docFile)
+}
 
 // EnsureAllAgentDocs ensures all agent-specific markdown files (CLAUDE.md,
 // AGENTS.md, GEMINI.md) exist in workDir with the vibeflow session rules
