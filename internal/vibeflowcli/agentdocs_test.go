@@ -238,6 +238,43 @@ func TestEnsureAgentDoc_UpdatesStaleSection(t *testing.T) {
 	}
 }
 
+func TestEnsureAllAgentDocs_CreatesAllFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	updated := EnsureAllAgentDocs(dir)
+	if len(updated) != len(providerDocFile) {
+		t.Errorf("expected %d files created, got %d", len(providerDocFile), len(updated))
+	}
+
+	// Verify all three files exist and contain the vibeflow section.
+	for _, expectedFile := range providerDocFile {
+		data, err := os.ReadFile(filepath.Join(dir, expectedFile))
+		if err != nil {
+			t.Errorf("expected %s to exist: %v", expectedFile, err)
+			continue
+		}
+		if !strings.Contains(string(data), vibeflowSectionMarker) {
+			t.Errorf("%s should contain vibeflow section marker", expectedFile)
+		}
+	}
+}
+
+func TestEnsureAllAgentDocs_IdempotentOnSecondCall(t *testing.T) {
+	dir := t.TempDir()
+
+	// First call creates all files.
+	first := EnsureAllAgentDocs(dir)
+	if len(first) != len(providerDocFile) {
+		t.Fatalf("expected %d files on first call, got %d", len(providerDocFile), len(first))
+	}
+
+	// Second call should return empty (all files already up to date).
+	second := EnsureAllAgentDocs(dir)
+	if len(second) != 0 {
+		t.Errorf("expected 0 files on second call (idempotent), got %d: %v", len(second), second)
+	}
+}
+
 func TestEnsureAgentDoc_AppendThenIdempotent(t *testing.T) {
 	dir := t.TempDir()
 

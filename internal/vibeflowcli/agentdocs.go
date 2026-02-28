@@ -41,6 +41,23 @@ var providerDocFile = map[string]string{
 // section in agent instruction files. All embedded templates use this heading.
 const vibeflowSectionMarker = "## vibeflow Agent Session Rules"
 
+// EnsureAllAgentDocs ensures all agent-specific markdown files (CLAUDE.md,
+// AGENTS.md, GEMINI.md) exist in workDir with the vibeflow session rules
+// section. This guarantees that any provider session started in the directory
+// will find its instruction file, regardless of which provider was launched
+// first.
+//
+// Returns the list of filenames that were created or updated.
+func EnsureAllAgentDocs(workDir string) []string {
+	var updated []string
+	for providerKey := range providerDocFile {
+		if docFile := EnsureAgentDoc(workDir, providerKey); docFile != "" {
+			updated = append(updated, docFile)
+		}
+	}
+	return updated
+}
+
 // EnsureAgentDoc ensures the agent-specific markdown file in workDir contains
 // the vibeflow session rules section.
 //
