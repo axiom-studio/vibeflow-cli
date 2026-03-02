@@ -962,11 +962,20 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 
 	// If LLM gateway is enabled, inject gateway env vars for the provider.
+	// Otherwise, explicitly clear gateway-related vars to prevent inheritance
+	// from the parent shell environment.
 	if result.SessionType == "vibeflow" && result.LLMGatewayEnabled {
 		if result.Provider.Env == nil {
 			result.Provider.Env = make(map[string]string)
 		}
 		for k, v := range BuildLLMGatewayEnv(provider, m.config.ServerURL, m.config.APIToken) {
+			result.Provider.Env[k] = v
+		}
+	} else {
+		if result.Provider.Env == nil {
+			result.Provider.Env = make(map[string]string)
+		}
+		for k, v := range ClearLLMGatewayEnv(provider) {
 			result.Provider.Env[k] = v
 		}
 	}

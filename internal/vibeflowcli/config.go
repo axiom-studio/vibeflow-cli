@@ -271,6 +271,22 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	return env
 }
 
+// ClearLLMGatewayEnv returns environment variables set to empty strings to
+// explicitly unset any gateway-related vars that might be inherited from the
+// parent shell environment. Called when the LLM gateway is NOT enabled, to
+// ensure the vibecoding agent connects directly to the provider.
+func ClearLLMGatewayEnv(providerKey string) map[string]string {
+	env := make(map[string]string)
+	switch providerKey {
+	case "claude":
+		env["ANTHROPIC_CUSTOM_HEADERS"] = ""
+		env["ANTHROPIC_BASE_URL"] = ""
+	case "codex", "gemini":
+		env["OPENAI_BASE_URL"] = ""
+	}
+	return env
+}
+
 // ReadCodexBearerTokenEnvVar reads ~/.codex/config.toml and returns the
 // bearer_token_env_var value from the [mcp_servers.vibeflow] section.
 // Returns "" if the file or key is not found.

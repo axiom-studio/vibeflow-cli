@@ -141,11 +141,20 @@ func launchCmd() *cobra.Command {
 			}
 
 			// If LLM gateway is enabled (flag or saved config), inject gateway env vars.
+			// Otherwise, explicitly clear gateway-related vars to prevent inheritance
+			// from the parent shell environment.
 			if llmGateway || cfg.LLMGatewayEnabled {
 				if sessionEnv == nil {
 					sessionEnv = make(map[string]string)
 				}
 				for k, v := range BuildLLMGatewayEnv(provider, cfg.ServerURL, cfg.APIToken) {
+					sessionEnv[k] = v
+				}
+			} else {
+				if sessionEnv == nil {
+					sessionEnv = make(map[string]string)
+				}
+				for k, v := range ClearLLMGatewayEnv(provider) {
 					sessionEnv[k] = v
 				}
 			}
