@@ -68,7 +68,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 
 func launchCmd() *cobra.Command {
 	var provider, branch, worktreeName string
-	var worktree, skipPermissions, newBranch bool
+	var worktree, skipPermissions, newBranch, llmGateway bool
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -140,6 +140,16 @@ func launchCmd() *cobra.Command {
 				}
 			}
 
+			// If LLM gateway is enabled (flag or saved config), inject gateway env vars.
+			if llmGateway || cfg.LLMGatewayEnabled {
+				if sessionEnv == nil {
+					sessionEnv = make(map[string]string)
+				}
+				for k, v := range BuildLLMGatewayEnv(provider, cfg.ServerURL, cfg.APIToken) {
+					sessionEnv[k] = v
+				}
+			}
+
 			// Ensure all agent-specific markdown docs exist in the working directory.
 			EnsureAllAgentDocs(workDir)
 
@@ -183,6 +193,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&worktreeName, "worktree-name", "", "Custom worktree directory name (default: auto-generated)")
 	cmd.Flags().BoolVar(&newBranch, "new-branch", false, "Create a new git branch (used with --worktree)")
 	cmd.Flags().BoolVar(&skipPermissions, "skip-permissions", false, "Skip permission prompts (autonomous mode)")
+	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through Axiom Cloud Gateway")
 	return cmd
 }
 

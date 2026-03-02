@@ -59,6 +59,7 @@ type Config struct {
 	ErrorRecovery    ErrorRecoveryConfig   `yaml:"error_recovery"`
 	DirectoryHistory []string              `yaml:"directory_history,omitempty"`
 	SavedEnvVars     map[string]string     `yaml:"saved_env_vars,omitempty"`
+	LLMGatewayEnabled bool                 `yaml:"llm_gateway_enabled,omitempty"`
 }
 
 // AddDirectoryToHistory adds a directory to the front of the history list,
@@ -92,7 +93,7 @@ func (c *Config) ResolveWorkDir(explicit string) string {
 // Three built-in providers are included; user config merges on top.
 func DefaultConfig() *Config {
 	return &Config{
-		ServerURL:       "http://localhost:7080",
+		ServerURL:       "https://cloud.axiomstudio.ai",
 		TmuxSocket:      "vibeflow",
 		PollInterval:    5,
 		ClaudeBinary:    "claude",
@@ -242,6 +243,32 @@ func CheckServerReachable(serverURL string) error {
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// BuildLLMGatewayEnv returns the environment variables needed to route a
+// provider's LLM requests through the Axiom Cloud LLM Gateway. The gateway
+// base URL is derived from serverURL. apiToken is the vibeflow API token
+// used as the gateway JWT for authentication.
+//
+// For Claude: uses ANTHROPIC_CUSTOM_HEADERS with x-axiom-api-key to keep
+// standard auth headers free for the user's own OAuth tokens.
+// For Codex/Gemini: uses OPENAI_API_KEY + OPENAI_BASE_URL (OpenAI SDK
+// does not support custom header env vars).
+func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]string {
+	env := make(map[string]string)
+	if apiToken == "" || serverURL == "" {
+		return env
+	}
+	gatewayBaseURL := strings.TrimRight(serverURL, "/") + "/rest/v1/llm-gateway"
+	switch providerKey {
+	case "claude":
+		env["ANTHROPIC_CUSTOM_HEADERS"] = "x-axiom-api-key: " + apiToken
+		env["ANTHROPIC_BASE_URL"] = gatewayBaseURL
+	case "codex", "gemini":
+		env["OPENAI_API_KEY"] = apiToken
+		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
+	}
+	return env
 }
 
 // ReadCodexBearerTokenEnvVar reads ~/.codex/config.toml and returns the

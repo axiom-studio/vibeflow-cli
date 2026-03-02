@@ -26,8 +26,8 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.ServerURL != "http://localhost:7080" {
-		t.Errorf("ServerURL = %q, want http://localhost:7080", cfg.ServerURL)
+	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
+		t.Errorf("ServerURL = %q, want https://cloud.axiomstudio.ai", cfg.ServerURL)
 	}
 	if cfg.TmuxSocket != "vibeflow" {
 		t.Errorf("TmuxSocket = %q, want vibeflow", cfg.TmuxSocket)
@@ -78,7 +78,7 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Should return defaults.
-	if cfg.ServerURL != "http://localhost:7080" {
+	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
 	if len(cfg.Providers) != 3 {

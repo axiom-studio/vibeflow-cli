@@ -37,6 +37,7 @@ const (
 	StepPersona
 	StepProvider
 	StepEnvToken
+	StepLLMGateway
 	StepBranch
 	StepWorktree
 	StepPermissions
@@ -74,6 +75,7 @@ type WizardResult struct {
 	ReuseSessionID       string // Session ID from a previous conflict to reuse via session_init.
 	WorkDir              string // Project root directory selected in StepWorkDir.
 	EnvVars              map[string]string // Extra env vars to set on the tmux session.
+	LLMGatewayEnabled    bool   // True if user opted to route LLM requests through the gateway.
 }
 
 // WizardModel is a Bubble Tea sub-model for multi-step session creation.
@@ -148,6 +150,11 @@ type WizardModel struct {
 	envTokenValue   string // User-entered value for the env var.
 	editingEnvToken bool   // True when text input for env token is active.
 	envVars         map[string]string // Resolved env vars to pass to session.
+
+	// LLM Gateway (StepLLMGateway).
+	llmGatewayOpts    []string // Display options for gateway step.
+	selectedLLMGateway int     // 0 = Yes, 1 = No.
+	llmGatewayEnabled bool     // True if user chose to route through gateway.
 
 	result WizardResult
 }
@@ -233,6 +240,12 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 	dirOpts := []string{"[+] Enter new path"}
 	dirOpts = append(dirOpts, dirHistory...)
 
+	// Pre-select LLM gateway from saved config.
+	savedGatewayChoice := 1 // Default: No
+	if cfg != nil && cfg.LLMGatewayEnabled {
+		savedGatewayChoice = 0 // Yes
+	}
+
 	return WizardModel{
 		step:              StepWorkDir,
 		sessionTypeOpts:   []string{"Vanilla", "VibeFlow"},
@@ -246,6 +259,9 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		filteredBranches:  filteredBr,
 		existingWorktrees: existingWts,
 		worktreeOpts:      []string{"New worktree", "Specify directory", "Current directory"},
+		llmGatewayOpts:    []string{"Yes — Route through gateway", "No — Connect directly to provider"},
+		selectedLLMGateway: savedGatewayChoice,
+		llmGatewayEnabled: cfg != nil && cfg.LLMGatewayEnabled,
 		permissionOpts:    []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
 		dirHistory:        dirHistory,
 		dirOpts:           dirOpts,
@@ -587,8 +603,14 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.config.SavedEnvVars[w.envTokenVarName] = w.envTokenValue
 						_ = SaveConfig(w.config, ConfigPath())
 					}
-					w.step = StepBranch
-					w.cursor = 0
+					// For vibeflow sessions, show gateway step; otherwise skip to branch.
+					if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+						w.step = StepLLMGateway
+						w.cursor = w.selectedLLMGateway
+					} else {
+						w.step = StepBranch
+						w.cursor = 0
+					}
 				}
 			case "esc":
 				w.editingEnvToken = false
@@ -850,6 +872,18 @@ func (w WizardModel) View() string {
 		b.WriteString("\n\n")
 		b.WriteString(helpStyle.Render("enter: confirm  esc: back"))
 
+	case StepLLMGateway:
+		b.WriteString("Route LLM requests through Axiom Cloud Gateway?\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("(Enables observability, cost tracking, and governance)"))
+		b.WriteString("\n\n")
+		for i, opt := range w.llmGatewayOpts {
+			cursor := "  "
+			if i == w.cursor {
+				cursor = "> "
+			}
+			b.WriteString(fmt.Sprintf("%s%s\n", cursor, opt))
+		}
+
 	case StepBranch:
 		if w.editingBranch {
 			b.WriteString("New branch name:\n\n")
@@ -1035,6 +1069,13 @@ func (w WizardModel) View() string {
 			perm = "Skip permissions"
 		}
 		b.WriteString(fmt.Sprintf("  Permissions:   %s\n", perm))
+		if w.selectedSessionType == 1 {
+			gw := "Direct (no proxy)"
+			if w.llmGatewayEnabled {
+				gw = "Enabled (via gateway)"
+			}
+			b.WriteString(fmt.Sprintf("  LLM Gateway:   %s\n", gw))
+		}
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("enter: create  esc: back"))
 		return b.String()
@@ -1065,6 +1106,8 @@ func (w WizardModel) listLen() int {
 		return len(w.providers)
 	case StepEnvToken:
 		return 1
+	case StepLLMGateway:
+		return len(w.llmGatewayOpts)
 	case StepBranch:
 		return len(w.filteredBranches)
 	case StepWorktree:
@@ -1151,6 +1194,22 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			return w, nil
 		}
 		w.envVars = env
+		// For vibeflow sessions with API token, show gateway step.
+		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+			w.step = StepLLMGateway
+			w.cursor = w.selectedLLMGateway
+		} else {
+			w.step = StepBranch
+			w.cursor = 0
+		}
+	case StepLLMGateway:
+		w.selectedLLMGateway = w.cursor
+		w.llmGatewayEnabled = w.cursor == 0 // 0 = Yes
+		// Persist choice in config.
+		if w.config != nil {
+			w.config.LLMGatewayEnabled = w.llmGatewayEnabled
+			_ = SaveConfig(w.config, ConfigPath())
+		}
 		w.step = StepBranch
 		w.cursor = 0
 	case StepEnvToken:
@@ -1270,6 +1329,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			SpecifiedWorkDir:     w.specifiedWorkDir,
 			WorkDir:              w.selectedWorkDir,
 			EnvVars:              w.envVars,
+			LLMGatewayEnabled:    w.llmGatewayEnabled,
 		}
 		w.done = true
 	}
@@ -1391,9 +1451,18 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 	case StepEnvToken:
 		w.step = StepProvider
 		w.cursor = w.selectedProvider
-	case StepBranch:
+	case StepLLMGateway:
 		w.step = StepProvider
 		w.cursor = w.selectedProvider
+	case StepBranch:
+		// Go back to LLM gateway step if it was shown, else to provider.
+		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+			w.step = StepLLMGateway
+			w.cursor = w.selectedLLMGateway
+		} else {
+			w.step = StepProvider
+			w.cursor = w.selectedProvider
+		}
 	case StepWorktree:
 		w.step = StepBranch
 		// Restore cursor to the position in the filtered list.

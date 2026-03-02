@@ -961,6 +961,16 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		}
 	}
 
+	// If LLM gateway is enabled, inject gateway env vars for the provider.
+	if result.SessionType == "vibeflow" && result.LLMGatewayEnabled {
+		if result.Provider.Env == nil {
+			result.Provider.Env = make(map[string]string)
+		}
+		for k, v := range BuildLLMGatewayEnv(provider, m.config.ServerURL, m.config.APIToken) {
+			result.Provider.Env[k] = v
+		}
+	}
+
 	// Ensure all agent-specific markdown docs exist in the working directory
 	// so any provider session picks up vibeflow session rules on startup.
 	if result.SessionType == "vibeflow" {
