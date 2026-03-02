@@ -148,7 +148,7 @@ func (m SetupModel) updateURL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		if m.urlInput == "" {
-			m.urlInput = "http://localhost:7080"
+			m.urlInput = "https://cloud.axiomstudio.ai"
 		}
 		m.validating = true
 		m.err = nil
@@ -314,7 +314,7 @@ func (m SetupModel) View() string {
 		b.WriteString("\n")
 		b.WriteString(inputStyle.Render(m.urlInput + "█"))
 		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("Default: http://localhost:7080"))
+		b.WriteString(dimStyle.Render("Default: https://cloud.axiomstudio.ai"))
 		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("Press Enter to continue"))
 
