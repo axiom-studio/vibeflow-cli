@@ -1517,7 +1517,12 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 		parts = append(parts, s.Branch)
 	}
 	if s.Persona != "" {
-		parts = append(parts, s.Persona)
+		icon := PersonaCompactIcon(s.Persona)
+		if icon != "" {
+			parts = append(parts, lipgloss.NewStyle().Foreground(PersonaColor(s.Persona)).Render(icon)+" "+s.Persona)
+		} else {
+			parts = append(parts, s.Persona)
+		}
 	}
 	if s.Project != "" {
 		parts = append(parts, s.Project)
