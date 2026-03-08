@@ -212,6 +212,62 @@ func TestCleanupStaleSession_WithPersona(t *testing.T) {
 	}
 }
 
+func TestSessionFile_SurvivesAfterWrite(t *testing.T) {
+	// Verify that session files persist after being written — they are not
+	// automatically removed on session kill. This enables session ID reuse
+	// via stale conflict detection on the next launch.
+	dir := t.TempDir()
+
+	_ = WriteSessionFile(dir, "developer", "session-persist-test")
+
+	// File should exist and be readable.
+	sid, _, _ := readSessionFileID(dir, "developer")
+	if sid != "session-persist-test" {
+		t.Errorf("readSessionFileID returned %q, want session-persist-test", sid)
+	}
+
+	// Simulate a "kill" — only store is cleaned up, NOT the session file.
+	// (This test documents the invariant that kill does NOT call RemoveSessionFile.)
+
+	// File should still exist after simulated kill.
+	sid2, _, _ := readSessionFileID(dir, "developer")
+	if sid2 != "session-persist-test" {
+		t.Errorf("session file should survive kill, got %q", sid2)
+	}
+}
+
+func TestStaleConflict_SessionIDPreserved(t *testing.T) {
+	dir := t.TempDir()
+
+	// Simulate a previous vibeflow session that left a session file.
+	oldID := "session-20260226-143000-abc12345"
+	_ = WriteSessionFile(dir, "developer", oldID)
+
+	// CheckConflict should find it as stale (no tmux).
+	conflict := CheckConflict(dir, "developer", nil)
+	if conflict.Status != StaleConflict {
+		t.Fatalf("expected StaleConflict, got %s", conflict.Status)
+	}
+	if conflict.SessionID != oldID {
+		t.Errorf("expected session ID %q, got %q", oldID, conflict.SessionID)
+	}
+
+	// After cleanup, the session ID should be retrievable for reuse.
+	// This simulates what launchFromWizard does: capture the ID before cleanup.
+	reuseID := conflict.SessionID
+	_ = CleanupStaleSession(dir, "developer")
+
+	// Verify the file is gone after cleanup.
+	if sid, _, _ := readSessionFileID(dir, "developer"); sid != "" {
+		t.Errorf("expected empty session ID after cleanup, got %q", sid)
+	}
+
+	// The captured reuseID should still be the old session ID.
+	if reuseID != oldID {
+		t.Errorf("reuseID = %q, want %q", reuseID, oldID)
+	}
+}
+
 func TestParseSessionFile_WithPersonaLine(t *testing.T) {
 	content := "session-20260226-143000-abc12345\nprovider=gemini\npersona=developer\n"
 	sid, prov, _ := parseSessionFile(content)

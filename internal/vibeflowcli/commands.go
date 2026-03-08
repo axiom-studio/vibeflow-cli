@@ -299,7 +299,8 @@ func killCmd() *cobra.Command {
 			}
 
 			if meta, found, _ := store.Get(name); found {
-				RemoveSessionFile(meta.WorkingDir, meta.Persona)
+				// Session file is intentionally kept so the session ID can
+				// be reused on next launch via stale conflict detection.
 				if cleanupWorktree && meta.WorktreePath != "" && wm != nil {
 					if err := wm.Remove(meta.WorktreePath, true); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree: %v\n", err)
@@ -340,7 +341,8 @@ func deleteCmd() *cobra.Command {
 			}
 
 			if meta, found, _ := store.Get(name); found {
-				RemoveSessionFile(meta.WorkingDir, meta.Persona)
+				// Session file is intentionally kept so the session ID can
+				// be reused on next launch via stale conflict detection.
 				if cleanupWorktree && meta.WorktreePath != "" && wm != nil {
 					if err := wm.Remove(meta.WorktreePath, true); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree: %v\n", err)
