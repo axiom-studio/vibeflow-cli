@@ -34,7 +34,7 @@ const (
 	StepWorkDir WizardStep = iota
 	StepSessionType
 	StepProject
-	StepPersona
+	StepTeam
 	StepProvider
 	StepEnvToken
 	StepLLMGateway
@@ -60,7 +60,8 @@ type WizardResult struct {
 	SessionType          string // "vanilla" or "vibeflow"
 	ProjectID            int64  // VibeFlow project ID (vibeflow sessions only).
 	ProjectName          string // VibeFlow project name (vibeflow sessions only).
-	Persona              string // Persona key (vibeflow sessions only, e.g. "developer").
+	Persona              string   // Persona key (vibeflow sessions only, e.g. "developer"). First selected persona for backward compat.
+	Personas             []string // All selected persona keys (vibeflow sessions only). Used for multi-session spawning.
 	Provider             Provider
 	ProviderKey          string
 	Branch               string
@@ -115,6 +116,7 @@ type WizardModel struct {
 	selectedSessionType int
 	selectedProject     int
 	selectedPersona     int
+	selectedPersonas    map[int]bool // Multi-select: tracks toggled personas by index.
 	selectedProvider    int
 	selectedBranch      int
 	selectedWorktree    int
@@ -254,6 +256,7 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		defaultProject:    defaultProject,
 		projectErr:        projectErr,
 		personas:          defaultPersonas(),
+		selectedPersonas:  map[int]bool{0: true}, // Pre-select "developer" (index 0).
 		providers:         entries,
 		branches:          branches,
 		filteredBranches:  filteredBr,
@@ -685,7 +688,24 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			}
 		case "down", "j":
 			w.cursor = min(w.cursor+1, w.listLen()-1)
+		case " ":
+			// Space toggles persona selection in team step.
+			if w.step == StepTeam && w.cursor >= 0 && w.cursor < len(w.personas) {
+				w.selectedPersonas[w.cursor] = !w.selectedPersonas[w.cursor]
+			}
 		case "enter":
+			// Block advance if no personas selected in team step.
+			if w.step == StepTeam {
+				count := 0
+				for _, on := range w.selectedPersonas {
+					if on {
+						count++
+					}
+				}
+				if count == 0 {
+					return w, nil
+				}
+			}
 			return w.advance()
 		case "esc":
 			return w.goBack()
@@ -730,7 +750,7 @@ func (w WizardModel) View() string {
 	b.WriteString("\n\n")
 
 	// Step indicator.
-	steps := []string{"Directory", "Type", "Project", "Persona", "Provider", "Env", "Branch", "Worktree", "Permissions", "Confirm"}
+	steps := []string{"Directory", "Type", "Project", "Team", "Provider", "Env", "Branch", "Worktree", "Permissions", "Confirm"}
 	var stepLine strings.Builder
 	for i, s := range steps {
 		if WizardStep(i) == w.step {
@@ -820,15 +840,30 @@ func (w WizardModel) View() string {
 			}
 		}
 
-	case StepPersona:
-		b.WriteString("Select your role:\n\n")
+	case StepTeam:
+		b.WriteString("Select team (space to toggle, enter to confirm):\n\n")
 		for i, p := range w.personas {
 			cursor := "  "
 			if i == w.cursor {
 				cursor = "> "
 			}
+			check := "[ ]"
+			if w.selectedPersonas[i] {
+				check = lipgloss.NewStyle().Foreground(accentColor).Render("[x]")
+			}
 			desc := lipgloss.NewStyle().Foreground(dimColor).Render(" — " + p.description)
-			b.WriteString(fmt.Sprintf("%s%-16s%s\n", cursor, p.displayName, desc))
+			b.WriteString(fmt.Sprintf("%s%s %-16s%s\n", cursor, check, p.displayName, desc))
+		}
+		// Count selected.
+		count := 0
+		for _, on := range w.selectedPersonas {
+			if on {
+				count++
+			}
+		}
+		if count == 0 {
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(warningColor).Render("  Select at least one persona"))
 		}
 
 	case StepProvider:
@@ -1036,8 +1071,16 @@ func (w WizardModel) View() string {
 		if w.selectedSessionType == 1 && w.selectedProject < len(w.projects) {
 			b.WriteString(fmt.Sprintf("  Project:       %s\n", w.projects[w.selectedProject].Name))
 		}
-		if w.selectedSessionType == 1 && w.selectedPersona < len(w.personas) {
-			b.WriteString(fmt.Sprintf("  Persona:       %s\n", w.personas[w.selectedPersona].displayName))
+		if w.selectedSessionType == 1 {
+			var personaNames []string
+			for i := 0; i < len(w.personas); i++ {
+				if w.selectedPersonas[i] {
+					personaNames = append(personaNames, w.personas[i].displayName)
+				}
+			}
+			if len(personaNames) > 0 {
+				b.WriteString(fmt.Sprintf("  Team:          %s\n", strings.Join(personaNames, ", ")))
+			}
 		}
 		pe := w.providers[w.selectedProvider]
 		b.WriteString(fmt.Sprintf("  Provider:      %s\n", pe.provider.Name))
@@ -1100,7 +1143,7 @@ func (w WizardModel) listLen() int {
 		return len(w.sessionTypeOpts)
 	case StepProject:
 		return len(w.filteredProjects)
-	case StepPersona:
+	case StepTeam:
 		return len(w.personas)
 	case StepProvider:
 		return len(w.providers)
@@ -1167,10 +1210,21 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			w.selectedProject = w.filteredProjects[w.cursor]
 		}
 		w.projectFilterActive = false
-		w.step = StepPersona
+		w.step = StepTeam
 		w.cursor = 0 // "developer" is index 0 (pre-selected default)
-	case StepPersona:
-		w.selectedPersona = w.cursor
+	case StepTeam:
+		// Collect selected personas. First selected becomes the primary (Persona field).
+		w.selectedPersona = -1
+		for i := 0; i < len(w.personas); i++ {
+			if w.selectedPersonas[i] {
+				if w.selectedPersona < 0 {
+					w.selectedPersona = i
+				}
+			}
+		}
+		if w.selectedPersona < 0 {
+			w.selectedPersona = 0 // fallback
+		}
 		w.step = StepProvider
 		w.cursor = 0
 	case StepProvider:
@@ -1308,14 +1362,26 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			projectName = w.projects[w.selectedProject].Name
 		}
 		var persona string
-		if sessionType == "vibeflow" && w.selectedPersona < len(w.personas) {
-			persona = w.personas[w.selectedPersona].key
+		var personas []string
+		if sessionType == "vibeflow" {
+			for i := 0; i < len(w.personas); i++ {
+				if w.selectedPersonas[i] {
+					personas = append(personas, w.personas[i].key)
+				}
+			}
+			if w.selectedPersona >= 0 && w.selectedPersona < len(w.personas) {
+				persona = w.personas[w.selectedPersona].key
+			}
+			if persona == "" && len(personas) > 0 {
+				persona = personas[0]
+			}
 		}
 		w.result = WizardResult{
 			SessionType:          sessionType,
 			ProjectID:            projectID,
 			ProjectName:          projectName,
 			Persona:              persona,
+			Personas:             personas,
 			Provider:             prov,
 			ProviderKey:          pe.key,
 			Branch:               w.resolvedBranch(),
@@ -1436,13 +1502,13 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.rebuildProjectFilter()
 		w.step = StepSessionType
 		w.cursor = w.selectedSessionType
-	case StepPersona:
+	case StepTeam:
 		w.step = StepProject
 		w.cursor = 0
 		w.projectFilterActive = true
 	case StepProvider:
-		if w.selectedSessionType == 1 { // VibeFlow — go back to persona
-			w.step = StepPersona
+		if w.selectedSessionType == 1 { // VibeFlow — go back to team selection
+			w.step = StepTeam
 			w.cursor = w.selectedPersona
 		} else { // Vanilla — go back to session type
 			w.step = StepSessionType
