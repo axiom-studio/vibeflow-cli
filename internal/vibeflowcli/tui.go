@@ -793,28 +793,79 @@ func (m Model) updateWorktreeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // launchFromWizard checks for conflicts and either launches or shows the conflict modal.
 func (m Model) launchFromWizard(result WizardResult) tea.Msg {
-	workDir := "."
-	if result.WorkDir != "" {
-		workDir = result.WorkDir
+	personas := result.Personas
+	if len(personas) == 0 {
+		personas = []string{result.Persona}
 	}
 
-	// Check for conflicts before launching (current-dir and specified-dir modes).
-	switch result.WorktreeChoice {
-	case WorktreeCurrent:
-		conflict := CheckConflict(workDir, result.Persona, m.tmux)
-		if conflict.Status != NoConflict {
-			return conflictDetectedMsg{conflict: conflict, wizardResult: result}
+	// Single persona — existing behavior (no multi-spawn overhead).
+	if len(personas) == 1 {
+		result.Persona = personas[0]
+		workDir := "."
+		if result.WorkDir != "" {
+			workDir = result.WorkDir
 		}
-	case WorktreeSpecifyDir:
-		if result.SpecifiedWorkDir != "" {
-			conflict := CheckConflict(result.SpecifiedWorkDir, result.Persona, m.tmux)
+		switch result.WorktreeChoice {
+		case WorktreeCurrent:
+			conflict := CheckConflict(workDir, result.Persona, m.tmux)
 			if conflict.Status != NoConflict {
 				return conflictDetectedMsg{conflict: conflict, wizardResult: result}
 			}
+		case WorktreeSpecifyDir:
+			if result.SpecifiedWorkDir != "" {
+				conflict := CheckConflict(result.SpecifiedWorkDir, result.Persona, m.tmux)
+				if conflict.Status != NoConflict {
+					return conflictDetectedMsg{conflict: conflict, wizardResult: result}
+				}
+			}
+		}
+		return m.executeLaunch(result)
+	}
+
+	// Multi-persona: resolve workDir once (creates worktree if needed),
+	// then spawn one session per persona in the same directory.
+	workDir, worktreePath, err := m.resolveSessionWorkDir(result)
+	if err != nil {
+		return sessionsMsg{err: err}
+	}
+
+	// Check conflicts for each persona in the resolved workDir.
+	for _, persona := range personas {
+		conflict := CheckConflict(workDir, persona, m.tmux)
+		if conflict.Status != NoConflict {
+			return conflictDetectedMsg{conflict: conflict, wizardResult: result}
 		}
 	}
 
-	return m.executeLaunch(result)
+	// Spawn a session for each persona. Override result to use the pre-resolved
+	// workDir so executeLaunch doesn't try to create the worktree again.
+	var firstErr error
+	spawned := 0
+	for _, persona := range personas {
+		r := result
+		r.Persona = persona
+		r.WorkDir = workDir
+		if worktreePath != "" {
+			r.WorktreeChoice = WorktreeExisting
+			r.ExistingWorktreePath = worktreePath
+		} else {
+			r.WorktreeChoice = WorktreeCurrent
+		}
+		msg := m.executeLaunch(r)
+		if errMsg, ok := msg.(sessionsMsg); ok && errMsg.err != nil {
+			m.logger.Error("spawn persona %s: %v", persona, errMsg.err)
+			if firstErr == nil {
+				firstErr = errMsg.err
+			}
+			continue
+		}
+		spawned++
+	}
+
+	if spawned == 0 && firstErr != nil {
+		return sessionsMsg{err: fmt.Errorf("all %d persona sessions failed: %w", len(personas), firstErr)}
+	}
+	return m.refreshSessions()
 }
 
 // conflictDetectedMsg triggers the conflict modal from within launchFromWizard.
@@ -826,27 +877,26 @@ type conflictDetectedMsg struct {
 // autoAttachMsg signals that a newly created session should be auto-attached.
 type autoAttachMsg struct{ name string }
 
-// executeLaunch performs the actual session creation after conflict resolution.
-func (m Model) executeLaunch(result WizardResult) tea.Msg {
-	workDir := m.config.ResolveWorkDir("")
+// resolveSessionWorkDir resolves the working directory and optional worktree path
+// from the wizard result. Creates a new worktree if needed.
+func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath string, err error) {
+	workDir = m.config.ResolveWorkDir("")
 	if result.WorkDir != "" {
 		workDir = result.WorkDir
 	}
-	name := sessionid.GenerateSessionID(workDir)
-	provider := result.ProviderKey
-	branch := result.Branch
 
 	// Resolve the WorktreeManager to use — if the wizard selected a different
 	// directory than the TUI's default, create a temporary manager for it.
 	wm := m.worktrees
 	if result.WorkDir != "" && (wm == nil || wm.RepoRoot() != result.WorkDir) {
-		if newWM, err := NewWorktreeManager(result.WorkDir, m.config.Worktree.BaseDir); err == nil {
+		if newWM, wmErr := NewWorktreeManager(result.WorkDir, m.config.Worktree.BaseDir); wmErr == nil {
 			wm = newWM
 		}
 	}
 
-	// Handle worktree selection.
-	var worktreePath string
+	provider := result.ProviderKey
+	branch := result.Branch
+
 	switch result.WorktreeChoice {
 	case WorktreeNew:
 		if wm != nil {
@@ -856,7 +906,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			}
 			wtPath, wtErr := wm.CreateBranch(wtName, branch, result.NewBranch)
 			if wtErr != nil {
-				return sessionsMsg{err: fmt.Errorf("create worktree: %w", wtErr)}
+				return "", "", fmt.Errorf("create worktree: %w", wtErr)
 			}
 			workDir = wtPath
 			worktreePath = wtPath
@@ -874,7 +924,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			}
 			wtPath, wtErr := wm.CreateBranchInDir(result.CustomBaseDir, wtName, branch, result.NewBranch)
 			if wtErr != nil {
-				return sessionsMsg{err: fmt.Errorf("create worktree in custom dir: %w", wtErr)}
+				return "", "", fmt.Errorf("create worktree in custom dir: %w", wtErr)
 			}
 			workDir = wtPath
 			worktreePath = wtPath
@@ -887,6 +937,18 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			workDir = result.SpecifiedWorkDir
 		}
 	}
+	return workDir, worktreePath, nil
+}
+
+// executeLaunch performs the actual session creation after conflict resolution.
+func (m Model) executeLaunch(result WizardResult) tea.Msg {
+	workDir, worktreePath, err := m.resolveSessionWorkDir(result)
+	if err != nil {
+		return sessionsMsg{err: err}
+	}
+	name := sessionid.GenerateSessionID(workDir)
+	provider := result.ProviderKey
+	branch := result.Branch
 
 	// For VibeFlow managed sessions, ensure a valid .vibeflow-session file
 	// exists before spawning. The agent will call session_init itself via MCP
