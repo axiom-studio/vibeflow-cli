@@ -842,6 +842,9 @@ func (w WizardModel) View() string {
 
 	case StepTeam:
 		b.WriteString("Select team (space to toggle, enter to confirm):\n\n")
+
+		// Build left column: persona checklist.
+		var leftLines []string
 		for i, p := range w.personas {
 			cursor := "  "
 			if i == w.cursor {
@@ -851,9 +854,35 @@ func (w WizardModel) View() string {
 			if w.selectedPersonas[i] {
 				check = lipgloss.NewStyle().Foreground(accentColor).Render("[x]")
 			}
+			compact := PersonaCompactIcon(p.key)
+			compactStyled := ""
+			if compact != "" {
+				compactStyled = lipgloss.NewStyle().Foreground(PersonaColor(p.key)).Render(compact) + " "
+			}
 			desc := lipgloss.NewStyle().Foreground(dimColor).Render(" — " + p.description)
-			b.WriteString(fmt.Sprintf("%s%s %-16s%s\n", cursor, check, p.displayName, desc))
+			leftLines = append(leftLines, fmt.Sprintf("%s%s %s%-16s%s", cursor, check, compactStyled, p.displayName, desc))
 		}
+
+		// Build right column: large icon preview for highlighted persona.
+		var rightCol string
+		if w.cursor >= 0 && w.cursor < len(w.personas) {
+			p := w.personas[w.cursor]
+			icon := PersonaLargeIcon(p.key)
+			if icon != "" {
+				iconStyle := lipgloss.NewStyle().Foreground(PersonaColor(p.key))
+				rightCol = iconStyle.Render(icon)
+			}
+		}
+
+		// Join columns side-by-side with the icon to the right.
+		leftCol := strings.Join(leftLines, "\n")
+		if rightCol != "" {
+			b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, "    ", rightCol))
+		} else {
+			b.WriteString(leftCol)
+		}
+		b.WriteString("\n")
+
 		// Count selected.
 		count := 0
 		for _, on := range w.selectedPersonas {
