@@ -85,7 +85,7 @@ func TestSelectedPersonas_EmptyBlocksAdvance(t *testing.T) {
 
 func TestWizardResult_PersonasField(t *testing.T) {
 	personas := defaultPersonas()
-	selectedPersonas := map[int]bool{0: true, 1: true, 3: true}
+	selectedPersonas := map[int]bool{0: true, 1: true, 4: true}
 
 	var result []string
 	for i := 0; i < len(personas); i++ {
@@ -108,7 +108,7 @@ func TestWizardResult_PersonasField(t *testing.T) {
 func TestWizardResult_PersonaBackwardCompat(t *testing.T) {
 	// First selected persona should become the primary Persona field.
 	personas := defaultPersonas()
-	selectedPersonas := map[int]bool{2: true, 4: true} // qa_lead and product_manager
+	selectedPersonas := map[int]bool{3: true, 5: true} // qa_lead and product_manager
 
 	selectedPersona := -1
 	for i := 0; i < len(personas); i++ {
@@ -119,18 +119,18 @@ func TestWizardResult_PersonaBackwardCompat(t *testing.T) {
 		}
 	}
 
-	if selectedPersona != 2 {
-		t.Errorf("selectedPersona = %d, want 2 (qa_lead)", selectedPersona)
+	if selectedPersona != 3 {
+		t.Errorf("selectedPersona = %d, want 3 (qa_lead)", selectedPersona)
 	}
 	if personas[selectedPersona].key != "qa_lead" {
 		t.Errorf("primary persona = %q, want qa_lead", personas[selectedPersona].key)
 	}
 }
 
-func TestDefaultPersonas_SevenEntries(t *testing.T) {
+func TestDefaultPersonas_EightEntries(t *testing.T) {
 	personas := defaultPersonas()
-	if len(personas) != 7 {
-		t.Errorf("len(defaultPersonas()) = %d, want 7", len(personas))
+	if len(personas) != 8 {
+		t.Errorf("len(defaultPersonas()) = %d, want 8", len(personas))
 	}
 }
 

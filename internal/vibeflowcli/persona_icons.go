@@ -44,6 +44,7 @@ func PersonaCompactIcon(key string) string {
 var personaColors = map[string]lipgloss.Color{
 	"developer":       lipgloss.Color("#61afef"), // soft blue — code/tech
 	"architect":       lipgloss.Color("#c678dd"), // purple — design/wisdom
+	"ux_designer":     lipgloss.Color("#e88fd2"), // pink — design/creativity
 	"qa_lead":         lipgloss.Color("#98c379"), // green — verification
 	"security_lead":   lipgloss.Color("#e06c75"), // red — security/alerts
 	"product_manager": lipgloss.Color("#e5c07b"), // gold — innovation
@@ -55,6 +56,7 @@ var personaColors = map[string]lipgloss.Color{
 var personaCompactIcons = map[string]string{
 	"developer":       "⟨⟩",
 	"architect":       "△",
+	"ux_designer":     "✎",
 	"qa_lead":         "◎",
 	"security_lead":   "◆",
 	"product_manager": "✦",
@@ -80,6 +82,14 @@ var personaLargeIcons = map[string]string{
 		"  ▐▌  ▐▌  \n" +
 		"  ▐▌  ▐▌  \n" +
 		" ▀██████▀ ",
+
+	// UX Designer — pen/stylus over artboard
+	"ux_designer": "" +
+		"      ▄██▄\n" +
+		"    ▄█▀▀  \n" +
+		"  ▄█▀     \n" +
+		" █▀       \n" +
+		"▀▄▄██████▀",
 
 	// QA Lead — magnifying glass over checkmark
 	"qa_lead": "" +

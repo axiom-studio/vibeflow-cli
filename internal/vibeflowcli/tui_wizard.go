@@ -178,6 +178,7 @@ func defaultPersonas() []personaEntry {
 	return []personaEntry{
 		{"developer", "Developer", "Write code, fix bugs, implement features"},
 		{"architect", "Architect", "Design systems, create architecture docs, plan work"},
+		{"ux_designer", "UX Designer", "Design user experiences, create wireframes, usability testing"},
 		{"qa_lead", "QA Lead", "Test, verify, ensure quality"},
 		{"security_lead", "Security Lead", "Security review, vulnerability assessment"},
 		{"product_manager", "Product Manager", "Define requirements, write PRDs"},

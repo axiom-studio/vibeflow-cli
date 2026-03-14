@@ -24,7 +24,7 @@ import (
 )
 
 var allPersonaKeys = []string{
-	"developer", "architect", "qa_lead", "security_lead",
+	"developer", "architect", "ux_designer", "qa_lead", "security_lead",
 	"product_manager", "project_manager", "customer",
 }
 
