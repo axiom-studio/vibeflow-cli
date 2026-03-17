@@ -67,8 +67,11 @@ func TestDefaultConfig(t *testing.T) {
 	if !cfg.ErrorRecovery.Enabled {
 		t.Error("ErrorRecovery.Enabled should default to true")
 	}
-	if cfg.ErrorRecovery.MaxRetries != 3 {
-		t.Errorf("ErrorRecovery.MaxRetries = %d, want 3", cfg.ErrorRecovery.MaxRetries)
+	if cfg.ErrorRecovery.MaxRetries != 10 {
+		t.Errorf("ErrorRecovery.MaxRetries = %d, want 10", cfg.ErrorRecovery.MaxRetries)
+	}
+	if cfg.ErrorRecovery.MaxBackoffSeconds != 300 {
+		t.Errorf("ErrorRecovery.MaxBackoffSeconds = %d, want 300", cfg.ErrorRecovery.MaxBackoffSeconds)
 	}
 }
 

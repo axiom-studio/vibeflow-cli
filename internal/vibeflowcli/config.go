@@ -41,6 +41,7 @@ type ErrorRecoveryConfig struct {
 	MaxRetries        int    `yaml:"max_retries"`
 	DebounceSeconds   int    `yaml:"debounce_seconds"`
 	BackoffMultiplier int    `yaml:"backoff_multiplier"`
+	MaxBackoffSeconds int    `yaml:"max_backoff_seconds"`
 }
 
 // Config holds all vibeflow-cli configuration.
@@ -105,9 +106,10 @@ func DefaultConfig() *Config {
 		},
 		ErrorRecovery: ErrorRecoveryConfig{
 			Enabled:           true,
-			MaxRetries:        3,
+			MaxRetries:        10,
 			DebounceSeconds:   5,
 			BackoffMultiplier: 2,
+			MaxBackoffSeconds: 300,
 		},
 		Providers: map[string]Provider{
 			"claude": {

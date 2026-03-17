@@ -75,19 +75,13 @@ func (r *ErrorPatternRegistry) AddPattern(p ErrorPattern) {
 func DefaultPatterns() []ErrorPattern {
 	return []ErrorPattern{
 		// --- Claude Code ---
-		{
-			Provider:        "claude",
-			Regex:           regexp.MustCompile(`API Error:\s*5\d{2}`),
-			Severity:        SeverityRecoverable,
-			RecoveryMessage: "The previous API call failed with a server error. Please retry the last operation.",
-			RequiresBackoff: false,
-			Description:     "Claude API 5xx server error",
-		},
+		// Specific status codes MUST come before the generic 5xx pattern
+		// so they match first and get their own recovery behavior.
 		{
 			Provider:        "claude",
 			Regex:           regexp.MustCompile(`API Error:\s*529`),
 			Severity:        SeverityRecoverable,
-			RecoveryMessage: "The API is overloaded. Please wait a moment and retry the last operation.",
+			RecoveryMessage: "continue",
 			RequiresBackoff: true,
 			Description:     "Claude API overloaded (529)",
 		},
@@ -98,6 +92,14 @@ func DefaultPatterns() []ErrorPattern {
 			RecoveryMessage: "Rate limit hit. Please wait and retry the last operation.",
 			RequiresBackoff: true,
 			Description:     "Claude API rate limit (429)",
+		},
+		{
+			Provider:        "claude",
+			Regex:           regexp.MustCompile(`API Error:\s*5\d{2}`),
+			Severity:        SeverityRecoverable,
+			RecoveryMessage: "The previous API call failed with a server error. Please retry the last operation.",
+			RequiresBackoff: false,
+			Description:     "Claude API 5xx server error",
 		},
 		{
 			Provider:        "claude",

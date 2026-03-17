@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 
@@ -35,9 +36,10 @@ func testHealthMonitor(t *testing.T) *HealthMonitor {
 	logger := &Logger{file: f, path: logPath}
 	cfg := ErrorRecoveryConfig{
 		Enabled:           true,
-		MaxRetries:        3,
+		MaxRetries:        10,
 		DebounceSeconds:   0, // No debounce for tests.
 		BackoffMultiplier: 2,
+		MaxBackoffSeconds: 300,
 	}
 	return NewHealthMonitor(reg, tmux, cfg, logger)
 }
@@ -212,6 +214,31 @@ func TestHealthMonitor_GetHealth_NotTracked(t *testing.T) {
 	hm := testHealthMonitor(t)
 	if hm.GetHealth("nonexistent") != nil {
 		t.Error("expected nil for untracked session")
+	}
+}
+
+func TestHealthMonitor_AttemptRecovery_BackoffCap(t *testing.T) {
+	hm := testHealthMonitor(t)
+	hm.config.MaxBackoffSeconds = 120 // 2-minute cap for test.
+	hm.config.MaxRetries = 20
+
+	output := "API Error: 529"
+
+	// Detect + debounce pass.
+	hm.CheckOutput("vibeflow_test", "claude", output, false)
+	hm.CheckOutput("vibeflow_test", "claude", output, false)
+
+	// Simulate multiple recovery attempts and check backoff is capped.
+	sh := hm.GetHealth("vibeflow_test")
+	for i := 0; i < 10; i++ {
+		sh.Status = HealthRecovering
+		sh.MatchedPattern = &hm.registry.patterns[0] // 529 pattern (first in list).
+		_ = hm.AttemptRecovery("vibeflow_test")
+
+		backoffDuration := sh.BackoffUntil.Sub(sh.LastRecoveryAt)
+		if backoffDuration > 120*time.Second {
+			t.Errorf("attempt %d: backoff %v exceeds cap of 120s", i+1, backoffDuration)
+		}
 	}
 }
 

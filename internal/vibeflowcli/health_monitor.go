@@ -201,7 +201,7 @@ func (hm *HealthMonitor) AttemptRecovery(sessionName string) error {
 	sh.LastRecoveryAt = time.Now()
 	sh.Status = HealthRecovering
 
-	// Calculate exponential backoff for next attempt.
+	// Calculate exponential backoff for next attempt, capped at MaxBackoffSeconds.
 	backoffBase := 30 * time.Second
 	multiplier := hm.config.BackoffMultiplier
 	if multiplier < 1 {
@@ -210,6 +210,10 @@ func (hm *HealthMonitor) AttemptRecovery(sessionName string) error {
 	backoff := backoffBase
 	for i := 1; i < sh.RecoveryCount; i++ {
 		backoff *= time.Duration(multiplier)
+	}
+	maxBackoff := time.Duration(hm.config.MaxBackoffSeconds) * time.Second
+	if maxBackoff > 0 && backoff > maxBackoff {
+		backoff = maxBackoff
 	}
 	sh.BackoffUntil = sh.LastRecoveryAt.Add(backoff)
 

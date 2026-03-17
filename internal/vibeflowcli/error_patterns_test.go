@@ -80,9 +80,41 @@ func TestErrorPatternRegistry_Match_ClaudeOverloaded(t *testing.T) {
 	if match == nil {
 		t.Fatal("expected match for 529")
 	}
-	// 529 matches the 5xx pattern (first in order); both are recoverable.
-	if match.Severity != SeverityRecoverable {
-		t.Error("expected recoverable severity")
+	if match.Description != "Claude API overloaded (529)" {
+		t.Errorf("expected specific 529 pattern, got %q", match.Description)
+	}
+	if match.RecoveryMessage != "continue" {
+		t.Errorf("expected recovery message 'continue', got %q", match.RecoveryMessage)
+	}
+	if !match.RequiresBackoff {
+		t.Error("529 should require backoff")
+	}
+}
+
+func TestErrorPatternRegistry_Match_Claude529BeforeGeneric5xx(t *testing.T) {
+	reg := NewErrorPatternRegistry()
+	// Full 529 error output as seen in production.
+	output := `API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded."}}`
+	match := reg.Match("claude", output)
+	if match == nil {
+		t.Fatal("expected match")
+	}
+	if match.Description != "Claude API overloaded (529)" {
+		t.Errorf("529 should match before generic 5xx, got %q", match.Description)
+	}
+}
+
+func TestErrorPatternRegistry_Match_Claude500StillMatchesGeneric(t *testing.T) {
+	reg := NewErrorPatternRegistry()
+	match := reg.Match("claude", "API Error: 500 Internal Server Error")
+	if match == nil {
+		t.Fatal("expected match for 500")
+	}
+	if match.Description != "Claude API 5xx server error" {
+		t.Errorf("500 should match generic 5xx, got %q", match.Description)
+	}
+	if match.RequiresBackoff {
+		t.Error("generic 5xx should not require backoff")
 	}
 }
 
