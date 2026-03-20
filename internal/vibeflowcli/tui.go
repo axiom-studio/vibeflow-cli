@@ -96,6 +96,7 @@ const (
 	ViewConflict
 	ViewWorktrees
 	ViewHelp
+	ViewRestart
 )
 
 // Model is the Bubble Tea model for vibeflow-cli.
@@ -126,6 +127,8 @@ type Model struct {
 	serverWarning  string        // non-empty if server unreachable at startup
 	healthMonitor  *HealthMonitor // session error detection and auto-recovery
 	logger         *Logger       // file-based logger
+	cache          *SessionCache // session cache for restart-without-intervention
+	restartSelect  RestartSelectModel // dead-session restart multiselect
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -136,7 +139,7 @@ type Model struct {
 }
 
 // NewModel creates a new TUI model.
-func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *WorktreeManager, store *Store, registry *ProviderRegistry, projectID int64) Model {
+func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *WorktreeManager, store *Store, cache *SessionCache, registry *ProviderRegistry, projectID int64) Model {
 	logger := NewLogger()
 	logger.Info("vibeflow-cli started (server=%s, project=%s)", cfg.ServerURL, cfg.DefaultProject)
 	tmux.SetLogger(logger)
@@ -148,6 +151,7 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 		tmux:            tmux,
 		worktrees:       worktrees,
 		store:           store,
+		cache:           cache,
 		registry:        registry,
 		projectID:       projectID,
 		activeView:      ViewSessions,
@@ -176,6 +180,9 @@ type errClearMsg struct{}
 
 // captureTickMsg triggers periodic capture-pane refresh.
 type captureTickMsg time.Time
+
+// cacheGCMsg triggers periodic session cache garbage collection.
+type cacheGCMsg time.Time
 
 // captureMsg carries captured pane output.
 type captureMsg struct {
@@ -411,12 +418,20 @@ func (m Model) selectedSessionIdx() int {
 	return m.cursor
 }
 
+// cacheGCTickCmd returns a command that fires a GC tick every 1 minute.
+func cacheGCTickCmd() tea.Cmd {
+	return tea.Tick(1*time.Minute, func(t time.Time) tea.Msg {
+		return cacheGCMsg(t)
+	})
+}
+
 // Init initializes the model.
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshSessions,
 		captureTickCmd(),
 		tickCmd(time.Duration(m.config.PollInterval)*time.Second),
+		cacheGCTickCmd(),
 	)
 }
 
@@ -472,6 +487,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case cacheGCMsg:
+		// Periodic session cache garbage collection (every 1 minute).
+		if m.cache != nil {
+			if names, err := m.tmux.ListSessionNames(); err == nil {
+				_ = m.cache.GC(names)
+			}
+		}
+		return m, cacheGCTickCmd()
+	case restartConfirmMsg:
+		// User confirmed dead sessions to restart.
+		m.activeView = ViewSessions
+		for _, meta := range msg.sessions {
+			if _, err := RestartSession(meta, m.config, m.tmux, m.store, m.cache, m.registry); err != nil {
+				m.logger.Error("restart session %s: %v", meta.Name, err)
+			} else {
+				m.logger.Info("restarted dead session: %s", meta.Name)
+			}
+		}
+		return m, m.refreshSessions
+	case restartSkipMsg:
+		// User skipped dead session restart — clean up cache.
+		m.activeView = ViewSessions
+		if m.cache != nil {
+			if names, err := m.tmux.ListSessionNames(); err == nil {
+				_ = m.cache.GC(names)
+			}
+		}
+		return m, nil
 	case attachExitMsg:
 		// tmux attach exited — refresh sessions to pick up status changes.
 		return m, m.refreshSessions
@@ -501,6 +544,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeView = ViewSessions
 			return m, nil
 		}
+	case ViewRestart:
+		var cmd tea.Cmd
+		m.restartSelect, cmd = m.restartSelect.Update(msg)
+		return m, cmd
 	}
 
 	switch msg := msg.(type) {
@@ -532,6 +579,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						}
 						_ = m.store.Remove(row.Name)
+					}
+					if m.cache != nil {
+						_ = m.cache.Remove(row.Name)
 					}
 					return m, m.refreshSessions
 				}
@@ -1115,19 +1165,26 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 
 	// Persist metadata.
+	sessionMeta := SessionMeta{
+		Name:              name,
+		TmuxSession:       tmuxName,
+		Provider:          provider,
+		Project:           projectName,
+		Persona:           result.Persona,
+		Branch:            branch,
+		WorktreePath:      worktreePath,
+		WorkingDir:        workDir,
+		VibeFlowSessionID: vibeflowSessionID,
+		SessionType:       result.SessionType,
+		SkipPermissions:   result.SkipPermissions,
+		LLMGatewayEnabled: result.LLMGatewayEnabled,
+		CreatedAt:         time.Now(),
+	}
 	if m.store != nil {
-		_ = m.store.Add(SessionMeta{
-			Name:              name,
-			TmuxSession:       tmuxName,
-			Provider:          provider,
-			Project:           projectName,
-			Persona:           result.Persona,
-			Branch:            branch,
-			WorktreePath:      worktreePath,
-			WorkingDir:        workDir,
-			VibeFlowSessionID: vibeflowSessionID,
-			CreatedAt:         time.Now(),
-		})
+		_ = m.store.Add(sessionMeta)
+	}
+	if m.cache != nil {
+		_ = m.cache.Add(sessionMeta)
 	}
 
 	// Save working directory to history for quick access in future sessions.
@@ -1228,18 +1285,22 @@ func (m Model) createSession(_ tea.Msg) tea.Msg {
 		_ = WriteSessionFileIfNeeded(workDir, "", name)
 	}
 
-	// Persist session metadata to store.
+	// Persist session metadata to store and cache.
+	meta := SessionMeta{
+		Name:         name,
+		TmuxSession:  tmuxName,
+		Provider:     provider,
+		Project:      m.config.DefaultProject,
+		Branch:       branch,
+		WorktreePath: worktreePath,
+		WorkingDir:   workDir,
+		CreatedAt:    time.Now(),
+	}
 	if m.store != nil {
-		_ = m.store.Add(SessionMeta{
-			Name:         name,
-			TmuxSession:  tmuxName,
-			Provider:     provider,
-			Project:      m.config.DefaultProject,
-			Branch:       branch,
-			WorktreePath: worktreePath,
-			WorkingDir:   workDir,
-			CreatedAt:    time.Now(),
-		})
+		_ = m.store.Add(meta)
+	}
+	if m.cache != nil {
+		_ = m.cache.Add(meta)
 	}
 
 	return m.refreshSessions()
@@ -1261,6 +1322,8 @@ func (m Model) View() string {
 		return m.worktreeList.View()
 	case ViewHelp:
 		return m.renderHelpPopup()
+	case ViewRestart:
+		return m.restartSelect.View()
 	}
 
 	width := m.width

@@ -36,6 +36,9 @@ type SessionMeta struct {
 	WorktreePath      string    `json:"worktree_path,omitempty"`
 	WorkingDir        string    `json:"working_dir"`
 	VibeFlowSessionID string    `json:"vibeflow_session_id,omitempty"`
+	SessionType       string    `json:"session_type,omitempty"`
+	SkipPermissions   bool      `json:"skip_permissions,omitempty"`
+	LLMGatewayEnabled bool      `json:"llm_gateway_enabled,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 }
 

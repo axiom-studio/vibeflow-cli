@@ -183,14 +183,21 @@ func launchCmd() *cobra.Command {
 				_ = WriteSessionFileIfNeeded(workDir, "", name)
 			}
 
-			_ = store.Add(SessionMeta{
-				Name:        name,
-				TmuxSession: tmuxName,
-				Provider:    provider,
-				Branch:      branch,
-				WorkingDir:  workDir,
-				CreatedAt:   time.Now(),
-			})
+			sessionMeta := SessionMeta{
+				Name:              name,
+				TmuxSession:       tmuxName,
+				Provider:          provider,
+				Branch:            branch,
+				WorkingDir:        workDir,
+				SkipPermissions:   skipPermissions,
+				LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
+				CreatedAt:         time.Now(),
+			}
+			_ = store.Add(sessionMeta)
+
+			// Add to session cache for restart-without-intervention.
+			cache := NewSessionCache()
+			_ = cache.Add(sessionMeta)
 
 			fmt.Printf("Session %q launched (provider: %s, branch: %s)\n", name, provider, branch)
 			return nil
@@ -292,6 +299,7 @@ func killCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cache := NewSessionCache()
 
 			name := args[0]
 			if err := tmux.KillSession(name); err != nil {
@@ -308,6 +316,7 @@ func killCmd() *cobra.Command {
 				}
 				_ = store.Remove(name)
 			}
+			_ = cache.Remove(name)
 
 			fmt.Printf("Session %q killed.\n", name)
 			return nil
@@ -334,6 +343,7 @@ func deleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cache := NewSessionCache()
 
 			name := args[0]
 			if err := tmux.KillSession(name); err != nil {
@@ -350,6 +360,7 @@ func deleteCmd() *cobra.Command {
 				}
 				_ = store.Remove(name)
 			}
+			_ = cache.Remove(name)
 
 			fmt.Printf("Session %q deleted.\n", name)
 			return nil
@@ -360,6 +371,153 @@ func deleteCmd() *cobra.Command {
 }
 
 // --- restart ---
+
+// RestartSession kills any existing tmux session and re-launches it using
+// the stored metadata. Used by both the CLI restart command and the TUI
+// dead-session restart popup. Returns the updated SessionMeta on success.
+func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Store, cache *SessionCache, registry *ProviderRegistry) (SessionMeta, error) {
+	// Kill the existing tmux session (ignore error if already dead).
+	_ = tmux.KillSession(meta.TmuxSession)
+
+	provider := meta.Provider
+	if provider == "" {
+		provider = cfg.DefaultProvider
+	}
+	if provider == "" {
+		provider = "claude"
+	}
+
+	prov, ok := registry.Get(provider)
+	if !ok {
+		return SessionMeta{}, fmt.Errorf("unknown provider %q", provider)
+	}
+	if !registry.IsAvailable(provider) {
+		return SessionMeta{}, fmt.Errorf("provider %q binary %q not found on PATH", provider, prov.Binary)
+	}
+
+	workDir := meta.WorkingDir
+	if workDir == "" {
+		workDir = "."
+	}
+	branch := meta.Branch
+	if branch == "" {
+		branch = "main"
+	}
+
+	command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
+		WorkDir:         workDir,
+		ServerURL:       cfg.ServerURL,
+		SkipPermissions: meta.SkipPermissions,
+		Binary:          prov.Binary,
+	})
+	if err != nil || command == "" {
+		command = prov.Binary
+	}
+
+	// Resolve provider env vars.
+	envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
+	if missingVar != "" {
+		return SessionMeta{}, fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
+	}
+	sessionEnv := prov.Env
+	if len(envVars) > 0 {
+		if sessionEnv == nil {
+			sessionEnv = make(map[string]string)
+		}
+		for k, v := range envVars {
+			sessionEnv[k] = v
+		}
+	}
+
+	// LLM gateway env vars.
+	if meta.LLMGatewayEnabled {
+		if sessionEnv == nil {
+			sessionEnv = make(map[string]string)
+		}
+		for k, v := range BuildLLMGatewayEnv(provider, cfg.ServerURL, cfg.APIToken) {
+			sessionEnv[k] = v
+		}
+	} else {
+		if sessionEnv == nil {
+			sessionEnv = make(map[string]string)
+		}
+		for k, v := range ClearLLMGatewayEnv(provider) {
+			sessionEnv[k] = v
+		}
+	}
+
+	// For vibeflow sessions, append the init prompt so the agent starts autonomously.
+	projectName := meta.Project
+	if projectName == "" {
+		projectName = cfg.DefaultProject
+	}
+	if meta.SessionType == "vibeflow" {
+		initPrompt := fmt.Sprintf(
+			"Initialize a vibeflow session for project %s with persona %q and follow the agent prompt.",
+			projectName, meta.Persona,
+		)
+		escaped := strings.ReplaceAll(initPrompt, "'", "'\\''")
+		switch provider {
+		case "gemini":
+			command += fmt.Sprintf(" -p '%s'", escaped)
+		default:
+			command += fmt.Sprintf(" '%s'", escaped)
+		}
+	}
+
+	// Ensure agent docs exist in the working directory.
+	if meta.SessionType == "vibeflow" {
+		EnsureAllAgentDocs(workDir)
+	}
+
+	if err := tmux.CreateSessionWithOpts(SessionOpts{
+		Name:     meta.Name,
+		Provider: provider,
+		WorkDir:  workDir,
+		Command:  command,
+		Env:      sessionEnv,
+		Branch:   branch,
+		Project:  projectName,
+	}); err != nil {
+		return SessionMeta{}, err
+	}
+
+	tmuxName := tmux.FullSessionName(provider, meta.Name)
+
+	// Re-bind session keys.
+	_ = tmux.BindSessionKeys(tmuxName)
+
+	if prov.SessionFile != "" {
+		_ = WriteSessionFileIfNeeded(workDir, meta.Persona, meta.Name)
+	}
+
+	// Build updated metadata.
+	updated := SessionMeta{
+		Name:              meta.Name,
+		TmuxSession:       tmuxName,
+		Provider:          provider,
+		Project:           projectName,
+		Persona:           meta.Persona,
+		Branch:            branch,
+		WorktreePath:      meta.WorktreePath,
+		WorkingDir:        workDir,
+		VibeFlowSessionID: meta.VibeFlowSessionID,
+		SessionType:       meta.SessionType,
+		SkipPermissions:   meta.SkipPermissions,
+		LLMGatewayEnabled: meta.LLMGatewayEnabled,
+		CreatedAt:         time.Now(),
+	}
+
+	// Update store and cache.
+	if store != nil {
+		_ = store.Add(updated)
+	}
+	if cache != nil {
+		_ = cache.Add(updated)
+	}
+
+	return updated, nil
+}
 
 func restartCmd() *cobra.Command {
 	var skipPermissions bool
@@ -376,109 +534,42 @@ func restartCmd() *cobra.Command {
 			}
 
 			_ = tmux.EnsureServer()
+			cache := NewSessionCache()
 
 			name := args[0]
+			// Try store first, then cache for dead sessions.
 			meta, found, err := store.Get(name)
 			if err != nil {
 				return fmt.Errorf("read store: %w", err)
 			}
 			if !found {
-				return fmt.Errorf("session %q not found in store", name)
-			}
-
-			// Kill the existing tmux session (ignore error if already dead).
-			_ = tmux.KillSession(meta.TmuxSession)
-
-			// Resolve provider from stored metadata.
-			provider := meta.Provider
-			if provider == "" {
-				provider = cfg.DefaultProvider
-			}
-			if provider == "" {
-				provider = "claude"
-			}
-
-			prov, ok := registry.Get(provider)
-			if !ok {
-				return fmt.Errorf("unknown provider %q", provider)
-			}
-			if !registry.IsAvailable(provider) {
-				return fmt.Errorf("provider %q binary %q not found on PATH", provider, prov.Binary)
-			}
-
-			workDir := meta.WorkingDir
-			if workDir == "" {
-				workDir = "."
-			}
-			branch := meta.Branch
-			if branch == "" {
-				branch = "main"
-			}
-
-			command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
-				WorkDir:         workDir,
-				ServerURL:       cfg.ServerURL,
-				SkipPermissions: skipPermissions,
-				Binary:          prov.Binary,
-			})
-			if err != nil || command == "" {
-				command = prov.Binary
-			}
-
-			// Resolve provider env vars.
-			envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
-			if missingVar != "" {
-				return fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
-			}
-			sessionEnv := prov.Env
-			if len(envVars) > 0 {
-				if sessionEnv == nil {
-					sessionEnv = make(map[string]string)
-				}
-				for k, v := range envVars {
-					sessionEnv[k] = v
+				// Check cache for dead sessions.
+				entries, cErr := cache.List()
+				if cErr == nil {
+					for _, e := range entries {
+						if e.Name == name {
+							meta = e
+							found = true
+							break
+						}
+					}
 				}
 			}
+			if !found {
+				return fmt.Errorf("session %q not found in store or cache", name)
+			}
 
-			// Ensure agent docs exist in the working directory.
-			EnsureAllAgentDocs(workDir)
+			// CLI flag overrides stored value.
+			if skipPermissions {
+				meta.SkipPermissions = true
+			}
 
-			if err := tmux.CreateSessionWithOpts(SessionOpts{
-				Name:     name,
-				Provider: provider,
-				WorkDir:  workDir,
-				Command:  command,
-				Env:      sessionEnv,
-				Branch:   branch,
-				Project:  cfg.DefaultProject,
-			}); err != nil {
+			_, err = RestartSession(meta, cfg, tmux, store, cache, registry)
+			if err != nil {
 				return err
 			}
 
-			tmuxName := tmux.FullSessionName(provider, name)
-
-			// Re-bind session keys.
-			_ = tmux.BindSessionKeys(tmuxName)
-
-			if prov.SessionFile != "" {
-				_ = WriteSessionFileIfNeeded(workDir, meta.Persona, name)
-			}
-
-			// Update store entry with new timestamp.
-			_ = store.Add(SessionMeta{
-				Name:              name,
-				TmuxSession:       tmuxName,
-				Provider:          provider,
-				Project:           meta.Project,
-				Persona:           meta.Persona,
-				Branch:            branch,
-				WorktreePath:      meta.WorktreePath,
-				WorkingDir:        workDir,
-				VibeFlowSessionID: meta.VibeFlowSessionID,
-				CreatedAt:         time.Now(),
-			})
-
-			fmt.Printf("Session %q restarted (provider: %s, branch: %s)\n", name, provider, branch)
+			fmt.Printf("Session %q restarted (provider: %s, branch: %s)\n", name, meta.Provider, meta.Branch)
 			return nil
 		},
 	}

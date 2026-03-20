@@ -124,6 +124,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Initialize worktree manager (best-effort — non-fatal if not in a git repo).
 	cwd, _ := os.Getwd()
 	worktrees, _ := NewWorktreeManager(cwd, cfg.Worktree.BaseDir)
+	cache := NewSessionCache()
 
 	// Resolve project ID if project name is set
 	var projectID int64
@@ -146,8 +147,16 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run TUI
-	model := NewModel(cfg, client, tmux, worktrees, store, registry, projectID)
+	model := NewModel(cfg, client, tmux, worktrees, store, cache, registry, projectID)
 	model.serverWarning = serverWarning
+
+	// Detect dead sessions from cache and show restart popup if any.
+	if tmuxNames, err := tmux.ListSessionNames(); err == nil {
+		if deadSessions, err := cache.DeadSessions(tmuxNames); err == nil && len(deadSessions) > 0 {
+			model.restartSelect = NewRestartSelectModel(deadSessions)
+			model.activeView = ViewRestart
+		}
+	}
 	defer model.logger.Close()
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
