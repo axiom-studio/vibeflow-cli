@@ -1,0 +1,37 @@
+# MkDocs site root for VibeFlow CLI customer documentation.
+# Build: pip install mkdocs-material && mkdocs serve (from this directory)
+site_name: VibeFlow CLI
+site_description: Terminal session manager for AI coding agents
+repo_url: https://github.com/axiom-studio/vibeflow-cli
+docs_dir: docs
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+nav:
+  - Home: index.md
+  - Overview: overview.md
+  - Installation: installation.md
+  - Configuration: configuration.md
+  - Interactive TUI: tui.md
+  - CLI reference: cli-reference.md
+  - Providers: providers.md
+  - Session wizard: session-wizard.md
+  - Worktrees & session files: worktrees-session-files.md
+  - VibeFlow server & personas: vibeflow-server.md
+  - Advanced topics: advanced-topics.md
+  - Troubleshooting: troubleshooting.md
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
