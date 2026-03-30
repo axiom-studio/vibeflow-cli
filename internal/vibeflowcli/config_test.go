@@ -42,11 +42,11 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("ClaudeBinary = %q, want claude", cfg.ClaudeBinary)
 	}
 
-	// Three built-in providers.
-	if len(cfg.Providers) != 3 {
-		t.Fatalf("expected 3 providers, got %d", len(cfg.Providers))
+	// Four built-in providers.
+	if len(cfg.Providers) != 4 {
+		t.Fatalf("expected 4 providers, got %d", len(cfg.Providers))
 	}
-	for _, key := range []string{"claude", "codex", "gemini"} {
+	for _, key := range []string{"claude", "codex", "cursor", "gemini"} {
 		if _, ok := cfg.Providers[key]; !ok {
 			t.Errorf("missing provider %q", key)
 		}
@@ -84,8 +84,8 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
-	if len(cfg.Providers) != 3 {
-		t.Errorf("expected 3 default providers, got %d", len(cfg.Providers))
+	if len(cfg.Providers) != 4 {
+		t.Errorf("expected 4 default providers, got %d", len(cfg.Providers))
 	}
 }
 

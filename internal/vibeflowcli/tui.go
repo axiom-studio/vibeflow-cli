@@ -1843,6 +1843,7 @@ func (m Model) renderHelpPopup() string {
 var providerColors = map[string]lipgloss.Color{
 	"claude": lipgloss.Color("#cc785c"), // warm amber
 	"codex":  lipgloss.Color("#10a37f"), // OpenAI green
+	"cursor": lipgloss.Color("#a8b4ff"), // Cursor accent
 	"gemini": lipgloss.Color("#4285f4"), // Google blue
 }
 

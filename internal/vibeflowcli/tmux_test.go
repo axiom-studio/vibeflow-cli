@@ -99,6 +99,20 @@ func TestRenderLaunchCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("cursor agent autonomous flags", func(t *testing.T) {
+		tmpl := "{{.Binary}}{{ if .SkipPermissions }} --yolo --approve-mcps{{ end }}"
+		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
+			Binary:          "agent",
+			SkipPermissions: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "agent --yolo --approve-mcps" {
+			t.Errorf("got %q", got)
+		}
+	})
+
 	t.Run("all vars", func(t *testing.T) {
 		tmpl := "{{.Binary}} --project={{.Project}} --branch={{.Branch}} --server={{.ServerURL}}"
 		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
@@ -158,6 +172,7 @@ func TestParseSessionProvider(t *testing.T) {
 		{"claude session", "vibeflow_claude-my-session", "claude"},
 		{"codex session", "vibeflow_codex-feature-123", "codex"},
 		{"gemini session", "vibeflow_gemini-dev", "gemini"},
+		{"cursor session", "vibeflow_cursor-my-agent", "cursor"},
 		{"no provider", "vibeflow_my-session", "my"},
 		{"no prefix", "some-session", "some"},
 		{"no dash", "vibeflow_nodash", ""},

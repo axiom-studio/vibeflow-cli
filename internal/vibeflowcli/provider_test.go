@@ -27,10 +27,10 @@ func TestNewProviderRegistry(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	keys := reg.Keys()
-	if len(keys) != 3 {
-		t.Fatalf("expected 3 providers, got %d", len(keys))
+	if len(keys) != 4 {
+		t.Fatalf("expected 4 providers, got %d", len(keys))
 	}
-	for _, k := range []string{"claude", "codex", "gemini"} {
+	for _, k := range []string{"claude", "codex", "cursor", "gemini"} {
 		if _, ok := reg.Get(k); !ok {
 			t.Errorf("missing provider %q", k)
 		}
@@ -42,11 +42,11 @@ func TestProviderRegistry_List(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	list := reg.List()
-	if len(list) != 3 {
-		t.Fatalf("expected 3 providers, got %d", len(list))
+	if len(list) != 4 {
+		t.Fatalf("expected 4 providers, got %d", len(list))
 	}
-	// Should be sorted alphabetically by key: claude, codex, gemini.
-	names := []string{"Claude Code", "OpenAI Codex CLI", "Google Gemini CLI"}
+	// Should be sorted alphabetically by key: claude, codex, cursor, gemini.
+	names := []string{"Claude Code", "OpenAI Codex CLI", "Cursor Agent", "Google Gemini CLI"}
 	for i, p := range list {
 		if p.Name != names[i] {
 			t.Errorf("list[%d].Name = %q, want %q", i, p.Name, names[i])
@@ -129,7 +129,7 @@ func TestProviderRegistry_Keys(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	keys := reg.Keys()
-	expected := []string{"claude", "codex", "gemini"}
+	expected := []string{"claude", "codex", "cursor", "gemini"}
 	if len(keys) != len(expected) {
 		t.Fatalf("expected %d keys, got %d", len(expected), len(keys))
 	}

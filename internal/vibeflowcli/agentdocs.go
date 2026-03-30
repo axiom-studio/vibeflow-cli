@@ -36,6 +36,8 @@ var providerDocFile = map[string]string{
 	"claude": "CLAUDE.md",
 	"codex":  "AGENTS.md",
 	"gemini": "GEMINI.md",
+	// Cursor Agent CLI loads AGENTS.md (and CLAUDE.md) as rules — same template as Codex.
+	"cursor": "AGENTS.md",
 }
 
 // vibeflowSectionMarker is the heading used to identify the vibeflow rules
@@ -47,7 +49,7 @@ const vibeflowSectionMarker = "## vibeflow Agent Session Rules"
 func GetAgentDoc(providerKey string) ([]byte, error) {
 	docFile, ok := providerDocFile[providerKey]
 	if !ok {
-		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini)", providerKey)
+		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini, cursor)", providerKey)
 	}
 	return agentDocsFS.ReadFile("agentdocs/" + docFile)
 }
@@ -61,7 +63,17 @@ func GetAgentDoc(providerKey string) ([]byte, error) {
 // Returns the list of filenames that were created or updated.
 func EnsureAllAgentDocs(workDir string) []string {
 	var updated []string
-	for providerKey := range providerDocFile {
+	seenFile := make(map[string]bool)
+	// Stable order; codex before cursor so AGENTS.md is written once (both use same file).
+	for _, providerKey := range []string{"claude", "codex", "gemini", "cursor"} {
+		docName, ok := providerDocFile[providerKey]
+		if !ok {
+			continue
+		}
+		if seenFile[docName] {
+			continue
+		}
+		seenFile[docName] = true
 		if docFile := EnsureAgentDoc(workDir, providerKey); docFile != "" {
 			updated = append(updated, docFile)
 		}

@@ -140,6 +140,18 @@ func DefaultConfig() *Config {
 				VibeFlowIntegrated: false,
 				SessionFile:        "",
 			},
+			"cursor": {
+				Name:   "Cursor Agent",
+				Binary: "agent",
+				// Cursor CLI: https://cursor.com/docs/cli/overview — binary is `agent`.
+				// --yolo/--approve-mcps align with autonomous sessions (see CLI reference parameters).
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo --approve-mcps{{ end }}",
+				PromptTemplate:     "",
+				Env:                map[string]string{},
+				VibeFlowIntegrated: true,
+				SessionFile:        ".vibeflow-session",
+				Default:            false,
+			},
 		},
 	}
 }
@@ -182,7 +194,7 @@ func LoadConfig(path string) (*Config, error) {
 
 // migrateProviders updates built-in provider configs to current defaults.
 // Removes stale VIBEFLOW_ env vars from provider Env sections and syncs
-// launch templates for built-in providers (claude, codex, gemini).
+// launch templates for built-in providers (claude, codex, gemini, cursor).
 func migrateProviders(cfg *Config, path string) {
 	defaults := DefaultConfig()
 	dirty := false

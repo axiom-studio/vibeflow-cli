@@ -181,7 +181,7 @@ func TestErrorPatternRegistry_Match_GeminiInternalError(t *testing.T) {
 func TestErrorPatternRegistry_Match_UniversalPanic(t *testing.T) {
 	reg := NewErrorPatternRegistry()
 	// Universal patterns should match any provider.
-	for _, provider := range []string{"claude", "codex", "gemini"} {
+	for _, provider := range []string{"claude", "codex", "cursor", "gemini"} {
 		match := reg.Match(provider, "panic: runtime error: index out of range")
 		if match == nil {
 			t.Errorf("expected panic match for provider %q", provider)

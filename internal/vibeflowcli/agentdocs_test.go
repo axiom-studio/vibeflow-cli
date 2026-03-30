@@ -242,12 +242,13 @@ func TestEnsureAllAgentDocs_CreatesAllFiles(t *testing.T) {
 	dir := t.TempDir()
 
 	updated := EnsureAllAgentDocs(dir)
-	if len(updated) != len(providerDocFile) {
-		t.Errorf("expected %d files created, got %d", len(providerDocFile), len(updated))
+	// Unique template files: CLAUDE.md, AGENTS.md, GEMINI.md (cursor shares AGENTS.md with codex).
+	const wantUnique = 3
+	if len(updated) != wantUnique {
+		t.Errorf("expected %d files created, got %d", wantUnique, len(updated))
 	}
 
-	// Verify all three files exist and contain the vibeflow section.
-	for _, expectedFile := range providerDocFile {
+	for _, expectedFile := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
 		data, err := os.ReadFile(filepath.Join(dir, expectedFile))
 		if err != nil {
 			t.Errorf("expected %s to exist: %v", expectedFile, err)
@@ -262,10 +263,10 @@ func TestEnsureAllAgentDocs_CreatesAllFiles(t *testing.T) {
 func TestEnsureAllAgentDocs_IdempotentOnSecondCall(t *testing.T) {
 	dir := t.TempDir()
 
-	// First call creates all files.
+	// First call creates all unique template files.
 	first := EnsureAllAgentDocs(dir)
-	if len(first) != len(providerDocFile) {
-		t.Fatalf("expected %d files on first call, got %d", len(providerDocFile), len(first))
+	if len(first) != 3 {
+		t.Fatalf("expected 3 files on first call, got %d", len(first))
 	}
 
 	// Second call should return empty (all files already up to date).

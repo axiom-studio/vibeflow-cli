@@ -203,7 +203,7 @@ func launchCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider key (claude, codex, gemini)")
+	cmd.Flags().StringVar(&provider, "provider", "", "Provider key (claude, codex, cursor, gemini)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Git branch (default: main)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "Create a new git worktree for the session")
 	cmd.Flags().StringVar(&worktreeName, "worktree-name", "", "Custom worktree directory name (default: auto-generated)")
