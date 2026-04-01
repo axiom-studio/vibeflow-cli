@@ -46,24 +46,12 @@ If not, continue polling.
 
 ## Output Efficiency
 
-- Answer first, reasoning after. Never lead with reasoning.
-- No preamble. No "Great question!", "Sure!", "Of course!", "Certainly!".
 - No hollow closings. No "I hope this helps!", "Let me know if you need anything!".
-- No restating the prompt. If the task is clear, execute immediately.
-- No explaining what you are about to do. Just do it.
 - No unsolicited suggestions. Do exactly what was asked, nothing more.
-- Compress responses. Every sentence must earn its place.
-- No redundant context. Do not repeat information already established in the session.
-- Short responses are correct unless depth is explicitly requested.
 - Disagree when wrong. State the correction directly. Do not change a correct answer because the user pushes back.
 
 ## Accuracy
 
 - Never speculate about code, files, or APIs you have not read.
-- If referencing a file or function: read it first, then answer.
 - If unsure: say "I don't know." Never guess confidently.
 - Never invent file paths, function names, or API signatures.
-- Return the simplest working solution. No over-engineering.
-- No abstractions or helpers for single-use operations.
-- No speculative features or future-proofing.
-- Read the file before modifying it. Never edit blind.
