@@ -71,8 +71,8 @@ func TestRenderLaunchCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("codex full-auto", func(t *testing.T) {
-		tmpl := "{{.Binary}}{{ if .SkipPermissions }} --full-auto{{ end }}"
+	t.Run("codex yolo", func(t *testing.T) {
+		tmpl := "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}"
 		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
 			Binary:          "codex",
 			SkipPermissions: true,
@@ -80,7 +80,7 @@ func TestRenderLaunchCommand(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "codex --full-auto" {
+		if got != "codex --yolo" {
 			t.Errorf("got %q", got)
 		}
 	})

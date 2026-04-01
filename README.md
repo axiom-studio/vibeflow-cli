@@ -20,7 +20,7 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | Agent | Binary | Autonomous Flag | Prompt Style |
 |-------|--------|-----------------|--------------|
 | **Claude Code** | `claude` | `--dangerously-skip-permissions` | Positional argument |
-| **OpenAI Codex CLI** | `codex` | `--full-auto` | Positional argument |
+| **OpenAI Codex CLI** | `codex` | `--yolo` | Positional argument |
 | **Google Gemini CLI** | `gemini` | `--yolo` | `-p` flag |
 
 All three agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.

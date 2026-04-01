@@ -465,6 +465,22 @@ func TestMigrateProviders_SyncsLaunchTemplate(t *testing.T) {
 	}
 }
 
+func TestMigrateProviders_UpdatesCodexSkipPermissionsFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	p := cfg.Providers["codex"]
+	p.LaunchTemplate = "{{.Binary}}{{ if .SkipPermissions }} --full-auto{{ end }}"
+	cfg.Providers["codex"] = p
+
+	migrateProviders(cfg, cfgPath)
+
+	if cfg.Providers["codex"].LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}" {
+		t.Errorf("expected codex launch template to be migrated to --yolo, got %q", cfg.Providers["codex"].LaunchTemplate)
+	}
+}
+
 func TestMigrateProviders_RemovesVibeflowEnvVars(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")

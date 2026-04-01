@@ -7,7 +7,7 @@ A **provider** is a configured AI agent CLI: display name, binary name, launch t
 | Key | Display name | Binary (default) | Autonomous launch flags (when skip-permissions) |
 |-----|----------------|------------------|-----------------------------------------------|
 | `claude` | Claude Code | `claude` | `--dangerously-skip-permissions` |
-| `codex` | OpenAI Codex CLI | `codex` | `--full-auto` |
+| `codex` | OpenAI Codex CLI | `codex` | `--yolo` |
 | `gemini` | Google Gemini CLI | `gemini` | `--yolo` |
 | `cursor` | Cursor Agent | `agent` | `--yolo --approve-mcps` |
 

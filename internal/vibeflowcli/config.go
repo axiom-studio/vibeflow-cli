@@ -125,7 +125,7 @@ func DefaultConfig() *Config {
 			"codex": {
 				Name:               "OpenAI Codex CLI",
 				Binary:             "codex",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --full-auto{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: false,
