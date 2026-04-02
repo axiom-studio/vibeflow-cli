@@ -1349,7 +1349,7 @@ func (m Model) View() string {
 		errStyle := lipgloss.NewStyle().Foreground(errorColor)
 		hintStyle := lipgloss.NewStyle().Foreground(dimColor)
 		errLine = errStyle.Render("Error: "+errMsg) + "\n" +
-			hintStyle.Render("  See ~/.vibeflow-cli/vibeflow-cli.log for details")
+			hintStyle.Render("  See "+RootDir()+"/vibeflow-cli.log for details")
 	} else if m.serverWarning != "" {
 		warnBannerStyle := lipgloss.NewStyle().Foreground(warningColor)
 		errLine = warnBannerStyle.Render("⚠ " + m.serverWarning + " — local sessions still available")

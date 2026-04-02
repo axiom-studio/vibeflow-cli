@@ -25,6 +25,7 @@ import (
 )
 
 var (
+	flagRootDir    string
 	flagConfigPath string
 	flagServerURL  string
 	flagProject    string
@@ -47,6 +48,11 @@ var rootCmd = &cobra.Command{
 	Long: `vibeflow-cli is a terminal-based session manager for VibeFlow.
 It provides a Bubble Tea TUI to launch, monitor, and manage multiple
 Claude Code agent sessions via tmux.`,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		if flagRootDir != "" {
+			SetRootDir(flagRootDir)
+		}
+	},
 	RunE: runTUI,
 }
 
@@ -59,7 +65,8 @@ var versionCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&flagConfigPath, "config", "", "Path to config file (default: ~/.vibeflow-cli/config.yaml)")
+	rootCmd.PersistentFlags().StringVar(&flagRootDir, "root", "", "Root directory for config, sessions, and logs (default: ~/.vibeflow-cli)")
+	rootCmd.PersistentFlags().StringVar(&flagConfigPath, "config", "", "Path to config file (default: <root>/config.yaml)")
 	rootCmd.Flags().StringVar(&flagServerURL, "server-url", "", "VibeFlow server URL (overrides config)")
 	rootCmd.Flags().StringVar(&flagProject, "project", "", "Default project name")
 

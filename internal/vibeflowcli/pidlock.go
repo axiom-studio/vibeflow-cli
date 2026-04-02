@@ -24,10 +24,9 @@ import (
 	"strings"
 )
 
-// PIDLockPath returns the default PID lock file path (~/.vibeflow-cli/vibeflow.pid).
+// PIDLockPath returns the PID lock file path under the root directory.
 func PIDLockPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".vibeflow-cli", "vibeflow.pid")
+	return filepath.Join(RootDir(), "vibeflow.pid")
 }
 
 // AcquirePIDLock checks for an existing vibeflow-cli process and writes the

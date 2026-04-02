@@ -48,10 +48,9 @@ type Store struct {
 	path string
 }
 
-// DefaultStorePath returns the default sessions.json path under ~/.vibeflow-cli/.
+// DefaultStorePath returns the default sessions.json path under the root directory.
 func DefaultStorePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".vibeflow-cli", "sessions.json")
+	return filepath.Join(RootDir(), "sessions.json")
 }
 
 // NewStore creates a Store that reads/writes the default sessions file.

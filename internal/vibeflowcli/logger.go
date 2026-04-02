@@ -35,14 +35,9 @@ type Logger struct {
 	file *os.File
 }
 
-// NewLogger opens (or creates) the log file under ~/.vibeflow-cli/.
+// NewLogger opens (or creates) the log file under the root directory.
 func NewLogger() *Logger {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return &Logger{} // no-op logger
-	}
-
-	dir := filepath.Join(home, ".vibeflow-cli")
+	dir := RootDir()
 	_ = os.MkdirAll(dir, 0755)
 
 	logPath := filepath.Join(dir, "vibeflow-cli.log")

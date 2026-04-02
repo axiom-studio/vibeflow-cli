@@ -27,6 +27,28 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// rootDir is set by the --root flag or VIBEFLOW_ROOT env var.
+// When empty, RootDir() falls back to ~/.vibeflow-cli.
+var rootDir string
+
+// SetRootDir sets the root directory for all vibeflow-cli state files.
+func SetRootDir(dir string) {
+	rootDir = dir
+}
+
+// RootDir returns the root directory for config, sessions, logs, and PID lock.
+// Priority: --root flag (via SetRootDir) > VIBEFLOW_ROOT env var > ~/.vibeflow-cli.
+func RootDir() string {
+	if rootDir != "" {
+		return rootDir
+	}
+	if v := os.Getenv("VIBEFLOW_ROOT"); v != "" {
+		return v
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".vibeflow-cli")
+}
+
 // WorktreeConfig holds settings for git worktree management.
 type WorktreeConfig struct {
 	BaseDir       string `yaml:"base_dir"`
@@ -158,8 +180,7 @@ func DefaultConfig() *Config {
 
 // ConfigPath returns the default config file path.
 func ConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".vibeflow-cli", "config.yaml")
+	return filepath.Join(RootDir(), "config.yaml")
 }
 
 // LoadConfig reads config from file, falling back to defaults.
