@@ -31,10 +31,9 @@ type SessionCache struct {
 	path string
 }
 
-// DefaultCachePath returns the default session_cache.json path under ~/.vibeflow-cli/.
+// DefaultCachePath returns the default session_cache.json path under the root directory.
 func DefaultCachePath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".vibeflow-cli", "session_cache.json")
+	return filepath.Join(RootDir(), "session_cache.json")
 }
 
 // NewSessionCache creates a SessionCache backed by the default file path.
