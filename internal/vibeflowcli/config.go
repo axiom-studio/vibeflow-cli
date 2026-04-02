@@ -17,6 +17,8 @@
 package vibeflowcli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -47,6 +49,18 @@ func RootDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".vibeflow-cli")
+}
+
+// TmuxSocketName returns the tmux socket name for the current root directory.
+// Default root uses "vibeflow"; custom roots use "vibeflow-<8-char-hash>"
+// to isolate tmux sessions between independent vibeflow instances.
+func TmuxSocketName() string {
+	// Only derive a custom socket if a non-default root is active.
+	if rootDir == "" && os.Getenv("VIBEFLOW_ROOT") == "" {
+		return "vibeflow"
+	}
+	h := sha256.Sum256([]byte(RootDir()))
+	return "vibeflow-" + hex.EncodeToString(h[:4])
 }
 
 // WorktreeConfig holds settings for git worktree management.

@@ -120,6 +120,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if flagProject != "" {
 		cfg.DefaultProject = flagProject
 	}
+	// Derive tmux socket from root directory for session isolation.
+	cfg.TmuxSocket = TmuxSocketName()
 
 	// Initialize components
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
