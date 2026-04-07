@@ -30,17 +30,19 @@ Allow: Bash(git:*)
 
 8. **ALWAYS use `wait_for_work` for polling.** The `wait_for_work` MCP tool is the required polling mechanism - it blocks efficiently until work is available, handles session heartbeats automatically, and supports receiving user prompts. Use `security_reviewed` and `qa_verified` filter params to only receive items relevant to your persona.
 
+9. **ALWAYS pass session_id when calling session_init.** Before calling `session_init` — directly OR via a sub-agent (Agent tool) — you MUST first read the persona-specific session file from the working directory (e.g., `.vibeflow-session-architect`, `.vibeflow-session-ux_designer`). If it contains a valid ID (starts with `session-`), pass it as `session_id`. When using the Agent tool for initialization, read the file yourself FIRST and inject `session_id: <prior_id>` into the sub-agent's prompt before spawning it. NEVER construct a `session_init` call (or sub-agent prompt) without checking the session file first. The server-side lookup is a fallback only.
+
 ## vibeflow agent Non-Stop Polling Contract (MANDATORY)
 
 After Phase 1, the agent MUST remain in a polling loop and MUST NOT end the turn because no work is available.
 
 Polling call:
-- Use `wait_for_work(..., timeout_seconds: 55)` (NOT 60; transport deadline is ~60s).
+- Use `wait_for_work(sid: <sid>)` — the server uses the poll timeout stored on your session record. Do not pass an explicit `timeout_seconds`.
 
 On return:
 - If work/prompts exist: process them.
 - If empty: immediately call `wait_for_work` again.
-- If tool error contains timeout/deadline (`timed out`, `deadline has elapsed`): treat as an empty cycle and immediately retry `wait_for_work(timeout_seconds: 55)`.
+- If tool error contains timeout/deadline (`timed out`, `deadline has elapsed`): treat as an empty cycle and immediately retry `wait_for_work(sid: <sid>)`.
 
 Stop conditions:
 - Only stop loop if user explicitly says to stop/exit.
