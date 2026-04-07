@@ -30,12 +30,12 @@
 After Phase 1, the agent MUST remain in a polling loop and MUST NOT end the turn because no work is available.
 
 Polling call:
-- Use `wait_for_work(..., timeout_seconds: 55)` (NOT 60; transport deadline is ~60s).
+- Use `wait_for_work(sid: <sid>)` — the server uses the poll timeout stored on your session record. Do not pass an explicit `timeout_seconds`.
 
 On return:
 - If work/prompts exist: process them.
 - If empty: immediately call `wait_for_work` again.
-- If tool error contains timeout/deadline (`timed out`, `deadline has elapsed`): treat as an empty cycle and immediately retry `wait_for_work(timeout_seconds: 55)`.
+- If tool error contains timeout/deadline (`timed out`, `deadline has elapsed`): treat as an empty cycle and immediately retry `wait_for_work(sid: <sid>)`.
 
 Stop conditions:
 - Only stop loop if user explicitly says to stop/exit.
