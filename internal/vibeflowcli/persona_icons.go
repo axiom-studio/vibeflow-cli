@@ -42,8 +42,9 @@ func PersonaCompactIcon(key string) string {
 // personaColors maps persona keys to their theme colors.
 // Palette chosen for distinctness on dark backgrounds and harmony with providerColors.
 var personaColors = map[string]lipgloss.Color{
-	"developer":       lipgloss.Color("#61afef"), // soft blue — code/tech
-	"architect":       lipgloss.Color("#c678dd"), // purple — design/wisdom
+	"principal_engineer": lipgloss.Color("#ffd700"), // gold — royalty/mastery
+	"developer":          lipgloss.Color("#61afef"), // soft blue — code/tech
+	"architect":          lipgloss.Color("#c678dd"), // purple — design/wisdom
 	"ux_designer":     lipgloss.Color("#e88fd2"), // pink — design/creativity
 	"qa_lead":         lipgloss.Color("#98c379"), // green — verification
 	"security_lead":   lipgloss.Color("#e06c75"), // red — security/alerts
@@ -54,8 +55,9 @@ var personaColors = map[string]lipgloss.Color{
 
 // personaCompactIcons maps persona keys to small Unicode glyphs for inline display.
 var personaCompactIcons = map[string]string{
-	"developer":       "⟨⟩",
-	"architect":       "△",
+	"principal_engineer": "♛",
+	"developer":          "⟨⟩",
+	"architect":          "△",
 	"ux_designer":     "✎",
 	"qa_lead":         "◎",
 	"security_lead":   "◆",
@@ -67,6 +69,14 @@ var personaCompactIcons = map[string]string{
 // personaLargeIcons maps persona keys to 5-line pixel art icons using Unicode block characters.
 // Icons use █ ▀ ▄ ▌ ▐ for pixel art. Callers apply color via PersonaColor().
 var personaLargeIcons = map[string]string{
+	// Principal Engineer — crown
+	"principal_engineer": "" +
+		" █ ▄██▄ █ \n" +
+		" █▄████▄█ \n" +
+		"  ████████\n" +
+		"  ██▀▀██  \n" +
+		"   ▀██▀   ",
+
 	// Developer — terminal/monitor with command prompt
 	"developer": "" +
 		"▄████████▄\n" +

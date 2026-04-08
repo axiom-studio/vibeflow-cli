@@ -24,8 +24,8 @@ import (
 )
 
 var allPersonaKeys = []string{
-	"developer", "architect", "ux_designer", "qa_lead", "security_lead",
-	"product_manager", "project_manager", "customer",
+	"principal_engineer", "developer", "architect", "ux_designer", "qa_lead",
+	"security_lead", "product_manager", "project_manager", "customer",
 }
 
 func TestPersonaLargeIcon_AllKeysReturnNonEmpty(t *testing.T) {

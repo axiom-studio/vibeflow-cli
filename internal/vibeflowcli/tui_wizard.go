@@ -176,6 +176,7 @@ type personaEntry struct {
 // defaultPersonas returns the known persona list from the vibeflow server.
 func defaultPersonas() []personaEntry {
 	return []personaEntry{
+		{"principal_engineer", "Principal Engineer", "Hands-on coding mastery, sees entire system, writes elegant solutions"},
 		{"developer", "Developer", "Write code, fix bugs, implement features"},
 		{"architect", "Architect", "Design systems, create architecture docs, plan work"},
 		{"ux_designer", "UX Designer", "Design user experiences, create wireframes, usability testing"},
