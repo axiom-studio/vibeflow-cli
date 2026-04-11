@@ -119,6 +119,7 @@ type Model struct {
 	conflictModal  ConflictModal
 	worktreeList   WorktreeListModel
 	pendingWizard  *WizardResult // wizard result waiting for conflict resolution
+	switchMeta     *SessionMeta  // non-nil during quick branch switch flow
 	captureOutput  string        // last captured pane output for selected session
 	captureName    string        // tmux session name for current capture
 	confirmDelete  bool          // showing delete confirmation
@@ -216,6 +217,44 @@ func (m Model) refreshCapture() tea.Msg {
 		return captureMsg{name: name, output: "(no output yet)"}
 	}
 	return captureMsg{name: name, output: stripANSI(output)}
+}
+
+// isWorktreeInUseByOthers returns true if any session other than excludeSession
+// references the same worktree path. Prevents deleting a worktree that sibling
+// sessions (e.g. qa_lead sharing a worktree with developer) still use.
+func (m Model) isWorktreeInUseByOthers(worktreePath, excludeSession string) bool {
+	if m.store == nil || worktreePath == "" {
+		return false
+	}
+	metas, err := m.store.List()
+	if err != nil {
+		return true // err on side of caution
+	}
+	for _, meta := range metas {
+		if meta.Name != excludeSession && meta.WorktreePath == worktreePath {
+			return true
+		}
+	}
+	return false
+}
+
+// safeRemoveWorktree removes a worktree only if it is not shared by other sessions
+// and has no uncommitted changes. Returns true if the worktree was removed.
+func (m Model) safeRemoveWorktree(worktreePath, sessionName string) bool {
+	if worktreePath == "" || m.worktrees == nil {
+		return false
+	}
+	if m.isWorktreeInUseByOthers(worktreePath, sessionName) {
+		return false
+	}
+	if isDirtyGit(worktreePath) {
+		if m.logger != nil {
+			m.logger.Warn("keeping dirty worktree %s — has uncommitted changes", worktreePath)
+		}
+		return false
+	}
+	_ = m.worktrees.Remove(worktreePath, true)
+	return true
 }
 
 func (m Model) refreshSessions() tea.Msg {
@@ -574,8 +613,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							// Session file is intentionally kept so the session
 							// ID can be reused on next launch. Stale conflict
 							// detection handles cleanup and ID preservation.
-							if meta.WorktreePath != "" && m.worktrees != nil && m.config.Worktree.CleanupOnKill == "always" {
-								_ = m.worktrees.Remove(meta.WorktreePath, true)
+							if m.config.Worktree.CleanupOnKill == "always" {
+								m.safeRemoveWorktree(meta.WorktreePath, meta.Name)
 							}
 						}
 						_ = m.store.Remove(row.Name)
@@ -684,6 +723,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirmDelete = true
 			}
 			return m, nil
+		case "b":
+			// Quick branch switch for the selected session.
+			idx := m.selectedSessionIdx()
+			if idx < 0 || idx >= len(m.sessions) || m.store == nil {
+				return m, nil
+			}
+			row := m.sessions[idx]
+			meta, found, _ := m.store.Get(row.Name)
+			if !found {
+				return m, nil
+			}
+			repoRoot := meta.WorkingDir
+			if meta.WorktreePath != "" && m.worktrees != nil {
+				repoRoot = m.worktrees.RepoRoot()
+			}
+			m.wizard = NewQuickSwitchWizard(meta, m.registry, repoRoot, m.worktrees, m.config)
+			m.switchMeta = &meta
+			m.activeView = ViewWizard
+			return m, nil
 		case "r":
 			// Manual recovery retry for failed sessions, otherwise refresh.
 			idx := m.selectedSessionIdx()
@@ -736,6 +794,7 @@ func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.wizard = w
 
 	if m.wizard.Cancelled() {
+		m.switchMeta = nil
 		m.activeView = ViewSessions
 		return m, nil
 	}
@@ -754,6 +813,54 @@ func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.activeView = ViewSessions
+
+		// Quick branch switch: kill old session, then launch new one.
+		if m.switchMeta != nil {
+			oldMeta := *m.switchMeta
+			m.switchMeta = nil
+			return m, func() tea.Msg {
+				// For in-place switches, check dirty state BEFORE killing.
+				if result.WorktreeChoice == WorktreeCurrent || result.WorktreeChoice == WorktreeSpecifyDir {
+					dir := oldMeta.WorkingDir
+					if result.WorktreeChoice == WorktreeSpecifyDir {
+						dir = result.SpecifiedWorkDir
+					}
+					if isDirtyGit(dir) {
+						return sessionsMsg{err: fmt.Errorf(
+							"working tree has uncommitted changes — commit/stash first, or choose 'New worktree'")}
+					}
+				}
+				// Kill old session. Abort if it fails to avoid ghost duplicates.
+				if err := m.tmux.KillSession(oldMeta.TmuxSession); err != nil {
+					// Check if session is truly still running.
+					if m.tmux.HasSession(oldMeta.TmuxSession) {
+						return sessionsMsg{err: fmt.Errorf("failed to kill old session %s: %w — switch aborted", oldMeta.Name, err)}
+					}
+					// Session is already gone — safe to proceed.
+				}
+				if m.store != nil {
+					if m.config.Worktree.CleanupOnKill == "always" {
+						m.safeRemoveWorktree(oldMeta.WorktreePath, oldMeta.Name)
+					}
+					_ = m.store.Remove(oldMeta.Name)
+				}
+				if m.cache != nil {
+					_ = m.cache.Remove(oldMeta.Name)
+				}
+				// Git checkout for in-place switches.
+				if result.WorktreeChoice == WorktreeCurrent || result.WorktreeChoice == WorktreeSpecifyDir {
+					dir := oldMeta.WorkingDir
+					if result.WorktreeChoice == WorktreeSpecifyDir {
+						dir = result.SpecifiedWorkDir
+					}
+					if err := gitCheckoutBranch(dir, result.Branch, result.NewBranch, result.NewBranchBase); err != nil {
+						return sessionsMsg{err: err}
+					}
+				}
+				return m.launchFromWizard(result)
+			}
+		}
+
 		return m, func() tea.Msg { return m.launchFromWizard(result) }
 	}
 
@@ -979,7 +1086,7 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 			if wtName == "" {
 				wtName = fmt.Sprintf("%s-%s-%d", provider, branch, time.Now().Unix())
 			}
-			wtPath, wtErr := wm.CreateBranch(wtName, branch, result.NewBranch)
+			wtPath, wtErr := wm.CreateBranch(wtName, branch, result.NewBranch, result.NewBranchBase)
 			if wtErr != nil {
 				return "", "", fmt.Errorf("create worktree: %w", wtErr)
 			}
@@ -997,7 +1104,7 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 			if wtName == "" {
 				wtName = fmt.Sprintf("%s-%s-%d", provider, branch, time.Now().Unix())
 			}
-			wtPath, wtErr := wm.CreateBranchInDir(result.CustomBaseDir, wtName, branch, result.NewBranch)
+			wtPath, wtErr := wm.CreateBranchInDir(result.CustomBaseDir, wtName, branch, result.NewBranch, result.NewBranchBase)
 			if wtErr != nil {
 				return "", "", fmt.Errorf("create worktree in custom dir: %w", wtErr)
 			}
@@ -1382,7 +1489,7 @@ func (m Model) View() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  d: delete  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -1794,6 +1901,7 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString("\n")
 	b.WriteString(keyStyle.Render("  n") + descStyle.Render("New session (wizard)") + "\n")
 	b.WriteString(keyStyle.Render("  d") + descStyle.Render("Delete session") + "\n")
+	b.WriteString(keyStyle.Render("  b") + descStyle.Render("Switch branch") + "\n")
 	b.WriteString(keyStyle.Render("  D") + descStyle.Render("Detach (quit, sessions persist)") + "\n")
 	b.WriteString(keyStyle.Render("  w") + descStyle.Render("Manage worktrees") + "\n")
 	b.WriteString(keyStyle.Render("  r") + descStyle.Render("Retry recovery / refresh") + "\n")

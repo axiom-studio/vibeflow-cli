@@ -73,6 +73,7 @@ type WizardResult struct {
 	ExistingWorktreePath string // Path of existing worktree to reuse (when WorktreeExisting).
 	CustomBaseDir        string // Custom base directory for worktree (when WorktreeCustom).
 	SpecifiedWorkDir     string // User-specified working directory (when WorktreeSpecifyDir).
+	NewBranchBase        string // Start-point for new branch creation (e.g. "main"). Empty means git default.
 	ReuseSessionID       string // Session ID from a previous conflict to reuse via session_init.
 	WorkDir              string // Project root directory selected in StepWorkDir.
 	EnvVars              map[string]string // Extra env vars to set on the tmux session.
@@ -158,6 +159,16 @@ type WizardModel struct {
 	selectedLLMGateway int     // 0 = Yes, 1 = No.
 	llmGatewayEnabled bool     // True if user chose to route through gateway.
 
+	// Branch auto-detection.
+	currentBranch     string // Current HEAD branch for auto-positioning cursor.
+	defaultBranch     string // Default branch name (e.g. "main") for new branch base.
+	newBranchBase     string // Base branch for new branch creation.
+	editingBranchBase bool   // True when editing the base branch field.
+
+	// Quick branch switch mode.
+	quickSwitch  bool         // True when wizard is running as a 2-step branch switch.
+	switchSource *SessionMeta // Original session metadata for quick switch.
+
 	result WizardResult
 }
 
@@ -174,6 +185,7 @@ type personaEntry struct {
 }
 
 // defaultPersonas returns the known persona list from the vibeflow server.
+// Code agents (git-modifying) must come first — the section header logic depends on this grouping.
 func defaultPersonas() []personaEntry {
 	return []personaEntry{
 		{"developer", "Developer", "Write code, fix bugs, implement features"},
@@ -187,6 +199,18 @@ func defaultPersonas() []personaEntry {
 		{"customer", "Customer", "Request features, report issues"},
 	}
 }
+
+// codeAgentKeys lists personas that modify git (only one allowed per branch).
+// Must stay in sync with GitModifyingPersonas in axiomcloud/database/vibeflow_models.go.
+var codeAgentKeys = map[string]bool{
+	"developer":          true,
+	"principal_engineer": true,
+	"architect":          true,
+}
+
+// isCodeAgentPersona returns true for personas that modify git and are subject to
+// branch-level mutual exclusion (only one code agent per branch).
+func isCodeAgentPersona(key string) bool { return codeAgentKeys[key] }
 
 // NewWizardModel creates a wizard pre-loaded with providers and branches.
 // wm may be nil if not in a git repository. client may be nil if API is unavailable.
@@ -274,7 +298,156 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		registry:          registry,
 		client:            client,
 		config:            cfg,
+		currentBranch:     GetGitBranch(repoRoot),
+		defaultBranch:     getDefaultBranch(repoRoot),
 	}
+}
+
+// NewQuickSwitchWizard creates a wizard pre-filled from an existing session,
+// starting at StepBranch. Used by the 'b' keybinding for quick branch switching.
+func NewQuickSwitchWizard(meta SessionMeta, registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, cfg *Config) WizardModel {
+	// Build provider list from registry.
+	allProviders := registry.List()
+	entries := make([]providerEntry, 0, len(allProviders))
+	selectedProvider := 0
+	for _, key := range providerKeys(registry) {
+		p, _ := registry.Get(key)
+		entries = append(entries, providerEntry{
+			key:       key,
+			provider:  p,
+			available: registry.IsAvailable(key),
+		})
+	}
+	// Find provider matching the source session.
+	for i, pe := range entries {
+		if pe.key == meta.Provider {
+			selectedProvider = i
+			break
+		}
+	}
+
+	// Build branch list.
+	branches := listGitBranches(repoRoot)
+	if len(branches) == 0 {
+		branches = []string{"main"}
+	}
+	branches = append([]string{"[+] Create new branch"}, branches...)
+	filteredBr := make([]int, len(branches))
+	for i := range branches {
+		filteredBr[i] = i
+	}
+
+	// Build worktree map.
+	var existingWts map[string]string
+	if wm != nil {
+		existingWts = wm.BranchWorktreeMap()
+	}
+
+	// Find persona index matching the source session.
+	personas := defaultPersonas()
+	selectedPersonas := make(map[int]bool)
+	selectedPersona := 0
+	for i, p := range personas {
+		if p.key == meta.Persona {
+			selectedPersonas[i] = true
+			selectedPersona = i
+			break
+		}
+	}
+
+	// Session type: 1 = vibeflow, 0 = vanilla.
+	sessionType := 0
+	if meta.SessionType == "vibeflow" {
+		sessionType = 1
+	}
+
+	w := WizardModel{
+		step:               StepBranch,
+		personas:           personas,
+		selectedPersonas:   selectedPersonas,
+		selectedPersona:    selectedPersona,
+		selectedSessionType: sessionType,
+		providers:          entries,
+		selectedProvider:   selectedProvider,
+		branches:           branches,
+		filteredBranches:   filteredBr,
+		existingWorktrees:  existingWts,
+		worktreeOpts:       []string{"New worktree", "Custom location", "Specify directory", "Current directory"},
+		permissionOpts:     []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
+		repoRoot:           repoRoot,
+		registry:           registry,
+		config:             cfg,
+		currentBranch:      GetGitBranch(repoRoot),
+		defaultBranch:      getDefaultBranch(repoRoot),
+		selectedWorkDir:    repoRoot,
+		llmGatewayEnabled:  meta.LLMGatewayEnabled,
+		quickSwitch:        true,
+		switchSource:       &meta,
+	}
+	w.cursorToCurrentBranch()
+	return w
+}
+
+// buildQuickSwitchResult constructs a WizardResult for quick branch switch,
+// inheriting session properties from switchSource and using the new branch/worktree.
+func (w WizardModel) buildQuickSwitchResult() (WizardModel, tea.Cmd) {
+	// Determine worktree choice from the selected option text.
+	opt := ""
+	if w.selectedWorktree >= 0 && w.selectedWorktree < len(w.worktreeOpts) {
+		opt = w.worktreeOpts[w.selectedWorktree]
+	}
+	var wtChoice WorktreeChoice
+	var existingPath string
+	switch {
+	case strings.HasPrefix(opt, "Use existing:"):
+		wtChoice = WorktreeExisting
+		if path := w.findWorktreeForBranch(w.resolvedBranch()); path != "" {
+			existingPath = path
+		}
+	case opt == "New worktree":
+		wtChoice = WorktreeNew
+	case opt == "Custom location":
+		wtChoice = WorktreeCustom
+	case opt == "Specify directory":
+		wtChoice = WorktreeSpecifyDir
+	default:
+		wtChoice = WorktreeCurrent
+	}
+
+	// Resolve provider.
+	pe := w.providers[w.selectedProvider]
+
+	// Resolve env vars.
+	env, _ := ResolveProviderEnvVars(w.config, pe.key)
+
+	// Determine skip permissions from source.
+	skipPerms := false
+	if w.switchSource != nil {
+		skipPerms = w.switchSource.SkipPermissions
+	}
+
+	w.result = WizardResult{
+		SessionType:          w.switchSource.SessionType,
+		ProjectName:          w.switchSource.Project,
+		Persona:              w.switchSource.Persona,
+		Personas:             []string{w.switchSource.Persona},
+		Provider:             pe.provider,
+		ProviderKey:          pe.key,
+		Branch:               w.resolvedBranch(),
+		NewBranch:            w.selectedBranch == 0,
+		NewBranchBase:        w.newBranchBase,
+		WorktreeChoice:       wtChoice,
+		SkipPermissions:      skipPerms,
+		WorktreeName:         w.worktreeName,
+		ExistingWorktreePath: existingPath,
+		CustomBaseDir:        w.customBaseDir,
+		SpecifiedWorkDir:     w.specifiedWorkDir,
+		WorkDir:              w.selectedWorkDir,
+		EnvVars:              env,
+		LLMGatewayEnabled:    w.switchSource.LLMGatewayEnabled,
+	}
+	w.done = true
+	return w, nil
 }
 
 // Done returns true when the wizard has completed.
@@ -351,10 +524,12 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			switch msg.String() {
 			case "enter":
 				if w.newBranchName != "" {
+					// Move to base branch editing.
 					w.editingBranch = false
-					w.rebuildWorktreeOpts()
-					w.step = StepWorktree
-					w.cursor = 0
+					w.editingBranchBase = true
+					if w.newBranchBase == "" {
+						w.newBranchBase = w.defaultBranch
+					}
 				}
 			case "esc":
 				w.editingBranch = false
@@ -376,6 +551,36 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			return w, nil
 		}
 
+		// Text input mode for new branch base.
+		if w.editingBranchBase {
+			switch msg.String() {
+			case "enter":
+				if w.newBranchBase != "" {
+					w.editingBranchBase = false
+					w.rebuildWorktreeOpts()
+					w.step = StepWorktree
+					w.cursor = 0
+				}
+			case "esc":
+				// Go back to editing branch name.
+				w.editingBranchBase = false
+				w.editingBranch = true
+			case "backspace":
+				if len(w.newBranchBase) > 0 {
+					w.newBranchBase = w.newBranchBase[:len(w.newBranchBase)-1]
+				}
+			default:
+				if msg.Type == tea.KeyRunes {
+					for _, r := range msg.Runes {
+						if isValidBranchChar(byte(r)) {
+							w.newBranchBase += string(r)
+						}
+					}
+				}
+			}
+			return w, nil
+		}
+
 		// Text input mode for binary path.
 		if w.editingBinary {
 			switch msg.String() {
@@ -390,6 +595,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.providers[w.selectedProvider].available = true
 						w.step = StepBranch
 						w.cursor = 0
+						w.cursorToCurrentBranch()
 					}
 				}
 			case "esc":
@@ -465,6 +671,9 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			switch msg.String() {
 			case "enter":
 				w.editingName = false
+				if w.quickSwitch {
+					return w.buildQuickSwitchResult()
+				}
 				w.step = StepPermissions
 				w.cursor = 0
 			case "esc":
@@ -513,6 +722,9 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				br := w.resolvedBranch()
 				safeBr := strings.ReplaceAll(br, "/", "-")
 				w.worktreeName = fmt.Sprintf("%s-%s", pe.key, safeBr)
+				if w.quickSwitch {
+					return w.buildQuickSwitchResult()
+				}
 				w.step = StepPermissions
 				w.cursor = 0
 			case "esc":
@@ -564,6 +776,9 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.specifiedWorkDirErr = ""
 				w.editingSpecWorkDir = false
+				if w.quickSwitch {
+					return w.buildQuickSwitchResult()
+				}
 				w.step = StepPermissions
 				w.cursor = 0
 			case "esc":
@@ -615,6 +830,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					} else {
 						w.step = StepBranch
 						w.cursor = 0
+						w.cursorToCurrentBranch()
 					}
 				}
 			case "esc":
@@ -693,7 +909,23 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 		case " ":
 			// Space toggles persona selection in team step.
 			if w.step == StepTeam && w.cursor >= 0 && w.cursor < len(w.personas) {
-				w.selectedPersonas[w.cursor] = !w.selectedPersonas[w.cursor]
+				key := w.personas[w.cursor].key
+				if isCodeAgentPersona(key) {
+					// Radio behavior: only one code agent at a time.
+					if w.selectedPersonas[w.cursor] {
+						w.selectedPersonas[w.cursor] = false
+					} else {
+						for i, p := range w.personas {
+							if isCodeAgentPersona(p.key) {
+								w.selectedPersonas[i] = false
+							}
+						}
+						w.selectedPersonas[w.cursor] = true
+					}
+				} else {
+					// Checkbox behavior for review/support personas.
+					w.selectedPersonas[w.cursor] = !w.selectedPersonas[w.cursor]
+				}
 			}
 		case "enter":
 			// Block advance if no personas selected in team step.
@@ -748,16 +980,32 @@ func (w WizardModel) View() string {
 	var b strings.Builder
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	b.WriteString(title.Render("New Session"))
+	if w.quickSwitch {
+		b.WriteString(title.Render("Switch Branch"))
+	} else {
+		b.WriteString(title.Render("New Session"))
+	}
 	b.WriteString("\n\n")
 
 	// Step indicator.
-	steps := []string{"Directory", "Type", "Project", "Team", "Provider", "Env", "Branch", "Worktree", "Permissions", "Confirm"}
+	var steps []string
+	var stepMapping []WizardStep // maps display index → actual WizardStep
+	if w.quickSwitch {
+		steps = []string{"Branch", "Worktree"}
+		stepMapping = []WizardStep{StepBranch, StepWorktree}
+	} else {
+		steps = []string{"Directory", "Type", "Project", "Team", "Provider", "Env", "Branch", "Worktree", "Permissions", "Confirm"}
+		stepMapping = make([]WizardStep, len(steps))
+		for i := range steps {
+			stepMapping[i] = WizardStep(i)
+		}
+	}
 	var stepLine strings.Builder
 	for i, s := range steps {
-		if WizardStep(i) == w.step {
+		actualStep := stepMapping[i]
+		if actualStep == w.step {
 			stepLine.WriteString(lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render(fmt.Sprintf("[%s]", s)))
-		} else if WizardStep(i) < w.step {
+		} else if actualStep < w.step {
 			stepLine.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" %s ", s)))
 		} else {
 			stepLine.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" %s ", s)))
@@ -845,23 +1093,49 @@ func (w WizardModel) View() string {
 	case StepTeam:
 		b.WriteString("Select team (space to toggle, enter to confirm):\n\n")
 
-		// Build left column: persona checklist.
+		dim := lipgloss.NewStyle().Foreground(dimColor)
+
+		// Build left column: persona checklist with grouped sections.
 		var leftLines []string
+		prevWasCodeAgent := false
 		for i, p := range w.personas {
+			isCode := isCodeAgentPersona(p.key)
+
+			// Insert section headers at group boundaries.
+			if i == 0 {
+				leftLines = append(leftLines, dim.Render("  "+strings.Repeat("─", 2)+" Code Agent (pick one) "+strings.Repeat("─", 28)))
+			} else if !isCode && prevWasCodeAgent {
+				leftLines = append(leftLines, "")
+				leftLines = append(leftLines, dim.Render("  "+strings.Repeat("─", 2)+" Review & Support (pick any) "+strings.Repeat("─", 22)))
+			}
+			prevWasCodeAgent = isCode
+
 			cursor := "  "
 			if i == w.cursor {
 				cursor = "> "
 			}
-			check := "[ ]"
-			if w.selectedPersonas[i] {
-				check = lipgloss.NewStyle().Foreground(accentColor).Render("[x]")
+			var check string
+			if isCode {
+				// Radio button for code agents.
+				if w.selectedPersonas[i] {
+					check = lipgloss.NewStyle().Foreground(accentColor).Render("(●)")
+				} else {
+					check = "( )"
+				}
+			} else {
+				// Checkbox for review/support agents.
+				if w.selectedPersonas[i] {
+					check = lipgloss.NewStyle().Foreground(accentColor).Render("[x]")
+				} else {
+					check = "[ ]"
+				}
 			}
 			compact := PersonaCompactIcon(p.key)
 			compactStyled := ""
 			if compact != "" {
 				compactStyled = lipgloss.NewStyle().Foreground(PersonaColor(p.key)).Render(compact) + " "
 			}
-			desc := lipgloss.NewStyle().Foreground(dimColor).Render(" — " + p.description)
+			desc := dim.Render(" — " + p.description)
 			leftLines = append(leftLines, fmt.Sprintf("%s%s %s%-16s%s", cursor, check, compactStyled, p.displayName, desc))
 		}
 
@@ -951,12 +1225,21 @@ func (w WizardModel) View() string {
 		}
 
 	case StepBranch:
-		if w.editingBranch {
-			b.WriteString("New branch name:\n\n")
-			b.WriteString(fmt.Sprintf("  Branch: %s", w.newBranchName))
-			b.WriteString(lipgloss.NewStyle().Foreground(accentColor).Render("█"))
-			b.WriteString("\n\n")
-			b.WriteString(helpStyle.Render("enter: confirm  esc: cancel  (a-z, 0-9, -, _, ., /)"))
+		if w.editingBranch || w.editingBranchBase {
+			dim := lipgloss.NewStyle().Foreground(dimColor)
+			cursor := lipgloss.NewStyle().Foreground(accentColor).Render("█")
+			b.WriteString("New branch:\n\n")
+			nameLabel := fmt.Sprintf("  Name: %s", w.newBranchName)
+			baseLabel := fmt.Sprintf("  Base: %s", w.newBranchBase)
+			if w.editingBranch {
+				b.WriteString(nameLabel + cursor + "\n")
+				b.WriteString(dim.Render(baseLabel) + "\n")
+			} else {
+				b.WriteString(dim.Render(nameLabel) + "\n")
+				b.WriteString(baseLabel + cursor + "\n")
+			}
+			b.WriteString("\n")
+			b.WriteString(helpStyle.Render("enter: confirm  esc: back"))
 		} else {
 			// Count branches with worktrees for header annotation.
 			wtCount := 0
@@ -1024,6 +1307,9 @@ func (w WizardModel) View() string {
 						shortPath = "..." + shortPath[len(shortPath)-27:]
 					}
 					label += " " + lipgloss.NewStyle().Foreground(dimColor).Render("[wt: "+shortPath+"]")
+				}
+				if branchIdx > 0 && br == w.currentBranch {
+					label += " " + lipgloss.NewStyle().Foreground(accentColor).Render("← current")
 				}
 				b.WriteString(fmt.Sprintf("%s%s\n", cursor, label))
 			}
@@ -1286,6 +1572,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		} else {
 			w.step = StepBranch
 			w.cursor = 0
+			w.cursorToCurrentBranch()
 		}
 	case StepLLMGateway:
 		w.selectedLLMGateway = w.cursor
@@ -1297,6 +1584,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		}
 		w.step = StepBranch
 		w.cursor = 0
+		w.cursorToCurrentBranch()
 	case StepEnvToken:
 		// Re-enter editing if not already done.
 		w.editingEnvToken = true
@@ -1327,6 +1615,9 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		switch {
 		case strings.HasPrefix(opt, "Use existing:"):
 			// Reuse existing worktree — skip to permissions.
+			if w.quickSwitch {
+				return w.buildQuickSwitchResult()
+			}
 			w.step = StepPermissions
 			w.cursor = 0
 		case opt == "New worktree":
@@ -1352,6 +1643,9 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			return w, nil
 		default:
 			// "Current directory"
+			if w.quickSwitch {
+				return w.buildQuickSwitchResult()
+			}
 			w.step = StepPermissions
 			w.cursor = 0
 		}
@@ -1417,6 +1711,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			ProviderKey:          pe.key,
 			Branch:               w.resolvedBranch(),
 			NewBranch:            w.selectedBranch == 0,
+			NewBranchBase:        w.newBranchBase,
 			WorktreeChoice:       wtChoice,
 			SkipPermissions:      w.selectedPermission == 0,
 			WorktreeName:         w.worktreeName,
@@ -1552,6 +1847,10 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.step = StepProvider
 		w.cursor = w.selectedProvider
 	case StepBranch:
+		if w.quickSwitch {
+			w.cancelled = true
+			return w, nil
+		}
 		// Go back to LLM gateway step if it was shown, else to provider.
 		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
 			w.step = StepLLMGateway
@@ -1589,6 +1888,19 @@ func (w WizardModel) resolvedBranch() string {
 	return w.branches[w.selectedBranch]
 }
 
+// cursorToCurrentBranch positions the cursor on the current HEAD branch if found.
+func (w *WizardModel) cursorToCurrentBranch() {
+	if w.currentBranch == "" {
+		return
+	}
+	for i, idx := range w.filteredBranches {
+		if idx > 0 && w.branches[idx] == w.currentBranch {
+			w.cursor = i
+			return
+		}
+	}
+}
+
 // reloadBranchesForDir re-fetches git branches and worktree info for a new directory.
 func (w *WizardModel) reloadBranchesForDir(dir string) {
 	branches := listGitBranches(dir)
@@ -1613,6 +1925,10 @@ func (w *WizardModel) reloadBranchesForDir(dir string) {
 	} else {
 		w.existingWorktrees = nil
 	}
+
+	// Re-detect current branch for the new directory.
+	w.currentBranch = GetGitBranch(dir)
+	w.defaultBranch = getDefaultBranch(dir)
 }
 
 // isGitRepo checks whether the given directory is inside a git repository.

@@ -259,7 +259,7 @@ func TestWorktreeManager_CreateBranch_NewBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wtPath, err := wm.CreateBranch("new-wt", "explicitly-new", true)
+	wtPath, err := wm.CreateBranch("new-wt", "explicitly-new", true, "")
 	if err != nil {
 		t.Fatalf("CreateBranch failed: %v", err)
 	}

@@ -110,7 +110,7 @@ func launchCmd() *cobra.Command {
 				if wtName == "" {
 					wtName = fmt.Sprintf("%s-%s-%d", provider, branch, time.Now().Unix())
 				}
-				wtPath, err := wm.CreateBranch(wtName, branch, newBranch)
+				wtPath, err := wm.CreateBranch(wtName, branch, newBranch, "")
 				if err == nil {
 					workDir = wtPath
 				}

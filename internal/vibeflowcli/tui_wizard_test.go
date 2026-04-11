@@ -151,3 +151,225 @@ func TestDefaultPersonas_DeveloperFirst(t *testing.T) {
 		t.Errorf("first persona key = %q, want developer", personas[0].key)
 	}
 }
+
+func TestPersonaMutualExclusion_CodeAgents(t *testing.T) {
+	// Selecting architect should deselect developer.
+	selected := map[int]bool{0: true} // developer pre-selected
+	personas := defaultPersonas()
+
+	// Simulate selecting architect (index 2).
+	cursor := 2
+	key := personas[cursor].key
+	if isCodeAgentPersona(key) {
+		for i, p := range personas {
+			if isCodeAgentPersona(p.key) {
+				selected[i] = false
+			}
+		}
+		selected[cursor] = true
+	}
+
+	if selected[0] {
+		t.Error("developer should be deselected after selecting architect")
+	}
+	if !selected[2] {
+		t.Error("architect should be selected")
+	}
+}
+
+func TestPersonaMutualExclusion_ReviewUnaffected(t *testing.T) {
+	// Selecting a code agent should not affect review personas.
+	selected := map[int]bool{0: true, 4: true, 5: true} // developer + qa_lead + security_lead
+	personas := defaultPersonas()
+
+	// Simulate selecting principal_engineer (index 1).
+	cursor := 1
+	key := personas[cursor].key
+	if isCodeAgentPersona(key) {
+		for i, p := range personas {
+			if isCodeAgentPersona(p.key) {
+				selected[i] = false
+			}
+		}
+		selected[cursor] = true
+	}
+
+	if selected[0] {
+		t.Error("developer should be deselected")
+	}
+	if !selected[1] {
+		t.Error("principal_engineer should be selected")
+	}
+	if !selected[4] {
+		t.Error("qa_lead should remain selected")
+	}
+	if !selected[5] {
+		t.Error("security_lead should remain selected")
+	}
+}
+
+func TestPersonaMutualExclusion_DeselectCodeAgent(t *testing.T) {
+	// Deselecting the only code agent is valid (review-only team).
+	selected := map[int]bool{0: true, 4: true}
+	personas := defaultPersonas()
+
+	// Simulate deselecting developer (already selected).
+	cursor := 0
+	key := personas[cursor].key
+	if isCodeAgentPersona(key) && selected[cursor] {
+		selected[cursor] = false
+	}
+
+	if selected[0] {
+		t.Error("developer should be deselected")
+	}
+	if !selected[4] {
+		t.Error("qa_lead should remain selected")
+	}
+}
+
+func TestCursorToCurrentBranch_Found(t *testing.T) {
+	w := WizardModel{
+		branches:         []string{"[+] Create new branch", "main", "develop", "feature-x"},
+		filteredBranches: []int{0, 1, 2, 3},
+		currentBranch:    "develop",
+	}
+	w.cursorToCurrentBranch()
+	if w.cursor != 2 {
+		t.Errorf("cursor = %d, want 2 (develop)", w.cursor)
+	}
+}
+
+func TestCursorToCurrentBranch_NotFound(t *testing.T) {
+	w := WizardModel{
+		branches:         []string{"[+] Create new branch", "main", "develop"},
+		filteredBranches: []int{0, 1, 2},
+		currentBranch:    "", // detached HEAD
+	}
+	w.cursor = 0
+	w.cursorToCurrentBranch()
+	if w.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 (unchanged for empty currentBranch)", w.cursor)
+	}
+}
+
+func TestCursorToCurrentBranch_SkipsCreateNew(t *testing.T) {
+	// Index 0 ("[+] Create new branch") should never match even if currentBranch is set.
+	w := WizardModel{
+		branches:         []string{"[+] Create new branch", "main"},
+		filteredBranches: []int{0, 1},
+		currentBranch:    "[+] Create new branch",
+	}
+	w.cursorToCurrentBranch()
+	if w.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 (should not match index 0)", w.cursor)
+	}
+}
+
+func TestQuickSwitchWizard_StartsAtBranch(t *testing.T) {
+	meta := SessionMeta{
+		Provider:    "claude",
+		Persona:     "developer",
+		SessionType: "vibeflow",
+		WorkingDir:  ".",
+	}
+	cfg := DefaultConfig()
+	reg := NewProviderRegistry(cfg)
+	w := NewQuickSwitchWizard(meta, reg, ".", nil, cfg)
+
+	if w.step != StepBranch {
+		t.Errorf("step = %d, want StepBranch (%d)", w.step, StepBranch)
+	}
+	if !w.quickSwitch {
+		t.Error("quickSwitch should be true")
+	}
+	if w.switchSource == nil {
+		t.Error("switchSource should not be nil")
+	}
+}
+
+func TestQuickSwitchWizard_BackFromBranchCancels(t *testing.T) {
+	meta := SessionMeta{
+		Provider:    "claude",
+		Persona:     "developer",
+		SessionType: "vibeflow",
+		WorkingDir:  ".",
+	}
+	cfg := DefaultConfig()
+	reg := NewProviderRegistry(cfg)
+	w := NewQuickSwitchWizard(meta, reg, ".", nil, cfg)
+
+	// Simulate pressing Esc.
+	w, _ = w.goBack()
+	if !w.cancelled {
+		t.Error("goBack from StepBranch in quickSwitch should cancel")
+	}
+}
+
+func TestBuildQuickSwitchResult_PreservesFields(t *testing.T) {
+	meta := SessionMeta{
+		Provider:          "claude",
+		Persona:           "architect",
+		Project:           "my-project",
+		SessionType:       "vibeflow",
+		SkipPermissions:   true,
+		LLMGatewayEnabled: true,
+		WorkingDir:        ".",
+	}
+	cfg := DefaultConfig()
+	reg := NewProviderRegistry(cfg)
+	w := NewQuickSwitchWizard(meta, reg, ".", nil, cfg)
+
+	// Simulate selecting branch "main" (index 1) and "Current directory" worktree choice.
+	if len(w.branches) > 1 {
+		w.selectedBranch = 1
+	}
+	// worktreeOpts last entry is "Current directory".
+	w.selectedWorktree = len(w.worktreeOpts) - 1
+
+	w, _ = w.buildQuickSwitchResult()
+
+	if !w.done {
+		t.Fatal("wizard should be done after buildQuickSwitchResult")
+	}
+	r := w.result
+	if r.Persona != "architect" {
+		t.Errorf("Persona = %q, want architect", r.Persona)
+	}
+	if r.ProjectName != "my-project" {
+		t.Errorf("ProjectName = %q, want my-project", r.ProjectName)
+	}
+	if r.SessionType != "vibeflow" {
+		t.Errorf("SessionType = %q, want vibeflow", r.SessionType)
+	}
+	if !r.SkipPermissions {
+		t.Error("SkipPermissions should be preserved as true")
+	}
+	if !r.LLMGatewayEnabled {
+		t.Error("LLMGatewayEnabled should be preserved as true")
+	}
+	if r.WorktreeChoice != WorktreeCurrent {
+		t.Errorf("WorktreeChoice = %d, want WorktreeCurrent (%d)", r.WorktreeChoice, WorktreeCurrent)
+	}
+}
+
+func TestIsCodeAgentPersona(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"developer", true},
+		{"principal_engineer", true},
+		{"architect", true},
+		{"qa_lead", false},
+		{"security_lead", false},
+		{"product_manager", false},
+		{"customer", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isCodeAgentPersona(tt.key); got != tt.want {
+			t.Errorf("isCodeAgentPersona(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
