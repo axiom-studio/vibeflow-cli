@@ -264,9 +264,19 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		filteredBr[i] = i
 	}
 
-	// Build directory options: "[+] Enter new path" + history entries.
+	// Build directory options: "[+] Enter new path" + existing history entries.
 	dirOpts := []string{"[+] Enter new path"}
-	dirOpts = append(dirOpts, dirHistory...)
+	for _, d := range dirHistory {
+		// Skip entries that no longer exist.
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			dirOpts = append(dirOpts, d)
+		}
+	}
+
+	// Cleanup and save config if directory history was modified.
+	if cfg != nil && cfg.CleanupDirectoryHistory() {
+		_ = SaveConfig(cfg, ConfigPath())
+	}
 
 	// Pre-select LLM gateway from saved config.
 	savedGatewayChoice := 1 // Default: No

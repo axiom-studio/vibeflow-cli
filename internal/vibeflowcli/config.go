@@ -114,6 +114,22 @@ func (c *Config) AddDirectoryToHistory(dir string) {
 	}
 }
 
+// CleanupDirectoryHistory removes entries that no longer exist as directories.
+// Returns true if the history was modified.
+func (c *Config) CleanupDirectoryHistory() bool {
+	cleaned := make([]string, 0, len(c.DirectoryHistory))
+	modified := false
+	for _, d := range c.DirectoryHistory {
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			cleaned = append(cleaned, d)
+		} else {
+			modified = true
+		}
+	}
+	c.DirectoryHistory = cleaned
+	return modified
+}
+
 // ResolveWorkDir returns the working directory to use. Priority:
 // explicit > Config.DefaultWorkDir > current directory.
 func (c *Config) ResolveWorkDir(explicit string) string {
