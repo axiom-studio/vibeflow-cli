@@ -22,8 +22,9 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | **Claude Code** | `claude` | `--dangerously-skip-permissions` | Positional argument |
 | **OpenAI Codex CLI** | `codex` | `--yolo` | Positional argument |
 | **Google Gemini CLI** | `gemini` | `--yolo` | `-p` flag |
+| **Cursor Agent** | `agent` | `--yolo --approve-mcps` | Positional argument |
 
-All three agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
+All four agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
 
 ### VibeFlow Terminal UI
 
@@ -91,6 +92,7 @@ vibeflow list            # List active sessions (alias: ls)
 vibeflow switch <name>   # Attach to a session
 vibeflow kill <name>     # Kill a session
 vibeflow delete <name>   # Delete a session (alias: rm)
+vibeflow restart <name>  # Restart a session using cached parameters
 vibeflow worktrees       # List git worktrees (alias: wt)
 vibeflow check [dir]     # Check for session conflicts
 vibeflow config          # Re-run interactive configuration setup
@@ -178,12 +180,13 @@ The interactive wizard walks through:
 2. **Session type** — VibeFlow (server-connected) or Vanilla (standalone)
 3. **Project** — Select VibeFlow project (VibeFlow mode only)
 4. **Persona** — Developer, Architect, QA Lead, Security Lead, Product Manager, Project Manager, or Customer (VibeFlow mode only)
-5. **Provider** — Choose agent (Claude, Codex, Gemini) with availability detection
+5. **Provider** — Choose agent (Claude, Codex, Gemini, Cursor) with availability detection
 6. **Environment token** — Enter required API keys if not already saved
-7. **Branch** — Select git branch or create new
-8. **Worktree** — Use current directory, create new worktree, or specify custom path
-9. **Permissions** — Skip permission prompts for autonomous mode
-10. **Confirm** — Review and launch
+7. **LLM Gateway** — Optional: route LLM traffic via VibeFlow server gateway
+8. **Branch** — Select git branch or create new
+9. **Worktree** — Use current directory, create new worktree, or specify custom path
+10. **Permissions** — Skip permission prompts for autonomous mode
+11. **Confirm** — Review and launch
 
 ## License
 
