@@ -8,11 +8,14 @@ Default path:
 ~/.vibeflow-cli/config.yaml
 ```
 
-Override with the global flag:
+Override with either the `--config` flag (individual file) or the `--root` flag (entire state directory):
 
 ```bash
 vibeflow --config /path/to/config.yaml
+vibeflow --root /path/to/custom-root   # config at <root>/config.yaml, sessions at <root>/sessions.json, etc.
 ```
+
+The `--root` flag enables fully isolated parallel instances with independent config, sessions, logs, PID lock, tmux socket, and session cache — useful for running multiple vibeflow-cli installations from different repository checkouts without interference.
 
 ## Common settings
 
@@ -59,6 +62,7 @@ Built-in provider keys include **`claude`**, **`codex`**, **`gemini`**, and **`c
 |----------|--------|
 | `VIBEFLOW_URL` | Overrides `server_url` |
 | `VIBEFLOW_TOKEN` | Overrides `api_token` |
+| `VIBEFLOW_ROOT` | Overrides the root directory for config, sessions, and logs (equivalent to `--root`). The `--root` flag takes precedence when both are set. |
 
 ## CLI overrides
 
@@ -70,12 +74,14 @@ vibeflow --server-url https://example.com --project my-project
 
 ## Logs and data files
 
+All paths below are resolved relative to the root directory (default `~/.vibeflow-cli`, overridable via `--root` or `VIBEFLOW_ROOT`).
+
 | Path | Purpose |
 |------|---------|
-| `~/.vibeflow-cli/vibeflow-cli.log` | Rotating log (1 MB) |
-| `~/.vibeflow-cli/sessions.json` | Session metadata (file-locked) |
-| `~/.vibeflow-cli/session_cache.json` | Cache for restart-after-exit (optional) |
-| `~/.vibeflow-cli/vibeflow.pid` | PID lock so only one TUI instance runs |
+| `<root>/vibeflow-cli.log` | Rotating log (1 MB) |
+| `<root>/sessions.json` | Session metadata (file-locked) |
+| `<root>/session_cache.json` | Cache for restart-after-exit; persists full launch parameters so `vibeflow restart` works after a session exits tmux |
+| `<root>/vibeflow.pid` | PID lock so only one TUI instance runs per root |
 
 ## Next steps
 
