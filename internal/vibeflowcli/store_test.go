@@ -86,6 +86,47 @@ func TestStore_AddAndList(t *testing.T) {
 	}
 }
 
+func TestStore_PreservesSkipPermissionsAndSessionType(t *testing.T) {
+	// Regression: Issue #517 — restart must preserve SkipPermissions across a
+	// round-trip through the store so an autonomous session doesn't silently
+	// downgrade to interactive on restart.
+	s := testStore(t)
+
+	meta := SessionMeta{
+		Name:            "autonomous-agent",
+		TmuxSession:     "vibeflow_claude-autonomous-agent",
+		Provider:        "claude",
+		Project:         "my-project",
+		Persona:         "developer",
+		Branch:          "main",
+		WorkingDir:      "/tmp/work",
+		SessionType:     "vibeflow",
+		SkipPermissions: true,
+		CreatedAt:       time.Now(),
+	}
+
+	if err := s.Add(meta); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	got, found, err := s.Get("autonomous-agent")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if !found {
+		t.Fatal("expected session to be found after Add")
+	}
+	if !got.SkipPermissions {
+		t.Error("SkipPermissions should be preserved as true after store round-trip")
+	}
+	if got.SessionType != "vibeflow" {
+		t.Errorf("SessionType = %q, want vibeflow", got.SessionType)
+	}
+	if got.Persona != "developer" {
+		t.Errorf("Persona = %q, want developer", got.Persona)
+	}
+}
+
 func TestStore_AddReplacesExisting(t *testing.T) {
 	s := testStore(t)
 
