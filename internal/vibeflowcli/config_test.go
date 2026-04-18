@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -259,6 +260,56 @@ func TestAddDirectoryToHistory(t *testing.T) {
 			t.Errorf("expected [/new], got %v", cfg.DirectoryHistory)
 		}
 	})
+}
+
+// TestCleanupDirectoryHistory verifies that the session wizard directory
+// history is pruned of non-existent paths and of directories that are no
+// longer valid git repositories. Regression for Issue #1648 QA rework —
+// orphaned worktree paths whose on-disk directory still exists (but whose
+// git metadata is broken) must be filtered out.
+func TestCleanupDirectoryHistory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available on PATH")
+	}
+
+	base := t.TempDir()
+
+	// A valid git repository — must be retained.
+	repo := filepath.Join(base, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+
+	// A directory that exists but is not a git repo — must be filtered out.
+	nonRepo := filepath.Join(base, "notgit")
+	if err := os.MkdirAll(nonRepo, 0o755); err != nil {
+		t.Fatalf("mkdir notgit: %v", err)
+	}
+
+	// A path that does not exist at all — must be filtered out.
+	missing := filepath.Join(base, "does-not-exist")
+
+	cfg := &Config{DirectoryHistory: []string{repo, nonRepo, missing}}
+	modified := cfg.CleanupDirectoryHistory()
+
+	if !modified {
+		t.Errorf("expected modified=true when entries are pruned, got false")
+	}
+	if len(cfg.DirectoryHistory) != 1 || cfg.DirectoryHistory[0] != repo {
+		t.Errorf("expected history to contain only %q, got %v", repo, cfg.DirectoryHistory)
+	}
+
+	// Idempotence: a second run with only valid entries must be a no-op.
+	modified = cfg.CleanupDirectoryHistory()
+	if modified {
+		t.Errorf("expected modified=false on clean history, got true")
+	}
+	if len(cfg.DirectoryHistory) != 1 || cfg.DirectoryHistory[0] != repo {
+		t.Errorf("expected history unchanged, got %v", cfg.DirectoryHistory)
+	}
 }
 
 func TestResolveWorkDir(t *testing.T) {
