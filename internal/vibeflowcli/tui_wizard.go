@@ -267,8 +267,8 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 	// Build directory options: "[+] Enter new path" + existing history entries.
 	dirOpts := []string{"[+] Enter new path"}
 	for _, d := range dirHistory {
-		// Skip entries that no longer exist.
-		if info, err := os.Stat(d); err == nil && info.IsDir() {
+		// Skip entries that no longer exist or are not git repos.
+		if info, err := os.Stat(d); err == nil && info.IsDir() && isGitRepo(d) {
 			dirOpts = append(dirOpts, d)
 		}
 	}
