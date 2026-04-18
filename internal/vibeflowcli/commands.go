@@ -560,9 +560,11 @@ func restartCmd() *cobra.Command {
 				return fmt.Errorf("session %q not found in store or cache", name)
 			}
 
-			// CLI flag overrides stored value.
-			if skipPermissions {
-				meta.SkipPermissions = true
+			// CLI flag overrides stored value only when explicitly set.
+			// Without this check, a user could not restart a stored-autonomous
+			// session in interactive mode via --skip-permissions=false.
+			if cmd.Flags().Changed("skip-permissions") {
+				meta.SkipPermissions = skipPermissions
 			}
 
 			_, err = RestartSession(meta, cfg, tmux, store, cache, registry)
