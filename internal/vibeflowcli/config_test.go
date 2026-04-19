@@ -42,11 +42,11 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("ClaudeBinary = %q, want claude", cfg.ClaudeBinary)
 	}
 
-	// Four built-in providers.
-	if len(cfg.Providers) != 4 {
-		t.Fatalf("expected 4 providers, got %d", len(cfg.Providers))
+	// Five built-in providers.
+	if len(cfg.Providers) != 5 {
+		t.Fatalf("expected 5 providers, got %d", len(cfg.Providers))
 	}
-	for _, key := range []string{"claude", "codex", "cursor", "gemini"} {
+	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
 		if _, ok := cfg.Providers[key]; !ok {
 			t.Errorf("missing provider %q", key)
 		}
@@ -84,8 +84,8 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
-	if len(cfg.Providers) != 4 {
-		t.Errorf("expected 4 default providers, got %d", len(cfg.Providers))
+	if len(cfg.Providers) != 5 {
+		t.Errorf("expected 5 default providers, got %d", len(cfg.Providers))
 	}
 }
 
@@ -543,5 +543,94 @@ func TestMigrateProviders_NoDirtyNoSave(t *testing.T) {
 
 	if ConfigFileExists(cfgPath) {
 		t.Error("config file should not be written when no migration is needed")
+	}
+}
+
+func TestMigrateProviders_AddsMissingQwen(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	// Simulate a pre-qwen user config: built-ins minus qwen, plus a custom provider.
+	cfg := DefaultConfig()
+	delete(cfg.Providers, "qwen")
+	cfg.Providers["custom"] = Provider{Name: "Custom", Binary: "custom-bin", LaunchTemplate: "{{.Binary}}"}
+
+	migrateProviders(cfg, cfgPath)
+
+	got, ok := cfg.Providers["qwen"]
+	if !ok {
+		t.Fatal("expected migrateProviders to add the missing qwen entry")
+	}
+	defaults := DefaultConfig()
+	if got.LaunchTemplate != defaults.Providers["qwen"].LaunchTemplate {
+		t.Errorf("qwen LaunchTemplate = %q, want default", got.LaunchTemplate)
+	}
+	if cfg.Providers["custom"].Binary != "custom-bin" {
+		t.Error("custom provider should be preserved")
+	}
+	if !ConfigFileExists(cfgPath) {
+		t.Error("config file should be written when migration adds a provider")
+	}
+}
+
+func TestMigrateProviders_NilProvidersMap(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	cfg := &Config{Providers: nil}
+	migrateProviders(cfg, cfgPath)
+
+	if cfg.Providers == nil {
+		t.Fatal("Providers map should be initialized")
+	}
+	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
+		if _, ok := cfg.Providers[key]; !ok {
+			t.Errorf("missing built-in provider %q after migration", key)
+		}
+	}
+}
+
+func TestBuildLLMGatewayEnv_Qwen(t *testing.T) {
+	env := BuildLLMGatewayEnv("qwen", "https://server.example.com", "tok-123")
+	if env["OPENAI_API_KEY"] != "tok-123" {
+		t.Errorf("OPENAI_API_KEY = %q, want tok-123", env["OPENAI_API_KEY"])
+	}
+	want := "https://server.example.com/rest/v1/llm-gateway/v1"
+	if env["OPENAI_BASE_URL"] != want {
+		t.Errorf("OPENAI_BASE_URL = %q, want %q", env["OPENAI_BASE_URL"], want)
+	}
+	// Must match codex/gemini shape exactly.
+	codex := BuildLLMGatewayEnv("codex", "https://server.example.com", "tok-123")
+	if env["OPENAI_API_KEY"] != codex["OPENAI_API_KEY"] || env["OPENAI_BASE_URL"] != codex["OPENAI_BASE_URL"] {
+		t.Error("qwen gateway env should match codex shape")
+	}
+}
+
+func TestBuildLLMGatewayEnv_QwenEmpty(t *testing.T) {
+	t.Run("empty token", func(t *testing.T) {
+		env := BuildLLMGatewayEnv("qwen", "https://server.example.com", "")
+		if len(env) != 0 {
+			t.Errorf("expected empty env, got %v", env)
+		}
+	})
+	t.Run("empty url", func(t *testing.T) {
+		env := BuildLLMGatewayEnv("qwen", "", "tok")
+		if len(env) != 0 {
+			t.Errorf("expected empty env, got %v", env)
+		}
+	})
+}
+
+func TestClearLLMGatewayEnv_Qwen(t *testing.T) {
+	env := ClearLLMGatewayEnv("qwen")
+	if env["OPENAI_BASE_URL"] != "" {
+		t.Errorf("OPENAI_BASE_URL = %q, want empty string", env["OPENAI_BASE_URL"])
+	}
+	if _, ok := env["OPENAI_BASE_URL"]; !ok {
+		t.Error("OPENAI_BASE_URL key should be present (set to empty string)")
+	}
+	// Should not set Anthropic vars.
+	if _, ok := env["ANTHROPIC_BASE_URL"]; ok {
+		t.Error("qwen clear should not touch ANTHROPIC_BASE_URL")
 	}
 }

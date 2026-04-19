@@ -27,10 +27,10 @@ func TestNewProviderRegistry(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	keys := reg.Keys()
-	if len(keys) != 4 {
-		t.Fatalf("expected 4 providers, got %d", len(keys))
+	if len(keys) != 5 {
+		t.Fatalf("expected 5 providers, got %d", len(keys))
 	}
-	for _, k := range []string{"claude", "codex", "cursor", "gemini"} {
+	for _, k := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
 		if _, ok := reg.Get(k); !ok {
 			t.Errorf("missing provider %q", k)
 		}
@@ -42,11 +42,11 @@ func TestProviderRegistry_List(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	list := reg.List()
-	if len(list) != 4 {
-		t.Fatalf("expected 4 providers, got %d", len(list))
+	if len(list) != 5 {
+		t.Fatalf("expected 5 providers, got %d", len(list))
 	}
-	// Should be sorted alphabetically by key: claude, codex, cursor, gemini.
-	names := []string{"Claude Code", "OpenAI Codex CLI", "Cursor Agent", "Google Gemini CLI"}
+	// Should be sorted alphabetically by key: claude, codex, cursor, gemini, qwen.
+	names := []string{"Claude Code", "OpenAI Codex CLI", "Cursor Agent", "Google Gemini CLI", "Qwen Code"}
 	for i, p := range list {
 		if p.Name != names[i] {
 			t.Errorf("list[%d].Name = %q, want %q", i, p.Name, names[i])
@@ -129,7 +129,7 @@ func TestProviderRegistry_Keys(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	keys := reg.Keys()
-	expected := []string{"claude", "codex", "cursor", "gemini"}
+	expected := []string{"claude", "codex", "cursor", "gemini", "qwen"}
 	if len(keys) != len(expected) {
 		t.Fatalf("expected %d keys, got %d", len(expected), len(keys))
 	}
@@ -278,6 +278,35 @@ func TestCheckBinaryAvailable(t *testing.T) {
 			t.Error("missing absolute path should not be available")
 		}
 	})
+}
+
+func TestDefaultConfig_QwenProviderFields(t *testing.T) {
+	cfg := DefaultConfig()
+	p, ok := cfg.Providers["qwen"]
+	if !ok {
+		t.Fatal("expected qwen provider in defaults")
+	}
+	if p.Name != "Qwen Code" {
+		t.Errorf("Name = %q, want Qwen Code", p.Name)
+	}
+	if p.Binary != "qwen" {
+		t.Errorf("Binary = %q, want qwen", p.Binary)
+	}
+	if p.LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}" {
+		t.Errorf("LaunchTemplate = %q, want --yolo template", p.LaunchTemplate)
+	}
+	if p.PromptTemplate != "" {
+		t.Errorf("PromptTemplate = %q, want empty", p.PromptTemplate)
+	}
+	if p.VibeFlowIntegrated {
+		t.Error("VibeFlowIntegrated should be false in v1")
+	}
+	if p.SessionFile != "" {
+		t.Errorf("SessionFile = %q, want empty", p.SessionFile)
+	}
+	if p.Default {
+		t.Error("Default should be false (claude is the default)")
+	}
 }
 
 func TestIsExecutable(t *testing.T) {

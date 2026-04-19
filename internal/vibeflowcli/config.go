@@ -204,6 +204,16 @@ func DefaultConfig() *Config {
 				SessionFile:        ".vibeflow-session",
 				Default:            false,
 			},
+			"qwen": {
+				Name:               "Qwen Code",
+				Binary:             "qwen",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
+				PromptTemplate:     "",
+				Env:                map[string]string{},
+				VibeFlowIntegrated: false,
+				SessionFile:        "",
+				Default:            false,
+			},
 		},
 	}
 }
@@ -244,11 +254,17 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // migrateProviders updates built-in provider configs to current defaults.
-// Removes stale VIBEFLOW_ env vars from provider Env sections and syncs
-// launch templates for built-in providers (claude, codex, gemini, cursor).
+// Removes stale VIBEFLOW_ env vars from provider Env sections, syncs launch
+// templates for built-in providers (claude, codex, gemini, cursor, qwen),
+// and adds any built-in providers that are missing from the user's config
+// (so users on older configs gain access to newly-added built-ins).
 func migrateProviders(cfg *Config, path string) {
 	defaults := DefaultConfig()
 	dirty := false
+
+	if cfg.Providers == nil {
+		cfg.Providers = make(map[string]Provider, len(defaults.Providers))
+	}
 
 	for key, prov := range cfg.Providers {
 		defProv, isBuiltin := defaults.Providers[key]
@@ -271,6 +287,15 @@ func migrateProviders(cfg *Config, path string) {
 		}
 
 		cfg.Providers[key] = prov
+	}
+
+	// Add any built-in providers the user's config is missing. Lets users on
+	// pre-cursor / pre-qwen configs see new built-ins without nuking their file.
+	for key, defProv := range defaults.Providers {
+		if _, exists := cfg.Providers[key]; !exists {
+			cfg.Providers[key] = defProv
+			dirty = true
+		}
 	}
 
 	if dirty {
@@ -317,8 +342,9 @@ func CheckServerReachable(serverURL string) error {
 //
 // For Claude: uses ANTHROPIC_CUSTOM_HEADERS with x-axiom-api-key to keep
 // standard auth headers free for the user's own OAuth tokens.
-// For Codex/Gemini: uses OPENAI_API_KEY + OPENAI_BASE_URL (OpenAI SDK
-// does not support custom header env vars).
+// For Codex/Gemini/Qwen: uses OPENAI_API_KEY + OPENAI_BASE_URL (these CLIs
+// share the OpenAI-compatible client surface; SDK does not support custom
+// header env vars).
 func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]string {
 	env := make(map[string]string)
 	if apiToken == "" || serverURL == "" {
@@ -329,7 +355,7 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	case "claude":
 		env["ANTHROPIC_CUSTOM_HEADERS"] = "x-axiom-api-key: " + apiToken
 		env["ANTHROPIC_BASE_URL"] = gatewayBaseURL
-	case "codex", "gemini":
+	case "codex", "gemini", "qwen":
 		env["OPENAI_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
 	}
@@ -340,13 +366,19 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 // explicitly unset any gateway-related vars that might be inherited from the
 // parent shell environment. Called when the LLM gateway is NOT enabled, to
 // ensure the vibecoding agent connects directly to the provider.
+//
+// Qwen Code caveat: the qwen CLI auto-loads `.env` from CWD and `~/.qwen/.env`
+// at startup. If a user has OPENAI_BASE_URL set in one of those files, it can
+// override the empty value we set on the tmux process env. Process-level env
+// usually wins, but users running mixed direct/gateway setups should be aware
+// — see docs/VibeFlow-CLI/docs/providers.md.
 func ClearLLMGatewayEnv(providerKey string) map[string]string {
 	env := make(map[string]string)
 	switch providerKey {
 	case "claude":
 		env["ANTHROPIC_CUSTOM_HEADERS"] = ""
 		env["ANTHROPIC_BASE_URL"] = ""
-	case "codex", "gemini":
+	case "codex", "gemini", "qwen":
 		env["OPENAI_BASE_URL"] = ""
 	}
 	return env
