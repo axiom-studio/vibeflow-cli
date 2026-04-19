@@ -13,7 +13,7 @@
 
 # vibeflow-cli
 
-A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, and Google Gemini CLI sessions from a single TUI — with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
+A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, and Qwen Code sessions from a single TUI — with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
 
 ## Supported Agents
 
@@ -23,8 +23,9 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | **OpenAI Codex CLI** | `codex` | `--yolo` | Positional argument |
 | **Google Gemini CLI** | `gemini` | `--yolo` | `-p` flag |
 | **Cursor Agent** | `agent` | `--yolo --approve-mcps` | Positional argument |
+| **Qwen Code** | `qwen` | `--yolo` | Positional argument |
 
-All four agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
+All five agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
 
 ### VibeFlow Terminal UI
 
@@ -72,7 +73,8 @@ go build -o vibeflow ./cmd/vibeflow
 
 - **Go 1.25+**
 - **tmux 3.2+** (for `-e` env var passthrough)
-- At least one supported agent CLI installed (`claude`, `codex`, or `gemini`)
+- At least one supported agent CLI installed (`claude`, `codex`, `gemini`, `agent` (Cursor), or `qwen`)
+  - Install Qwen Code: `npm install -g @qwen-code/qwen-code@latest`
 
 ## Usage
 
@@ -166,6 +168,9 @@ providers:
   gemini:
     name: Google Gemini CLI
     binary: gemini
+  qwen:
+    name: Qwen Code
+    binary: qwen
 ```
 
 Environment variable overrides:
@@ -180,7 +185,7 @@ The interactive wizard walks through:
 2. **Session type** — VibeFlow (server-connected) or Vanilla (standalone)
 3. **Project** — Select VibeFlow project (VibeFlow mode only)
 4. **Persona** — Developer, Architect, QA Lead, Security Lead, Product Manager, Project Manager, or Customer (VibeFlow mode only)
-5. **Provider** — Choose agent (Claude, Codex, Gemini, Cursor) with availability detection
+5. **Provider** — Choose agent (Claude, Codex, Gemini, Cursor, Qwen) with availability detection
 6. **Environment token** — Enter required API keys if not already saved
 7. **LLM Gateway** — Optional: route LLM traffic via VibeFlow server gateway
 8. **Branch** — Select git branch or create new
