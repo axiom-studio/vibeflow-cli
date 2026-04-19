@@ -1957,7 +1957,7 @@ func providerKeys(r *ProviderRegistry) []string {
 	// Better approach: iterate all and collect.
 	seen := make(map[string]bool)
 	for _, p := range list {
-		for _, candidate := range []string{"claude", "codex", "cursor", "gemini"} {
+		for _, candidate := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
 			if got, ok := r.Get(candidate); ok && got.Name == p.Name && !seen[candidate] {
 				keys = append(keys, candidate)
 				seen[candidate] = true
