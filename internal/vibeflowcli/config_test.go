@@ -674,13 +674,12 @@ func TestBuildLLMGatewayEnv_QwenEmpty(t *testing.T) {
 
 func TestClearLLMGatewayEnv_Qwen(t *testing.T) {
 	env := ClearLLMGatewayEnv("qwen")
-	if env["OPENAI_BASE_URL"] != "" {
-		t.Errorf("OPENAI_BASE_URL = %q, want empty string", env["OPENAI_BASE_URL"])
+	// Qwen must NOT be cleared: qwen-code has no hardcoded fallback, so blanking
+	// OPENAI_BASE_URL redirects the OpenAI SDK to api.openai.com and breaks users
+	// configured for DashScope or any other OpenAI-compatible endpoint.
+	if _, ok := env["OPENAI_BASE_URL"]; ok {
+		t.Errorf("qwen clear must not set OPENAI_BASE_URL, got %q", env["OPENAI_BASE_URL"])
 	}
-	if _, ok := env["OPENAI_BASE_URL"]; !ok {
-		t.Error("OPENAI_BASE_URL key should be present (set to empty string)")
-	}
-	// Should not set Anthropic vars.
 	if _, ok := env["ANTHROPIC_BASE_URL"]; ok {
 		t.Error("qwen clear should not touch ANTHROPIC_BASE_URL")
 	}
