@@ -1,10 +1,10 @@
 ```
- __      __ _  _            _____  _
- \ \    / /(_)| |          |  ___|| |
-  \ \  / /  _ | |__    ___ | |_   | |  ___  __      __
-   \ \/ /  | ||  _ \  / _ \|  _|  | | / _ \ \ \ /\ / /
-    \  /   | || |_) ||  __/| |    | || (_) | \ V  V /
-     \/    |_||_.__/  \___||_|    |_| \___/   \_/\_/
+██╗   ██╗██╗██████╗ ███████╗███████╗██╗      ██████╗ ██╗    ██╗
+██║   ██║██║██╔══██╗██╔════╝██╔════╝██║     ██╔═══██╗██║    ██║
+██║   ██║██║██████╔╝█████╗  █████╗  ██║     ██║   ██║██║ █╗ ██║
+╚██╗ ██╔╝██║██╔══██╗██╔══╝  ██╔══╝  ██║     ██║   ██║██║███╗██║
+ ╚████╔╝ ██║██████╔╝███████╗██║     ███████╗╚██████╔╝╚███╔███╔╝
+  ╚═══╝  ╚═╝╚═════╝ ╚══════╝╚═╝     ╚══════╝ ╚═════╝  ╚══╝╚══╝
 ```
 
 **by [axiomstudio.ai](https://axiomstudio.ai) | Copyright 2026**
@@ -13,7 +13,7 @@
 
 # vibeflow-cli
 
-A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, and Qwen Code sessions from a single TUI — with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
+A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, and Qwen Code sessions from a single TUI - with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
 
 ## Supported Agents
 
@@ -31,29 +31,29 @@ All five agents support both **Vanilla** (standalone) and **VibeFlow** (server-c
 
 
 <p align="center">
-  <img src="assets/vibeflow-cli-tui.png" alt="VibeFlow — AI Coding Session Manager" width="600" />
+  <img src="assets/vibeflow-cli-tui.png" alt="VibeFlow - AI Coding Session Manager" width="600" />
 </p>
 
 ### VibeFlow Service connected autonomous mode
 
 <p align="center">
-  <img src="assets/illust-vibeflow.svg" alt="VibeFlow — AI Coding Session Manager" width="600" />
+  <img src="assets/illust-vibeflow.svg" alt="VibeFlow - AI Coding Session Manager" width="600" />
 </p>
 
 ## Features
 
-- **Multi-agent TUI** — Interactive terminal UI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) for launching and managing sessions
-- **Two session modes** — *VibeFlow mode* connects agents to a VibeFlow server for autonomous task polling and execution; *Vanilla mode* launches agents standalone
-- **Persona-based sessions** — Assign specialized personas (Developer, Architect, QA Lead, Security Lead, Product Manager, Project Manager, Customer) to VibeFlow sessions. Multiple personas can work concurrently in the same repository without conflict.
-- **tmux-based session management** — Each agent runs in an isolated tmux session on a dedicated socket (`-L vibeflow`), with clipboard passthrough for macOS paste support
-- **Git worktree isolation** — Run multiple agents on different branches simultaneously without conflicts, with automatic worktree creation and cleanup
-- **Session conflict detection** — Detects when multiple agents target the same directory and offers resolution options (switch to existing, create worktree, clean up stale session, or cancel)
-- **Grouped view mode** — Toggle between flat list and sessions grouped by git repository root, with collapsible groups
-- **Error recovery** — Automatic error pattern detection with provider-specific recovery messages, exponential backoff, and configurable retry limits
-- **Agent doc embedding** — Automatically copies vibeflow session rules (CLAUDE.md, AGENTS.md, GEMINI.md) to the working directory so agents pick up project conventions on startup
-- **Provider environment variable management** — Resolves required env vars (e.g. bearer token for Codex from `~/.codex/config.toml`, `GEMINI_API_KEY` for Gemini) from saved config, environment, or interactive prompt
-- **10-step session wizard** — Guided session creation with directory history, session type, project/persona selection, provider picking, branch selection, worktree strategy, and permission level
-- **Server health check** — Non-blocking reachability check on startup with warning if the VibeFlow server is unreachable
+- **Multi-agent TUI** - Interactive terminal UI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) for launching and managing sessions
+- **Two session modes** - *VibeFlow mode* connects agents to a VibeFlow server for autonomous task polling and execution; *Vanilla mode* launches agents standalone
+- **Persona-based sessions** - Assign specialized personas (Developer, Principal Engineer, Architect, UX Designer, QA Lead, Security Lead, Product Manager, Project Manager, Customer) to VibeFlow sessions. Multiple personas can work concurrently in the same repository without conflict.
+- **tmux-based session management** - Each agent runs in an isolated tmux session on a dedicated socket (`-L vibeflow`), with clipboard passthrough for macOS paste support
+- **Git worktree isolation** - Run multiple agents on different branches simultaneously without conflicts, with automatic worktree creation and cleanup
+- **Session conflict detection** - Detects when multiple agents target the same directory and offers resolution options (switch to existing, create worktree, clean up stale session, or cancel)
+- **Grouped view mode** - Toggle between flat list and sessions grouped by git repository root, with collapsible groups
+- **Error recovery** - Automatic error pattern detection with provider-specific recovery messages, exponential backoff, and configurable retry limits
+- **Agent doc embedding** - Automatically copies vibeflow session rules (CLAUDE.md, AGENTS.md, GEMINI.md) to the working directory so agents pick up project conventions on startup
+- **Provider environment variable management** - Resolves required env vars (e.g. bearer token for Codex from `~/.codex/config.toml`, `GEMINI_API_KEY` for Gemini) from saved config, environment, or interactive prompt
+- **10-step session wizard** - Guided session creation with directory history, session type, project/persona selection, provider picking, branch selection, worktree strategy, and permission level
+- **Server health check** - Non-blocking reachability check on startup with warning if the VibeFlow server is unreachable
 
 ## Installation
 
@@ -109,12 +109,24 @@ vibeflow launch --worktree --new-branch --provider codex
 vibeflow launch --skip-permissions  # Autonomous mode
 ```
 
+### Global Flags
+
+Available on all commands:
+
+| Flag | Description |
+|------|-------------|
+| `--root <dir>` | Root directory for config, sessions, and logs (default: `~/.vibeflow-cli`). Tmux socket is derived from this path, so different roots get isolated sessions. |
+| `--config <path>` | Path to config file (default: `<root>/config.yaml`) |
+| `--server-url <url>` | VibeFlow server URL (overrides config) |
+| `--project <name>` | Default project name |
+
 ### TUI Keybindings
 
 | Key | Action |
 |-----|--------|
 | `n` | New session (opens wizard) |
 | `Enter` | Attach to selected session / toggle group collapse |
+| `b` | Quick branch switch on selected session (skips full wizard) |
 | `d` | Delete selected session |
 | `D` | Detach (quit TUI, sessions keep running) |
 | `r` | Retry recovery for failed session / refresh list |
@@ -174,24 +186,24 @@ providers:
 ```
 
 Environment variable overrides:
-- `VIBEFLOW_URL` — Override `server_url`
-- `VIBEFLOW_TOKEN` — Override `api_token`
+- `VIBEFLOW_URL` - Override `server_url`
+- `VIBEFLOW_TOKEN` - Override `api_token`
 
 ## Session Wizard Steps
 
 The interactive wizard walks through:
 
-1. **Working directory** — Select from recent history or enter a new path
-2. **Session type** — VibeFlow (server-connected) or Vanilla (standalone)
-3. **Project** — Select VibeFlow project (VibeFlow mode only)
-4. **Persona** — Developer, Architect, QA Lead, Security Lead, Product Manager, Project Manager, or Customer (VibeFlow mode only)
-5. **Provider** — Choose agent (Claude, Codex, Gemini, Cursor, Qwen) with availability detection
-6. **Environment token** — Enter required API keys if not already saved
-7. **LLM Gateway** — Optional: route LLM traffic via VibeFlow server gateway
-8. **Branch** — Select git branch or create new
-9. **Worktree** — Use current directory, create new worktree, or specify custom path
-10. **Permissions** — Skip permission prompts for autonomous mode
-11. **Confirm** — Review and launch
+1. **Working directory** - Select from recent history or enter a new path
+2. **Session type** - VibeFlow (server-connected) or Vanilla (standalone)
+3. **Project** - Select VibeFlow project (VibeFlow mode only)
+4. **Persona** - Developer, Principal Engineer, Architect, UX Designer, QA Lead, Security Lead, Product Manager, Project Manager, or Customer (VibeFlow mode only)
+5. **Provider** - Choose agent (Claude, Codex, Gemini, Cursor, Qwen) with availability detection
+6. **Environment token** - Enter required API keys if not already saved
+7. **LLM Gateway** - Optional: route LLM traffic via VibeFlow server gateway
+8. **Branch** - Select git branch or create new
+9. **Worktree** - Use current directory, create new worktree, or specify custom path
+10. **Permissions** - Skip permission prompts for autonomous mode
+11. **Confirm** - Review and launch
 
 ## License
 
