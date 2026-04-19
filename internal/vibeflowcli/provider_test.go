@@ -280,6 +280,35 @@ func TestCheckBinaryAvailable(t *testing.T) {
 	})
 }
 
+func TestDefaultConfig_QwenProviderFields(t *testing.T) {
+	cfg := DefaultConfig()
+	p, ok := cfg.Providers["qwen"]
+	if !ok {
+		t.Fatal("expected qwen provider in defaults")
+	}
+	if p.Name != "Qwen Code" {
+		t.Errorf("Name = %q, want Qwen Code", p.Name)
+	}
+	if p.Binary != "qwen" {
+		t.Errorf("Binary = %q, want qwen", p.Binary)
+	}
+	if p.LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}" {
+		t.Errorf("LaunchTemplate = %q, want --yolo template", p.LaunchTemplate)
+	}
+	if p.PromptTemplate != "" {
+		t.Errorf("PromptTemplate = %q, want empty", p.PromptTemplate)
+	}
+	if p.VibeFlowIntegrated {
+		t.Error("VibeFlowIntegrated should be false in v1")
+	}
+	if p.SessionFile != "" {
+		t.Errorf("SessionFile = %q, want empty", p.SessionFile)
+	}
+	if p.Default {
+		t.Error("Default should be false (claude is the default)")
+	}
+}
+
 func TestIsExecutable(t *testing.T) {
 	dir := t.TempDir()
 

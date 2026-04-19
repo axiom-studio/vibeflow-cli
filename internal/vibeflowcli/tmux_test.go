@@ -113,6 +113,34 @@ func TestRenderLaunchCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("qwen yolo on", func(t *testing.T) {
+		tmpl := "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}"
+		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
+			Binary:          "qwen",
+			SkipPermissions: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "qwen --yolo" {
+			t.Errorf("got %q", got)
+		}
+	})
+
+	t.Run("qwen yolo off", func(t *testing.T) {
+		tmpl := "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}"
+		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
+			Binary:          "qwen",
+			SkipPermissions: false,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "qwen" {
+			t.Errorf("got %q", got)
+		}
+	})
+
 	t.Run("all vars", func(t *testing.T) {
 		tmpl := "{{.Binary}} --project={{.Project}} --branch={{.Branch}} --server={{.ServerURL}}"
 		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
@@ -173,6 +201,7 @@ func TestParseSessionProvider(t *testing.T) {
 		{"codex session", "vibeflow_codex-feature-123", "codex"},
 		{"gemini session", "vibeflow_gemini-dev", "gemini"},
 		{"cursor session", "vibeflow_cursor-my-agent", "cursor"},
+		{"qwen session", "vibeflow_qwen-feature-x", "qwen"},
 		{"no provider", "vibeflow_my-session", "my"},
 		{"no prefix", "some-session", "some"},
 		{"no dash", "vibeflow_nodash", ""},
