@@ -242,13 +242,14 @@ func TestEnsureAllAgentDocs_CreatesAllFiles(t *testing.T) {
 	dir := t.TempDir()
 
 	updated := EnsureAllAgentDocs(dir)
-	// Unique template files: CLAUDE.md, AGENTS.md, GEMINI.md (cursor shares AGENTS.md with codex).
-	const wantUnique = 3
+	// Unique template files: CLAUDE.md, AGENTS.md, GEMINI.md, QWEN.md
+	// (cursor shares AGENTS.md with codex).
+	const wantUnique = 4
 	if len(updated) != wantUnique {
 		t.Errorf("expected %d files created, got %d", wantUnique, len(updated))
 	}
 
-	for _, expectedFile := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md"} {
+	for _, expectedFile := range []string{"CLAUDE.md", "AGENTS.md", "GEMINI.md", "QWEN.md"} {
 		data, err := os.ReadFile(filepath.Join(dir, expectedFile))
 		if err != nil {
 			t.Errorf("expected %s to exist: %v", expectedFile, err)
@@ -265,8 +266,8 @@ func TestEnsureAllAgentDocs_IdempotentOnSecondCall(t *testing.T) {
 
 	// First call creates all unique template files.
 	first := EnsureAllAgentDocs(dir)
-	if len(first) != 3 {
-		t.Fatalf("expected 3 files on first call, got %d", len(first))
+	if len(first) != 4 {
+		t.Fatalf("expected 4 files on first call, got %d", len(first))
 	}
 
 	// Second call should return empty (all files already up to date).

@@ -375,18 +375,18 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 // parent shell environment. Called when the LLM gateway is NOT enabled, to
 // ensure the vibecoding agent connects directly to the provider.
 //
-// Qwen Code caveat: the qwen CLI auto-loads `.env` from CWD and `~/.qwen/.env`
-// at startup. If a user has OPENAI_BASE_URL set in one of those files, it can
-// override the empty value we set on the tmux process env. Process-level env
-// usually wins, but users running mixed direct/gateway setups should be aware
-// — see docs/VibeFlow-CLI/docs/providers.md.
+// Qwen is intentionally excluded: qwen-code has no hardcoded fallback endpoint,
+// so blanking OPENAI_BASE_URL pushes the OpenAI SDK to its default
+// (api.openai.com) and breaks users configured for DashScope or any other
+// OpenAI-compatible endpoint via their shell or `.qwen/.env`. Leave qwen's
+// base URL alone and let the user's existing auth work.
 func ClearLLMGatewayEnv(providerKey string) map[string]string {
 	env := make(map[string]string)
 	switch providerKey {
 	case "claude":
 		env["ANTHROPIC_CUSTOM_HEADERS"] = ""
 		env["ANTHROPIC_BASE_URL"] = ""
-	case "codex", "gemini", "qwen":
+	case "codex", "gemini":
 		env["OPENAI_BASE_URL"] = ""
 	}
 	return env

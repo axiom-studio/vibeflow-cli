@@ -38,6 +38,9 @@ var providerDocFile = map[string]string{
 	"gemini": "GEMINI.md",
 	// Cursor Agent CLI loads AGENTS.md (and CLAUDE.md) as rules — same template as Codex.
 	"cursor": "AGENTS.md",
+	// Qwen Code reads QWEN.md (plus AGENTS.md) — it does NOT read GEMINI.md despite
+	// being a gemini-cli fork. See https://github.com/QwenLM/qwen-code docs/users/features/memory.md
+	"qwen": "QWEN.md",
 }
 
 // vibeflowSectionMarker is the heading used to identify the vibeflow rules
@@ -49,23 +52,23 @@ const vibeflowSectionMarker = "## vibeflow Agent Session Rules"
 func GetAgentDoc(providerKey string) ([]byte, error) {
 	docFile, ok := providerDocFile[providerKey]
 	if !ok {
-		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini, cursor)", providerKey)
+		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini, cursor, qwen)", providerKey)
 	}
 	return agentDocsFS.ReadFile("agentdocs/" + docFile)
 }
 
 // EnsureAllAgentDocs ensures all agent-specific markdown files (CLAUDE.md,
-// AGENTS.md, GEMINI.md) exist in workDir with the vibeflow session rules
-// section. This guarantees that any provider session started in the directory
-// will find its instruction file, regardless of which provider was launched
-// first.
+// AGENTS.md, GEMINI.md, QWEN.md) exist in workDir with the vibeflow session
+// rules section. This guarantees that any provider session started in the
+// directory will find its instruction file, regardless of which provider was
+// launched first.
 //
 // Returns the list of filenames that were created or updated.
 func EnsureAllAgentDocs(workDir string) []string {
 	var updated []string
 	seenFile := make(map[string]bool)
 	// Stable order; codex before cursor so AGENTS.md is written once (both use same file).
-	for _, providerKey := range []string{"claude", "codex", "gemini", "cursor"} {
+	for _, providerKey := range []string{"claude", "codex", "gemini", "cursor", "qwen"} {
 		docName, ok := providerDocFile[providerKey]
 		if !ok {
 			continue
