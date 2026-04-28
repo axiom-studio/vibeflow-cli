@@ -109,17 +109,6 @@ vibeflow launch --worktree --new-branch --provider codex
 vibeflow launch --skip-permissions  # Autonomous mode
 ```
 
-### Global Flags
-
-Available on all commands:
-
-| Flag | Description |
-|------|-------------|
-| `--root <dir>` | Root directory for config, sessions, and logs (default: `~/.vibeflow-cli`). Tmux socket is derived from this path, so different roots get isolated sessions. |
-| `--config <path>` | Path to config file (default: `<root>/config.yaml`) |
-| `--server-url <url>` | VibeFlow server URL (overrides config) |
-| `--project <name>` | Default project name |
-
 ### TUI Keybindings
 
 | Key | Action |

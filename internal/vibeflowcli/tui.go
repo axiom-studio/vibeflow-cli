@@ -56,18 +56,18 @@ var (
 
 	helpStyle = lipgloss.NewStyle().Foreground(dimColor)
 
-	asciiBanner = accentColor
+	asciiBanner    = accentColor
 	copyrightStyle = lipgloss.NewStyle().Foreground(dimColor)
 )
 
 // bannerText is the 3D ASCII art for "VibeFlow" displayed on TUI startup.
 const bannerText = `
- __      __ _  _            _____  _
- \ \    / /(_)| |          |  ___|| |
-  \ \  / /  _ | |__    ___ | |_   | |  ___  __      __
-   \ \/ /  | ||  _ \  / _ \|  _|  | | / _ \ \ \ /\ / /
-    \  /   | || |_) ||  __/| |    | || (_) | \ V  V /
-     \/    |_||_.__/  \___||_|    |_| \___/   \_/\_/`
+██╗   ██╗██╗██████╗ ███████╗███████╗██╗      ██████╗ ██╗    ██╗
+██║   ██║██║██╔══██╗██╔════╝██╔════╝██║     ██╔═══██╗██║    ██║
+██║   ██║██║██████╔╝█████╗  █████╗  ██║     ██║   ██║██║ █╗ ██║
+╚██╗ ██╔╝██║██╔══██╗██╔══╝  ██╔══╝  ██║     ██║   ██║██║███╗██║
+ ╚████╔╝ ██║██████╔╝███████╗██║     ███████╗╚██████╔╝╚███╔███╔╝
+  ╚═══╝  ╚═╝╚═════╝ ╚══════╝╚═╝     ╚══════╝ ╚═════╝  ╚══╝╚══╝`
 
 const copyrightText = "by axiomstudio.ai | Copyright 2026"
 
@@ -101,35 +101,35 @@ const (
 
 // Model is the Bubble Tea model for vibeflow-cli.
 type Model struct {
-	sessions   []SessionRow
-	cursor     int
-	client     *Client
-	tmux       *TmuxManager
-	worktrees  *WorktreeManager
-	store      *Store
-	registry   *ProviderRegistry
-	config     *Config
-	width      int
-	height     int
-	err        error
-	quitting   bool
-	projectID  int64
-	activeView     ViewState
-	wizard         WizardModel
-	conflictModal  ConflictModal
-	worktreeList   WorktreeListModel
-	pendingWizard  *WizardResult // wizard result waiting for conflict resolution
-	switchMeta     *SessionMeta  // non-nil during quick branch switch flow
-	captureOutput  string        // last captured pane output for selected session
-	captureName    string        // tmux session name for current capture
-	confirmDelete  bool          // showing delete confirmation
-	confirmQuit    bool          // showing quit confirmation
-	confirmDetach  bool          // showing detach confirmation
-	serverWarning  string        // non-empty if server unreachable at startup
-	healthMonitor  *HealthMonitor // session error detection and auto-recovery
-	logger         *Logger       // file-based logger
-	cache          *SessionCache // session cache for restart-without-intervention
-	restartSelect  RestartSelectModel // dead-session restart multiselect
+	sessions      []SessionRow
+	cursor        int
+	client        *Client
+	tmux          *TmuxManager
+	worktrees     *WorktreeManager
+	store         *Store
+	registry      *ProviderRegistry
+	config        *Config
+	width         int
+	height        int
+	err           error
+	quitting      bool
+	projectID     int64
+	activeView    ViewState
+	wizard        WizardModel
+	conflictModal ConflictModal
+	worktreeList  WorktreeListModel
+	pendingWizard *WizardResult      // wizard result waiting for conflict resolution
+	switchMeta    *SessionMeta       // non-nil during quick branch switch flow
+	captureOutput string             // last captured pane output for selected session
+	captureName   string             // tmux session name for current capture
+	confirmDelete bool               // showing delete confirmation
+	confirmQuit   bool               // showing quit confirmation
+	confirmDetach bool               // showing detach confirmation
+	serverWarning string             // non-empty if server unreachable at startup
+	healthMonitor *HealthMonitor     // session error detection and auto-recovery
+	logger        *Logger            // file-based logger
+	cache         *SessionCache      // session cache for restart-without-intervention
+	restartSelect RestartSelectModel // dead-session restart multiselect
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -480,6 +480,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// session refreshes continue while sub-views (wizard, conflict modal,
 	// worktree list) are active.
 	switch msg := msg.(type) {
+	case tea.FocusMsg:
+		// Pane regained focus (e.g. tmux pane switch). Force a full repaint
+		// so the diff-based renderer doesn't skip lines it assumes are unchanged.
+		return m, tea.ClearScreen
 	case tickMsg:
 		return m, tea.Batch(
 			m.refreshSessions,
@@ -556,6 +560,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case attachExitMsg:
 		// tmux attach exited — refresh sessions to pick up status changes.
+		// No ClearScreen needed: RestoreTerminal already re-enters alt screen
+		// which clears the screen and calls repaint() internally.
 		return m, m.refreshSessions
 	case autoAttachMsg:
 		// Auto-attach to a newly created session.
