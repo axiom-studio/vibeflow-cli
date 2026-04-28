@@ -120,6 +120,7 @@ type WizardModel struct {
 	selectedPersona     int
 	selectedPersonas    map[int]bool // Multi-select: tracks toggled personas by index.
 	selectedProvider    int
+	personaProviderIdx  []int // Team-mode per-persona provider override; index into w.providers, -1 = inherit selectedProvider. Same index space as personas.
 	selectedBranch      int
 	selectedWorktree    int
 	selectedPermission  int
@@ -285,6 +286,11 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		savedGatewayChoice = 0 // Yes
 	}
 
+	personasList := defaultPersonas()
+	personaProviderIdx := make([]int, len(personasList))
+	for i := range personaProviderIdx {
+		personaProviderIdx[i] = -1 // -1 = inherit team default
+	}
 	return WizardModel{
 		step:              StepWorkDir,
 		sessionTypeOpts:   []string{"Vanilla", "VibeFlow"},
@@ -292,8 +298,9 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		filteredProjects:  filtered,
 		defaultProject:    defaultProject,
 		projectErr:        projectErr,
-		personas:          defaultPersonas(),
+		personas:          personasList,
 		selectedPersonas:  map[int]bool{0: true}, // Pre-select "developer" (index 0).
+		personaProviderIdx: personaProviderIdx,
 		providers:         entries,
 		branches:          branches,
 		filteredBranches:  filteredBr,
@@ -372,6 +379,10 @@ func NewQuickSwitchWizard(meta SessionMeta, registry *ProviderRegistry, repoRoot
 		sessionType = 1
 	}
 
+	personaProviderIdx := make([]int, len(personas))
+	for i := range personaProviderIdx {
+		personaProviderIdx[i] = -1
+	}
 	w := WizardModel{
 		step:               StepBranch,
 		personas:           personas,
@@ -380,6 +391,7 @@ func NewQuickSwitchWizard(meta SessionMeta, registry *ProviderRegistry, repoRoot
 		selectedSessionType: sessionType,
 		providers:          entries,
 		selectedProvider:   selectedProvider,
+		personaProviderIdx: personaProviderIdx,
 		branches:           branches,
 		filteredBranches:   filteredBr,
 		existingWorktrees:  existingWts,
@@ -917,6 +929,34 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			}
 		case "down", "j":
 			w.cursor = min(w.cursor+1, w.listLen()-1)
+		case "left", "h", "right", "l":
+			// Cycle providers per row in team-mode StepProvider.
+			if w.step == StepProvider && w.teamModeProvider() {
+				delta := 1
+				if msg.String() == "left" || msg.String() == "h" {
+					delta = -1
+				}
+				if w.cursor == 0 {
+					w.selectedProvider = w.nextAvailableProviderIdx(w.selectedProvider, delta)
+				} else {
+					order := w.selectedPersonaIndices()
+					rowIdx := w.cursor - 1
+					if rowIdx >= 0 && rowIdx < len(order) {
+						personaIdx := order[rowIdx]
+						from := w.resolvedProviderForPersona(personaIdx)
+						w.personaProviderIdx[personaIdx] = w.nextAvailableProviderIdx(from, delta)
+					}
+				}
+			}
+		case "r":
+			// Reset focused persona's provider override back to inherit (team mode only).
+			if w.step == StepProvider && w.teamModeProvider() && w.cursor > 0 {
+				order := w.selectedPersonaIndices()
+				rowIdx := w.cursor - 1
+				if rowIdx >= 0 && rowIdx < len(order) {
+					w.personaProviderIdx[order[rowIdx]] = -1
+				}
+			}
 		case " ":
 			// Space toggles persona selection in team step.
 			if w.step == StepTeam && w.cursor >= 0 && w.cursor < len(w.personas) {
@@ -1194,6 +1234,17 @@ func (w WizardModel) View() string {
 			}
 			b.WriteString("\n\n")
 			b.WriteString(helpStyle.Render("enter: confirm  esc: cancel"))
+		} else if w.teamModeProvider() {
+			b.WriteString("Select providers per persona:\n\n")
+			b.WriteString(w.renderTeamProviderRow(0, "Team default", w.selectedProvider, false))
+			b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("  ─── per-persona overrides (← / → to change, r to reset)\n"))
+			order := w.selectedPersonaIndices()
+			for i, personaIdx := range order {
+				label := w.personas[personaIdx].displayName
+				inherits := w.personaProviderIdx[personaIdx] < 0
+				resolved := w.resolvedProviderForPersona(personaIdx)
+				b.WriteString(w.renderTeamProviderRow(i+1, label, resolved, inherits))
+			}
 		} else {
 			b.WriteString("Select a provider:\n\n")
 			for i, pe := range w.providers {
@@ -1411,7 +1462,21 @@ func (w WizardModel) View() string {
 			}
 		}
 		pe := w.providers[w.selectedProvider]
-		b.WriteString(fmt.Sprintf("  Provider:      %s\n", pe.provider.Name))
+		if w.teamModeProvider() {
+			b.WriteString("  Providers:\n")
+			order := w.selectedPersonaIndices()
+			for _, personaIdx := range order {
+				resolved := w.resolvedProviderForPersona(personaIdx)
+				inherits := w.personaProviderIdx[personaIdx] < 0
+				suffix := ""
+				if inherits {
+					suffix = lipgloss.NewStyle().Foreground(dimColor).Render(" (team default)")
+				}
+				b.WriteString(fmt.Sprintf("    %-15s %s%s\n", w.personas[personaIdx].displayName+":", w.providers[resolved].provider.Name, suffix))
+			}
+		} else {
+			b.WriteString(fmt.Sprintf("  Provider:      %s\n", pe.provider.Name))
+		}
 		branchDisplay := w.resolvedBranch()
 		if w.selectedBranch == 0 {
 			branchDisplay += " (new)"
@@ -1474,6 +1539,9 @@ func (w WizardModel) listLen() int {
 	case StepTeam:
 		return len(w.personas)
 	case StepProvider:
+		if w.teamModeProvider() {
+			return w.teamProviderRowCount()
+		}
 		return len(w.providers)
 	case StepEnvToken:
 		return 1
@@ -1556,16 +1624,24 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		w.step = StepProvider
 		w.cursor = 0
 	case StepProvider:
-		w.selectedProvider = w.cursor
-		if w.cursor < len(w.providers) && !w.providers[w.cursor].available {
-			// Provider binary not found — prompt for absolute path.
-			w.binaryPath = ""
-			w.binaryPathErr = ""
-			w.editingBinary = true
-			return w, nil
+		teamMode := w.teamModeProvider()
+		if !teamMode {
+			w.selectedProvider = w.cursor
+			if w.cursor < len(w.providers) && !w.providers[w.cursor].available {
+				// Provider binary not found — prompt for absolute path.
+				w.binaryPath = ""
+				w.binaryPathErr = ""
+				w.editingBinary = true
+				return w, nil
+			}
 		}
-		// Check if provider needs env token (e.g. codex bearer_token_env_var).
-		pe := w.providers[w.cursor]
+		// Team mode: w.selectedProvider is already maintained by left/right
+		// cycling, and uninstalled providers are skipped during cycling so no
+		// editingBinary fallback is needed.
+		// Check if the team-default provider needs an env token (e.g. codex
+		// bearer_token_env_var). Per-persona overrides reuse the same env-var
+		// surface — see launch resolution in tui.go.
+		pe := w.providers[w.selectedProvider]
 		env, missing := ResolveProviderEnvVars(w.config, pe.key)
 		if missing != "" {
 			w.envTokenVarName = missing
@@ -1712,6 +1788,23 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 				persona = personas[0]
 			}
 		}
+		// Build per-persona provider override map for team mode.
+		var personaProviders map[string]string
+		if sessionType == "vibeflow" && w.teamModeProvider() {
+			for _, personaIdx := range w.selectedPersonaIndices() {
+				idx := w.personaProviderIdx[personaIdx]
+				if idx < 0 || idx >= len(w.providers) {
+					continue
+				}
+				if w.providers[idx].key == pe.key {
+					continue // matches team default — skip (no-op override)
+				}
+				if personaProviders == nil {
+					personaProviders = make(map[string]string)
+				}
+				personaProviders[w.personas[personaIdx].key] = w.providers[idx].key
+			}
+		}
 		w.result = WizardResult{
 			SessionType:          sessionType,
 			ProjectID:            projectID,
@@ -1720,6 +1813,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			Personas:             personas,
 			Provider:             prov,
 			ProviderKey:          pe.key,
+			PersonaProviders:     personaProviders,
 			Branch:               w.resolvedBranch(),
 			NewBranch:            w.selectedBranch == 0,
 			NewBranchBase:        w.newBranchBase,
@@ -1888,6 +1982,93 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.cursor = w.selectedPermission
 	}
 	return w, nil
+}
+
+// selectedPersonaIndices returns indices into w.personas for personas the user
+// toggled on, in display order (matches the order rendered in StepTeam).
+func (w WizardModel) selectedPersonaIndices() []int {
+	out := make([]int, 0, len(w.personas))
+	for i := 0; i < len(w.personas); i++ {
+		if w.selectedPersonas[i] {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// teamModeProvider reports whether StepProvider should render the per-persona
+// selector (more than one persona toggled on for a vibeflow session).
+func (w WizardModel) teamModeProvider() bool {
+	if w.selectedSessionType != 1 {
+		return false
+	}
+	count := 0
+	for i := 0; i < len(w.personas); i++ {
+		if w.selectedPersonas[i] {
+			count++
+			if count > 1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// teamProviderRowCount returns the number of focusable rows on the team-mode
+// StepProvider: 1 (team default) + number of selected personas.
+func (w WizardModel) teamProviderRowCount() int {
+	return 1 + len(w.selectedPersonaIndices())
+}
+
+// resolvedProviderForPersona returns the provider index that will back the
+// persona at w.personas[personaIdx]: explicit override if set, otherwise the
+// team default (selectedProvider).
+func (w WizardModel) resolvedProviderForPersona(personaIdx int) int {
+	if personaIdx < 0 || personaIdx >= len(w.personaProviderIdx) {
+		return w.selectedProvider
+	}
+	if v := w.personaProviderIdx[personaIdx]; v >= 0 && v < len(w.providers) {
+		return v
+	}
+	return w.selectedProvider
+}
+
+// renderTeamProviderRow renders a single row of the team-mode StepProvider:
+// either the team-default row (rowIdx 0) or a persona row (rowIdx 1..N).
+func (w WizardModel) renderTeamProviderRow(rowIdx int, label string, providerIdx int, inherits bool) string {
+	cursor := "  "
+	if w.cursor == rowIdx {
+		cursor = "> "
+	}
+	pe := w.providers[providerIdx]
+	color, ok := providerColors[pe.key]
+	if !ok {
+		color = accentColor
+	}
+	dot := lipgloss.NewStyle().Foreground(color).Render("●")
+	providerName := fmt.Sprintf("%s %s", pe.provider.Name, dot)
+	suffix := ""
+	if inherits {
+		suffix = lipgloss.NewStyle().Foreground(dimColor).Render(" (team default)")
+	}
+	return fmt.Sprintf("%s%-18s %s%s\n", cursor, label+":", providerName, suffix)
+}
+
+// nextAvailableProviderIdx returns the index of the next available provider
+// after `from` in the cycle direction (delta = +1 or -1). Returns `from`
+// unchanged if no other available provider exists.
+func (w WizardModel) nextAvailableProviderIdx(from, delta int) int {
+	n := len(w.providers)
+	if n == 0 {
+		return from
+	}
+	for step := 1; step <= n; step++ {
+		j := ((from+delta*step)%n + n) % n
+		if w.providers[j].available {
+			return j
+		}
+	}
+	return from
 }
 
 // resolvedBranch returns the actual branch name — either the new branch name
