@@ -64,6 +64,7 @@ type WizardResult struct {
 	Personas             []string // All selected persona keys (vibeflow sessions only). Used for multi-session spawning.
 	Provider             Provider
 	ProviderKey          string
+	PersonaProviders     map[string]string // Optional persona key → provider key override for team mode. Missing/empty value means inherit ProviderKey.
 	Branch               string
 	NewBranch            bool   // True if user chose to create a new branch.
 	WorktreeChoice       WorktreeChoice

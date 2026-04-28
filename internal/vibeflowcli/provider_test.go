@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -335,6 +336,133 @@ func TestIsExecutable(t *testing.T) {
 	t.Run("missing file", func(t *testing.T) {
 		if isExecutable(filepath.Join(dir, "nope")) {
 			t.Error("missing file should not be executable")
+		}
+	})
+}
+
+func TestResolvePersonaProvider(t *testing.T) {
+	// Real registry with two installed providers (sh always exists on POSIX
+	// and is what the existing TestProviderRegistry_IsAvailable suite uses)
+	// and one configured-but-uninstalled provider.
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"claude": {Name: "Claude", Binary: "sh"},
+			"qwen":   {Name: "Qwen", Binary: "sh"},
+			"cursor": {Name: "Cursor", Binary: "this-binary-does-not-exist-xyz-123"},
+		},
+	}
+	reg := NewProviderRegistry(cfg)
+	defaultProvider, _ := reg.Get("claude")
+
+	t.Run("inherit when no overrides set", func(t *testing.T) {
+		p, key, err := ResolvePersonaProvider("developer", nil, "claude", defaultProvider, reg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if key != "claude" || p.Name != "Claude" {
+			t.Errorf("got (%s, %s), want (claude, Claude)", key, p.Name)
+		}
+	})
+
+	t.Run("inherit when persona not in overrides map", func(t *testing.T) {
+		overrides := map[string]string{"qa_lead": "qwen"}
+		p, key, err := ResolvePersonaProvider("developer", overrides, "claude", defaultProvider, reg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if key != "claude" || p.Name != "Claude" {
+			t.Errorf("got (%s, %s), want (claude, Claude)", key, p.Name)
+		}
+	})
+
+	t.Run("inherit when persona override is empty string", func(t *testing.T) {
+		overrides := map[string]string{"developer": ""}
+		p, key, err := ResolvePersonaProvider("developer", overrides, "claude", defaultProvider, reg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if key != "claude" || p.Name != "Claude" {
+			t.Errorf("got (%s, %s), want (claude, Claude)", key, p.Name)
+		}
+	})
+
+	t.Run("explicit override to a different installed provider", func(t *testing.T) {
+		overrides := map[string]string{"developer": "qwen"}
+		p, key, err := ResolvePersonaProvider("developer", overrides, "claude", defaultProvider, reg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if key != "qwen" || p.Name != "Qwen" {
+			t.Errorf("got (%s, %s), want (qwen, Qwen)", key, p.Name)
+		}
+	})
+
+	t.Run("override matching default key returns default without registry lookup", func(t *testing.T) {
+		// Even if the registry lookup would succeed, this short-circuit avoids
+		// a needless IsAvailable check and is the common no-op case when the
+		// wizard writes the team default into PersonaProviders.
+		overrides := map[string]string{"developer": "claude"}
+		p, key, err := ResolvePersonaProvider("developer", overrides, "claude", defaultProvider, reg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if key != "claude" || p.Name != "Claude" {
+			t.Errorf("got (%s, %s), want (claude, Claude)", key, p.Name)
+		}
+	})
+
+	t.Run("override referencing unknown provider returns error", func(t *testing.T) {
+		overrides := map[string]string{"developer": "ghost"}
+		_, _, err := ResolvePersonaProvider("developer", overrides, "claude", defaultProvider, reg)
+		if err == nil {
+			t.Fatal("expected error for unknown provider, got nil")
+		}
+		if !strings.Contains(err.Error(), "ghost") || !strings.Contains(err.Error(), "developer") {
+			t.Errorf("error %q should name both provider and persona", err.Error())
+		}
+	})
+
+	t.Run("override referencing uninstalled provider returns error", func(t *testing.T) {
+		overrides := map[string]string{"qa_lead": "cursor"}
+		_, _, err := ResolvePersonaProvider("qa_lead", overrides, "claude", defaultProvider, reg)
+		if err == nil {
+			t.Fatal("expected error for uninstalled provider, got nil")
+		}
+		if !strings.Contains(err.Error(), "not installed") {
+			t.Errorf("error %q should mention 'not installed'", err.Error())
+		}
+	})
+
+	t.Run("nil registry with non-default override returns error", func(t *testing.T) {
+		overrides := map[string]string{"developer": "qwen"}
+		_, _, err := ResolvePersonaProvider("developer", overrides, "claude", defaultProvider, nil)
+		if err == nil {
+			t.Fatal("expected error for nil registry, got nil")
+		}
+	})
+
+	t.Run("multi-persona team scenario — full resolution sweep", func(t *testing.T) {
+		// AC subitems (a) all-inherit, (b) one-override-rest-inherit, (c) all-override
+		// exercised together in the realistic shape that launchFromWizard sees.
+		personas := []string{"developer", "qa_lead", "architect"}
+		overrides := map[string]string{
+			"developer": "qwen",   // explicit override
+			"qa_lead":   "",       // empty → inherit
+			// architect: missing key → inherit
+		}
+		want := map[string]string{
+			"developer": "qwen",
+			"qa_lead":   "claude",
+			"architect": "claude",
+		}
+		for _, persona := range personas {
+			_, key, err := ResolvePersonaProvider(persona, overrides, "claude", defaultProvider, reg)
+			if err != nil {
+				t.Fatalf("persona %s: unexpected error: %v", persona, err)
+			}
+			if key != want[persona] {
+				t.Errorf("persona %s: got %q, want %q", persona, key, want[persona])
+			}
 		}
 	})
 }

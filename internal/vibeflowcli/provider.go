@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,6 +179,35 @@ func checkBinaryAvailable(binary string) bool {
 	}
 	_, err := exec.LookPath(binary)
 	return err == nil
+}
+
+// ResolvePersonaProvider returns the provider that should back a given persona
+// in a multi-persona team launch.
+//
+// Resolution order (top wins):
+//  1. overrides[persona] — when set to a non-empty key, that provider is used.
+//  2. defaultProvider — when no override applies, the team-level pick is used.
+//
+// An override that names a provider missing from the registry, or whose binary
+// is not installed on PATH, returns an actionable error so the launch can
+// surface the failure instead of silently falling back. The default provider
+// is trusted (the wizard has already validated it is installed).
+func ResolvePersonaProvider(persona string, overrides map[string]string, defaultKey string, defaultProvider Provider, registry *ProviderRegistry) (Provider, string, error) {
+	key, ok := overrides[persona]
+	if !ok || key == "" || key == defaultKey {
+		return defaultProvider, defaultKey, nil
+	}
+	if registry == nil {
+		return Provider{}, "", fmt.Errorf("provider %q for persona %q not found: registry is nil", key, persona)
+	}
+	p, exists := registry.Get(key)
+	if !exists {
+		return Provider{}, "", fmt.Errorf("provider %q for persona %q is not configured", key, persona)
+	}
+	if !registry.IsAvailable(key) {
+		return Provider{}, "", fmt.Errorf("provider %q for persona %q is not installed", key, persona)
+	}
+	return p, key, nil
 }
 
 // isExecutable reports whether the file at path exists and has at least one

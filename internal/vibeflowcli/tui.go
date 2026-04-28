@@ -1024,6 +1024,19 @@ func (m Model) launchFromWizard(result WizardResult) tea.Msg {
 		r := result
 		r.Persona = persona
 		r.WorkDir = workDir
+		// Resolve per-persona provider override (team mode). Single-persona
+		// flow above intentionally bypasses this — solo launches use
+		// result.Provider directly.
+		provider, providerKey, err := ResolvePersonaProvider(persona, result.PersonaProviders, result.ProviderKey, result.Provider, m.registry)
+		if err != nil {
+			m.logger.Error("resolve provider for persona %s: %v", persona, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		r.Provider = provider
+		r.ProviderKey = providerKey
 		if rID, ok := reuseIDs[persona]; ok {
 			r.ReuseSessionID = rID
 		}
