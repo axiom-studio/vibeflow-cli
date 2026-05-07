@@ -31,6 +31,45 @@ When enabled in config or the wizard, the CLI can set **per-provider environment
 
 **Qwen Code** uses the OpenAI-compatible env vars (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) — same wiring as Codex and Gemini. Note that the `qwen` CLI auto-loads `.env` files from the current working directory and `~/.qwen/.env` at startup. If you have `OPENAI_BASE_URL` set in either of those, it can interact with the value the wizard sets for the tmux process: process-level env normally takes precedence, but users running mixed direct/gateway setups should double-check that the gateway is actually being used (e.g. by checking the request URL in the gateway server logs). Qwen also supports DashScope, Anthropic, Gemini, Ollama, vLLM, and BailianCoding auth modes for direct use; these are not touched by the gateway wiring — you own the corresponding env vars (`DASHSCOPE_API_KEY` etc.).
 
+## Qwen launch config (API-key mode)
+
+When you launch a qwen session **without** the LLM Gateway, the wizard inserts a dedicated **Qwen launch config** step that captures the OpenAI-compatible launch environment for the tmux process:
+
+| Env var | Source |
+|---|---|
+| `OPENAI_API_KEY` | `StepEnvToken` (saved → shell → prompt). Persists in `cfg.SavedEnvVars`. |
+| `OPENAI_BASE_URL` | `StepQwenLaunchConfig` vendor preset, editable. |
+| `OPENAI_MODEL` | `StepQwenLaunchConfig` vendor preset, editable. |
+
+The step is **skipped** for any other provider, and skipped for qwen when the LLM Gateway is enabled (the gateway provides its own `OPENAI_API_KEY` + `OPENAI_BASE_URL`).
+
+### Vendor presets
+
+| Vendor | Model | Base URL |
+|---|---|---|
+| OpenAI | `gpt-4o-mini` | `https://api.openai.com/v1` |
+| Qwen (DashScope) | `qwen3-coder-plus` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| z.ai | `glm-4.6` | `https://api.z.ai/api/paas/v4` |
+| Custom | _(empty)_ | _(empty)_ |
+
+**Behavior**
+
+- `j` / `k` cycles vendor rows. The model + base URL inputs auto-fill from the focused vendor's preset _until you start typing_ — once edited, vendor row navigation preserves your input.
+- Press `r` on any row to reset both inputs to the current vendor's preset (clears the "edited" flag).
+- Move the cursor to the **Model** or **Base URL** rows below the vendor list to type custom values.
+- Pressing `enter` writes `OPENAI_BASE_URL` and `OPENAI_MODEL` to the launch env block. Empty inputs (e.g. on the **Custom** row before the user types) are not written, so they will not override values inherited from `~/.qwen/.env`.
+
+### Launch example (DashScope)
+
+1. Run `vibeflow launch` and pick your working directory.
+2. Pick **Vanilla** session type.
+3. Pick **Qwen Code** in the provider step.
+4. The env-token step prompts for `OPENAI_API_KEY` (saved on first run; subsequent launches skip the prompt).
+5. The new **Qwen launch config** step opens. Highlight **Qwen (DashScope)** — both inputs auto-fill with `qwen3-coder-plus` and `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`. Press `enter`.
+6. Pick a branch / worktree / permissions, confirm, and the tmux session starts with `qwen --yolo` (when skip-permissions is selected) and the three OpenAI-compatible env vars exported.
+
+The **LLM Gateway** path bypasses this step; `BuildLLMGatewayEnv("qwen", …)` injects the gateway-derived `OPENAI_API_KEY` and `OPENAI_BASE_URL` instead.
+
 ## Custom providers
 
 You can add entries under `providers:` in `config.yaml` with:
