@@ -42,6 +42,11 @@ const (
 	StepWorktree
 	StepPermissions
 	StepConfirm
+	// StepQwenLaunchConfig is appended (not inserted) so the breadcrumb's
+	// WizardStep(i) display-index mapping at View() stays correct. The flow
+	// position is between StepLLMGateway and StepBranch when active — see
+	// postProviderConfigStep() — but the iota index is end-of-list.
+	StepQwenLaunchConfig
 )
 
 // WorktreeChoice represents the user's worktree selection.
@@ -160,6 +165,13 @@ type WizardModel struct {
 	llmGatewayOpts    []string // Display options for gateway step.
 	selectedLLMGateway int     // 0 = Yes, 1 = No.
 	llmGatewayEnabled bool     // True if user chose to route through gateway.
+
+	// Qwen launch config (StepQwenLaunchConfig — qwen + non-gateway flow only).
+	qwenVendorIdx    int    // index into qwenLaunchPresets()
+	qwenModelInput   string // OPENAI_MODEL value, auto-filled from preset, editable.
+	qwenBaseURLInput string // OPENAI_BASE_URL value, auto-filled from preset, editable.
+	qwenUserEdited   bool   // True if user has typed in either input since last vendor change/reset.
+	qwenInitialized  bool   // True once applyQwenPreset has seeded inputs at least once.
 
 	// Branch auto-detection.
 	currentBranch     string // Current HEAD branch for auto-positioning cursor.
@@ -616,9 +628,13 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.editingBinary = false
 						// Update the provider entry to reflect availability.
 						w.providers[w.selectedProvider].available = true
-						w.step = StepBranch
-						w.cursor = 0
-						w.cursorToCurrentBranch()
+						if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
+							w.enterQwenLaunchConfig()
+						} else {
+							w.step = StepBranch
+							w.cursor = 0
+							w.cursorToCurrentBranch()
+						}
 					}
 				}
 			case "esc":
@@ -846,10 +862,13 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.config.SavedEnvVars[w.envTokenVarName] = w.envTokenValue
 						_ = SaveConfig(w.config, ConfigPath())
 					}
-					// For vibeflow sessions, show gateway step; otherwise skip to branch.
+					// For vibeflow sessions, show gateway step; otherwise jump to
+					// the qwen launch config (qwen-only) or directly to branch.
 					if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
 						w.step = StepLLMGateway
 						w.cursor = w.selectedLLMGateway
+					} else if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
+						w.enterQwenLaunchConfig()
 					} else {
 						w.step = StepBranch
 						w.cursor = 0
@@ -920,6 +939,75 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 			}
 			return w, nil
+		}
+
+		// StepQwenLaunchConfig: combined vendor radio + two text inputs in one
+		// navigable list. Cursor 0..N-1 is a vendor row; cursor N is the model
+		// input row; cursor N+1 is the base URL input row. Vendor row navigation
+		// auto-fills inputs unless the user has edited them (`r` resets).
+		if w.step == StepQwenLaunchConfig {
+			presetCount := len(qwenLaunchPresets())
+			modelRowIdx := presetCount
+			baseURLRowIdx := presetCount + 1
+			isModelRow := w.cursor == modelRowIdx
+			isBaseURLRow := w.cursor == baseURLRowIdx
+			isInputRow := isModelRow || isBaseURLRow
+			switch msg.String() {
+			case "enter":
+				return w.advance()
+			case "esc":
+				return w.goBack()
+			case "up", "k":
+				if w.cursor > 0 {
+					w.cursor--
+				}
+				if w.cursor < presetCount {
+					w.qwenVendorIdx = w.cursor
+					if !w.qwenUserEdited {
+						w.applyQwenPreset()
+					}
+				}
+				return w, nil
+			case "down", "j":
+				if w.cursor < baseURLRowIdx {
+					w.cursor++
+				}
+				if w.cursor < presetCount {
+					w.qwenVendorIdx = w.cursor
+					if !w.qwenUserEdited {
+						w.applyQwenPreset()
+					}
+				}
+				return w, nil
+			case "r":
+				// Reset both inputs to the current vendor preset and clear the
+				// user-edited flag. Works from any row in this step.
+				w.applyQwenPreset()
+				return w, nil
+			case "backspace":
+				if isModelRow && len(w.qwenModelInput) > 0 {
+					w.qwenModelInput = w.qwenModelInput[:len(w.qwenModelInput)-1]
+					w.qwenUserEdited = true
+				} else if isBaseURLRow && len(w.qwenBaseURLInput) > 0 {
+					w.qwenBaseURLInput = w.qwenBaseURLInput[:len(w.qwenBaseURLInput)-1]
+					w.qwenUserEdited = true
+				}
+				return w, nil
+			default:
+				if isInputRow && msg.Type == tea.KeyRunes {
+					for _, ch := range msg.Runes {
+						if ch >= ' ' && ch <= '~' {
+							if isModelRow {
+								w.qwenModelInput += string(ch)
+							} else if isBaseURLRow {
+								w.qwenBaseURLInput += string(ch)
+							}
+							w.qwenUserEdited = true
+						}
+					}
+				}
+				return w, nil
+			}
 		}
 
 		switch msg.String() {
@@ -1286,6 +1374,56 @@ func (w WizardModel) View() string {
 			b.WriteString(fmt.Sprintf("%s%s\n", cursor, opt))
 		}
 
+	case StepQwenLaunchConfig:
+		presets := qwenLaunchPresets()
+		modelRowIdx := len(presets)
+		baseURLRowIdx := modelRowIdx + 1
+		dim := lipgloss.NewStyle().Foreground(dimColor)
+		accent := lipgloss.NewStyle().Foreground(accentColor)
+		cursorMark := accent.Render("█")
+
+		b.WriteString("Qwen launch config:\n")
+		b.WriteString(dim.Render("(API-key mode — sets OPENAI_BASE_URL + OPENAI_MODEL on the tmux session; OPENAI_API_KEY is captured by the env step)"))
+		b.WriteString("\n\nVendor:\n")
+		for i, p := range presets {
+			marker := "  "
+			if i == w.cursor {
+				marker = "> "
+			}
+			selected := "( )"
+			if i == w.qwenVendorIdx {
+				selected = "(*)"
+			}
+			b.WriteString(fmt.Sprintf("%s%s %s\n", marker, selected, p.label))
+		}
+		b.WriteString("\n")
+
+		modelLine := fmt.Sprintf("  Model:    %s", w.qwenModelInput)
+		baseLine := fmt.Sprintf("  Base URL: %s", w.qwenBaseURLInput)
+		if w.cursor == modelRowIdx {
+			b.WriteString("> " + strings.TrimPrefix(modelLine, "  "))
+			b.WriteString(cursorMark)
+			b.WriteString("\n")
+			b.WriteString(dim.Render(baseLine))
+			b.WriteString("\n")
+		} else if w.cursor == baseURLRowIdx {
+			b.WriteString(dim.Render(modelLine))
+			b.WriteString("\n")
+			b.WriteString("> " + strings.TrimPrefix(baseLine, "  "))
+			b.WriteString(cursorMark)
+			b.WriteString("\n")
+		} else {
+			b.WriteString(modelLine + "\n")
+			b.WriteString(baseLine + "\n")
+		}
+		b.WriteString("\n")
+		hint := "j/k: navigate  type to edit  r: reset to preset  enter: confirm  esc: back"
+		if w.qwenUserEdited {
+			hint = "j/k: navigate  type to edit  r: reset (overrides edits)  enter: confirm  esc: back"
+		}
+		b.WriteString(helpStyle.Render(hint))
+		return b.String()
+
 	case StepBranch:
 		if w.editingBranch || w.editingBranchBase {
 			dim := lipgloss.NewStyle().Foreground(dimColor)
@@ -1512,6 +1650,21 @@ func (w WizardModel) View() string {
 			}
 			b.WriteString(fmt.Sprintf("  LLM Gateway:   %s\n", gw))
 		}
+		// Qwen launch config summary — only shown when the qwen step ran.
+		if pe.key == "qwen" && !w.llmGatewayEnabled {
+			presets := qwenLaunchPresets()
+			vendorLabel := "Custom"
+			if w.qwenVendorIdx >= 0 && w.qwenVendorIdx < len(presets) {
+				vendorLabel = presets[w.qwenVendorIdx].label
+			}
+			b.WriteString(fmt.Sprintf("  Qwen Vendor:   %s\n", vendorLabel))
+			if w.qwenModelInput != "" {
+				b.WriteString(fmt.Sprintf("  Qwen Model:    %s\n", w.qwenModelInput))
+			}
+			if w.qwenBaseURLInput != "" {
+				b.WriteString(fmt.Sprintf("  Qwen Base URL: %s\n", w.qwenBaseURLInput))
+			}
+		}
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("enter: create  esc: back"))
 		return b.String()
@@ -1547,6 +1700,8 @@ func (w WizardModel) listLen() int {
 		return 1
 	case StepLLMGateway:
 		return len(w.llmGatewayOpts)
+	case StepQwenLaunchConfig:
+		return len(qwenLaunchPresets()) + 2 // vendor rows + model input + base URL input
 	case StepBranch:
 		return len(w.filteredBranches)
 	case StepWorktree:
@@ -1652,10 +1807,13 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			return w, nil
 		}
 		w.envVars = env
-		// For vibeflow sessions with API token, show gateway step.
+		// For vibeflow sessions with API token, show gateway step. Otherwise
+		// advance to the qwen launch config (qwen-only) or directly to branch.
 		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
+		} else if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
+			w.enterQwenLaunchConfig()
 		} else {
 			w.step = StepBranch
 			w.cursor = 0
@@ -1669,13 +1827,36 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			w.config.LLMGatewayEnabled = w.llmGatewayEnabled
 			_ = SaveConfig(w.config, ConfigPath())
 		}
-		w.step = StepBranch
-		w.cursor = 0
-		w.cursorToCurrentBranch()
+		if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
+			w.enterQwenLaunchConfig()
+		} else {
+			w.step = StepBranch
+			w.cursor = 0
+			w.cursorToCurrentBranch()
+		}
 	case StepEnvToken:
 		// Re-enter editing if not already done.
 		w.editingEnvToken = true
 		return w, nil
+	case StepQwenLaunchConfig:
+		// Commit the qwen launch values into the env block that the result
+		// build later carries through to the tmux session.
+		if w.envVars == nil {
+			w.envVars = make(map[string]string)
+		}
+		if w.qwenBaseURLInput != "" {
+			w.envVars["OPENAI_BASE_URL"] = w.qwenBaseURLInput
+		} else {
+			delete(w.envVars, "OPENAI_BASE_URL")
+		}
+		if w.qwenModelInput != "" {
+			w.envVars["OPENAI_MODEL"] = w.qwenModelInput
+		} else {
+			delete(w.envVars, "OPENAI_MODEL")
+		}
+		w.step = StepBranch
+		w.cursor = 0
+		w.cursorToCurrentBranch()
 	case StepBranch:
 		// Map cursor through filter to actual branch index.
 		if w.cursor >= len(w.filteredBranches) {
@@ -1956,7 +2137,20 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 			w.cancelled = true
 			return w, nil
 		}
-		// Go back to LLM gateway step if it was shown, else to provider.
+		// Reverse of advance(): qwen launch config first, then LLM gateway,
+		// else fall back to the provider step.
+		if w.postProviderConfigStep() == StepQwenLaunchConfig {
+			w.enterQwenLaunchConfig()
+		} else if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+			w.step = StepLLMGateway
+			w.cursor = w.selectedLLMGateway
+		} else {
+			w.step = StepProvider
+			w.cursor = w.selectedProvider
+		}
+	case StepQwenLaunchConfig:
+		// Reverse of advance(): if the user came from the gateway step, return
+		// there; otherwise jump back to the provider step.
 		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
@@ -2206,4 +2400,63 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// qwenLaunchPreset is one row in the qwen launch-config vendor table.
+type qwenLaunchPreset struct {
+	label   string // human-readable vendor name shown in the wizard radio
+	model   string // OPENAI_MODEL value to seed when this row is selected
+	baseURL string // OPENAI_BASE_URL value to seed when this row is selected
+}
+
+// qwenLaunchPresets returns the vendor presets shown in StepQwenLaunchConfig.
+// The "Custom" row has empty fields so the user enters both manually.
+func qwenLaunchPresets() []qwenLaunchPreset {
+	return []qwenLaunchPreset{
+		{label: "OpenAI", model: "gpt-4o-mini", baseURL: "https://api.openai.com/v1"},
+		{label: "Qwen (DashScope)", model: "qwen3-coder-plus", baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"},
+		{label: "z.ai", model: "glm-4.6", baseURL: "https://api.z.ai/api/coding/paas/v4"},
+		{label: "Custom", model: "", baseURL: ""},
+	}
+}
+
+// applyQwenPreset overwrites qwenModelInput and qwenBaseURLInput with the
+// preset values for w.qwenVendorIdx and clears qwenUserEdited. Called on
+// vendor row navigation (only when !qwenUserEdited) and on the 'r' reset key.
+func (w *WizardModel) applyQwenPreset() {
+	presets := qwenLaunchPresets()
+	if w.qwenVendorIdx < 0 || w.qwenVendorIdx >= len(presets) {
+		w.qwenVendorIdx = 0
+	}
+	p := presets[w.qwenVendorIdx]
+	w.qwenModelInput = p.model
+	w.qwenBaseURLInput = p.baseURL
+	w.qwenUserEdited = false
+}
+
+// postProviderConfigStep returns the wizard step that should follow the
+// env-token / LLM-gateway flow. Inserts StepQwenLaunchConfig when the
+// selected provider is "qwen" AND the LLM gateway is NOT enabled (gateway
+// supplies its own OPENAI_BASE_URL/API_KEY, making the step redundant).
+func (w WizardModel) postProviderConfigStep() WizardStep {
+	if w.selectedProvider < 0 || w.selectedProvider >= len(w.providers) {
+		return StepBranch
+	}
+	pe := w.providers[w.selectedProvider]
+	if pe.key == "qwen" && !w.llmGatewayEnabled {
+		return StepQwenLaunchConfig
+	}
+	return StepBranch
+}
+
+// enterQwenLaunchConfig is called when transitioning into the step. Seeds
+// the inputs from the current vendor preset on first entry; preserves the
+// user's edits on re-entry.
+func (w *WizardModel) enterQwenLaunchConfig() {
+	w.step = StepQwenLaunchConfig
+	w.cursor = w.qwenVendorIdx
+	if !w.qwenInitialized {
+		w.qwenInitialized = true
+		w.applyQwenPreset()
+	}
 }
