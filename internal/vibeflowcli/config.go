@@ -478,6 +478,22 @@ func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]str
 			return env, ""
 		}
 		return env, geminiKey
+	case "qwen":
+		// Qwen Code is OpenAI-API-compatible — it reads OPENAI_API_KEY from the
+		// process env. The vendor / model / base URL are captured separately by
+		// StepQwenLaunchConfig and flow through WizardResult.EnvVars.
+		const qwenKey = "OPENAI_API_KEY"
+		if cfg.SavedEnvVars != nil {
+			if val, ok := cfg.SavedEnvVars[qwenKey]; ok && val != "" {
+				env[qwenKey] = cleanEnvToken(val)
+				return env, ""
+			}
+		}
+		if val := os.Getenv(qwenKey); val != "" {
+			env[qwenKey] = cleanEnvToken(val)
+			return env, ""
+		}
+		return env, qwenKey
 	default:
 		return env, ""
 	}
