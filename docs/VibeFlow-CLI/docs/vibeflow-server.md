@@ -14,18 +14,26 @@ Defaults target **`https://cloud.axiomstudio.ai`**. Self-hosted or enterprise UR
 
 When creating a VibeFlow session, you assign a **persona** so multiple agents can work in parallel without sharing one session id. Typical built-in personas include:
 
-| Key | Label |
-|-----|--------|
-| `developer` | Developer |
-| `architect` | Architect |
-| `ux_designer` | UX Designer |
-| `qa_lead` | QA Lead |
-| `security_lead` | Security Lead |
-| `product_manager` | Product Manager |
-| `project_manager` | Project Manager |
-| `customer` | Customer |
+| Key | Label | Group |
+|-----|--------|-------|
+| `developer` | Developer | Code agent |
+| `principal_engineer` | Principal Engineer | Code agent |
+| `architect` | Architect | Code agent |
+| `ux_designer` | UX Designer | Review / support |
+| `qa_lead` | QA Lead | Review / support |
+| `security_lead` | Security Lead | Review / support |
+| `product_manager` | Product Manager | Review / support |
+| `project_manager` | Project Manager | Review / support |
+| `customer` | Customer | Review / support |
 
 Each persona uses its own **`.vibeflow-session-<persona>`** file when applicable.
+
+### Persona groups
+
+The wizard splits personas into two groups:
+
+- **Code agents** (`developer`, `principal_engineer`, `architect`) — mutually exclusive **per branch**. The wizard renders them as radio buttons because the server enforces a single code-modifying persona per branch (the branch lock). Pick one.
+- **Review / support** (`ux_designer`, `qa_lead`, `security_lead`, `product_manager`, `project_manager`, `customer`) — free multi-select checkboxes; multiple can run in parallel against the same branch.
 
 ## Autonomous operation
 
