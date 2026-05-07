@@ -9,6 +9,13 @@ Worktrees let each agent work on a **separate checkout** (often a different bran
 
 Configuration (`cleanup_on_kill`, `auto_create`, `base_dir`) controls whether worktrees are created automatically and whether you are prompted to delete them when a session ends.
 
+### Worktree safety on kill / branch switch
+
+Two protections guard against accidental data loss when a session ends or its branch is switched:
+
+- **Shared worktree protection** — Before deleting a worktree, the CLI scans the session store for sibling sessions still using the same path (e.g. a multi-persona team where another persona is still running there). If any are found, the worktree is preserved regardless of `cleanup_on_kill`.
+- **Dirty worktree protection** — A worktree with uncommitted changes (modified, staged, or untracked files) is never force-removed, even when `cleanup_on_kill: always`. Commit, stash, or remove the worktree manually first.
+
 ## Session files
 
 VibeFlow-aware sessions write a small marker file in the working directory so the tool can detect **stale** vs **active** usage:

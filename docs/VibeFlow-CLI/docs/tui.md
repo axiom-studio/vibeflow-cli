@@ -13,6 +13,7 @@ Running `vibeflow` with no subcommand starts the **Bubble Tea** full-screen term
 - Navigate with **`j`** / **`k`** (or arrow keys where supported).
 - **`Enter`** — Attach to the selected session or toggle a collapsed group (grouped view).
 - **`n`** — New session (opens the wizard).
+- **`b`** — **Quick branch switch** for the selected running session. Skips the full wizard; only re-runs the Branch → Worktree steps and inherits project / persona / provider / permissions from the current session. Refuses to switch in place when the working tree is dirty so uncommitted changes cannot be lost.
 - **`d`** — Delete the selected session (and optional worktree cleanup per config).
 - **`D`** — Detach from the TUI (sessions keep running).
 - **`r`** — Retry recovery for a failed session or refresh the list.
