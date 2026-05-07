@@ -497,6 +497,61 @@ func TestResolveProviderEnvVars_GeminiCleansToken(t *testing.T) {
 	}
 }
 
+func TestResolveProviderEnvVars_QwenFromSavedConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "shell-should-be-ignored")
+	cfg := DefaultConfig()
+	cfg.SavedEnvVars = map[string]string{
+		"OPENAI_API_KEY": "saved-qwen-key",
+	}
+
+	env, missing := ResolveProviderEnvVars(cfg, "qwen")
+	if missing != "" {
+		t.Errorf("expected no missing var, got %q", missing)
+	}
+	if env["OPENAI_API_KEY"] != "saved-qwen-key" {
+		t.Errorf("OPENAI_API_KEY = %q, want saved-qwen-key (saved must win over shell)", env["OPENAI_API_KEY"])
+	}
+}
+
+func TestResolveProviderEnvVars_QwenFromEnv(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("OPENAI_API_KEY", "env-qwen-key")
+
+	env, missing := ResolveProviderEnvVars(cfg, "qwen")
+	if missing != "" {
+		t.Errorf("expected no missing var, got %q", missing)
+	}
+	if env["OPENAI_API_KEY"] != "env-qwen-key" {
+		t.Errorf("OPENAI_API_KEY = %q, want env-qwen-key", env["OPENAI_API_KEY"])
+	}
+}
+
+func TestResolveProviderEnvVars_QwenMissing(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("OPENAI_API_KEY", "")
+	os.Unsetenv("OPENAI_API_KEY")
+
+	env, missing := ResolveProviderEnvVars(cfg, "qwen")
+	if missing != "OPENAI_API_KEY" {
+		t.Errorf("expected OPENAI_API_KEY missing, got %q", missing)
+	}
+	if len(env) != 0 {
+		t.Errorf("env should be empty when missing, got %v", env)
+	}
+}
+
+func TestResolveProviderEnvVars_QwenCleansToken(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.SavedEnvVars = map[string]string{
+		"OPENAI_API_KEY": "[\"wrapped-qwen-key\"]",
+	}
+
+	env, _ := ResolveProviderEnvVars(cfg, "qwen")
+	if env["OPENAI_API_KEY"] != "wrapped-qwen-key" {
+		t.Errorf("expected cleaned key, got %q", env["OPENAI_API_KEY"])
+	}
+}
+
 func TestMigrateProviders_SyncsLaunchTemplate(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")

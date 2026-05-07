@@ -18,6 +18,8 @@ package vibeflowcli
 
 import (
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestNewWizardModel_PreselectsDeveloper(t *testing.T) {
@@ -658,5 +660,246 @@ func TestIsCodeAgentPersona(t *testing.T) {
 		if got := isCodeAgentPersona(tt.key); got != tt.want {
 			t.Errorf("isCodeAgentPersona(%q) = %v, want %v", tt.key, got, tt.want)
 		}
+	}
+}
+
+// qwenWizardFixture builds a minimal WizardModel sitting at StepQwenLaunchConfig
+// with the qwen provider pre-selected. Used by the qwen-launch-config tests.
+func qwenWizardFixture(t *testing.T) WizardModel {
+	t.Helper()
+	cfg := &Config{Providers: map[string]Provider{
+		"qwen": {Name: "Qwen Code", Binary: "sh"},
+	}}
+	reg := NewProviderRegistry(cfg)
+	wm := NewWizardModel(reg, ".", nil, nil, "", nil, cfg)
+	wm.selectedSessionType = 0 // vanilla — gateway path is irrelevant here
+	for i, pe := range wm.providers {
+		if pe.key == "qwen" {
+			wm.selectedProvider = i
+		}
+	}
+	if len(wm.branches) < 2 {
+		wm.branches = []string{"[+] Create new branch", "main"}
+		wm.filteredBranches = []int{0, 1}
+	}
+	wm.enterQwenLaunchConfig()
+	return wm
+}
+
+func TestQwenLaunchPresets_Shape(t *testing.T) {
+	presets := qwenLaunchPresets()
+	if len(presets) < 2 {
+		t.Fatalf("expected at least 2 presets, got %d", len(presets))
+	}
+	last := presets[len(presets)-1]
+	if last.label != "Custom" {
+		t.Errorf("expected last preset to be 'Custom', got %q", last.label)
+	}
+	if last.model != "" || last.baseURL != "" {
+		t.Errorf("Custom preset must have empty model + baseURL, got %+v", last)
+	}
+	for i, p := range presets {
+		if p.label == "" {
+			t.Errorf("preset %d has empty label", i)
+		}
+		if p.label != "Custom" && p.baseURL == "" {
+			t.Errorf("preset %d (%s) has empty baseURL", i, p.label)
+		}
+	}
+}
+
+func TestApplyQwenPreset_FillsFromVendor(t *testing.T) {
+	w := WizardModel{qwenVendorIdx: 0, qwenUserEdited: true}
+	presets := qwenLaunchPresets()
+	w.applyQwenPreset()
+	if w.qwenModelInput != presets[0].model {
+		t.Errorf("model = %q, want %q", w.qwenModelInput, presets[0].model)
+	}
+	if w.qwenBaseURLInput != presets[0].baseURL {
+		t.Errorf("baseURL = %q, want %q", w.qwenBaseURLInput, presets[0].baseURL)
+	}
+	if w.qwenUserEdited {
+		t.Error("qwenUserEdited should be cleared after applyQwenPreset")
+	}
+}
+
+func TestApplyQwenPreset_OutOfRangeResetsToZero(t *testing.T) {
+	w := WizardModel{qwenVendorIdx: 999}
+	w.applyQwenPreset()
+	if w.qwenVendorIdx != 0 {
+		t.Errorf("expected qwenVendorIdx clamped to 0, got %d", w.qwenVendorIdx)
+	}
+}
+
+func TestPostProviderConfigStep_RoutingMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		gateway bool
+		want    WizardStep
+	}{
+		{"qwen_no_gateway_routes_to_qwen_step", "qwen", false, StepQwenLaunchConfig},
+		{"qwen_with_gateway_skips_to_branch", "qwen", true, StepBranch},
+		{"claude_skips_qwen_step", "claude", false, StepBranch},
+		{"codex_skips_qwen_step", "codex", false, StepBranch},
+		{"gemini_skips_qwen_step", "gemini", false, StepBranch},
+		{"cursor_skips_qwen_step", "cursor", false, StepBranch},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := WizardModel{
+				providers: []providerEntry{
+					{key: "claude", provider: Provider{}},
+					{key: "codex", provider: Provider{}},
+					{key: "cursor", provider: Provider{}},
+					{key: "gemini", provider: Provider{}},
+					{key: "qwen", provider: Provider{}},
+				},
+				llmGatewayEnabled: tt.gateway,
+			}
+			for i, pe := range w.providers {
+				if pe.key == tt.key {
+					w.selectedProvider = i
+				}
+			}
+			if got := w.postProviderConfigStep(); got != tt.want {
+				t.Errorf("postProviderConfigStep() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnterQwenLaunchConfig_FirstEntryAppliesPreset(t *testing.T) {
+	w := WizardModel{}
+	if w.qwenInitialized {
+		t.Fatal("fresh WizardModel should have qwenInitialized=false")
+	}
+	w.enterQwenLaunchConfig()
+	if !w.qwenInitialized {
+		t.Error("first entry must mark qwenInitialized=true")
+	}
+	presets := qwenLaunchPresets()
+	if w.qwenModelInput != presets[0].model {
+		t.Errorf("first entry should seed model from preset[0]: got %q, want %q", w.qwenModelInput, presets[0].model)
+	}
+	if w.step != StepQwenLaunchConfig {
+		t.Errorf("step = %v, want StepQwenLaunchConfig", w.step)
+	}
+	if w.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 (first vendor row)", w.cursor)
+	}
+}
+
+func TestEnterQwenLaunchConfig_PreservesEditsOnReentry(t *testing.T) {
+	w := WizardModel{
+		qwenInitialized:  true,
+		qwenVendorIdx:    1,
+		qwenModelInput:   "user-typed-model",
+		qwenBaseURLInput: "https://user-typed.example.com",
+		qwenUserEdited:   true,
+	}
+	w.enterQwenLaunchConfig()
+	if w.qwenModelInput != "user-typed-model" {
+		t.Errorf("re-entry must preserve user model edit, got %q", w.qwenModelInput)
+	}
+	if w.qwenBaseURLInput != "https://user-typed.example.com" {
+		t.Errorf("re-entry must preserve user baseURL edit, got %q", w.qwenBaseURLInput)
+	}
+}
+
+func TestWizardListLen_QwenLaunchConfig(t *testing.T) {
+	w := WizardModel{step: StepQwenLaunchConfig}
+	want := len(qwenLaunchPresets()) + 2
+	if got := w.listLen(); got != want {
+		t.Errorf("listLen() = %d, want %d", got, want)
+	}
+}
+
+func TestWizardAdvance_QwenLaunchConfig_PopulatesEnvVars(t *testing.T) {
+	wm := qwenWizardFixture(t)
+	// Set some user-entered values.
+	wm.qwenModelInput = "custom-model"
+	wm.qwenBaseURLInput = "https://custom.example.com/v1"
+	wm.qwenUserEdited = true
+
+	w2, _ := wm.advance()
+
+	if w2.envVars["OPENAI_BASE_URL"] != "https://custom.example.com/v1" {
+		t.Errorf("OPENAI_BASE_URL = %q, want https://custom.example.com/v1", w2.envVars["OPENAI_BASE_URL"])
+	}
+	if w2.envVars["OPENAI_MODEL"] != "custom-model" {
+		t.Errorf("OPENAI_MODEL = %q, want custom-model", w2.envVars["OPENAI_MODEL"])
+	}
+	if w2.step != StepBranch {
+		t.Errorf("after advance step = %v, want StepBranch", w2.step)
+	}
+}
+
+func TestWizardAdvance_QwenLaunchConfig_EmptyValuesAreElided(t *testing.T) {
+	wm := qwenWizardFixture(t)
+	// Pre-seed envVars with stale entries that should be stripped.
+	wm.envVars = map[string]string{
+		"OPENAI_BASE_URL": "stale",
+		"OPENAI_MODEL":    "stale",
+	}
+	// Custom preset → empty inputs.
+	wm.qwenVendorIdx = 3 // Custom (last preset)
+	wm.applyQwenPreset()
+
+	w2, _ := wm.advance()
+
+	if _, ok := w2.envVars["OPENAI_BASE_URL"]; ok {
+		t.Errorf("empty baseURL must be deleted from envVars, got %q", w2.envVars["OPENAI_BASE_URL"])
+	}
+	if _, ok := w2.envVars["OPENAI_MODEL"]; ok {
+		t.Errorf("empty model must be deleted from envVars, got %q", w2.envVars["OPENAI_MODEL"])
+	}
+}
+
+func TestWizardUpdate_QwenLaunchConfig_NavigationAutofillsUntilEdited(t *testing.T) {
+	wm := qwenWizardFixture(t)
+	presets := qwenLaunchPresets()
+	if len(presets) < 2 {
+		t.Skip("requires at least 2 presets")
+	}
+	// Initial state: cursor=0, vendor 0 preset applied.
+	if wm.qwenModelInput != presets[0].model {
+		t.Fatalf("init model = %q, want %q", wm.qwenModelInput, presets[0].model)
+	}
+	// Simulate j (down) to vendor row 1 — should auto-fill from preset[1].
+	w2, _ := wm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if w2.qwenModelInput != presets[1].model {
+		t.Errorf("after j to vendor 1: model = %q, want %q (autofill)", w2.qwenModelInput, presets[1].model)
+	}
+	if w2.qwenVendorIdx != 1 {
+		t.Errorf("qwenVendorIdx = %d, want 1", w2.qwenVendorIdx)
+	}
+
+	// Mark user-edited and navigate again — auto-fill should NOT happen.
+	w2.qwenUserEdited = true
+	w2.qwenModelInput = "user-typed"
+	w3, _ := w2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if w3.qwenModelInput != "user-typed" {
+		t.Errorf("vendor change after edit must preserve user input, got %q", w3.qwenModelInput)
+	}
+}
+
+func TestWizardUpdate_QwenLaunchConfig_ResetKeyClearsEdits(t *testing.T) {
+	wm := qwenWizardFixture(t)
+	wm.qwenUserEdited = true
+	wm.qwenModelInput = "user-typed"
+	wm.qwenBaseURLInput = "user-url"
+
+	w2, _ := wm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+
+	presets := qwenLaunchPresets()
+	if w2.qwenModelInput != presets[0].model {
+		t.Errorf("after r: model = %q, want %q", w2.qwenModelInput, presets[0].model)
+	}
+	if w2.qwenBaseURLInput != presets[0].baseURL {
+		t.Errorf("after r: baseURL = %q, want %q", w2.qwenBaseURLInput, presets[0].baseURL)
+	}
+	if w2.qwenUserEdited {
+		t.Error("after r: qwenUserEdited should be cleared")
 	}
 }
