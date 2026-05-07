@@ -2415,7 +2415,7 @@ func qwenLaunchPresets() []qwenLaunchPreset {
 	return []qwenLaunchPreset{
 		{label: "OpenAI", model: "gpt-4o-mini", baseURL: "https://api.openai.com/v1"},
 		{label: "Qwen (DashScope)", model: "qwen3-coder-plus", baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"},
-		{label: "z.ai", model: "glm-4.6", baseURL: "https://api.z.ai/api/coding/paas/v4"},
+		{label: "z.ai", model: "glm-4.6", baseURL: "https://api.z.ai/api/paas/v4"},
 		{label: "Custom", model: "", baseURL: ""},
 	}
 }
