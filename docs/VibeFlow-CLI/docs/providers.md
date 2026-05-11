@@ -52,7 +52,7 @@ The step is **skipped** for any other provider, and skipped for qwen when the LL
 |---|---|---|
 | OpenAI | `gpt-4o-mini` | `https://api.openai.com/v1` |
 | Qwen (DashScope) | `qwen3-coder-plus` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
-| z.ai | `glm-4.6` | `https://api.z.ai/api/paas/v4` |
+| z.ai | `glm-4.6` | `https://api.z.ai/api/coding/paas/v4` |
 | Custom | _(empty)_ | _(empty)_ |
 
 **Behavior**
