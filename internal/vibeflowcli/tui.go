@@ -1200,10 +1200,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	// Always append for vibeflow sessions — even if session_init failed, the
 	// agent has MCP access and will call session_init itself on startup.
 	if result.SessionType == "vibeflow" {
-		initPrompt := fmt.Sprintf(
-			"Initialize a vibeflow session for project %s with persona %q and follow the agent prompt.",
-			projectName, result.Persona,
-		)
+		initPrompt := BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona)
 		escaped := strings.ReplaceAll(initPrompt, "'", "'\\''")
 		switch provider {
 		case "gemini":
@@ -1304,6 +1301,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		SessionType:       result.SessionType,
 		SkipPermissions:   result.SkipPermissions,
 		LLMGatewayEnabled: result.LLMGatewayEnabled,
+		MCPToolName:       m.config.MCPToolName,
 		CreatedAt:         time.Now(),
 	}
 	if m.store != nil {
