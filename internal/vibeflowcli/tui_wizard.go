@@ -1270,9 +1270,17 @@ func (w WizardModel) View() string {
 				}
 			}
 			compact := PersonaCompactIcon(p.key)
+			// Pad each compact icon to a fixed 2-column display width so
+			// the displayName column lines up across rows. Without this,
+			// `Developer`'s 2-glyph "⟨⟩" icon (or its terminal fallback
+			// "()") shifts the first row's text right relative to single-
+			// glyph icons like `♛` or `◆` (issue #1982).
 			compactStyled := ""
 			if compact != "" {
-				compactStyled = lipgloss.NewStyle().Foreground(PersonaColor(p.key)).Render(compact) + " "
+				iconStyle := lipgloss.NewStyle().Foreground(PersonaColor(p.key)).Width(2)
+				compactStyled = iconStyle.Render(compact) + " "
+			} else {
+				compactStyled = "   " // 2-col icon slot + 1-col separator
 			}
 			desc := dim.Render(" — " + p.description)
 			leftLines = append(leftLines, fmt.Sprintf("%s%s %s%-16s%s", cursor, check, compactStyled, p.displayName, desc))
