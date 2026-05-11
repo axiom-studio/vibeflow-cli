@@ -23,7 +23,7 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | **OpenAI Codex CLI** | `codex` | `--yolo` | Positional argument |
 | **Google Gemini CLI** | `gemini` | `--yolo` | `-p` flag |
 | **Cursor Agent** | `agent` | `--yolo --approve-mcps` | Positional argument |
-| **Qwen Code** | `qwen` | `--yolo` | Positional argument |
+| **Qwen Code** | `qwen` | `--yolo` | `-i` flag (interactive after prompt) |
 
 All five agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
 
