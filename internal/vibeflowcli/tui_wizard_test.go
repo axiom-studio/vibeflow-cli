@@ -17,9 +17,11 @@
 package vibeflowcli
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestNewWizardModel_PreselectsDeveloper(t *testing.T) {
@@ -901,5 +903,68 @@ func TestWizardUpdate_QwenLaunchConfig_ResetKeyClearsEdits(t *testing.T) {
 	}
 	if w2.qwenUserEdited {
 		t.Error("after r: qwenUserEdited should be cleared")
+	}
+}
+
+// TestWizardStepTeam_PersonaRowsAlignConsistently is a regression test for
+// issue #1982: the first persona row (Developer) had extra indentation
+// because its 2-glyph "⟨⟩" compact icon takes a different display width
+// than the single-glyph icons used by the other personas. After the fix,
+// the displayName column must start at the same visual column on every
+// persona row regardless of which icon precedes it.
+func TestWizardStepTeam_PersonaRowsAlignConsistently(t *testing.T) {
+	cfg := DefaultConfig()
+	reg := NewProviderRegistry(cfg)
+	w := NewWizardModel(reg, ".", nil, nil, "", nil, cfg)
+	w.step = StepTeam
+	// Select every persona so every row appears in the rendered view.
+	for i := range w.personas {
+		w.selectedPersonas[i] = true
+	}
+
+	view := w.View()
+
+	// Pull out the lines that contain a checkbox/radio glyph followed by
+	// a persona displayName. Section headers (───), counts, and the
+	// right-column icon preview are skipped.
+	var personaLines []string
+	for _, raw := range strings.Split(view, "\n") {
+		if !(strings.Contains(raw, "(●)") || strings.Contains(raw, "( )") ||
+			strings.Contains(raw, "[x]") || strings.Contains(raw, "[ ]")) {
+			continue
+		}
+		personaLines = append(personaLines, raw)
+	}
+	if len(personaLines) < 2 {
+		t.Fatalf("expected at least 2 persona rows in StepTeam view, got %d\nView:\n%s", len(personaLines), view)
+	}
+
+	// For each persona row, measure the visual column at which the
+	// displayName begins (after cursor + check + space + icon + space).
+	// All rows must agree on that column, otherwise the first-row
+	// indentation bug has regressed.
+	displayNameCol := func(line string) int {
+		for i, p := range w.personas {
+			if !w.selectedPersonas[i] {
+				continue
+			}
+			if idx := strings.Index(line, p.displayName); idx >= 0 {
+				// lipgloss.Width measures terminal columns, not byte length.
+				return lipgloss.Width(line[:idx])
+			}
+		}
+		return -1
+	}
+
+	baseCol := displayNameCol(personaLines[0])
+	if baseCol < 0 {
+		t.Fatalf("could not locate any displayName in first persona row: %q", personaLines[0])
+	}
+	for i, line := range personaLines {
+		col := displayNameCol(line)
+		if col != baseCol {
+			t.Errorf("persona row %d displayName starts at column %d, want %d (issue #1982 regression). Line: %q",
+				i, col, baseCol, line)
+		}
 	}
 }
