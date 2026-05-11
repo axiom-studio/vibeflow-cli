@@ -22,8 +22,11 @@ The **Cursor** provider uses the official Cursor CLI binary name **`agent`**, no
 
 ## Prompt passing
 
-- **Claude / Codex / Gemini / Qwen** — VibeFlow init prompts are passed in the style each CLI expects (positional vs flags); the wizard and launch path handle this.
-- **Cursor** — Uses **`AGENTS.md`** for embedded rules alongside other agent docs where applicable.
+VibeFlow init prompts are passed in the argument shape each CLI expects so the agent process stays running for the autonomous polling loop. The wizard and launch path pick this automatically:
+
+- **Claude / Codex / Cursor** — positional argument (`claude '<prompt>'`). These CLIs treat a positional prompt as the initial input and stay interactive.
+- **Gemini** — `-p '<prompt>'` (non-interactive headless mode).
+- **Qwen** — `-i '<prompt>'` (`--prompt-interactive`: execute the prompt and continue in interactive mode). Qwen's positional argument is **one-shot mode** (process the prompt, then exit) — wrong for vibeflow autonomous sessions, which need the agent to remain running.
 
 ## LLM Gateway
 

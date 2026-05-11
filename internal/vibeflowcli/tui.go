@@ -1195,20 +1195,14 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		command = result.Provider.Binary
 	}
 
-	// For vibeflow sessions, pass the init prompt so the agent starts autonomously.
-	// Claude and Codex take the prompt as a positional argument; Gemini uses -p.
-	// Always append for vibeflow sessions — even if session_init failed, the
-	// agent has MCP access and will call session_init itself on startup.
+	// For vibeflow sessions, pass the init prompt so the agent starts
+	// autonomously. AppendVibeflowInitPrompt picks the right per-provider
+	// argument shape (positional vs `-p` vs `-i`). Always append for
+	// vibeflow sessions — even if session_init failed, the agent has MCP
+	// access and will call session_init itself on startup.
 	if result.SessionType == "vibeflow" {
 		initPrompt := BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona)
-		escaped := strings.ReplaceAll(initPrompt, "'", "'\\''")
-		switch provider {
-		case "gemini":
-			command += fmt.Sprintf(" -p '%s'", escaped)
-		default:
-			// claude, codex, and custom providers: positional argument.
-			command += fmt.Sprintf(" '%s'", escaped)
-		}
+		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
 	}
 
 	// Merge wizard-resolved env vars (e.g. codex bearer token) into provider env.

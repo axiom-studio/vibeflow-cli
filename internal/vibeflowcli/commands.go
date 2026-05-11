@@ -454,13 +454,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 	if meta.SessionType == "vibeflow" {
 		initPrompt := BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona)
-		escaped := strings.ReplaceAll(initPrompt, "'", "'\\''")
-		switch provider {
-		case "gemini":
-			command += fmt.Sprintf(" -p '%s'", escaped)
-		default:
-			command += fmt.Sprintf(" '%s'", escaped)
-		}
+		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
 	}
 
 	// Ensure agent docs exist in the working directory.
