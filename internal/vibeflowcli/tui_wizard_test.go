@@ -906,6 +906,72 @@ func TestWizardUpdate_QwenLaunchConfig_ResetKeyClearsEdits(t *testing.T) {
 	}
 }
 
+// TestWizardStepProvider_TeamMode_FirstPersonaRowNotIndented is a regression
+// test for issue #1982 (the actual bug, as confirmed by the user after the
+// initial fix on the wrong screen). The wizard's team-mode StepProvider
+// screen renders a "─── per-persona overrides ───" separator between the
+// "Team default" row and the per-persona rows. When the trailing `\n`
+// inside the `lipgloss…Render(...\n)` call was processed, lipgloss treated
+// the empty trailing line as a second line and padded it to the width of
+// the preceding separator line. That padding (~57 spaces) then concatenated
+// with the next b.WriteString call, shoving the FIRST persona row's leading
+// whitespace from 2 columns to ~59 columns. The fix moves the `\n` outside
+// the Render call so lipgloss never sees a multi-line input.
+func TestWizardStepProvider_TeamMode_FirstPersonaRowNotIndented(t *testing.T) {
+	cfg := DefaultConfig()
+	reg := NewProviderRegistry(cfg)
+	w := NewWizardModel(reg, ".", nil, nil, "", nil, cfg)
+	w.step = StepProvider
+	w.selectedSessionType = 1 // vibeflow — required for team mode
+	// Select developer + qa_lead + security_lead so team mode renders.
+	for i, p := range w.personas {
+		if p.key == "developer" || p.key == "qa_lead" || p.key == "security_lead" {
+			w.selectedPersonas[i] = true
+		}
+	}
+	if !w.teamModeProvider() {
+		t.Fatalf("expected teamModeProvider=true with 3 personas selected")
+	}
+
+	view := w.View()
+
+	// Find every persona row by looking for lines that contain one of
+	// the selected personas' displayNames followed by ":" and the
+	// provider label. Capture each row's leading-whitespace count.
+	wantNames := map[string]bool{}
+	for i, p := range w.personas {
+		if w.selectedPersonas[i] {
+			wantNames[p.displayName] = true
+		}
+	}
+	var personaLeadingSpaces []int
+	for _, ln := range strings.Split(view, "\n") {
+		for name := range wantNames {
+			if strings.Contains(ln, name+":") && strings.Contains(ln, "Claude Code") {
+				n := 0
+				for n < len(ln) && ln[n] == ' ' {
+					n++
+				}
+				personaLeadingSpaces = append(personaLeadingSpaces, n)
+				break
+			}
+		}
+	}
+	if len(personaLeadingSpaces) < 2 {
+		t.Fatalf("expected to find at least 2 persona rows, got %d. View:\n%s", len(personaLeadingSpaces), view)
+	}
+
+	// All persona rows in team mode share the same 2-column cursor area
+	// when not focused. The first row regressed to ~59 spaces before
+	// the fix. Assert every row starts within the same small leading
+	// whitespace bucket (≤ 4 cols).
+	for i, n := range personaLeadingSpaces {
+		if n > 4 {
+			t.Errorf("persona row %d has %d leading spaces — issue #1982 regression. View:\n%s", i, n, view)
+		}
+	}
+}
+
 // TestWizardStepTeam_PersonaRowsAlignConsistently is a regression test for
 // issue #1982: the first persona row (Developer) had extra indentation
 // because its 2-glyph "⟨⟩" compact icon takes a different display width

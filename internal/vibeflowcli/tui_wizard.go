@@ -1333,7 +1333,13 @@ func (w WizardModel) View() string {
 		} else if w.teamModeProvider() {
 			b.WriteString("Select providers per persona:\n\n")
 			b.WriteString(w.renderTeamProviderRow(0, "Team default", w.selectedProvider, false))
-			b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("  ─── per-persona overrides (← / → to change, r to reset)\n"))
+			// The `\n` MUST live outside the Render call: lipgloss treats a
+			// trailing newline as a second (empty) line and pads it to the
+			// preceding line's width, which then concatenates with the next
+			// b.WriteString call and shoves the first persona row ~57 spaces
+			// to the right (issue #1982).
+			b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("  ─── per-persona overrides (← / → to change, r to reset)"))
+			b.WriteString("\n")
 			order := w.selectedPersonaIndices()
 			for i, personaIdx := range order {
 				label := w.personas[personaIdx].displayName
