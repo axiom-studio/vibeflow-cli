@@ -14,7 +14,7 @@ A separate **`session_cache.json`** stores enough metadata to **restart** a sess
 
 ## Agent documentation embedding
 
-On launch, the CLI can write **agent rule files** from embedded templates (`vibecoding-agent-docs/`) so each provider picks up project rules. Behavior differs when the **VibeFlow Claude plugin** is enabled—Claude may rely on plugin skills while Codex/Gemini still receive on-disk docs.
+On launch, the CLI can write **agent rule files** from embedded templates so each provider picks up project rules: `CLAUDE.md` for Claude, `AGENTS.md` for Codex and Cursor, `GEMINI.md` for Gemini, and `QWEN.md` for Qwen. Behavior differs when the **VibeFlow Claude plugin** is enabled—Claude may rely on plugin skills while Codex/Gemini/Qwen still receive on-disk docs.
 
 ## Logging
 

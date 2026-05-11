@@ -9,6 +9,7 @@
   - `codex` (OpenAI Codex CLI)
   - `gemini` (Google Gemini CLI)
   - `agent` ([Cursor CLI](https://cursor.com/docs/cli/overview))
+  - `qwen` (Qwen Code — `npm install -g @qwen-code/qwen-code@latest`)
 
 ## Install with Go
 

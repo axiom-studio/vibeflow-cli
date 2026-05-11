@@ -32,6 +32,7 @@ poll_interval_seconds: 5
 view_mode: flat   # flat or grouped
 
 llm_gateway_enabled: false  # optional: route LLM traffic via server gateway when supported
+mcp_tool_name: vibeflow     # optional: override the MCP server tool name in agent init prompts (default: vibeflow)
 
 worktree:
   base_dir: .claude/worktrees
@@ -51,10 +52,10 @@ providers:
     binary: claude
     vibeflow_integrated: true
     default: true
-  # codex, gemini, cursor — see defaults in repo; merge overrides here
+  # codex, gemini, cursor, qwen — see defaults in repo; merge overrides here
 ```
 
-Built-in provider keys include **`claude`**, **`codex`**, **`gemini`**, and **`cursor`**. You can add custom providers by extending the `providers` map (see [Providers](providers.md)).
+Built-in provider keys include **`claude`**, **`codex`**, **`gemini`**, **`cursor`**, and **`qwen`**. You can add custom providers by extending the `providers` map (see [Providers](providers.md)).
 
 ## Environment variable overrides
 
@@ -82,6 +83,15 @@ All paths below are resolved relative to the root directory (default `~/.vibeflo
 | `<root>/sessions.json` | Session metadata (file-locked) |
 | `<root>/session_cache.json` | Cache for restart-after-exit; persists full launch parameters so `vibeflow restart` works after a session exits tmux |
 | `<root>/vibeflow.pid` | PID lock so only one TUI instance runs per root |
+
+### Internal fields
+
+You may see these fields in your `config.yaml`; they are managed by the CLI automatically:
+
+| Field | Purpose |
+|-------|---------|
+| `saved_env_vars` | Persisted environment variable values captured during wizard env-token steps (e.g. `OPENAI_API_KEY` for Qwen). |
+| `directory_history` | History of working directories used in the wizard's directory picker. |
 
 ## Next steps
 

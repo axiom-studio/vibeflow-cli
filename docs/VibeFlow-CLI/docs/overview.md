@@ -1,10 +1,10 @@
 # Overview
 
-**VibeFlow CLI** is a single Go binary that helps you launch, supervise, and switch between **AI coding agent** sessions (Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, and custom providers). Sessions run inside **tmux** on a dedicated socket so they stay isolated, recoverable, and easy to attach to from one full-screen terminal UI (TUI).
+**VibeFlow CLI** is a single Go binary that helps you launch, supervise, and switch between **AI coding agent** sessions (Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, Qwen Code, and custom providers). Sessions run inside **tmux** on a dedicated socket so they stay isolated, recoverable, and easy to attach to from one full-screen terminal UI (TUI).
 
 ## Why use it
 
-- **One place for all agents** — Same keyboard-driven UI whether you use Claude, Codex, Gemini, or Cursor.
+- **One place for all agents** — Same keyboard-driven UI whether you use Claude, Codex, Gemini, Cursor, or Qwen.
 - **Git worktrees** — Optional per-session checkout on its own branch, reducing collisions when multiple agents work in parallel.
 - **Session safety** — Persona-scoped `.vibeflow-session-*` files detect conflicts when two agents would use the same working tree in incompatible ways.
 - **VibeFlow integration** — Optional connection to a VibeFlow server for autonomous task polling, multi-persona teams, and centralized project context.
