@@ -153,3 +153,135 @@ func TestAppendVibeflowInitPrompt_EscapesSingleQuotes(t *testing.T) {
 	}
 }
 
+func TestAppendQwenAPIFlags(t *testing.T) {
+	tests := []struct {
+		name        string
+		providerKey string
+		base        string
+		env         map[string]string
+		want        string
+	}{
+		{
+			name:        "qwen with all three env vars — emits all flags in key/base-url/model order",
+			providerKey: "qwen",
+			base:        "qwen --yolo",
+			env: map[string]string{
+				"OPENAI_API_KEY":  "sk-test-123",
+				"OPENAI_BASE_URL": "https://api.z.ai/api/coding/paas/v4",
+				"OPENAI_MODEL":    "GLM-4.6",
+			},
+			want: `qwen --yolo --openai-api-key 'sk-test-123' --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6'`,
+		},
+		{
+			name:        "qwen gateway mode — only key + base-url present (no OPENAI_MODEL)",
+			providerKey: "qwen",
+			base:        "qwen --yolo",
+			env: map[string]string{
+				"OPENAI_API_KEY":  "gateway-token",
+				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
+			},
+			want: `qwen --yolo --openai-api-key 'gateway-token' --openai-base-url 'https://gateway.example/rest/v1/llm-gateway/v1'`,
+		},
+		{
+			name:        "qwen with only OPENAI_API_KEY — emits only the key flag",
+			providerKey: "qwen",
+			base:        "qwen --yolo",
+			env: map[string]string{
+				"OPENAI_API_KEY": "sk-test-123",
+			},
+			want: `qwen --yolo --openai-api-key 'sk-test-123'`,
+		},
+		{
+			name:        "qwen with empty env values — no flags emitted (empty != present)",
+			providerKey: "qwen",
+			base:        "qwen --yolo",
+			env: map[string]string{
+				"OPENAI_API_KEY":  "",
+				"OPENAI_BASE_URL": "",
+				"OPENAI_MODEL":    "",
+			},
+			want: `qwen --yolo`,
+		},
+		{
+			name:        "qwen with nil env — command unchanged",
+			providerKey: "qwen",
+			base:        "qwen --yolo",
+			env:         nil,
+			want:        `qwen --yolo`,
+		},
+		{
+			name:        "claude — non-qwen provider, command unchanged even with OPENAI_* in env",
+			providerKey: "claude",
+			base:        "claude --dangerously-skip-permissions",
+			env: map[string]string{
+				"OPENAI_API_KEY":  "sk-test",
+				"OPENAI_BASE_URL": "https://api.example",
+				"OPENAI_MODEL":    "gpt-4",
+			},
+			want: `claude --dangerously-skip-permissions`,
+		},
+		{
+			name:        "codex — non-qwen provider, command unchanged even though codex also reads OPENAI_*",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env: map[string]string{
+				"OPENAI_API_KEY": "sk-test",
+			},
+			want: `codex --yolo`,
+		},
+		{
+			name:        "gemini — non-qwen provider, command unchanged",
+			providerKey: "gemini",
+			base:        "gemini --yolo",
+			env: map[string]string{
+				"OPENAI_MODEL": "should-not-leak",
+			},
+			want: `gemini --yolo`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AppendQwenAPIFlags(tc.base, tc.providerKey, tc.env)
+			if got != tc.want {
+				t.Errorf("AppendQwenAPIFlags(%q, %q, env):\n got:  %q\n want: %q",
+					tc.base, tc.providerKey, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAppendQwenAPIFlags_EscapesSingleQuotes(t *testing.T) {
+	// Single quotes in values must be sh-escaped via the '\'' idiom so the
+	// wrapping single-quoted argument stays balanced when tmux passes the
+	// assembled command through `sh -c`. The same idiom is used by
+	// AppendVibeflowInitPrompt — keeping them consistent simplifies review.
+	env := map[string]string{
+		"OPENAI_API_KEY":  "weird'key",
+		"OPENAI_BASE_URL": "https://host/api?q=it's",
+		"OPENAI_MODEL":    "model'name",
+	}
+	got := AppendQwenAPIFlags("qwen", "qwen", env)
+	const want = `qwen --openai-api-key 'weird'\''key' --openai-base-url 'https://host/api?q=it'\''s' --model 'model'\''name'`
+	if got != want {
+		t.Errorf("AppendQwenAPIFlags escape:\n got:  %q\n want: %q", got, want)
+	}
+}
+
+func TestAppendQwenAPIFlags_OrderingWithInitPrompt(t *testing.T) {
+	// Integration: flags must land between the base command (e.g. `qwen --yolo`)
+	// and the `-i 'prompt'` arg appended by AppendVibeflowInitPrompt, so qwen's
+	// arg parser sees them as options rather than as part of the seed prompt.
+	env := map[string]string{
+		"OPENAI_API_KEY":  "sk-test",
+		"OPENAI_BASE_URL": "https://api.z.ai/api/coding/paas/v4",
+		"OPENAI_MODEL":    "GLM-4.6",
+	}
+	cmd := "qwen --yolo"
+	cmd = AppendQwenAPIFlags(cmd, "qwen", env)
+	cmd = AppendVibeflowInitPrompt(cmd, "qwen", "hello world")
+	const want = `qwen --yolo --openai-api-key 'sk-test' --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6' -i 'hello world'`
+	if cmd != want {
+		t.Errorf("Ordering integration:\n got:  %q\n want: %q", cmd, want)
+	}
+}
+

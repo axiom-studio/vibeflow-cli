@@ -160,6 +160,9 @@ func launchCmd() *cobra.Command {
 				}
 			}
 
+			// Mirror qwen OPENAI_* env vars onto the CLI flags so qwen-code uses them.
+			command = AppendQwenAPIFlags(command, provider, sessionEnv)
+
 			// Ensure all agent-specific markdown docs exist in the working directory.
 			EnsureAllAgentDocs(workDir)
 
@@ -446,6 +449,10 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 			sessionEnv[k] = v
 		}
 	}
+
+	// For qwen, mirror OPENAI_* env vars onto the command line so qwen-code
+	// honors them on restart too. Must run before the init-prompt append.
+	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
 	// For vibeflow sessions, append the init prompt so the agent starts autonomously.
 	projectName := meta.Project

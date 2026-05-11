@@ -68,3 +68,38 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 		return baseCommand + fmt.Sprintf(" '%s'", escaped)
 	}
 }
+
+// AppendQwenAPIFlags appends `--openai-api-key`, `--openai-base-url`, and
+// `--model` flags to the qwen launch command when the corresponding env vars
+// are present in env. Non-qwen providers are returned unchanged.
+//
+// Why: qwen-code does not consistently honor `OPENAI_MODEL` env var for
+// model reporting in tool calls (observed: env says GLM-5-turbo, MCP tool
+// calls say `qwen 235b`). The CLI flags are authoritative — passing them
+// explicitly forces qwen-code to use the vendor/model the user picked in
+// `StepQwenLaunchConfig`. The env vars are left in the session env as a
+// fallback for any qwen-code code path that still reads them.
+//
+// Ordering: flags are inserted after the base command (e.g. `qwen --yolo`)
+// and BEFORE `AppendVibeflowInitPrompt` appends `-i 'prompt'`, so qwen's
+// arg parser sees them as options rather than as part of the seed prompt.
+//
+// Sh-escaping mirrors `AppendVibeflowInitPrompt`: each value is wrapped in
+// single quotes with embedded `'` escaped as `'\''`, since the assembled
+// command is handed to `sh -c` via tmux send-keys.
+func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) string {
+	if providerKey != "qwen" {
+		return baseCommand
+	}
+	out := baseCommand
+	if v := env["OPENAI_API_KEY"]; v != "" {
+		out += fmt.Sprintf(" --openai-api-key '%s'", strings.ReplaceAll(v, "'", `'\''`))
+	}
+	if v := env["OPENAI_BASE_URL"]; v != "" {
+		out += fmt.Sprintf(" --openai-base-url '%s'", strings.ReplaceAll(v, "'", `'\''`))
+	}
+	if v := env["OPENAI_MODEL"]; v != "" {
+		out += fmt.Sprintf(" --model '%s'", strings.ReplaceAll(v, "'", `'\''`))
+	}
+	return out
+}

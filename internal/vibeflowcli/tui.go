@@ -1195,16 +1195,6 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		command = result.Provider.Binary
 	}
 
-	// For vibeflow sessions, pass the init prompt so the agent starts
-	// autonomously. AppendVibeflowInitPrompt picks the right per-provider
-	// argument shape (positional vs `-p` vs `-i`). Always append for
-	// vibeflow sessions — even if session_init failed, the agent has MCP
-	// access and will call session_init itself on startup.
-	if result.SessionType == "vibeflow" {
-		initPrompt := BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona)
-		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
-	}
-
 	// Merge wizard-resolved env vars (e.g. codex bearer token) into provider env.
 	if result.EnvVars != nil {
 		if result.Provider.Env == nil {
@@ -1232,6 +1222,22 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		for k, v := range ClearLLMGatewayEnv(provider) {
 			result.Provider.Env[k] = v
 		}
+	}
+
+	// For qwen, mirror OPENAI_* env vars onto the command line so qwen-code
+	// honors them (env vars alone don't always drive model reporting).
+	// Must run after env merging and before the init-prompt append so the
+	// flags land between the base command and the seed prompt argument.
+	command = AppendQwenAPIFlags(command, provider, result.Provider.Env)
+
+	// For vibeflow sessions, pass the init prompt so the agent starts
+	// autonomously. AppendVibeflowInitPrompt picks the right per-provider
+	// argument shape (positional vs `-p` vs `-i`). Always append for
+	// vibeflow sessions — even if session_init failed, the agent has MCP
+	// access and will call session_init itself on startup.
+	if result.SessionType == "vibeflow" {
+		initPrompt := BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona)
+		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
 	}
 
 	// Ensure all agent-specific markdown docs exist in the working directory
@@ -1377,6 +1383,9 @@ func (m Model) createSession(_ tea.Msg) tea.Msg {
 	} else {
 		command = fmt.Sprintf("%s --dangerously-skip-permissions", m.config.ClaudeBinary)
 	}
+
+	// Mirror qwen OPENAI_* env vars onto the CLI flags so qwen-code uses them.
+	command = AppendQwenAPIFlags(command, provider, provCfg.Env)
 
 	err := m.tmux.CreateSessionWithOpts(SessionOpts{
 		Name:     name,
