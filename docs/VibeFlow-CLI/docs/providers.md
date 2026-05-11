@@ -83,6 +83,15 @@ You can add entries under `providers:` in `config.yaml` with:
 
 Defaults from the built-in set are merged with your file; see the source `DefaultConfig()` in `internal/vibeflowcli/config.go` for the canonical templates.
 
+## MCP tool name
+
+The VibeFlow init prompt sent to agents references the MCP server by tool name (default: `vibeflow`). If you run a renamed or forked MCP server, override the tool name so the init prompt generates correct `mcp__<name>__*` tool calls:
+
+- **CLI flag**: `--mcp <name>` (e.g. `vibeflow --mcp my-vibeflow launch`)
+- **Config file**: `mcp_tool_name: my-vibeflow` in `~/.vibeflow-cli/config.yaml`
+
+The chosen value persists on the session record so `vibeflow restart` re-uses the original launch's MCP name. If neither is set, the default (`vibeflow`) is used.
+
 ## Next steps
 
 - [Session wizard](session-wizard.md)

@@ -11,10 +11,11 @@ Press **`n`** in the TUI (or use headless `vibeflow launch` with flags) to creat
 5. **Provider** — Claude, Codex, Gemini, Cursor, Qwen, or other configured providers; unavailable binaries are marked. **Team mode** (multiple personas) opens a per-persona × provider matrix instead of a single list — see below.
 6. **API / tokens** — Prompt for missing credentials (e.g. Codex/Gemini keys) when needed.
 7. **LLM Gateway** — Optional: route via server gateway when your org uses it.
-8. **Branch** — Select an existing branch or create a new one. The current `HEAD` branch is auto-detected and pre-selected, with a `← current` annotation. Creating a new branch prompts for a **base branch** (defaults to `main`) so you don't accidentally fork from the wrong branch. If you type a name that matches a remote branch, the CLI **tracks** the remote instead of creating a divergent local branch.
-9. **Worktree** — Stay in repo root, create a new worktree, or pick a custom path (see [Worktrees & session files](worktrees-session-files.md)).
-10. **Permissions** — Whether to enable **autonomous** / skip-permissions style flags for the provider.
-11. **Confirm** — Review and launch.
+8. **Qwen launch config** — _(Qwen provider, non-gateway only)_ Captures OpenAI-compatible environment for the tmux process: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`. Includes vendor presets (OpenAI, DashScope, z.ai). Skipped for other providers and for qwen when the LLM Gateway is enabled. See [Providers — Qwen launch config](providers.md#qwen-launch-config-api-key-mode) for details.
+9. **Branch** — Select an existing branch or create a new one. The current `HEAD` branch is auto-detected and pre-selected, with a `← current` annotation. Creating a new branch prompts for a **base branch** (defaults to `main`) so you don't accidentally fork from the wrong branch. If you type a name that matches a remote branch, the CLI **tracks** the remote instead of creating a divergent local branch.
+10. **Worktree** — Stay in repo root, create a new worktree, or pick a custom path (see [Worktrees & session files](worktrees-session-files.md)).
+11. **Permissions** — Whether to enable **autonomous** / skip-permissions style flags for the provider.
+12. **Confirm** — Review and launch.
 
 Exact labels and ordering match your installed version; the list above reflects the intended product flow.
 

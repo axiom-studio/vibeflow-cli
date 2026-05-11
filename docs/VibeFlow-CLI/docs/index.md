@@ -11,7 +11,7 @@ Welcome to the documentation for **VibeFlow CLI** (`vibeflow`), a terminal-based
 | [Configuration](configuration.md) | Config file, environment variables, providers |
 | [Interactive TUI](tui.md) | Main terminal UI, keybindings, grouped view |
 | [CLI reference](cli-reference.md) | Headless commands (`launch`, `list`, `kill`, …) |
-| [Providers](providers.md) | Claude Code, Codex, Gemini, Cursor Agent |
+| [Providers](providers.md) | Claude Code, Codex, Gemini, Cursor Agent, Qwen Code |
 | [Session wizard](session-wizard.md) | Step-by-step session creation |
 | [Worktrees & session files](worktrees-session-files.md) | Isolation, conflicts, `.vibeflow-session-*` |
 | [VibeFlow server & personas](vibeflow-server.md) | Autonomous mode, API token, team personas |

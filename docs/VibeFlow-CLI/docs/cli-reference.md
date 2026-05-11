@@ -10,6 +10,7 @@ The binary name is **`vibeflow`**. Root command with no subcommand runs the **TU
 | `--root` | Root directory for config, sessions, and logs (default `~/.vibeflow-cli`). Also settable via `VIBEFLOW_ROOT` env var. Enables isolated parallel instances. |
 | `--server-url` | Override VibeFlow server URL |
 | `--project` | Default project name for VibeFlow |
+| `--mcp` | MCP server tool name used in the agent init prompt (default: `vibeflow`). Override if you run a renamed or forked MCP server. |
 
 ## Commands
 
@@ -23,7 +24,7 @@ Create and launch a session without the full wizard. Key flags:
 
 | Flag | Description |
 |------|-------------|
-| `--provider` | Provider key: `claude`, `codex`, `cursor`, `gemini`, or a custom key from `config.yaml` |
+| `--provider` | Provider key: `claude`, `codex`, `cursor`, `gemini`, `qwen`, or a custom key from `config.yaml` |
 | `--branch` | Git branch (default `main`) |
 | `--worktree` | Create a new git worktree for the session |
 | `--new-branch` | Create a new git branch (used with `--worktree`) |
@@ -37,6 +38,7 @@ Examples:
 vibeflow launch --provider claude --branch main
 vibeflow launch --provider cursor --worktree --new-branch
 vibeflow launch --provider codex --skip-permissions --llm-gateway
+vibeflow launch --provider qwen --skip-permissions
 ```
 
 ### `vibeflow list` (alias: `ls`)
@@ -51,9 +53,17 @@ Attach to a tmux session by name.
 
 Terminate a session.
 
+| Flag | Description |
+|------|-------------|
+| `--cleanup-worktree` | Also remove the git worktree associated with the session |
+
 ### `vibeflow delete <session-name>` (alias: `rm`)
 
 Remove session metadata and session file; may interact with worktree cleanup per config.
+
+| Flag | Description |
+|------|-------------|
+| `--cleanup-worktree` | Also remove the git worktree associated with the session |
 
 ### `vibeflow restart <session-name>`
 
@@ -79,7 +89,7 @@ Re-run interactive configuration.
 
 ### `vibeflow agent-doc <provider>`
 
-Print the embedded agent documentation template for the given provider to stdout. Provider keys: `claude` → `CLAUDE.md`, `codex` → `AGENTS.md`, `cursor` → `AGENTS.md`, `gemini` → `GEMINI.md`. Useful for inspecting or piping the embedded template outside of the normal launch flow (launch automatically writes these files via `EnsureAllAgentDocs`, deduplicating `AGENTS.md` when both Codex and Cursor are configured).
+Print the embedded agent documentation template for the given provider to stdout. Provider keys: `claude` → `CLAUDE.md`, `codex` → `AGENTS.md`, `cursor` → `AGENTS.md`, `gemini` → `GEMINI.md`, `qwen` → `QWEN.md`. Useful for inspecting or piping the embedded template outside of the normal launch flow (launch automatically writes these files via `EnsureAllAgentDocs`, deduplicating `AGENTS.md` when both Codex and Cursor are configured).
 
 Use `vibeflow --help` and `vibeflow <command> --help` for the exact flag set in your installed version.
 
