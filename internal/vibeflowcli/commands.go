@@ -453,10 +453,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		projectName = cfg.DefaultProject
 	}
 	if meta.SessionType == "vibeflow" {
-		initPrompt := fmt.Sprintf(
-			"Initialize a vibeflow session for project %s with persona %q and follow the agent prompt.",
-			projectName, meta.Persona,
-		)
+		initPrompt := BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona)
 		escaped := strings.ReplaceAll(initPrompt, "'", "'\\''")
 		switch provider {
 		case "gemini":
@@ -506,6 +503,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		SessionType:       meta.SessionType,
 		SkipPermissions:   meta.SkipPermissions,
 		LLMGatewayEnabled: meta.LLMGatewayEnabled,
+		MCPToolName:       meta.MCPToolName,
 		CreatedAt:         time.Now(),
 	}
 

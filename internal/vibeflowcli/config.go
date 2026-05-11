@@ -98,6 +98,7 @@ type Config struct {
 	DirectoryHistory []string              `yaml:"directory_history,omitempty"`
 	SavedEnvVars     map[string]string     `yaml:"saved_env_vars,omitempty"`
 	LLMGatewayEnabled bool                 `yaml:"llm_gateway_enabled,omitempty"`
+	MCPToolName      string                `yaml:"mcp_tool_name,omitempty"`
 }
 
 // AddDirectoryToHistory adds a directory to the front of the history list,
@@ -159,6 +160,7 @@ func DefaultConfig() *Config {
 		PollInterval:    5,
 		ClaudeBinary:    "claude",
 		DefaultProvider: "claude",
+		MCPToolName:     DefaultMCPToolName,
 		Worktree: WorktreeConfig{
 			BaseDir:       ".claude/worktrees",
 			AutoCreate:    true,

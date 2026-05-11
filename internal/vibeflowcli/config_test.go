@@ -42,6 +42,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.ClaudeBinary != "claude" {
 		t.Errorf("ClaudeBinary = %q, want claude", cfg.ClaudeBinary)
 	}
+	if cfg.MCPToolName != DefaultMCPToolName {
+		t.Errorf("MCPToolName = %q, want %q", cfg.MCPToolName, DefaultMCPToolName)
+	}
 
 	// Five built-in providers.
 	if len(cfg.Providers) != 5 {

@@ -39,6 +39,7 @@ type SessionMeta struct {
 	SessionType       string    `json:"session_type,omitempty"`
 	SkipPermissions   bool      `json:"skip_permissions,omitempty"`
 	LLMGatewayEnabled bool      `json:"llm_gateway_enabled,omitempty"`
+	MCPToolName       string    `json:"mcp_tool_name,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 }
 
