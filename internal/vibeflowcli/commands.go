@@ -40,6 +40,7 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(checkCmd())
 	root.AddCommand(configCmd())
 	root.AddCommand(agentDocCmd())
+	root.AddCommand(projectsCmd())
 }
 
 // --- helpers shared by subcommands ---
@@ -68,7 +69,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 // --- launch ---
 
 func launchCmd() *cobra.Command {
-	var provider, branch, worktreeName, persona, project string
+	var provider, branch, worktreeName, persona, personasRaw, project, sessionType string
 	var worktree, skipPermissions, newBranch, llmGateway bool
 
 	cmd := &cobra.Command{
@@ -116,12 +117,33 @@ func launchCmd() *cobra.Command {
 				}
 			}
 
-			// Resolve project and persona from CLI flags or config.
+			// Resolve project, persona, and session type from CLI flags.
 			sessionProject := cfg.DefaultProject
 			if project != "" {
 				sessionProject = project
 			}
 			sessionPersona := persona
+			var sessionPersonas []string
+			if personasRaw != "" {
+				sessionPersonas = strings.Split(personasRaw, ",")
+				for i := range sessionPersonas {
+					sessionPersonas[i] = strings.TrimSpace(sessionPersonas[i])
+				}
+				if sessionPersona == "" && len(sessionPersonas) > 0 {
+					sessionPersona = sessionPersonas[0]
+				}
+			}
+			effectiveSessionType := sessionType
+			if effectiveSessionType == "" {
+				if sessionPersona != "" {
+					effectiveSessionType = "vibeflow"
+				} else {
+					effectiveSessionType = "vanilla"
+				}
+			}
+			if effectiveSessionType != "vanilla" && effectiveSessionType != "vibeflow" {
+				return fmt.Errorf("invalid session-type %q — must be 'vanilla' or 'vibeflow'", effectiveSessionType)
+			}
 
 			command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
 				WorkDir:         workDir,
@@ -171,9 +193,7 @@ func launchCmd() *cobra.Command {
 			command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
 			// Build vibeflow init prompt when persona is specified.
-			sessionType := ""
-			if sessionPersona != "" {
-				sessionType = "vibeflow"
+			if effectiveSessionType == "vibeflow" && sessionPersona != "" {
 				mcpName := cmd.Flags().Lookup("mcp").Value.String()
 				if mcpName == "" {
 					mcpName = DefaultMCPToolName
@@ -183,7 +203,7 @@ func launchCmd() *cobra.Command {
 			}
 
 			// Ensure all agent-specific markdown docs exist in the working directory.
-			if sessionType == "vibeflow" {
+			if effectiveSessionType == "vibeflow" {
 				EnsureAllAgentDocs(workDir)
 			}
 
@@ -217,7 +237,7 @@ func launchCmd() *cobra.Command {
 				Persona:           sessionPersona,
 				Branch:            branch,
 				WorkingDir:        workDir,
-				SessionType:       sessionType,
+				SessionType:       effectiveSessionType,
 				SkipPermissions:   skipPermissions,
 				LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
 				CreatedAt:         time.Now(),
@@ -240,7 +260,9 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&skipPermissions, "skip-permissions", false, "Skip permission prompts (autonomous mode)")
 	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through Axiom Cloud Gateway")
 	cmd.Flags().StringVar(&persona, "persona", "", "Persona key for vibeflow sessions")
+	cmd.Flags().StringVar(&personasRaw, "personas", "", "Comma-separated persona keys for team mode")
 	cmd.Flags().StringVar(&project, "project", "", "Project name (overrides config default)")
+	cmd.Flags().StringVar(&sessionType, "session-type", "", "Session type: vanilla or vibeflow (default: inferred from persona)")
 	return cmd
 }
 
@@ -708,6 +730,38 @@ func configCmd() *cobra.Command {
 			p := tea.NewProgram(setup, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("setup wizard: %w", err)
+			}
+			return nil
+		},
+	}
+}
+
+func projectsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "projects",
+		Short: "List available VibeFlow projects",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfgPath, _ := cmd.Flags().GetString("config")
+			if cfgPath == "" {
+				cfgPath = ConfigPath()
+			}
+			cfg, err := LoadConfig(cfgPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			client := NewClient(cfg.ServerURL, cfg.APIToken)
+			projects, err := client.ListProjects()
+			if err != nil {
+				return fmt.Errorf("fetch projects: %w", err)
+			}
+			if len(projects) == 0 {
+				fmt.Println("No projects found.")
+				return nil
+			}
+			fmt.Printf("%-8s %-30s %s\n", "ID", "NAME", "STATUS")
+			fmt.Println(strings.Repeat("-", 60))
+			for _, p := range projects {
+				fmt.Printf("%-8d %-30s %s\n", p.ID, p.Name, p.Status)
 			}
 			return nil
 		},
