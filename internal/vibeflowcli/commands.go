@@ -68,7 +68,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 // --- launch ---
 
 func launchCmd() *cobra.Command {
-	var provider, branch, worktreeName string
+	var provider, branch, worktreeName, persona, project string
 	var worktree, skipPermissions, newBranch, llmGateway bool
 
 	cmd := &cobra.Command{
@@ -115,6 +115,13 @@ func launchCmd() *cobra.Command {
 					workDir = wtPath
 				}
 			}
+
+			// Resolve project and persona from CLI flags or config.
+			sessionProject := cfg.DefaultProject
+			if project != "" {
+				sessionProject = project
+			}
+			sessionPersona := persona
 
 			command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
 				WorkDir:         workDir,
@@ -163,8 +170,22 @@ func launchCmd() *cobra.Command {
 			// Mirror qwen OPENAI_* env vars onto the CLI flags so qwen-code uses them.
 			command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
+			// Build vibeflow init prompt when persona is specified.
+			sessionType := ""
+			if sessionPersona != "" {
+				sessionType = "vibeflow"
+				mcpName := cmd.Flags().Lookup("mcp").Value.String()
+				if mcpName == "" {
+					mcpName = DefaultMCPToolName
+				}
+				initPrompt := BuildVibeflowInitPrompt(mcpName, sessionProject, sessionPersona)
+				command = AppendVibeflowInitPrompt(command, provider, initPrompt)
+			}
+
 			// Ensure all agent-specific markdown docs exist in the working directory.
-			EnsureAllAgentDocs(workDir)
+			if sessionType == "vibeflow" {
+				EnsureAllAgentDocs(workDir)
+			}
 
 			if err := tmux.CreateSessionWithOpts(SessionOpts{
 				Name:     name,
@@ -173,7 +194,8 @@ func launchCmd() *cobra.Command {
 				Command:  command,
 				Env:      sessionEnv,
 				Branch:   branch,
-				Project:  cfg.DefaultProject,
+				Project:  sessionProject,
+				Persona:  sessionPersona,
 			}); err != nil {
 				return err
 			}
@@ -184,15 +206,18 @@ func launchCmd() *cobra.Command {
 			_ = tmux.BindSessionKeys(tmuxName)
 
 			if prov.SessionFile != "" {
-				_ = WriteSessionFileIfNeeded(workDir, "", name)
+				_ = WriteSessionFileIfNeeded(workDir, sessionPersona, name)
 			}
 
 			sessionMeta := SessionMeta{
 				Name:              name,
 				TmuxSession:       tmuxName,
 				Provider:          provider,
+				Project:           sessionProject,
+				Persona:           sessionPersona,
 				Branch:            branch,
 				WorkingDir:        workDir,
+				SessionType:       sessionType,
 				SkipPermissions:   skipPermissions,
 				LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
 				CreatedAt:         time.Now(),
@@ -214,6 +239,8 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&newBranch, "new-branch", false, "Create a new git branch (used with --worktree)")
 	cmd.Flags().BoolVar(&skipPermissions, "skip-permissions", false, "Skip permission prompts (autonomous mode)")
 	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through Axiom Cloud Gateway")
+	cmd.Flags().StringVar(&persona, "persona", "", "Persona key for vibeflow sessions")
+	cmd.Flags().StringVar(&project, "project", "", "Project name (overrides config default)")
 	return cmd
 }
 
