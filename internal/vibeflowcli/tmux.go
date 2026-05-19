@@ -101,6 +101,7 @@ type SessionOpts struct {
 	Env       map[string]string // Provider-specific environment variables.
 	Branch    string            // Git branch for status bar display.
 	Project   string            // Project name for status bar display.
+	Persona   string            // Persona key for vibeflow sessions.
 }
 
 // StatusBarOpts holds display parameters for the tmux status bar.
