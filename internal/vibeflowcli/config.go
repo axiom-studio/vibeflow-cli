@@ -264,10 +264,11 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // migrateProviders updates built-in provider configs to current defaults.
-// Removes stale VIBEFLOW_ env vars from provider Env sections, syncs launch
-// templates for built-in providers (claude, codex, gemini, cursor, qwen),
-// and adds any built-in providers that are missing from the user's config
-// (so users on older configs gain access to newly-added built-ins).
+// It removes stale VIBEFLOW_ env vars from provider Env sections and adds any
+// built-in providers that are missing from the user's config (so users on older
+// configs gain access to newly-added built-ins).
+// Launch templates are intentionally NOT modified — the user's config is honored
+// as-is. If a template is broken, it's broken; no silent fallback.
 func migrateProviders(cfg *Config, path string) {
 	defaults := DefaultConfig()
 	dirty := false
@@ -277,15 +278,9 @@ func migrateProviders(cfg *Config, path string) {
 	}
 
 	for key, prov := range cfg.Providers {
-		defProv, isBuiltin := defaults.Providers[key]
+		_, isBuiltin := defaults.Providers[key]
 		if !isBuiltin {
 			continue
-		}
-
-		// Sync launch template to current default.
-		if prov.LaunchTemplate != defProv.LaunchTemplate {
-			prov.LaunchTemplate = defProv.LaunchTemplate
-			dirty = true
 		}
 
 		// Remove stale VIBEFLOW_ env vars that agents don't read.
