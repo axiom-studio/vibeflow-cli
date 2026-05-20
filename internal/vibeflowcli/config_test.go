@@ -555,38 +555,21 @@ func TestResolveProviderEnvVars_QwenCleansToken(t *testing.T) {
 	}
 }
 
-func TestMigrateProviders_SyncsLaunchTemplate(t *testing.T) {
+func TestMigrateProviders_PreservesLaunchTemplates(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 
 	cfg := DefaultConfig()
-	// Simulate a stale launch template.
-	p := cfg.Providers["claude"]
-	p.LaunchTemplate = "old-template {{.Binary}}"
-	cfg.Providers["claude"] = p
-
-	migrateProviders(cfg, cfgPath)
-
-	// Should have been synced to default.
-	defaults := DefaultConfig()
-	if cfg.Providers["claude"].LaunchTemplate != defaults.Providers["claude"].LaunchTemplate {
-		t.Errorf("expected launch template to be synced, got %q", cfg.Providers["claude"].LaunchTemplate)
-	}
-}
-
-func TestMigrateProviders_UpdatesCodexSkipPermissionsFlag(t *testing.T) {
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.yaml")
-
-	cfg := DefaultConfig()
+	// Simulate a custom launch template.
 	p := cfg.Providers["codex"]
-	p.LaunchTemplate = "{{.Binary}}{{ if .SkipPermissions }} --full-auto{{ end }}"
+	p.LaunchTemplate = "{{.Binary}} --dangerously-bypass-hook-trust --full-auto"
 	cfg.Providers["codex"] = p
 
 	migrateProviders(cfg, cfgPath)
 
-	if cfg.Providers["codex"].LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}" {
-		t.Errorf("expected codex launch template to be migrated to --yolo, got %q", cfg.Providers["codex"].LaunchTemplate)
+	// Custom template should NOT be overwritten.
+	if cfg.Providers["codex"].LaunchTemplate != "{{.Binary}} --dangerously-bypass-hook-trust --full-auto" {
+		t.Errorf("expected custom launch template to be preserved, got %q", cfg.Providers["codex"].LaunchTemplate)
 	}
 }
 
