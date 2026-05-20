@@ -104,7 +104,6 @@ func launchCmd() *cobra.Command {
 			}
 
 			workDir := "."
-			name := sessionid.GenerateSessionID(workDir)
 
 			if worktree && wm != nil {
 				wtName := worktreeName
@@ -192,14 +191,12 @@ func launchCmd() *cobra.Command {
 			// Mirror qwen OPENAI_* env vars onto the CLI flags so qwen-code uses them.
 			command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
-			// Build vibeflow init prompt when persona is specified.
-			if effectiveSessionType == "vibeflow" && sessionPersona != "" {
-				mcpName := cmd.Flags().Lookup("mcp").Value.String()
-				if mcpName == "" {
-					mcpName = DefaultMCPToolName
-				}
-				initPrompt := BuildVibeflowInitPrompt(mcpName, sessionProject, sessionPersona)
-				command = AppendVibeflowInitPrompt(command, provider, initPrompt)
+			// Determine which personas to launch.
+			personasToLaunch := []string{""}
+			if len(sessionPersonas) > 0 {
+				personasToLaunch = sessionPersonas
+			} else if sessionPersona != "" {
+				personasToLaunch = []string{sessionPersona}
 			}
 
 			// Ensure all agent-specific markdown docs exist in the working directory.
@@ -207,48 +204,66 @@ func launchCmd() *cobra.Command {
 				EnsureAllAgentDocs(workDir)
 			}
 
-			if err := tmux.CreateSessionWithOpts(SessionOpts{
-				Name:     name,
-				Provider: provider,
-				WorkDir:  workDir,
-				Command:  command,
-				Env:      sessionEnv,
-				Branch:   branch,
-				Project:  sessionProject,
-				Persona:  sessionPersona,
-			}); err != nil {
-				return err
+			for _, p := range personasToLaunch {
+				sessionName := sessionid.GenerateSessionID(workDir)
+				sessionCommand := command
+
+				if effectiveSessionType == "vibeflow" && p != "" {
+					mcpName := cmd.Flags().Lookup("mcp").Value.String()
+					if mcpName == "" {
+						mcpName = DefaultMCPToolName
+					}
+					initPrompt := BuildVibeflowInitPrompt(mcpName, sessionProject, p)
+					sessionCommand = AppendVibeflowInitPrompt(command, provider, initPrompt)
+				}
+
+				if err := tmux.CreateSessionWithOpts(SessionOpts{
+					Name:     sessionName,
+					Provider: provider,
+					WorkDir:  workDir,
+					Command:  sessionCommand,
+					Env:      sessionEnv,
+					Branch:   branch,
+					Project:  sessionProject,
+					Persona:  p,
+				}); err != nil {
+					return err
+				}
+
+				tmuxName := tmux.FullSessionName(provider, sessionName)
+
+				// Bind Ctrl+Q to open vibeflow TUI popup inside the session.
+				_ = tmux.BindSessionKeys(tmuxName)
+
+				if prov.SessionFile != "" {
+					_ = WriteSessionFileIfNeeded(workDir, p, sessionName)
+				}
+
+				sessionMeta := SessionMeta{
+					Name:              sessionName,
+					TmuxSession:       tmuxName,
+					Provider:          provider,
+					Project:           sessionProject,
+					Persona:           p,
+					Branch:            branch,
+					WorkingDir:        workDir,
+					SessionType:       effectiveSessionType,
+					SkipPermissions:   skipPermissions,
+					LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
+					CreatedAt:         time.Now(),
+				}
+				_ = store.Add(sessionMeta)
+
+				// Add to session cache for restart-without-intervention.
+				cache := NewSessionCache()
+				_ = cache.Add(sessionMeta)
+
+				if p != "" {
+					fmt.Printf("Session %q launched (provider: %s, persona: %s, branch: %s)\n", sessionName, provider, p, branch)
+				} else {
+					fmt.Printf("Session %q launched (provider: %s, branch: %s)\n", sessionName, provider, branch)
+				}
 			}
-
-			tmuxName := tmux.FullSessionName(provider, name)
-
-			// Bind Ctrl+Q to open vibeflow TUI popup inside the session.
-			_ = tmux.BindSessionKeys(tmuxName)
-
-			if prov.SessionFile != "" {
-				_ = WriteSessionFileIfNeeded(workDir, sessionPersona, name)
-			}
-
-			sessionMeta := SessionMeta{
-				Name:              name,
-				TmuxSession:       tmuxName,
-				Provider:          provider,
-				Project:           sessionProject,
-				Persona:           sessionPersona,
-				Branch:            branch,
-				WorkingDir:        workDir,
-				SessionType:       effectiveSessionType,
-				SkipPermissions:   skipPermissions,
-				LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
-				CreatedAt:         time.Now(),
-			}
-			_ = store.Add(sessionMeta)
-
-			// Add to session cache for restart-without-intervention.
-			cache := NewSessionCache()
-			_ = cache.Add(sessionMeta)
-
-			fmt.Printf("Session %q launched (provider: %s, branch: %s)\n", name, provider, branch)
 			return nil
 		},
 	}
