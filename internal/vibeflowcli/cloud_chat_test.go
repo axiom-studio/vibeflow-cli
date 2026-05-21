@@ -1,0 +1,258 @@
+/*
+ * Copyright (c) 2026. AXIOM STUDIO AI Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package vibeflowcli
+
+import (
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+func TestCloudPersonas_CompleteAndOrdered(t *testing.T) {
+	// Sidebar order is part of the UX contract — assert it explicitly so
+	// future re-orderings are deliberate.
+	wantOrder := []string{
+		"principal_engineer",
+		"architect",
+		"developer",
+		"ux_designer",
+		"qa_lead",
+		"security_lead",
+		"product_manager",
+		"project_manager",
+		"customer",
+	}
+	if len(CloudPersonas) != len(wantOrder) {
+		t.Fatalf("CloudPersonas length = %d, want %d", len(CloudPersonas), len(wantOrder))
+	}
+	for i, key := range wantOrder {
+		if CloudPersonas[i].Key != key {
+			t.Errorf("CloudPersonas[%d].Key = %q, want %q", i, CloudPersonas[i].Key, key)
+		}
+		if CloudPersonas[i].DisplayName == "" {
+			t.Errorf("CloudPersonas[%d].DisplayName is empty for key %q", i, key)
+		}
+		if PersonaCompactIcon(key) == "" {
+			t.Errorf("persona %q has no compact icon", key)
+		}
+		if PersonaLargeIcon(key) == "" {
+			t.Errorf("persona %q has no large icon", key)
+		}
+	}
+}
+
+func TestCloudChatModel_NewIsAtFirstPersonaWithSidebarFocus(t *testing.T) {
+	m := NewCloudChatModel()
+	if got := m.SelectedPersona().Key; got != "principal_engineer" {
+		t.Errorf("starting persona = %q, want principal_engineer", got)
+	}
+	if m.focus != CloudFocusSidebar {
+		t.Errorf("starting focus = %v, want CloudFocusSidebar", m.focus)
+	}
+	if len(m.Messages("principal_engineer")) != 0 {
+		t.Errorf("expected empty history for fresh model")
+	}
+}
+
+func TestCloudChatModel_NavigationDownWraps(t *testing.T) {
+	m := NewCloudChatModel()
+	last := len(CloudPersonas) - 1
+	for i := 0; i < last; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.cursor != last {
+		t.Fatalf("after %d ↓ presses cursor = %d, want %d", last, m.cursor, last)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.cursor != 0 {
+		t.Errorf("↓ at last persona did not wrap to 0 (got %d)", m.cursor)
+	}
+}
+
+func TestCloudChatModel_NavigationUpWraps(t *testing.T) {
+	m := NewCloudChatModel()
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	want := len(CloudPersonas) - 1
+	if m.cursor != want {
+		t.Errorf("↑ at first persona did not wrap to %d (got %d)", want, m.cursor)
+	}
+}
+
+func TestCloudChatModel_EnterFocusesInputAndEscReturns(t *testing.T) {
+	m := NewCloudChatModel()
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.focus != CloudFocusInput {
+		t.Fatalf("Enter from sidebar should focus input (got focus=%v)", m.focus)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.focus != CloudFocusSidebar {
+		t.Errorf("Esc from input should return to sidebar (got focus=%v)", m.focus)
+	}
+}
+
+func TestCloudChatModel_TypingAppendsToInputBuffer(t *testing.T) {
+	m := focusInput(NewCloudChatModel())
+	for _, r := range "hello" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m.input != "hello" {
+		t.Errorf("input = %q, want \"hello\"", m.input)
+	}
+}
+
+func TestCloudChatModel_BackspaceTrimsLastRune(t *testing.T) {
+	m := focusInput(NewCloudChatModel())
+	for _, r := range "ab" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if m.input != "a" {
+		t.Errorf("after backspace input = %q, want %q", m.input, "a")
+	}
+}
+
+func TestCloudChatModel_EnterSendsAndAppendsLocalEchoPlusPendingReply(t *testing.T) {
+	m := focusInput(NewCloudChatModel())
+	for _, r := range "hi" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	msgs := m.Messages("principal_engineer")
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages (user + pending reply), got %d", len(msgs))
+	}
+	if msgs[0].Sender != "you" || msgs[0].Text != "hi" {
+		t.Errorf("user message wrong: sender=%q text=%q", msgs[0].Sender, msgs[0].Text)
+	}
+	if !msgs[1].Pending {
+		t.Errorf("reply should be marked Pending until backend wired")
+	}
+	if !strings.Contains(msgs[1].Text, "backend not yet wired") {
+		t.Errorf("pending reply text missing backend-pending marker: %q", msgs[1].Text)
+	}
+	if m.input != "" {
+		t.Errorf("input not cleared after send: %q", m.input)
+	}
+}
+
+func TestCloudChatModel_EnterOnEmptyInputDoesNotSend(t *testing.T) {
+	m := focusInput(NewCloudChatModel())
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.Messages("principal_engineer")) != 0 {
+		t.Errorf("blank input should not produce a message")
+	}
+}
+
+func TestCloudChatModel_HistoryIsPerPersona(t *testing.T) {
+	m := focusInput(NewCloudChatModel())
+	m = typeAndEnter(t, m, "first")
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.SelectedPersona().Key != "developer" {
+		t.Fatalf("expected developer selected, got %q", m.SelectedPersona().Key)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = typeAndEnter(t, m, "second")
+
+	if got := len(m.Messages("principal_engineer")); got != 2 {
+		t.Errorf("principal_engineer history len = %d, want 2", got)
+	}
+	if got := len(m.Messages("developer")); got != 2 {
+		t.Errorf("developer history len = %d, want 2", got)
+	}
+	if m.Messages("principal_engineer")[0].Text != "first" {
+		t.Errorf("principal_engineer first message = %q", m.Messages("principal_engineer")[0].Text)
+	}
+	if m.Messages("developer")[0].Text != "second" {
+		t.Errorf("developer first message = %q", m.Messages("developer")[0].Text)
+	}
+}
+
+func TestCloudChatModel_ViewMatchesShellFrame(t *testing.T) {
+	m := NewCloudChatModel()
+	out := m.View(100, 30)
+	if !strings.Contains(out, "Personas") {
+		t.Errorf("View missing 'Personas' header; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Principal Eng") {
+		t.Errorf("View missing selected persona display name; output:\n%s", out)
+	}
+	// Selection idiom: "> " prefix on the selected sidebar row (matches the
+	// sessions view's selectedStyle.Render("> " + ...) convention).
+	if !strings.Contains(out, "> ") {
+		t.Errorf("View missing '> ' selection prefix; output:\n%s", out)
+	}
+}
+
+func TestCloudChatModel_HelpKeysSwitchByFocus(t *testing.T) {
+	m := NewCloudChatModel()
+	sidebarHelp := m.CloudChatHelpKeys()
+	if !strings.Contains(sidebarHelp, "persona") {
+		t.Errorf("sidebar help keys missing 'persona'; got: %q", sidebarHelp)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	inputHelp := m.CloudChatHelpKeys()
+	if !strings.Contains(inputHelp, "send") {
+		t.Errorf("input-focus help keys missing 'send'; got: %q", inputHelp)
+	}
+}
+
+func TestTrimToHeight(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		height int
+		want   string
+	}{
+		{"under cap returns input", "a\nb", 5, "a\nb"},
+		{"exactly cap returns input", "a\nb\nc", 3, "a\nb\nc"},
+		{"over cap drops leading lines", "a\nb\nc\nd", 2, "c\nd"},
+		{"zero height returns empty", "a\nb", 0, ""},
+		{"negative height returns empty", "a\nb", -1, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := trimToHeight(tc.in, tc.height); got != tc.want {
+				t.Errorf("trimToHeight(%q, %d) = %q, want %q", tc.in, tc.height, got, tc.want)
+			}
+		})
+	}
+}
+
+// --- helpers ---
+
+func focusInput(m CloudChatModel) CloudChatModel {
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return next
+}
+
+// typeAndEnter feeds text into the focused input then presses Enter.
+// Caller must ensure focus is on the input pane.
+func typeAndEnter(t *testing.T, m CloudChatModel, text string) CloudChatModel {
+	t.Helper()
+	if m.focus != CloudFocusInput {
+		t.Fatalf("typeAndEnter requires CloudFocusInput, got %v", m.focus)
+	}
+	for _, r := range text {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return m
+}

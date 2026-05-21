@@ -41,6 +41,7 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(configCmd())
 	root.AddCommand(agentDocCmd())
 	root.AddCommand(projectsCmd())
+	root.AddCommand(cloudCmd())
 }
 
 // --- helpers shared by subcommands ---
@@ -781,6 +782,87 @@ func projectsCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// --- cloud ---
+//
+// `vibeflow cloud` launches the same bubbletea TUI as `vibeflow` but starts
+// directly on the Cloud Chat sub-view (ViewCloudChat). The TUI shell, model,
+// and styling are shared with the sessions view — this command is purely a
+// one-keystroke shortcut for users who only want the cloud-agent chat.
+
+func cloudCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cloud",
+		Short: "Open the cloud-agent persona chat (TUI shortcut)",
+		Long: `cloud launches the vibeflow TUI directly on the Cloud Chat view,
+where the left sidebar lists personas and the right pane shows the chat
+with the selected persona. Inside the main TUI, the same view is reachable
+by pressing 'c' from the sessions list.`,
+		RunE: runCloudTUI,
+	}
+}
+
+// runCloudTUI mirrors runTUI but skips the local-session bootstrap (tmux
+// ensure-server, restart popup) and pins the initial view to ViewCloudChat.
+func runCloudTUI(cmd *cobra.Command, args []string) error {
+	if err := AcquirePIDLock(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return nil
+	}
+	defer ReleasePIDLock()
+
+	cfgPath := flagConfigPath
+	if cfgPath == "" {
+		cfgPath = ConfigPath()
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	if flagServerURL != "" {
+		cfg.ServerURL = flagServerURL
+	}
+	if flagProject != "" {
+		cfg.DefaultProject = flagProject
+	}
+	cfg.TmuxSocket = TmuxSocketName()
+
+	client := NewClient(cfg.ServerURL, cfg.APIToken)
+	tmux := NewTmuxManager(cfg.TmuxSocket)
+	store := NewStore()
+	registry := NewProviderRegistry(cfg)
+	cwd, _ := os.Getwd()
+	worktrees, _ := NewWorktreeManager(cwd, cfg.Worktree.BaseDir)
+	cache := NewSessionCache()
+
+	var projectID int64
+	if cfg.DefaultProject != "" {
+		if projects, err := client.ListProjects(); err == nil {
+			for _, p := range projects {
+				if p.Name == cfg.DefaultProject {
+					projectID = p.ID
+					break
+				}
+			}
+		}
+	}
+
+	model := NewModel(cfg, client, tmux, worktrees, store, cache, registry, projectID)
+	model.activeView = ViewCloudChat
+	if err := CheckServerReachable(cfg.ServerURL); err != nil {
+		model.serverWarning = fmt.Sprintf("Server unreachable (%s)", cfg.ServerURL)
+	}
+	defer model.logger.Close()
+
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
+	if _, err := p.Run(); err != nil {
+		model.logger.Error("cloud TUI fatal: %v", err)
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		return err
+	}
+	return nil
 }
 
 // --- agent-doc ---

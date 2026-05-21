@@ -17,8 +17,22 @@
 package vibeflowcli
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestCloudCmd_RegistersUseAndShort(t *testing.T) {
+	cmd := cloudCmd()
+	if cmd.Use != "cloud" {
+		t.Errorf("Use = %q, want %q", cmd.Use, "cloud")
+	}
+	if !strings.Contains(strings.ToLower(cmd.Short), "cloud") {
+		t.Errorf("Short missing 'cloud': %q", cmd.Short)
+	}
+	if cmd.RunE == nil {
+		t.Errorf("RunE should be set")
+	}
+}
 
 // TestRestartCmd_SkipPermissionsFlag verifies that `vibeflow restart`
 // distinguishes an unset --skip-permissions flag (preserve stored value) from
