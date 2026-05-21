@@ -97,6 +97,7 @@ const (
 	ViewWorktrees
 	ViewHelp
 	ViewRestart
+	ViewCloudChat
 )
 
 // Model is the Bubble Tea model for vibeflow-cli.
@@ -130,6 +131,7 @@ type Model struct {
 	logger        *Logger            // file-based logger
 	cache         *SessionCache      // session cache for restart-without-intervention
 	restartSelect RestartSelectModel // dead-session restart multiselect
+	cloudChat     CloudChatModel     // cloud-agent persona chat view (ViewCloudChat)
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -161,6 +163,7 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 		groupMode:       cfg.ViewMode == "grouped",
 		repoRootCache:   make(map[string]string),
 		collapsedGroups: make(map[string]bool),
+		cloudChat:       NewCloudChatModel(),
 	}
 }
 
@@ -593,6 +596,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.restartSelect, cmd = m.restartSelect.Update(msg)
 		return m, cmd
+	case ViewCloudChat:
+		return m.updateCloudChat(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -763,6 +768,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeList = NewWorktreeListModel(m.worktrees, m.store)
 			m.activeView = ViewWorktrees
 			return m, nil
+		case "c":
+			m.activeView = ViewCloudChat
+			return m, nil
 		case "?":
 			m.activeView = ViewHelp
 			return m, nil
@@ -786,6 +794,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// updateCloudChat delegates input to the cloud chat sub-model. Esc returns
+// to the sessions view when the sidebar is focused; when the input is focused,
+// the sub-model handles Esc itself (unfocus the input).
+func (m Model) updateCloudChat(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Always honor global quit.
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.Type == tea.KeyCtrlC {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		// Esc from the sidebar returns to the sessions list. The sub-model's
+		// own Esc handler (unfocus input) wins when input is focused.
+		if keyMsg.Type == tea.KeyEsc && m.cloudChat.focus == CloudFocusSidebar {
+			m.activeView = ViewSessions
+			return m, nil
+		}
+		// Q quits the whole TUI from the cloud sidebar (consistent with
+		// ViewSessions). When the input is focused, q is a literal character
+		// and the sub-model handles it.
+		if keyMsg.String() == "q" && m.cloudChat.focus == CloudFocusSidebar {
+			if len(m.sessions) > 0 {
+				m.confirmQuit = true
+				m.activeView = ViewSessions
+				return m, nil
+			}
+			m.quitting = true
+			return m, tea.Quit
+		}
+	}
+	var cmd tea.Cmd
+	m.cloudChat, cmd = m.cloudChat.Update(msg)
+	return m, cmd
 }
 
 // updateWizard delegates to the wizard sub-model and handles completion.
@@ -1451,6 +1493,8 @@ func (m Model) View() string {
 		return m.renderHelpPopup()
 	case ViewRestart:
 		return m.restartSelect.View()
+	case ViewCloudChat:
+		return m.renderCloudChat()
 	}
 
 	width := m.width
@@ -1509,7 +1553,7 @@ func (m Model) View() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  d: delete  b: switch  D: detach  g: group  w: worktrees  c: cloud  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -2025,4 +2069,48 @@ func truncate(s string, max int) string {
 
 func stripANSI(s string) string {
 	return ansiRe.ReplaceAllString(s, "")
+}
+
+// renderCloudChat renders the ViewCloudChat sub-view using the same banner +
+// help-bar frame as the sessions view, with the cloud chat sub-model providing
+// the two-column body. Visual proportions match renderSessionList for parity.
+func (m Model) renderCloudChat() string {
+	width := m.width
+	if width < 40 {
+		width = 80
+	}
+	height := m.height
+	if height < 10 {
+		height = 24
+	}
+
+	bannerStyle := lipgloss.NewStyle().Foreground(asciiBanner).Bold(true)
+	title := bannerStyle.Render(bannerText) + "\n" + copyrightStyle.Render("  "+copyrightText)
+
+	var errLine string
+	if m.serverWarning != "" {
+		warnBannerStyle := lipgloss.NewStyle().Foreground(warningColor)
+		errLine = warnBannerStyle.Render("⚠ " + m.serverWarning)
+	}
+
+	// Mirror the height math from the sessions view so columns line up.
+	usedLines := 10
+	if errLine != "" {
+		usedLines++
+	}
+	colHeight := height - usedLines
+	if colHeight < 6 {
+		colHeight = 6
+	}
+
+	body := m.cloudChat.View(width, colHeight)
+
+	helpBar := helpStyle.Render(m.cloudChat.CloudChatHelpKeys())
+
+	parts := []string{title}
+	if errLine != "" {
+		parts = append(parts, errLine)
+	}
+	parts = append(parts, body, helpBar)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
