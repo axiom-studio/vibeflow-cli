@@ -725,3 +725,104 @@ func TestClearLLMGatewayEnv_Qwen(t *testing.T) {
 		t.Error("qwen clear should not touch ANTHROPIC_BASE_URL")
 	}
 }
+
+// --- OpenShell compatibility tests ---
+
+func TestRootDir_Priority(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	t.Run("flag wins over env and home", func(t *testing.T) {
+		t.Setenv("VIBEFLOW_ROOT", "/env/root")
+		SetRootDir("/flag/root")
+		if got := RootDir(); got != "/flag/root" {
+			t.Errorf("RootDir() = %q, want /flag/root (--root flag)", got)
+		}
+		SetRootDir("")
+	})
+
+	t.Run("env wins over home", func(t *testing.T) {
+		SetRootDir("")
+		t.Setenv("VIBEFLOW_ROOT", "/sandbox/state/.vibeflow-cli")
+		if got := RootDir(); got != "/sandbox/state/.vibeflow-cli" {
+			t.Errorf("RootDir() = %q, want /sandbox/state/.vibeflow-cli (VIBEFLOW_ROOT)", got)
+		}
+	})
+
+	t.Run("falls back to home", func(t *testing.T) {
+		SetRootDir("")
+		t.Setenv("VIBEFLOW_ROOT", "")
+		os.Unsetenv("VIBEFLOW_ROOT")
+		home, _ := os.UserHomeDir()
+		want := filepath.Join(home, ".vibeflow-cli")
+		if got := RootDir(); got != want {
+			t.Errorf("RootDir() = %q, want %q ($HOME fallback)", got, want)
+		}
+	})
+}
+
+func TestTmuxSocketName_CustomRoot(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	t.Run("default root uses vibeflow", func(t *testing.T) {
+		SetRootDir("")
+		t.Setenv("VIBEFLOW_ROOT", "")
+		os.Unsetenv("VIBEFLOW_ROOT")
+		if got := TmuxSocketName(); got != "vibeflow" {
+			t.Errorf("TmuxSocketName() = %q, want vibeflow", got)
+		}
+	})
+
+	t.Run("custom root uses hashed name", func(t *testing.T) {
+		SetRootDir("/sandbox/state/.vibeflow-cli")
+		got := TmuxSocketName()
+		if got == "vibeflow" {
+			t.Error("custom root should not use default socket name")
+		}
+		if !strings.HasPrefix(got, "vibeflow-") {
+			t.Errorf("TmuxSocketName() = %q, want vibeflow-<hash> prefix", got)
+		}
+		SetRootDir("")
+	})
+}
+
+func TestNoHardcodedPaths(t *testing.T) {
+	goFiles, err := filepath.Glob(filepath.Join(".", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forbidden := []string{"/workspace", "/home/nimbus", "/usr/bin/python"}
+
+	for _, f := range goFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("reading %s: %v", f, err)
+		}
+		content := string(data)
+		for _, pattern := range forbidden {
+			if strings.Contains(content, pattern) {
+				t.Errorf("%s contains forbidden hardcoded path %q", f, pattern)
+			}
+		}
+	}
+}
+
+func TestDefaultConfig_OutboundEndpoints(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
+		t.Errorf("ServerURL = %q; egress policy must allow this endpoint", cfg.ServerURL)
+	}
+
+	// Verify no provider has hardcoded outbound URLs in its launch template.
+	for name, p := range cfg.Providers {
+		if strings.Contains(p.LaunchTemplate, "http://") || strings.Contains(p.LaunchTemplate, "https://") {
+			t.Errorf("provider %q has hardcoded URL in LaunchTemplate: %s", name, p.LaunchTemplate)
+		}
+	}
+}
