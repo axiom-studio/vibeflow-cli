@@ -46,6 +46,15 @@ error_recovery:
   backoff_multiplier: 2
   max_backoff_seconds: 300
 
+openshell:
+  enabled: false
+  binary: openshell
+  mode: create
+  sandbox: vf-main
+  from: ghcr.io/nvidia/openshell-community/sandboxes/base
+  policy: ./policy.yaml
+  keep: true
+
 providers:
   claude:
     name: Claude Code
@@ -56,6 +65,10 @@ providers:
 ```
 
 Built-in provider keys include **`claude`**, **`codex`**, **`gemini`**, **`cursor`**, and **`qwen`**. You can add custom providers by extending the `providers` map (see [Providers](providers.md)).
+
+## OpenShell
+
+Set `openshell.enabled: true` to wrap launched provider commands in NVIDIA OpenShell. Headless launches can also enable it per run with `vibeflow launch --openshell`. See [Providers](providers.md#openshell-sandboxes) for the full option list and generated command shape.
 
 ## Environment variable overrides
 

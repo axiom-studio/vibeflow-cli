@@ -74,31 +74,47 @@ type WorktreeConfig struct {
 
 // ErrorRecoveryConfig holds settings for automatic error detection and recovery.
 type ErrorRecoveryConfig struct {
-	Enabled           bool   `yaml:"enabled"`
-	MaxRetries        int    `yaml:"max_retries"`
-	DebounceSeconds   int    `yaml:"debounce_seconds"`
-	BackoffMultiplier int    `yaml:"backoff_multiplier"`
-	MaxBackoffSeconds int    `yaml:"max_backoff_seconds"`
+	Enabled           bool `yaml:"enabled"`
+	MaxRetries        int  `yaml:"max_retries"`
+	DebounceSeconds   int  `yaml:"debounce_seconds"`
+	BackoffMultiplier int  `yaml:"backoff_multiplier"`
+	MaxBackoffSeconds int  `yaml:"max_backoff_seconds"`
+}
+
+// OpenShellConfig controls optional NVIDIA OpenShell sandbox wrapping for
+// launched agent commands.
+type OpenShellConfig struct {
+	Enabled         bool     `yaml:"enabled,omitempty"`
+	Binary          string   `yaml:"binary,omitempty"`
+	Mode            string   `yaml:"mode,omitempty"` // "create" or "use"
+	Sandbox         string   `yaml:"sandbox,omitempty"`
+	From            string   `yaml:"from,omitempty"`
+	Policy          string   `yaml:"policy,omitempty"`
+	Providers       []string `yaml:"providers,omitempty"`
+	NoAutoProviders bool     `yaml:"no_auto_providers,omitempty"`
+	Keep            bool     `yaml:"keep,omitempty"`
+	Args            []string `yaml:"args,omitempty"`
 }
 
 // Config holds all vibeflow-cli configuration.
 type Config struct {
-	ServerURL        string                `yaml:"server_url"`
-	APIToken         string                `yaml:"api_token"`
-	DefaultProject   string                `yaml:"default_project"`
-	DefaultWorkDir   string                `yaml:"default_work_dir"`
-	TmuxSocket       string                `yaml:"tmux_socket"`
-	PollInterval     int                   `yaml:"poll_interval_seconds"`
-	ClaudeBinary     string                `yaml:"claude_binary"`
-	Providers        map[string]Provider   `yaml:"providers"`
-	Worktree         WorktreeConfig        `yaml:"worktree"`
-	DefaultProvider  string                `yaml:"default_provider"`
-	ViewMode         string                `yaml:"view_mode"` // "flat" or "grouped" (default: flat)
-	ErrorRecovery    ErrorRecoveryConfig   `yaml:"error_recovery"`
-	DirectoryHistory []string              `yaml:"directory_history,omitempty"`
-	SavedEnvVars     map[string]string     `yaml:"saved_env_vars,omitempty"`
-	LLMGatewayEnabled bool                 `yaml:"llm_gateway_enabled,omitempty"`
-	MCPToolName      string                `yaml:"mcp_tool_name,omitempty"`
+	ServerURL         string              `yaml:"server_url"`
+	APIToken          string              `yaml:"api_token"`
+	DefaultProject    string              `yaml:"default_project"`
+	DefaultWorkDir    string              `yaml:"default_work_dir"`
+	TmuxSocket        string              `yaml:"tmux_socket"`
+	PollInterval      int                 `yaml:"poll_interval_seconds"`
+	ClaudeBinary      string              `yaml:"claude_binary"`
+	Providers         map[string]Provider `yaml:"providers"`
+	Worktree          WorktreeConfig      `yaml:"worktree"`
+	OpenShell         OpenShellConfig     `yaml:"openshell,omitempty"`
+	DefaultProvider   string              `yaml:"default_provider"`
+	ViewMode          string              `yaml:"view_mode"` // "flat" or "grouped" (default: flat)
+	ErrorRecovery     ErrorRecoveryConfig `yaml:"error_recovery"`
+	DirectoryHistory  []string            `yaml:"directory_history,omitempty"`
+	SavedEnvVars      map[string]string   `yaml:"saved_env_vars,omitempty"`
+	LLMGatewayEnabled bool                `yaml:"llm_gateway_enabled,omitempty"`
+	MCPToolName       string              `yaml:"mcp_tool_name,omitempty"`
 }
 
 // AddDirectoryToHistory adds a directory to the front of the history list,
@@ -172,6 +188,11 @@ func DefaultConfig() *Config {
 			DebounceSeconds:   5,
 			BackoffMultiplier: 2,
 			MaxBackoffSeconds: 300,
+		},
+		OpenShell: OpenShellConfig{
+			Binary: "openshell",
+			Mode:   "create",
+			Keep:   true,
 		},
 		Providers: map[string]Provider{
 			"claude": {

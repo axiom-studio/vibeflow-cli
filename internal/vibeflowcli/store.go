@@ -27,20 +27,21 @@ import (
 // SessionMeta holds metadata for a vibeflow-cli session that tmux alone
 // cannot store (provider, worktree path, vibeflow session ID, etc.).
 type SessionMeta struct {
-	Name              string    `json:"name"`
-	TmuxSession       string    `json:"tmux_session"`
-	Provider          string    `json:"provider"`
-	Project           string    `json:"project"`
-	Persona           string    `json:"persona,omitempty"`
-	Branch            string    `json:"branch"`
-	WorktreePath      string    `json:"worktree_path,omitempty"`
-	WorkingDir        string    `json:"working_dir"`
-	VibeFlowSessionID string    `json:"vibeflow_session_id,omitempty"`
-	SessionType       string    `json:"session_type,omitempty"`
-	SkipPermissions   bool      `json:"skip_permissions,omitempty"`
-	LLMGatewayEnabled bool      `json:"llm_gateway_enabled,omitempty"`
-	MCPToolName       string    `json:"mcp_tool_name,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
+	Name              string           `json:"name"`
+	TmuxSession       string           `json:"tmux_session"`
+	Provider          string           `json:"provider"`
+	Project           string           `json:"project"`
+	Persona           string           `json:"persona,omitempty"`
+	Branch            string           `json:"branch"`
+	WorktreePath      string           `json:"worktree_path,omitempty"`
+	WorkingDir        string           `json:"working_dir"`
+	VibeFlowSessionID string           `json:"vibeflow_session_id,omitempty"`
+	SessionType       string           `json:"session_type,omitempty"`
+	SkipPermissions   bool             `json:"skip_permissions,omitempty"`
+	LLMGatewayEnabled bool             `json:"llm_gateway_enabled,omitempty"`
+	MCPToolName       string           `json:"mcp_tool_name,omitempty"`
+	OpenShell         *OpenShellConfig `json:"openshell,omitempty"`
+	CreatedAt         time.Time        `json:"created_at"`
 }
 
 // Store persists session metadata to a JSON file with file-level locking
@@ -233,4 +234,3 @@ func (s *Store) writeFile(sessions []SessionMeta) error {
 	}
 	return os.WriteFile(s.path, data, 0600)
 }
-

@@ -92,6 +92,49 @@ The VibeFlow init prompt sent to agents references the MCP server by tool name (
 
 The chosen value persists on the session record so `vibeflow restart` re-uses the original launch's MCP name. If neither is set, the default (`vibeflow`) is used.
 
+## OpenShell sandboxes
+
+vibeflow-cli can wrap any provider command in NVIDIA OpenShell so the agent runs inside a policy-enforced sandbox. Enable it per launch:
+
+```bash
+vibeflow launch --provider codex --skip-permissions \
+  --openshell \
+  --openshell-sandbox vf-main \
+  --openshell-from ghcr.io/nvidia/openshell-community/sandboxes/base \
+  --openshell-policy ./policy.yaml
+```
+
+The generated command shape is:
+
+```bash
+openshell sandbox create --name <sandbox> --keep [options] -- sh -lc '<agent command>'
+```
+
+Config-file equivalent:
+
+```yaml
+openshell:
+  enabled: true
+  binary: openshell
+  mode: create
+  sandbox: vf-main
+  from: ghcr.io/nvidia/openshell-community/sandboxes/base
+  policy: ./policy.yaml
+  providers:
+    - openai
+    - github
+  no_auto_providers: false
+  keep: true
+  args: []
+```
+
+Supported modes:
+
+- `create` (default) uses `openshell sandbox create` and passes the final provider command after `--`.
+- `use` is an advanced escape hatch for OpenShell installs that provide `openshell sandbox use <name> -- ...`; set `sandbox` and any extra `args` in config.
+
+When enabled, restart metadata stores the OpenShell settings so `vibeflow restart` uses the same sandbox wrapper.
+
 ## Next steps
 
 - [Session wizard](session-wizard.md)

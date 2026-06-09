@@ -70,7 +70,8 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 
 func launchCmd() *cobra.Command {
 	var provider, branch, worktreeName, persona, personasRaw, project, sessionType string
-	var worktree, skipPermissions, newBranch, llmGateway bool
+	var openshellSandbox, openshellFrom, openshellPolicy, openshellProvidersRaw string
+	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders bool
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -191,6 +192,26 @@ func launchCmd() *cobra.Command {
 			// Mirror qwen OPENAI_* env vars onto the CLI flags so qwen-code uses them.
 			command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
+			openShellCfg := cfg.OpenShell
+			if openshell {
+				openShellCfg.Enabled = true
+			}
+			if openshellSandbox != "" {
+				openShellCfg.Sandbox = openshellSandbox
+			}
+			if openshellFrom != "" {
+				openShellCfg.From = openshellFrom
+			}
+			if openshellPolicy != "" {
+				openShellCfg.Policy = openshellPolicy
+			}
+			if openshellNoAutoProviders {
+				openShellCfg.NoAutoProviders = true
+			}
+			if openshellProvidersRaw != "" {
+				openShellCfg.Providers = splitCommaList(openshellProvidersRaw)
+			}
+
 			// Determine which personas to launch.
 			personasToLaunch := []string{""}
 			if len(sessionPersonas) > 0 {
@@ -215,6 +236,10 @@ func launchCmd() *cobra.Command {
 					}
 					initPrompt := BuildVibeflowInitPrompt(mcpName, sessionProject, p)
 					sessionCommand = AppendVibeflowInitPrompt(command, provider, initPrompt)
+				}
+				sessionCommand, err = WrapOpenShellCommand(sessionCommand, openShellCfg)
+				if err != nil {
+					return err
 				}
 
 				if err := tmux.CreateSessionWithOpts(SessionOpts{
@@ -250,6 +275,7 @@ func launchCmd() *cobra.Command {
 					SessionType:       effectiveSessionType,
 					SkipPermissions:   skipPermissions,
 					LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
+					OpenShell:         openShellMeta(openShellCfg),
 					CreatedAt:         time.Now(),
 				}
 				_ = store.Add(sessionMeta)
@@ -274,6 +300,12 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&newBranch, "new-branch", false, "Create a new git branch (used with --worktree)")
 	cmd.Flags().BoolVar(&skipPermissions, "skip-permissions", false, "Skip permission prompts (autonomous mode)")
 	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through Axiom Cloud Gateway")
+	cmd.Flags().BoolVar(&openshell, "openshell", false, "Run the agent inside an NVIDIA OpenShell sandbox")
+	cmd.Flags().StringVar(&openshellSandbox, "openshell-sandbox", "", "OpenShell sandbox name (sets --name for create mode)")
+	cmd.Flags().StringVar(&openshellFrom, "openshell-from", "", "OpenShell sandbox image/base to create from")
+	cmd.Flags().StringVar(&openshellPolicy, "openshell-policy", "", "OpenShell policy YAML path")
+	cmd.Flags().StringVar(&openshellProvidersRaw, "openshell-provider", "", "Comma-separated OpenShell provider names to attach")
+	cmd.Flags().BoolVar(&openshellNoAutoProviders, "openshell-no-auto-providers", false, "Disable OpenShell credential auto-provider discovery")
 	cmd.Flags().StringVar(&persona, "persona", "", "Persona key for vibeflow sessions")
 	cmd.Flags().StringVar(&personasRaw, "personas", "", "Comma-separated persona keys for team mode")
 	cmd.Flags().StringVar(&project, "project", "", "Project name (overrides config default)")
@@ -285,8 +317,8 @@ func launchCmd() *cobra.Command {
 
 func listCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List active sessions",
+		Use:     "list",
+		Short:   "List active sessions",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
@@ -400,10 +432,10 @@ func deleteCmd() *cobra.Command {
 	var cleanupWorktree bool
 
 	cmd := &cobra.Command{
-		Use:   "delete <session-name>",
-		Short: "Delete (kill) a session",
-		Long:  "Delete a session by name. This is an alias for the 'kill' command.",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <session-name>",
+		Short:   "Delete (kill) a session",
+		Long:    "Delete a session by name. This is an alias for the 'kill' command.",
+		Args:    cobra.ExactArgs(1),
 		Aliases: []string{"rm"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
@@ -527,6 +559,10 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		initPrompt := BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona)
 		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
 	}
+	command, err = WrapOpenShellCommand(command, openShellValue(meta.OpenShell))
+	if err != nil {
+		return SessionMeta{}, err
+	}
 
 	// Ensure agent docs exist in the working directory.
 	if meta.SessionType == "vibeflow" {
@@ -569,6 +605,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		SkipPermissions:   meta.SkipPermissions,
 		LLMGatewayEnabled: meta.LLMGatewayEnabled,
 		MCPToolName:       meta.MCPToolName,
+		OpenShell:         meta.OpenShell,
 		CreatedAt:         time.Now(),
 	}
 
@@ -581,6 +618,35 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 
 	return updated, nil
+}
+
+func splitCommaList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func openShellMeta(cfg OpenShellConfig) *OpenShellConfig {
+	if !cfg.Enabled {
+		return nil
+	}
+	return &cfg
+}
+
+func openShellValue(cfg *OpenShellConfig) OpenShellConfig {
+	if cfg == nil {
+		return OpenShellConfig{}
+	}
+	return *cfg
 }
 
 func restartCmd() *cobra.Command {
@@ -647,8 +713,8 @@ func restartCmd() *cobra.Command {
 
 func worktreesCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "worktrees",
-		Short: "List git worktrees",
+		Use:     "worktrees",
+		Short:   "List git worktrees",
 		Aliases: []string{"wt"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
