@@ -405,7 +405,16 @@ func TestStore_SessionMetaFields(t *testing.T) {
 		WorktreePath:      "/worktree/path",
 		WorkingDir:        "/work/dir",
 		VibeFlowSessionID: "session-123",
-		CreatedAt:         now,
+		SessionType:       "vibeflow",
+		SkipPermissions:   true,
+		LLMGatewayEnabled: true,
+		MCPToolName:       "myvibeflow",
+		OpenShell: &OpenShellConfig{
+			Enabled: true,
+			Sandbox: "vf-main",
+			Policy:  "/sandbox/policy.yaml",
+		},
+		CreatedAt: now,
 	}
 	if err := s.Add(meta); err != nil {
 		t.Fatal(err)
@@ -429,6 +438,21 @@ func TestStore_SessionMetaFields(t *testing.T) {
 	}
 	if got.Persona != "developer" {
 		t.Errorf("Persona = %q", got.Persona)
+	}
+	if got.SessionType != "vibeflow" {
+		t.Errorf("SessionType = %q", got.SessionType)
+	}
+	if !got.SkipPermissions {
+		t.Error("SkipPermissions should be true")
+	}
+	if !got.LLMGatewayEnabled {
+		t.Error("LLMGatewayEnabled should be true")
+	}
+	if got.MCPToolName != "myvibeflow" {
+		t.Errorf("MCPToolName = %q", got.MCPToolName)
+	}
+	if got.OpenShell == nil || !got.OpenShell.Enabled || got.OpenShell.Sandbox != "vf-main" || got.OpenShell.Policy != "/sandbox/policy.yaml" {
+		t.Errorf("OpenShell metadata not preserved: %+v", got.OpenShell)
 	}
 	if got.Branch != "feature-branch" {
 		t.Errorf("Branch = %q", got.Branch)

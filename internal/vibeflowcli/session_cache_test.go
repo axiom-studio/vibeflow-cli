@@ -265,6 +265,12 @@ func TestSessionCache_PersistsNewFields(t *testing.T) {
 		SessionType:       "vibeflow",
 		SkipPermissions:   true,
 		LLMGatewayEnabled: true,
+		MCPToolName:       "vf",
+		OpenShell: &OpenShellConfig{
+			Enabled: true,
+			Sandbox: "cached-sandbox",
+			Mode:    "create",
+		},
 		VibeFlowSessionID: "session-123",
 		CreatedAt:         time.Now(),
 	}
@@ -291,5 +297,11 @@ func TestSessionCache_PersistsNewFields(t *testing.T) {
 	}
 	if got.Persona != "architect" {
 		t.Errorf("Persona = %q", got.Persona)
+	}
+	if got.MCPToolName != "vf" {
+		t.Errorf("MCPToolName = %q", got.MCPToolName)
+	}
+	if got.OpenShell == nil || !got.OpenShell.Enabled || got.OpenShell.Sandbox != "cached-sandbox" {
+		t.Errorf("OpenShell metadata not preserved: %+v", got.OpenShell)
 	}
 }

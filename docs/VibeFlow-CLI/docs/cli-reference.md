@@ -31,6 +31,12 @@ Create and launch a session without the full wizard. Key flags:
 | `--worktree-name` | Custom worktree directory name (default: auto-generated) |
 | `--skip-permissions` | Skip permission prompts (autonomous mode) |
 | `--llm-gateway` | Route LLM requests through the VibeFlow server's LLM Gateway |
+| `--openshell` | Run the agent command inside an NVIDIA OpenShell sandbox |
+| `--openshell-sandbox` | OpenShell sandbox name |
+| `--openshell-from` | OpenShell sandbox image/base |
+| `--openshell-policy` | OpenShell policy YAML path |
+| `--openshell-provider` | Comma-separated OpenShell provider names to attach |
+| `--openshell-no-auto-providers` | Disable OpenShell credential auto-provider discovery |
 
 Examples:
 
@@ -39,6 +45,7 @@ vibeflow launch --provider claude --branch main
 vibeflow launch --provider cursor --worktree --new-branch
 vibeflow launch --provider codex --skip-permissions --llm-gateway
 vibeflow launch --provider qwen --skip-permissions
+vibeflow launch --provider codex --openshell --openshell-sandbox vf-main
 ```
 
 ### `vibeflow list` (alias: `ls`)

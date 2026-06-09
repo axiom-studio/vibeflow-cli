@@ -1239,6 +1239,11 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		initPrompt := BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona)
 		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
 	}
+	command, err = WrapOpenShellCommand(command, m.config.OpenShell)
+	if err != nil {
+		m.logger.Error("wrap openshell command (provider=%s): %v", provider, err)
+		return sessionsMsg{err: err}
+	}
 
 	// Ensure all agent-specific markdown docs exist in the working directory
 	// so any provider session picks up vibeflow session rules on startup.
@@ -1302,6 +1307,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		SkipPermissions:   result.SkipPermissions,
 		LLMGatewayEnabled: result.LLMGatewayEnabled,
 		MCPToolName:       m.config.MCPToolName,
+		OpenShell:         openShellMeta(m.config.OpenShell),
 		CreatedAt:         time.Now(),
 	}
 	if m.store != nil {
