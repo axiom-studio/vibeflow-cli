@@ -225,6 +225,9 @@ var secretEnvPrefixes = []string{
 	"VIBEFLOW_TOKEN=",
 	"OPENAI_API_KEY=",
 	"QWEN_CUSTOM_API_KEY", // dynamic suffix encodes the endpoint; value is the key
+	"ANTHROPIC_CUSTOM_HEADERS=", // gateway mode embeds the API token as "x-axiom-api-key: <token>"
+	"ANTHROPIC_AUTH_TOKEN=",
+	"ANTHROPIC_API_KEY=",
 }
 
 // openaiAPIKeyFlagRe matches `--openai-api-key <value>` (or `=<value>`) inside
