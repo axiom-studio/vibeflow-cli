@@ -364,6 +364,13 @@ func TestRedactSpawnArg(t *testing.T) {
 			in:   "QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4=sk-zai",
 			want: "QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4=<redacted>",
 		},
+		{
+			name: "anthropic custom headers env (gateway token inside header value)",
+			in:   "ANTHROPIC_CUSTOM_HEADERS=x-axiom-api-key: tok-123",
+			want: "ANTHROPIC_CUSTOM_HEADERS=<redacted>",
+		},
+		{"anthropic auth token env", "ANTHROPIC_AUTH_TOKEN=tok", "ANTHROPIC_AUTH_TOKEN=<redacted>"},
+		{"anthropic api key env", "ANTHROPIC_API_KEY=sk-ant", "ANTHROPIC_API_KEY=<redacted>"},
 		{"non-secret env passes through", "OPENAI_MODEL=glm-4.6", "OPENAI_MODEL=glm-4.6"},
 		{"plain arg passes through", "-e", "-e"},
 		{
