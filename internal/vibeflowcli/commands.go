@@ -190,6 +190,7 @@ func launchCmd() *cobra.Command {
 			}
 
 			// Mirror qwen OPENAI_* env vars onto the CLI flags so qwen-code uses them.
+			applyQwenModelPassthrough(provider, sessionEnv)
 			command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
 			openShellCfg := cfg.OpenShell
@@ -548,6 +549,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 
 	// For qwen, mirror OPENAI_* env vars onto the command line so qwen-code
 	// honors them on restart too. Must run before the init-prompt append.
+	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
 	// For vibeflow sessions, append the init prompt so the agent starts autonomously.

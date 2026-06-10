@@ -691,10 +691,52 @@ func TestBuildLLMGatewayEnv_Qwen(t *testing.T) {
 	if env["OPENAI_BASE_URL"] != want {
 		t.Errorf("OPENAI_BASE_URL = %q, want %q", env["OPENAI_BASE_URL"], want)
 	}
-	// Must match codex/gemini shape exactly.
+	// Must be a superset of the codex/gemini shape (OPENAI_* pair identical)…
 	codex := BuildLLMGatewayEnv("codex", "https://server.example.com", "tok-123")
 	if env["OPENAI_API_KEY"] != codex["OPENAI_API_KEY"] || env["OPENAI_BASE_URL"] != codex["OPENAI_BASE_URL"] {
-		t.Error("qwen gateway env should match codex shape")
+		t.Error("qwen gateway env should match codex OPENAI_* shape")
+	}
+	// …plus the qwen custom-API-key var binding the gateway endpoint, whose
+	// value is the same bearer token.
+	customVar := "QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_SERVER_EXAMPLE_COM_REST_V1_LLM_GATEWAY_V1"
+	if env[customVar] != "tok-123" {
+		t.Errorf("%s = %q, want tok-123", customVar, env[customVar])
+	}
+	if len(env) != 3 {
+		t.Errorf("qwen gateway env has %d vars, want 3: %v", len(env), env)
+	}
+}
+
+func TestQwenCustomAPIKeyEnvName(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol string
+		url      string
+		want     string
+	}{
+		// The z.ai example from the support requirements, verbatim.
+		{"zai_paas", "OPENAI", "https://api.z.ai/api/paas/v4",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4"},
+		{"zai_coding", "OPENAI", "https://api.z.ai/api/coding/paas/v4",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_CODING_PAAS_V4"},
+		{"gateway_endpoint", "OPENAI", "https://axiom.example.com/rest/v1/llm-gateway/v1",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_AXIOM_EXAMPLE_COM_REST_V1_LLM_GATEWAY_V1"},
+		// Trailing separators are trimmed, runs of separators collapse.
+		{"trailing_slash", "OPENAI", "https://api.z.ai/api/paas/v4/",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4"},
+		{"port_and_dash", "OPENAI", "http://my-host.local:8080/v1",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTP_MY_HOST_LOCAL_8080_V1"},
+		// Protocol is uppercased; empty URL contributes no segment.
+		{"lowercase_protocol", "openai", "https://api.z.ai/api/paas/v4",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4"},
+		{"empty_url", "OPENAI", "", "QWEN_CUSTOM_API_KEY_OPENAI"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := QwenCustomAPIKeyEnvName(tt.protocol, tt.url); got != tt.want {
+				t.Errorf("QwenCustomAPIKeyEnvName(%q, %q) = %q, want %q", tt.protocol, tt.url, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -723,6 +765,13 @@ func TestClearLLMGatewayEnv_Qwen(t *testing.T) {
 	}
 	if _, ok := env["ANTHROPIC_BASE_URL"]; ok {
 		t.Error("qwen clear should not touch ANTHROPIC_BASE_URL")
+	}
+	// User-exported QWEN_CUSTOM_API_KEY_* vars are the user's own auth wiring
+	// (an API key, not a base URL) — never blanked, same as every other key.
+	for k := range env {
+		if strings.HasPrefix(k, "QWEN_CUSTOM_API_KEY_") {
+			t.Errorf("qwen clear must not touch custom API key vars, got %q", k)
+		}
 	}
 }
 

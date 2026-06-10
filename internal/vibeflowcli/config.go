@@ -371,6 +371,10 @@ func CheckServerReachable(serverURL string) error {
 // For Codex/Gemini/Qwen: uses OPENAI_API_KEY + OPENAI_BASE_URL (these CLIs
 // share the OpenAI-compatible client surface; SDK does not support custom
 // header env vars).
+// Qwen additionally gets a QWEN_CUSTOM_API_KEY_* var binding the gateway
+// endpoint via qwen-code's custom-API-key mechanism (the var NAME encodes
+// the protocol + endpoint URL; the VALUE is the bearer token), so gateway
+// routing works even where qwen-code ignores the OPENAI_* env pair.
 func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]string {
 	env := make(map[string]string)
 	if apiToken == "" || serverURL == "" {
@@ -384,8 +388,49 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	case "codex", "gemini", "qwen":
 		env["OPENAI_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
+		if providerKey == "qwen" {
+			env[QwenCustomAPIKeyEnvName("OPENAI", gatewayBaseURL+"/v1")] = apiToken
+		}
 	}
 	return env
+}
+
+// QwenCustomAPIKeyEnvName builds the env var name qwen-code uses to bind an
+// API key to a custom OpenAI-compatible endpoint:
+//
+//	QWEN_CUSTOM_API_KEY_{PROTOCOL}_{ENCODED_ENDPOINT}
+//
+// The endpoint URL is uppercased and every run of non-alphanumeric characters
+// collapses to a single underscore, e.g. protocol "OPENAI" with endpoint
+// "https://api.z.ai/api/paas/v4" yields
+// QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4. The var's VALUE is
+// the API key / bearer token for that endpoint.
+func QwenCustomAPIKeyEnvName(protocol, endpointURL string) string {
+	name := "QWEN_CUSTOM_API_KEY_" + strings.ToUpper(protocol)
+	if enc := encodeQwenEnvSegment(endpointURL); enc != "" {
+		name += "_" + enc
+	}
+	return name
+}
+
+// encodeQwenEnvSegment uppercases s and collapses each run of characters
+// outside [A-Z0-9] into a single underscore, trimming leading/trailing
+// underscores ("https://api.z.ai/api/paas/v4" → "HTTPS_API_Z_AI_API_PAAS_V4").
+func encodeQwenEnvSegment(s string) string {
+	var b strings.Builder
+	pendingSep := false
+	for _, ch := range strings.ToUpper(s) {
+		if (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') {
+			if pendingSep && b.Len() > 0 {
+				b.WriteByte('_')
+			}
+			pendingSep = false
+			b.WriteRune(ch)
+		} else {
+			pendingSep = true
+		}
+	}
+	return b.String()
 }
 
 // ClearLLMGatewayEnv returns environment variables set to empty strings to
@@ -397,7 +442,10 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 // so blanking OPENAI_BASE_URL pushes the OpenAI SDK to its default
 // (api.openai.com) and breaks users configured for DashScope or any other
 // OpenAI-compatible endpoint via their shell or `.qwen/.env`. Leave qwen's
-// base URL alone and let the user's existing auth work.
+// base URL alone and let the user's existing auth work. The same applies to
+// any QWEN_CUSTOM_API_KEY_* vars the user exports themselves — like API keys
+// (which this function never blanks for any provider), they are the user's
+// own auth wiring.
 func ClearLLMGatewayEnv(providerKey string) map[string]string {
 	env := make(map[string]string)
 	switch providerKey {

@@ -285,3 +285,41 @@ func TestAppendQwenAPIFlags_OrderingWithInitPrompt(t *testing.T) {
 	}
 }
 
+func TestApplyQwenModelPassthrough(t *testing.T) {
+	t.Run("copies shell OPENAI_MODEL for qwen when unset", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "glm-4.6")
+		env := map[string]string{"OPENAI_API_KEY": "tok"}
+		applyQwenModelPassthrough("qwen", env)
+		if env["OPENAI_MODEL"] != "glm-4.6" {
+			t.Errorf("OPENAI_MODEL = %q, want glm-4.6", env["OPENAI_MODEL"])
+		}
+	})
+	t.Run("existing session value wins over shell", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "shell-model")
+		env := map[string]string{"OPENAI_MODEL": "wizard-model"}
+		applyQwenModelPassthrough("qwen", env)
+		if env["OPENAI_MODEL"] != "wizard-model" {
+			t.Errorf("OPENAI_MODEL = %q, want wizard-model (session env wins)", env["OPENAI_MODEL"])
+		}
+	})
+	t.Run("non-qwen providers untouched", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "glm-4.6")
+		env := map[string]string{}
+		applyQwenModelPassthrough("codex", env)
+		if _, ok := env["OPENAI_MODEL"]; ok {
+			t.Error("codex must not receive the qwen model passthrough")
+		}
+	})
+	t.Run("no shell var is a no-op", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "")
+		env := map[string]string{}
+		applyQwenModelPassthrough("qwen", env)
+		if _, ok := env["OPENAI_MODEL"]; ok {
+			t.Error("empty shell var must not be copied")
+		}
+	})
+	t.Run("nil env is safe", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "glm-4.6")
+		applyQwenModelPassthrough("qwen", nil) // must not panic
+	})
+}
