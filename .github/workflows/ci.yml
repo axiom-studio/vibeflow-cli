@@ -7,8 +7,10 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only: CI only tests and builds snapshot artifacts. Release publishing
+# (which needs contents: write) lives in release.yml and runs on tags only.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -56,23 +58,3 @@ jobs:
           name: vibeflow-snapshot
           path: dist/vibeflow_*
           retention-days: 7
-
-      - name: Update nightly release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: andelf/nightly-release@main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: nightly
-          name: "Nightly Build ($${{ github.sha }})"
-          prerelease: true
-          body: |
-            Automated nightly build from commit ${{ github.sha }}.
-
-            **Branch**: main
-            **Commit**: ${{ github.sha }}
-            **Date**: ${{ github.event.head_commit.timestamp }}
-          files: |
-            dist/vibeflow_*.tar.gz
-            dist/vibeflow_*.zip
-            dist/checksums.txt
