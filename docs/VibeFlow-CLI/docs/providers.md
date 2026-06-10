@@ -32,7 +32,7 @@ VibeFlow init prompts are passed in the argument shape each CLI expects so the a
 
 When enabled in config or the wizard, the CLI can set **per-provider environment variables** so traffic goes through your VibeFlow server’s LLM gateway (where supported). Routing for Cursor may evolve; if gateway env mapping is empty for a provider, the CLI leaves gateway vars unset for that agent.
 
-**Qwen Code** uses the OpenAI-compatible env vars (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) — same wiring as Codex and Gemini. Note that the `qwen` CLI auto-loads `.env` files from the current working directory and `~/.qwen/.env` at startup. If you have `OPENAI_BASE_URL` set in either of those, it can interact with the value the wizard sets for the tmux process: process-level env normally takes precedence, but users running mixed direct/gateway setups should double-check that the gateway is actually being used (e.g. by checking the request URL in the gateway server logs). Qwen also supports DashScope, Anthropic, Gemini, Ollama, vLLM, and BailianCoding auth modes for direct use; these are not touched by the gateway wiring — you own the corresponding env vars (`DASHSCOPE_API_KEY` etc.).
+**Qwen Code** uses the OpenAI-compatible env vars (`OPENAI_API_KEY`, `OPENAI_BASE_URL`) — same wiring as Codex and Gemini — plus a `QWEN_CUSTOM_API_KEY_{PROTOCOL}_{ENCODED_ENDPOINT}` variable that binds the gateway endpoint via qwen-code's custom-API-key mechanism (the variable's *name* encodes the protocol and endpoint URL, e.g. `QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4` for `https://api.z.ai/api/paas/v4`; its *value* is the bearer token). In gateway mode the wizard still shows the **Qwen launch config** step so you can pick the model the gateway routes to (`OPENAI_MODEL`, e.g. `glm-4.6` for z.ai); the endpoint and key fields come from the gateway, so the base URL input is ignored there. For headless `vibeflow launch` and session restarts, export `OPENAI_MODEL` in your shell — it is passed through to the session and mirrored onto qwen's `--model` flag. Note that the `qwen` CLI auto-loads `.env` files from the current working directory and `~/.qwen/.env` at startup. If you have `OPENAI_BASE_URL` set in either of those, it can interact with the value the wizard sets for the tmux process: process-level env normally takes precedence, but users running mixed direct/gateway setups should double-check that the gateway is actually being used (e.g. by checking the request URL in the gateway server logs). Qwen also supports DashScope, Anthropic, Gemini, Ollama, vLLM, and BailianCoding auth modes for direct use; these are not touched by the gateway wiring — you own the corresponding env vars (`DASHSCOPE_API_KEY` etc.).
 
 ## Qwen launch config (API-key mode)
 
@@ -44,7 +44,7 @@ When you launch a qwen session **without** the LLM Gateway, the wizard inserts a
 | `OPENAI_BASE_URL` | `StepQwenLaunchConfig` vendor preset, editable. |
 | `OPENAI_MODEL` | `StepQwenLaunchConfig` vendor preset, editable. |
 
-The step is **skipped** for any other provider, and skipped for qwen when the LLM Gateway is enabled (the gateway provides its own `OPENAI_API_KEY` + `OPENAI_BASE_URL`).
+The step is **skipped** for any other provider. For qwen it also runs when the LLM Gateway is enabled, but in that mode only the **model** selection is committed (`OPENAI_MODEL`) — the gateway provides its own `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `QWEN_CUSTOM_API_KEY_*` endpoint binding, so the base URL input is ignored.
 
 ### Vendor presets
 
@@ -71,7 +71,7 @@ The step is **skipped** for any other provider, and skipped for qwen when the LL
 5. The new **Qwen launch config** step opens. Highlight **Qwen (DashScope)** — both inputs auto-fill with `qwen3-coder-plus` and `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`. Press `enter`.
 6. Pick a branch / worktree / permissions, confirm, and the tmux session starts with `qwen --yolo` (when skip-permissions is selected) and the three OpenAI-compatible env vars exported.
 
-The **LLM Gateway** path bypasses this step; `BuildLLMGatewayEnv("qwen", …)` injects the gateway-derived `OPENAI_API_KEY` and `OPENAI_BASE_URL` instead.
+On the **LLM Gateway** path, `BuildLLMGatewayEnv("qwen", …)` injects the gateway-derived `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and the `QWEN_CUSTOM_API_KEY_*` endpoint binding instead; the launch-config step still runs there, but only to capture the model (see [LLM Gateway](#llm-gateway)).
 
 ## Custom providers
 

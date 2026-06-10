@@ -166,7 +166,8 @@ type WizardModel struct {
 	selectedLLMGateway int     // 0 = Yes, 1 = No.
 	llmGatewayEnabled bool     // True if user chose to route through gateway.
 
-	// Qwen launch config (StepQwenLaunchConfig — qwen + non-gateway flow only).
+	// Qwen launch config (StepQwenLaunchConfig — all qwen flows; in gateway
+	// mode only the model selection is committed).
 	qwenVendorIdx    int    // index into qwenLaunchPresets()
 	qwenModelInput   string // OPENAI_MODEL value, auto-filled from preset, editable.
 	qwenBaseURLInput string // OPENAI_BASE_URL value, auto-filled from preset, editable.
@@ -1397,7 +1398,11 @@ func (w WizardModel) View() string {
 		cursorMark := accent.Render("█")
 
 		b.WriteString("Qwen launch config:\n")
-		b.WriteString(dim.Render("(API-key mode — sets OPENAI_BASE_URL + OPENAI_MODEL on the tmux session; OPENAI_API_KEY is captured by the env step)"))
+		if w.llmGatewayEnabled {
+			b.WriteString(dim.Render("(LLM Gateway mode — sets OPENAI_MODEL, the model the gateway routes to; endpoint + key come from the gateway)"))
+		} else {
+			b.WriteString(dim.Render("(API-key mode — sets OPENAI_BASE_URL + OPENAI_MODEL on the tmux session; OPENAI_API_KEY is captured by the env step)"))
+		}
 		b.WriteString("\n\nVendor:\n")
 		for i, p := range presets {
 			marker := "  "
@@ -1414,6 +1419,11 @@ func (w WizardModel) View() string {
 
 		modelLine := fmt.Sprintf("  Model:    %s", w.qwenModelInput)
 		baseLine := fmt.Sprintf("  Base URL: %s", w.qwenBaseURLInput)
+		if w.llmGatewayEnabled {
+			// Plain text (not dim.Render) — baseLine is itself re-rendered
+			// through dim below, and nested ANSI resets garble the output.
+			baseLine += " (ignored — gateway endpoint is used)"
+		}
 		if w.cursor == modelRowIdx {
 			b.WriteString("> " + strings.TrimPrefix(modelLine, "  "))
 			b.WriteString(cursorMark)
@@ -1664,8 +1674,9 @@ func (w WizardModel) View() string {
 			}
 			b.WriteString(fmt.Sprintf("  LLM Gateway:   %s\n", gw))
 		}
-		// Qwen launch config summary — only shown when the qwen step ran.
-		if pe.key == "qwen" && !w.llmGatewayEnabled {
+		// Qwen launch config summary — shown whenever the qwen step ran. In
+		// gateway mode the base URL is omitted (the gateway endpoint is used).
+		if pe.key == "qwen" {
 			presets := qwenLaunchPresets()
 			vendorLabel := "Custom"
 			if w.qwenVendorIdx >= 0 && w.qwenVendorIdx < len(presets) {
@@ -1675,7 +1686,7 @@ func (w WizardModel) View() string {
 			if w.qwenModelInput != "" {
 				b.WriteString(fmt.Sprintf("  Qwen Model:    %s\n", w.qwenModelInput))
 			}
-			if w.qwenBaseURLInput != "" {
+			if w.qwenBaseURLInput != "" && !w.llmGatewayEnabled {
 				b.WriteString(fmt.Sprintf("  Qwen Base URL: %s\n", w.qwenBaseURLInput))
 			}
 		}
@@ -1854,11 +1865,13 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		return w, nil
 	case StepQwenLaunchConfig:
 		// Commit the qwen launch values into the env block that the result
-		// build later carries through to the tmux session.
+		// build later carries through to the tmux session. In gateway mode
+		// only the model is committed — the endpoint and key come from
+		// BuildLLMGatewayEnv (which would override OPENAI_BASE_URL anyway).
 		if w.envVars == nil {
 			w.envVars = make(map[string]string)
 		}
-		if w.qwenBaseURLInput != "" {
+		if w.qwenBaseURLInput != "" && !w.llmGatewayEnabled {
 			w.envVars["OPENAI_BASE_URL"] = w.qwenBaseURLInput
 		} else {
 			delete(w.envVars, "OPENAI_BASE_URL")
@@ -2449,15 +2462,17 @@ func (w *WizardModel) applyQwenPreset() {
 }
 
 // postProviderConfigStep returns the wizard step that should follow the
-// env-token / LLM-gateway flow. Inserts StepQwenLaunchConfig when the
-// selected provider is "qwen" AND the LLM gateway is NOT enabled (gateway
-// supplies its own OPENAI_BASE_URL/API_KEY, making the step redundant).
+// env-token / LLM-gateway flow. Inserts StepQwenLaunchConfig whenever the
+// selected provider is "qwen": in direct (non-gateway) mode the step captures
+// vendor + model + base URL; in gateway mode the endpoint and key come from
+// the gateway, but the step still runs so the user picks the model the
+// gateway routes to (OPENAI_MODEL, e.g. glm-4.6 for z.ai).
 func (w WizardModel) postProviderConfigStep() WizardStep {
 	if w.selectedProvider < 0 || w.selectedProvider >= len(w.providers) {
 		return StepBranch
 	}
 	pe := w.providers[w.selectedProvider]
-	if pe.key == "qwen" && !w.llmGatewayEnabled {
+	if pe.key == "qwen" {
 		return StepQwenLaunchConfig
 	}
 	return StepBranch

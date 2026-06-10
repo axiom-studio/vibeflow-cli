@@ -741,7 +741,9 @@ func TestPostProviderConfigStep_RoutingMatrix(t *testing.T) {
 		want    WizardStep
 	}{
 		{"qwen_no_gateway_routes_to_qwen_step", "qwen", false, StepQwenLaunchConfig},
-		{"qwen_with_gateway_skips_to_branch", "qwen", true, StepBranch},
+		// Gateway mode also runs the qwen step: the gateway owns endpoint +
+		// key, but the user still picks the model (OPENAI_MODEL) there.
+		{"qwen_with_gateway_routes_to_qwen_step", "qwen", true, StepQwenLaunchConfig},
 		{"claude_skips_qwen_step", "claude", false, StepBranch},
 		{"codex_skips_qwen_step", "codex", false, StepBranch},
 		{"gemini_skips_qwen_step", "gemini", false, StepBranch},
@@ -855,6 +857,28 @@ func TestWizardAdvance_QwenLaunchConfig_EmptyValuesAreElided(t *testing.T) {
 	}
 	if _, ok := w2.envVars["OPENAI_MODEL"]; ok {
 		t.Errorf("empty model must be deleted from envVars, got %q", w2.envVars["OPENAI_MODEL"])
+	}
+}
+
+func TestWizardAdvance_QwenLaunchConfig_GatewayModeCommitsModelOnly(t *testing.T) {
+	wm := qwenWizardFixture(t)
+	wm.llmGatewayEnabled = true
+	// Stale base URL from a previous non-gateway pass must be stripped.
+	wm.envVars = map[string]string{"OPENAI_BASE_URL": "stale"}
+	wm.qwenModelInput = "glm-4.6"
+	wm.qwenBaseURLInput = "https://api.z.ai/api/coding/paas/v4"
+	wm.qwenUserEdited = true
+
+	w2, _ := wm.advance()
+
+	if _, ok := w2.envVars["OPENAI_BASE_URL"]; ok {
+		t.Errorf("gateway mode must not commit OPENAI_BASE_URL, got %q", w2.envVars["OPENAI_BASE_URL"])
+	}
+	if w2.envVars["OPENAI_MODEL"] != "glm-4.6" {
+		t.Errorf("OPENAI_MODEL = %q, want glm-4.6", w2.envVars["OPENAI_MODEL"])
+	}
+	if w2.step != StepBranch {
+		t.Errorf("after advance step = %v, want StepBranch", w2.step)
 	}
 }
 

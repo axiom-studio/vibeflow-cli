@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -102,4 +103,19 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 		out += fmt.Sprintf(" --model '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
 	return out
+}
+
+// applyQwenModelPassthrough copies OPENAI_MODEL from the calling shell into
+// the session env for qwen launches when it isn't already set. Wizard-driven
+// launches carry the model via WizardResult.EnvVars, but headless launches
+// and restarts have no wizard state (wizard env vars are not persisted), so
+// the shell export is the only model source — copying it in lets
+// AppendQwenAPIFlags emit an explicit `--model` flag on those paths too.
+func applyQwenModelPassthrough(providerKey string, sessionEnv map[string]string) {
+	if providerKey != "qwen" || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
+		return
+	}
+	if v := os.Getenv("OPENAI_MODEL"); v != "" {
+		sessionEnv["OPENAI_MODEL"] = v
+	}
 }
