@@ -70,9 +70,9 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	}
 }
 
-// AppendQwenAPIFlags appends `--openai-api-key`, `--openai-base-url`, and
-// `--model` flags to the qwen launch command when the corresponding env vars
-// are present in env. Non-qwen providers are returned unchanged.
+// AppendQwenAPIFlags appends `--openai-base-url` and `--model` flags to the
+// qwen launch command when the corresponding env vars are present in env.
+// Non-qwen providers are returned unchanged.
 //
 // Why: qwen-code does not consistently honor `OPENAI_MODEL` env var for
 // model reporting in tool calls (observed: env says GLM-5-turbo, MCP tool
@@ -80,6 +80,13 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 // explicitly forces qwen-code to use the vendor/model the user picked in
 // `StepQwenLaunchConfig`. The env vars are left in the session env as a
 // fallback for any qwen-code code path that still reads them.
+//
+// The API key is deliberately NOT passed as a `--openai-api-key` flag: a
+// flag value is world-readable via `ps aux` / `/proc/<pid>/cmdline` (issue
+// #1993, SOC2 CC6.1 / PCI-DSS 3.5 / GDPR Art.32). qwen-code reads
+// OPENAI_API_KEY from the process env on every auth path we ship, and the
+// env var is set on all launch paths, so the flag added no functionality —
+// only exposure.
 //
 // Ordering: flags are inserted after the base command (e.g. `qwen --yolo`)
 // and BEFORE `AppendVibeflowInitPrompt` appends `-i 'prompt'`, so qwen's
@@ -93,9 +100,6 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 		return baseCommand
 	}
 	out := baseCommand
-	if v := env["OPENAI_API_KEY"]; v != "" {
-		out += fmt.Sprintf(" --openai-api-key '%s'", strings.ReplaceAll(v, "'", `'\''`))
-	}
 	if v := env["OPENAI_BASE_URL"]; v != "" {
 		out += fmt.Sprintf(" --openai-base-url '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
