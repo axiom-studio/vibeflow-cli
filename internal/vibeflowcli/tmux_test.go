@@ -302,3 +302,81 @@ func TestNewTmuxManager_CustomSocket(t *testing.T) {
 		t.Errorf("socketName = %q, want custom", tm.socketName)
 	}
 }
+
+func TestRedactCommandSecrets(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "sh-quoted key flag is masked",
+			in:   `qwen --yolo --openai-api-key 'sk-secret-123' --model 'glm-4.6'`,
+			want: `qwen --yolo --openai-api-key <redacted> --model 'glm-4.6'`,
+		},
+		{
+			name: "quoted key with embedded sh-escaped quote is fully masked",
+			in:   `qwen --openai-api-key 'weird'\''key' -i 'prompt'`,
+			want: `qwen --openai-api-key <redacted> -i 'prompt'`,
+		},
+		{
+			name: "bare (unquoted) key value is masked",
+			in:   `qwen --openai-api-key sk-bare-456 --model glm`,
+			want: `qwen --openai-api-key <redacted> --model glm`,
+		},
+		{
+			name: "equals form is masked",
+			in:   `qwen --openai-api-key=sk-equals-789`,
+			want: `qwen --openai-api-key <redacted>`,
+		},
+		{
+			name: "command without key flag is unchanged",
+			in:   `qwen --yolo --openai-base-url 'https://api.z.ai/api/coding/paas/v4' -i 'hi'`,
+			want: `qwen --yolo --openai-base-url 'https://api.z.ai/api/coding/paas/v4' -i 'hi'`,
+		},
+		{
+			name: "empty command is unchanged",
+			in:   "",
+			want: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redactCommandSecrets(tc.in); got != tc.want {
+				t.Errorf("redactCommandSecrets(%q):\n got:  %q\n want: %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedactSpawnArg(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"gemini key env", "GEMINI_API_KEY=abc123", "GEMINI_API_KEY=<redacted>"},
+		{"mcp token env", "MCP_TOKEN=tok", "MCP_TOKEN=<redacted>"},
+		{"vibeflow token env", "VIBEFLOW_TOKEN=tok", "VIBEFLOW_TOKEN=<redacted>"},
+		{"openai key env", "OPENAI_API_KEY=sk-test", "OPENAI_API_KEY=<redacted>"},
+		{
+			name: "qwen custom api key env (dynamic endpoint-encoded name)",
+			in:   "QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4=sk-zai",
+			want: "QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4=<redacted>",
+		},
+		{"non-secret env passes through", "OPENAI_MODEL=glm-4.6", "OPENAI_MODEL=glm-4.6"},
+		{"plain arg passes through", "-e", "-e"},
+		{
+			name: "command arg gets key-flag redaction",
+			in:   `qwen --openai-api-key 'sk-x' -i 'go'`,
+			want: `qwen --openai-api-key <redacted> -i 'go'`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redactSpawnArg(tc.in); got != tc.want {
+				t.Errorf("redactSpawnArg(%q):\n got:  %q\n want: %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

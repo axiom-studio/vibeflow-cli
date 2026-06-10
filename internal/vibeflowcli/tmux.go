@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/template"
@@ -216,6 +217,42 @@ func (tm *TmuxManager) CreateSession(name, workDir, command string) error {
 	})
 }
 
+// secretEnvPrefixes are env assignment prefixes ("KEY=" or a key-name prefix
+// for dynamically-named keys) whose values must never reach the log file.
+var secretEnvPrefixes = []string{
+	"GEMINI_API_KEY=",
+	"MCP_TOKEN=",
+	"VIBEFLOW_TOKEN=",
+	"OPENAI_API_KEY=",
+	"QWEN_CUSTOM_API_KEY", // dynamic suffix encodes the endpoint; value is the key
+}
+
+// openaiAPIKeyFlagRe matches `--openai-api-key <value>` (or `=<value>`) inside
+// an assembled launch command, where <value> is either a sh-single-quoted
+// token (including the `'\''` embedded-quote idiom) or a bare word.
+var openaiAPIKeyFlagRe = regexp.MustCompile(`--openai-api-key[= ]('[^']*'(?:\\''[^']*')*|\S+)`)
+
+// redactCommandSecrets masks API-key values embedded in a launch command
+// string before it is logged (issue #1993: keys leaked at INFO level via the
+// raw command). Commands without key flags are returned unchanged. Our own
+// builders no longer emit `--openai-api-key`, but custom launch templates may.
+func redactCommandSecrets(command string) string {
+	return openaiAPIKeyFlagRe.ReplaceAllString(command, "--openai-api-key <redacted>")
+}
+
+// redactSpawnArg redacts a single tmux spawn argument for logging: values of
+// secret env assignments become "<redacted>", and any embedded key flags in
+// the command argument are masked via redactCommandSecrets.
+func redactSpawnArg(a string) string {
+	for _, p := range secretEnvPrefixes {
+		if strings.HasPrefix(a, p) && strings.Contains(a, "=") {
+			parts := strings.SplitN(a, "=", 2)
+			return parts[0] + "=<redacted>"
+		}
+	}
+	return redactCommandSecrets(a)
+}
+
 // CreateSessionWithOpts creates a tmux session with provider-specific
 // options including environment variables and provider-prefixed naming.
 func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
@@ -244,18 +281,13 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 	if tm.logger != nil {
 		// Build the full command line as it would appear in a shell.
 		fullArgs := append([]string{"tmux", "-L", tm.socketName}, args...)
-		// Redact env var values to avoid leaking secrets.
+		// Redact secrets (env var values and in-command key flags) before logging.
 		var redacted []string
 		for _, a := range fullArgs {
-			if strings.HasPrefix(a, "GEMINI_API_KEY=") || strings.HasPrefix(a, "MCP_TOKEN=") || strings.HasPrefix(a, "VIBEFLOW_TOKEN=") {
-				parts := strings.SplitN(a, "=", 2)
-				redacted = append(redacted, parts[0]+"=<redacted>")
-			} else {
-				redacted = append(redacted, a)
-			}
+			redacted = append(redacted, redactSpawnArg(a))
 		}
 		tm.logger.Debug("spawn %s: %s", opts.Provider, strings.Join(redacted, " "))
-		tm.logger.Info("spawn session %q provider=%s workdir=%s command=%q", fullName, opts.Provider, opts.WorkDir, opts.Command)
+		tm.logger.Info("spawn session %q provider=%s workdir=%s command=%q", fullName, opts.Provider, opts.WorkDir, redactCommandSecrets(opts.Command))
 	}
 
 	_, err := tm.run(args...)

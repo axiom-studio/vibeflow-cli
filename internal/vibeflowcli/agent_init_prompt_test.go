@@ -162,7 +162,7 @@ func TestAppendQwenAPIFlags(t *testing.T) {
 		want        string
 	}{
 		{
-			name:        "qwen with all three env vars — emits all flags in key/base-url/model order",
+			name:        "qwen with all three env vars — emits base-url/model flags, never the key (issue #1993)",
 			providerKey: "qwen",
 			base:        "qwen --yolo",
 			env: map[string]string{
@@ -170,7 +170,7 @@ func TestAppendQwenAPIFlags(t *testing.T) {
 				"OPENAI_BASE_URL": "https://api.z.ai/api/coding/paas/v4",
 				"OPENAI_MODEL":    "GLM-4.6",
 			},
-			want: `qwen --yolo --openai-api-key 'sk-test-123' --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6'`,
+			want: `qwen --yolo --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6'`,
 		},
 		{
 			name:        "qwen gateway mode — only key + base-url present (no OPENAI_MODEL)",
@@ -180,16 +180,16 @@ func TestAppendQwenAPIFlags(t *testing.T) {
 				"OPENAI_API_KEY":  "gateway-token",
 				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
 			},
-			want: `qwen --yolo --openai-api-key 'gateway-token' --openai-base-url 'https://gateway.example/rest/v1/llm-gateway/v1'`,
+			want: `qwen --yolo --openai-base-url 'https://gateway.example/rest/v1/llm-gateway/v1'`,
 		},
 		{
-			name:        "qwen with only OPENAI_API_KEY — emits only the key flag",
+			name:        "qwen with only OPENAI_API_KEY — no flags; key is env-only (ps-aux exposure, issue #1993)",
 			providerKey: "qwen",
 			base:        "qwen --yolo",
 			env: map[string]string{
 				"OPENAI_API_KEY": "sk-test-123",
 			},
-			want: `qwen --yolo --openai-api-key 'sk-test-123'`,
+			want: `qwen --yolo`,
 		},
 		{
 			name:        "qwen with empty env values — no flags emitted (empty != present)",
@@ -261,7 +261,7 @@ func TestAppendQwenAPIFlags_EscapesSingleQuotes(t *testing.T) {
 		"OPENAI_MODEL":    "model'name",
 	}
 	got := AppendQwenAPIFlags("qwen", "qwen", env)
-	const want = `qwen --openai-api-key 'weird'\''key' --openai-base-url 'https://host/api?q=it'\''s' --model 'model'\''name'`
+	const want = `qwen --openai-base-url 'https://host/api?q=it'\''s' --model 'model'\''name'`
 	if got != want {
 		t.Errorf("AppendQwenAPIFlags escape:\n got:  %q\n want: %q", got, want)
 	}
@@ -279,7 +279,7 @@ func TestAppendQwenAPIFlags_OrderingWithInitPrompt(t *testing.T) {
 	cmd := "qwen --yolo"
 	cmd = AppendQwenAPIFlags(cmd, "qwen", env)
 	cmd = AppendVibeflowInitPrompt(cmd, "qwen", "hello world")
-	const want = `qwen --yolo --openai-api-key 'sk-test' --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6' -i 'hello world'`
+	const want = `qwen --yolo --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6' -i 'hello world'`
 	if cmd != want {
 		t.Errorf("Ordering integration:\n got:  %q\n want: %q", cmd, want)
 	}

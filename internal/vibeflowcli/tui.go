@@ -1275,7 +1275,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		m.logger.Error("session %q not verified by has-session after create", tmuxName)
 		return sessionsMsg{err: fmt.Errorf("session %q was not created — tmux has-session check failed", tmuxName)}
 	}
-	m.logger.Info("session created: %s (provider=%s, workdir=%s, command=%q)", tmuxName, provider, workDir, command)
+	m.logger.Info("session created: %s (provider=%s, workdir=%s, command=%q)", tmuxName, provider, workDir, redactCommandSecrets(command))
 
 	// Bind Ctrl+Q to open vibeflow TUI popup inside the tmux session.
 	if bindErr := m.tmux.BindSessionKeys(tmuxName); bindErr != nil {
