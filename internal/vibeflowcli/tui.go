@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -85,6 +86,10 @@ type SessionRow struct {
 	LastHeartbeat time.Time
 	TmuxAttached  bool
 	Recovered     bool
+
+	// LLMGatewayEnabled mirrors SessionMeta.LLMGatewayEnabled so the detail
+	// panel can re-derive the gateway env wiring for the selected session.
+	LLMGatewayEnabled bool
 }
 
 // ViewState controls which sub-view is active.
@@ -325,6 +330,7 @@ func (m Model) refreshSessions() tea.Msg {
 			row.Project = meta.Project
 			row.Persona = meta.Persona
 			row.WorkingDir = meta.WorkingDir
+			row.LLMGatewayEnabled = meta.LLMGatewayEnabled
 		}
 		if recoveredNames[ts.Name] {
 			row.Recovered = true
@@ -1837,6 +1843,29 @@ func (m Model) renderDetailPanel(width, height int) string {
 	// Attached indicator.
 	if s.TmuxAttached {
 		row("Attached", "yes")
+	}
+
+	// Gateway env wiring (gateway mode only). Re-derived from current config
+	// rather than persisted — BuildLLMGatewayEnv is deterministic per provider.
+	// Secret-bearing values are masked with the same allowlist used for
+	// spawn-log redaction (isSecretEnvKey).
+	if s.LLMGatewayEnabled {
+		row("Gateway", "enabled")
+		env := BuildLLMGatewayEnv(s.Provider, m.config.ServerURL, m.config.APIToken)
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		envStyle := lipgloss.NewStyle().Foreground(dimColor)
+		for _, k := range keys {
+			v := env[k]
+			if isSecretEnvKey(k) {
+				v = "<redacted>"
+			}
+			b.WriteString(envStyle.Render(truncate("  "+k+"="+v, width)))
+			b.WriteString("\n")
+		}
 	}
 
 	// Health status banner.

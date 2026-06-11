@@ -387,3 +387,29 @@ func TestRedactSpawnArg(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSecretEnvKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"GEMINI_API_KEY", true},
+		{"MCP_TOKEN", true},
+		{"VIBEFLOW_TOKEN", true},
+		{"OPENAI_API_KEY", true},
+		{"ANTHROPIC_CUSTOM_HEADERS", true},
+		{"ANTHROPIC_AUTH_TOKEN", true},
+		{"ANTHROPIC_API_KEY", true},
+		{"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4", true},
+		{"OPENAI_BASE_URL", false},
+		{"ANTHROPIC_BASE_URL", false},
+		{"OPENAI_MODEL", false},
+		{"OPENAI_API_KEY_EXTRA", false},
+		{"PATH", false},
+	}
+	for _, tc := range tests {
+		if got := isSecretEnvKey(tc.key); got != tc.want {
+			t.Errorf("isSecretEnvKey(%q) = %v, want %v", tc.key, got, tc.want)
+		}
+	}
+}
