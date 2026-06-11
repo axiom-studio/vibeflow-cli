@@ -243,15 +243,25 @@ func redactCommandSecrets(command string) string {
 	return openaiAPIKeyFlagRe.ReplaceAllString(command, "--openai-api-key <redacted>")
 }
 
+// isSecretEnvKey reports whether the named env var carries a secret whose
+// value must never be displayed or logged. Shares secretEnvPrefixes with
+// spawn-arg redaction: "KEY="-style entries match the exact name, bare
+// entries (dynamically-named keys) match as a name prefix.
+func isSecretEnvKey(key string) bool {
+	for _, p := range secretEnvPrefixes {
+		if strings.HasPrefix(key+"=", p) {
+			return true
+		}
+	}
+	return false
+}
+
 // redactSpawnArg redacts a single tmux spawn argument for logging: values of
 // secret env assignments become "<redacted>", and any embedded key flags in
 // the command argument are masked via redactCommandSecrets.
 func redactSpawnArg(a string) string {
-	for _, p := range secretEnvPrefixes {
-		if strings.HasPrefix(a, p) && strings.Contains(a, "=") {
-			parts := strings.SplitN(a, "=", 2)
-			return parts[0] + "=<redacted>"
-		}
+	if key, _, ok := strings.Cut(a, "="); ok && isSecretEnvKey(key) {
+		return key + "=<redacted>"
 	}
 	return redactCommandSecrets(a)
 }
