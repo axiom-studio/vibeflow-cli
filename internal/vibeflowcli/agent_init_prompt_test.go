@@ -305,7 +305,7 @@ func TestAppendCodexGatewayProviderFlags(t *testing.T) {
 				`-c 'model_providers.vibeflow_gateway.name="VibeFlowGateway"'`,
 				`-c 'model_providers.vibeflow_gateway.base_url="https://gateway.example/rest/v1/llm-gateway/v1"'`,
 				`-c 'model_providers.vibeflow_gateway.env_key="OPENAI_API_KEY"'`,
-				`-c 'model_providers.vibeflow_gateway.wire_api="responses"'`,
+				`-c 'model_providers.vibeflow_gateway.wire_api="chat"'`,
 				`-c model_providers.vibeflow_gateway.supports_websockets=false`,
 			},
 		},
