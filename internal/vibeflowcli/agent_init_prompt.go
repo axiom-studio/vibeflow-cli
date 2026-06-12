@@ -90,7 +90,10 @@ func AppendCodexGatewayProviderFlags(baseCommand, providerKey string, env map[st
 			codexConfigStringArg("model_providers."+codexGatewayProviderID+".name", codexGatewayProviderName),
 			codexConfigStringArg("model_providers."+codexGatewayProviderID+".base_url", v),
 			codexConfigStringArg("model_providers."+codexGatewayProviderID+".env_key", "OPENAI_API_KEY"),
-			codexConfigStringArg("model_providers."+codexGatewayProviderID+".wire_api", "responses"),
+			// The gateway exposes only the OpenAI chat-completions surface
+			// (/v1/chat/completions); it does not route /v1/responses, so the
+			// Responses wire API 404s over both wss and https.
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".wire_api", "chat"),
 			codexConfigBoolArg("model_providers."+codexGatewayProviderID+".supports_websockets", false),
 		}
 		for _, flag := range flags {
