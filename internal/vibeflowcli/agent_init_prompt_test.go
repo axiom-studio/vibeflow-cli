@@ -285,6 +285,82 @@ func TestAppendQwenAPIFlags_OrderingWithInitPrompt(t *testing.T) {
 	}
 }
 
+func TestAppendCodexOpenAIBaseURLFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		providerKey string
+		base        string
+		env         map[string]string
+		want        string
+	}{
+		{
+			name:        "codex with routed base URL",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env: map[string]string{
+				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
+			},
+			want: `codex --yolo -c openai_base_url=https://gateway.example/rest/v1/llm-gateway/v1`,
+		},
+		{
+			name:        "codex with special characters escapes as one arg",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env: map[string]string{
+				"OPENAI_BASE_URL": "https://host/api?q=it's",
+			},
+			want: `codex --yolo -c 'openai_base_url=https://host/api?q=it'\''s'`,
+		},
+		{
+			name:        "non-codex provider unchanged",
+			providerKey: "claude",
+			base:        "claude --dangerously-skip-permissions",
+			env: map[string]string{
+				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
+			},
+			want: `claude --dangerously-skip-permissions`,
+		},
+		{
+			name:        "empty env leaves command unchanged",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env: map[string]string{
+				"OPENAI_BASE_URL": "",
+			},
+			want: `codex --yolo`,
+		},
+		{
+			name:        "nil env leaves command unchanged",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env:         nil,
+			want:        `codex --yolo`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AppendCodexOpenAIBaseURLFlag(tc.base, tc.providerKey, tc.env)
+			if got != tc.want {
+				t.Errorf("AppendCodexOpenAIBaseURLFlag(%q, %q, env):\n got:  %q\n want: %q",
+					tc.base, tc.providerKey, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAppendCodexOpenAIBaseURLFlag_OrderingWithInitPrompt(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
+	}
+	cmd := "codex --yolo"
+	cmd = AppendCodexOpenAIBaseURLFlag(cmd, "codex", env)
+	cmd = AppendVibeflowInitPrompt(cmd, "codex", "hello world")
+	const want = `codex --yolo -c openai_base_url=https://gateway.example/rest/v1/llm-gateway/v1 'hello world'`
+	if cmd != want {
+		t.Errorf("Ordering integration:\n got:  %q\n want: %q", cmd, want)
+	}
+}
+
 func TestApplyQwenModelPassthrough(t *testing.T) {
 	t.Run("copies shell OPENAI_MODEL for qwen when unset", func(t *testing.T) {
 		t.Setenv("OPENAI_MODEL", "glm-4.6")
