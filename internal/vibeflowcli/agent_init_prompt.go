@@ -70,6 +70,22 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	}
 }
 
+// AppendCodexOpenAIBaseURLFlag appends a Codex CLI `-c openai_base_url=...`
+// override when the launch env has a routed OpenAI-compatible base URL.
+//
+// Codex documents `-c key=value` as the one-off config override mechanism,
+// and `openai_base_url` is the supported key for changing the built-in
+// OpenAI provider's base URL.
+func AppendCodexOpenAIBaseURLFlag(baseCommand, providerKey string, env map[string]string) string {
+	if providerKey != "codex" || env == nil {
+		return baseCommand
+	}
+	if v := env["OPENAI_BASE_URL"]; v != "" {
+		return baseCommand + " -c " + shellQuote("openai_base_url="+v)
+	}
+	return baseCommand
+}
+
 // AppendQwenAPIFlags appends `--openai-base-url` and `--model` flags to the
 // qwen launch command when the corresponding env vars are present in env.
 // Non-qwen providers are returned unchanged.
@@ -93,8 +109,8 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 // arg parser sees them as options rather than as part of the seed prompt.
 //
 // Sh-escaping mirrors `AppendVibeflowInitPrompt`: each value is wrapped in
-// single quotes with embedded `'` escaped as `'\''`, since the assembled
-// command is handed to `sh -c` via tmux send-keys.
+// single quotes and embedded single quotes use standard shell escaping, since
+// the assembled command is handed to `sh -c` via tmux send-keys.
 func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) string {
 	if providerKey != "qwen" {
 		return baseCommand
