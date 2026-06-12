@@ -189,9 +189,10 @@ func launchCmd() *cobra.Command {
 				}
 			}
 
-			// Mirror codex and qwen launch env vars onto CLI flags so the agents
-			// see the routed configuration explicitly on every launch path.
-			command = AppendCodexOpenAIBaseURLFlag(command, provider, sessionEnv)
+			// Mirror Codex gateway config and qwen launch env vars onto CLI
+			// flags so the agents see the routed configuration explicitly on
+			// every launch path.
+			command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
 			applyQwenModelPassthrough(provider, sessionEnv)
 			command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
@@ -549,9 +550,9 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		}
 	}
 
-	// Mirror codex and qwen routed env vars onto CLI flags on restart too.
-	// Must run before the init-prompt append.
-	command = AppendCodexOpenAIBaseURLFlag(command, provider, sessionEnv)
+	// Mirror Codex gateway config and qwen routed env vars onto CLI flags on
+	// restart too. Must run before the init-prompt append.
+	command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
 	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 

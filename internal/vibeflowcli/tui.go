@@ -1230,9 +1230,10 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		}
 	}
 
-	// Mirror codex and qwen routed env vars onto the command line so each
-	// provider sees the explicit launch-time configuration it expects.
-	command = AppendCodexOpenAIBaseURLFlag(command, provider, result.Provider.Env)
+	// Mirror Codex gateway config and qwen routed env vars onto the command
+	// line so each provider sees the explicit launch-time configuration it
+	// expects.
+	command = AppendCodexGatewayProviderFlags(command, provider, result.Provider.Env)
 	// For qwen, env vars alone don't always drive model reporting.
 	// Must run after env merging and before the init-prompt append so the
 	// flags land between the base command and the seed prompt argument.
@@ -1398,9 +1399,9 @@ func (m Model) createSession(_ tea.Msg) tea.Msg {
 		command = fmt.Sprintf("%s --dangerously-skip-permissions", m.config.ClaudeBinary)
 	}
 
-	// Mirror codex and qwen launch env vars onto CLI flags so the session
-	// command gets the routed configuration explicitly.
-	command = AppendCodexOpenAIBaseURLFlag(command, provider, provCfg.Env)
+	// Mirror Codex gateway config and qwen launch env vars onto CLI flags so
+	// the session command gets the routed configuration explicitly.
+	command = AppendCodexGatewayProviderFlags(command, provider, provCfg.Env)
 	command = AppendQwenAPIFlags(command, provider, provCfg.Env)
 
 	err := m.tmux.CreateSessionWithOpts(SessionOpts{
