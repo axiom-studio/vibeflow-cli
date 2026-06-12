@@ -26,6 +26,8 @@ import (
 // running a renamed or forked MCP server can override it via the `--mcp`
 // CLI flag or the `mcp_tool_name` field in config.yaml.
 const DefaultMCPToolName = "vibeflow"
+const codexGatewayProviderID = "vibeflow_gateway"
+const codexGatewayProviderName = "VibeFlowGateway"
 
 // BuildVibeflowInitPrompt returns the prompt vibeflow-cli passes to a
 // vibecoding agent when launching a vibeflow-managed session. mcpName names
@@ -70,20 +72,40 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	}
 }
 
-// AppendCodexOpenAIBaseURLFlag appends a Codex CLI `-c openai_base_url=...`
-// override when the launch env has a routed OpenAI-compatible base URL.
+// AppendCodexGatewayProviderFlags appends a temporary Codex CLI custom
+// provider definition when the launch env has a routed OpenAI-compatible
+// base URL.
 //
-// Codex documents `-c key=value` as the one-off config override mechanism,
-// and `openai_base_url` is the supported key for changing the built-in
-// OpenAI provider's base URL.
-func AppendCodexOpenAIBaseURLFlag(baseCommand, providerKey string, env map[string]string) string {
+// The built-in `openai` provider can still probe websocket transport even
+// when pointed at a gateway. Defining a dedicated provider with websocket
+// support disabled avoids that startup fallback noise while preserving the
+// gateway routing.
+func AppendCodexGatewayProviderFlags(baseCommand, providerKey string, env map[string]string) string {
 	if providerKey != "codex" || env == nil {
 		return baseCommand
 	}
 	if v := env["OPENAI_BASE_URL"]; v != "" {
-		return baseCommand + " -c " + shellQuote("openai_base_url="+v)
+		flags := []string{
+			codexConfigStringArg("model_provider", codexGatewayProviderID),
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".name", codexGatewayProviderName),
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".base_url", v),
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".env_key", "OPENAI_API_KEY"),
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".wire_api", "responses"),
+			codexConfigBoolArg("model_providers."+codexGatewayProviderID+".supports_websockets", false),
+		}
+		for _, flag := range flags {
+			baseCommand += " -c " + flag
+		}
 	}
 	return baseCommand
+}
+
+func codexConfigStringArg(key, value string) string {
+	return shellQuote(fmt.Sprintf("%s=%q", key, value))
+}
+
+func codexConfigBoolArg(key string, value bool) string {
+	return shellQuote(fmt.Sprintf("%s=%t", key, value))
 }
 
 // AppendQwenAPIFlags appends `--openai-base-url` and `--model` flags to the

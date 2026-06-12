@@ -285,13 +285,13 @@ func TestAppendQwenAPIFlags_OrderingWithInitPrompt(t *testing.T) {
 	}
 }
 
-func TestAppendCodexOpenAIBaseURLFlag(t *testing.T) {
+func TestAppendCodexGatewayProviderFlags(t *testing.T) {
 	tests := []struct {
 		name        string
 		providerKey string
 		base        string
 		env         map[string]string
-		want        string
+		wantPieces  []string
 	}{
 		{
 			name:        "codex with routed base URL",
@@ -300,7 +300,14 @@ func TestAppendCodexOpenAIBaseURLFlag(t *testing.T) {
 			env: map[string]string{
 				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
 			},
-			want: `codex --yolo -c openai_base_url=https://gateway.example/rest/v1/llm-gateway/v1`,
+			wantPieces: []string{
+				`codex --yolo -c 'model_provider="vibeflow_gateway"'`,
+				`-c 'model_providers.vibeflow_gateway.name="VibeFlowGateway"'`,
+				`-c 'model_providers.vibeflow_gateway.base_url="https://gateway.example/rest/v1/llm-gateway/v1"'`,
+				`-c 'model_providers.vibeflow_gateway.env_key="OPENAI_API_KEY"'`,
+				`-c 'model_providers.vibeflow_gateway.wire_api="responses"'`,
+				`-c model_providers.vibeflow_gateway.supports_websockets=false`,
+			},
 		},
 		{
 			name:        "codex with special characters escapes as one arg",
@@ -309,7 +316,9 @@ func TestAppendCodexOpenAIBaseURLFlag(t *testing.T) {
 			env: map[string]string{
 				"OPENAI_BASE_URL": "https://host/api?q=it's",
 			},
-			want: `codex --yolo -c 'openai_base_url=https://host/api?q=it'\''s'`,
+			wantPieces: []string{
+				`-c 'model_providers.vibeflow_gateway.base_url="https://host/api?q=it'\''s"'`,
+			},
 		},
 		{
 			name:        "non-codex provider unchanged",
@@ -318,7 +327,7 @@ func TestAppendCodexOpenAIBaseURLFlag(t *testing.T) {
 			env: map[string]string{
 				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
 			},
-			want: `claude --dangerously-skip-permissions`,
+			wantPieces: []string{`claude --dangerously-skip-permissions`},
 		},
 		{
 			name:        "empty env leaves command unchanged",
@@ -327,37 +336,48 @@ func TestAppendCodexOpenAIBaseURLFlag(t *testing.T) {
 			env: map[string]string{
 				"OPENAI_BASE_URL": "",
 			},
-			want: `codex --yolo`,
+			wantPieces: []string{`codex --yolo`},
 		},
 		{
 			name:        "nil env leaves command unchanged",
 			providerKey: "codex",
 			base:        "codex --yolo",
 			env:         nil,
-			want:        `codex --yolo`,
+			wantPieces:  []string{`codex --yolo`},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := AppendCodexOpenAIBaseURLFlag(tc.base, tc.providerKey, tc.env)
-			if got != tc.want {
-				t.Errorf("AppendCodexOpenAIBaseURLFlag(%q, %q, env):\n got:  %q\n want: %q",
-					tc.base, tc.providerKey, got, tc.want)
+			got := AppendCodexGatewayProviderFlags(tc.base, tc.providerKey, tc.env)
+			prev := -1
+			for _, want := range tc.wantPieces {
+				idx := strings.Index(got, want)
+				if idx < 0 {
+					t.Fatalf("AppendCodexGatewayProviderFlags(%q, %q, env) missing piece %q in %q",
+						tc.base, tc.providerKey, want, got)
+				}
+				if idx < prev {
+					t.Fatalf("AppendCodexGatewayProviderFlags(%q, %q, env) out of order: %q appears before previous piece in %q",
+						tc.base, tc.providerKey, want, got)
+				}
+				prev = idx
 			}
 		})
 	}
 }
 
-func TestAppendCodexOpenAIBaseURLFlag_OrderingWithInitPrompt(t *testing.T) {
+func TestAppendCodexGatewayProviderFlags_OrderingWithInitPrompt(t *testing.T) {
 	env := map[string]string{
 		"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
 	}
 	cmd := "codex --yolo"
-	cmd = AppendCodexOpenAIBaseURLFlag(cmd, "codex", env)
+	cmd = AppendCodexGatewayProviderFlags(cmd, "codex", env)
 	cmd = AppendVibeflowInitPrompt(cmd, "codex", "hello world")
-	const want = `codex --yolo -c openai_base_url=https://gateway.example/rest/v1/llm-gateway/v1 'hello world'`
-	if cmd != want {
-		t.Errorf("Ordering integration:\n got:  %q\n want: %q", cmd, want)
+	if !strings.HasSuffix(cmd, ` 'hello world'`) {
+		t.Fatalf("ordering integration: init prompt must remain the last argument, got %q", cmd)
+	}
+	if !strings.Contains(cmd, `-c 'model_provider="vibeflow_gateway"'`) {
+		t.Fatalf("ordering integration: missing Codex gateway provider flags in %q", cmd)
 	}
 }
 
