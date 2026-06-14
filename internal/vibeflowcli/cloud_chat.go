@@ -103,8 +103,9 @@ type CloudChatModel struct {
 	cursor   int // selected persona index in personas
 
 	// Per-persona chat history, keyed by persona key. Lazily initialized.
-	history map[string][]CloudChatMessage
+	history           map[string][]CloudChatMessage
 	sessionsByPersona map[string]*Session
+	sessionsLoaded    bool
 
 	focus CloudChatFocus
 	input string // current text in the composer
@@ -152,6 +153,7 @@ func (m CloudChatModel) Update(msg tea.Msg) (CloudChatModel, tea.Cmd) {
 		}
 		m.err = ""
 		m.sessionsByPersona = msg.sessions
+		m.sessionsLoaded = true
 		return m, m.loadSelectedMessagesCmd()
 	case cloudSessionMessagesMsg:
 		if msg.err != nil {
@@ -195,6 +197,13 @@ func (m CloudChatModel) handleSidebarKey(msg tea.KeyMsg) (CloudChatModel, tea.Cm
 		m.cursor = (m.cursor + 1) % len(m.personas)
 	case "enter", "i":
 		m.focus = CloudFocusInput
+	case "r":
+		return m, m.loadPersonaSessionsCmd()
+	case "s":
+		persona := m.SelectedPersona()
+		if m.sessionsLoaded && m.sessionForPersona(persona.Key) == nil {
+			m.err = fmt.Sprintf("Start a %s cloud agent in Axiom Cloud, then press r to refresh.", persona.DisplayName)
+		}
 	}
 	if after := m.SelectedPersona().Key; after != "" && after != before {
 		return m, m.loadMessagesCmd(after)
@@ -516,6 +525,14 @@ func (m CloudChatModel) renderChatPane(width, height int) string {
 }
 
 func (m CloudChatModel) renderHistory(personaKey string, width int) string {
+	persona := cloudPersonaByKey(m.personas, personaKey)
+	if m.sessionsLoaded && m.sessionForPersona(personaKey) == nil {
+		lines := []string{
+			fmt.Sprintf("No active %s session.", persona.DisplayName),
+			"Press s for start guidance, or r to refresh.",
+		}
+		return helpStyle.Render(strings.Join(lines, "\n"))
+	}
 	msgs := m.history[personaKey]
 	if len(msgs) == 0 {
 		return helpStyle.Render("No messages yet. Press Enter to compose.")
@@ -567,5 +584,5 @@ func (m CloudChatModel) CloudChatHelpKeys() string {
 	if m.focus == CloudFocusInput {
 		return "esc: back  enter: send  ctrl+c: quit"
 	}
-	return "↑/↓: persona  enter: compose  esc: back to sessions  q: quit"
+	return "↑/↓: persona  enter: compose  r: refresh  s: start hint  esc: back  q: quit"
 }
