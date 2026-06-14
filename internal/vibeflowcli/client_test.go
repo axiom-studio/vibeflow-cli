@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewClient(t *testing.T) {
@@ -140,6 +141,96 @@ func TestClient_ListSessions(t *testing.T) {
 	}
 	if sessions[0].ID != "session-1" {
 		t.Errorf("session ID = %q", sessions[0].ID)
+	}
+}
+
+func TestClient_ListPersonaSessions_GroupsMostRecentActiveByPersona(t *testing.T) {
+	now := time.Now()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/v1/vibeflow/projects/13/sessions" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]Session{
+			{ID: "old-architect", ProjectID: 13, PersonaKey: "architect", Status: "running", LastHeartbeat: now.Add(-5 * time.Minute)},
+			{ID: "new-architect", ProjectID: 13, PersonaKey: "architect", Status: "running", LastHeartbeat: now},
+			{ID: "done-dev", ProjectID: 13, PersonaKey: "developer", Status: "done", LastHeartbeat: now},
+			{ID: "missing-persona", ProjectID: 13, Status: "running", LastHeartbeat: now},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "")
+	sessions, err := c.ListPersonaSessions(13)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("grouped sessions len = %d, want 1", len(sessions))
+	}
+	if got := sessions["architect"].ID; got != "new-architect" {
+		t.Errorf("architect session = %q, want new-architect", got)
+	}
+	if _, ok := sessions["developer"]; ok {
+		t.Errorf("done developer session should not be returned")
+	}
+}
+
+func TestClient_GetSessionMessages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/v1/vibeflow/sessions/session-abc/messages" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("since"); got != "2026-06-14T13:00:00Z" {
+			t.Errorf("since query = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]SessionMessage{
+			{Sender: "you", Text: "hello", Kind: "user"},
+			{Sender: "Architect", Text: "hi", Kind: "agent"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "")
+	messages, err := c.GetSessionMessages("session-abc", "2026-06-14T13:00:00Z")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages len = %d, want 2", len(messages))
+	}
+	if messages[1].Text != "hi" {
+		t.Errorf("second message text = %q, want hi", messages[1].Text)
+	}
+}
+
+func TestClient_SendSessionPrompt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/v1/vibeflow/sessions/session-abc/prompts" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != "POST" {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]string
+		json.Unmarshal(body, &req)
+		if got := req["text"]; got != "ship it" {
+			t.Errorf("text = %q, want ship it", got)
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(SessionMessage{Sender: "you", Text: "ship it", Kind: "user"})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "")
+	message, err := c.SendSessionPrompt("session-abc", "ship it")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if message.Text != "ship it" {
+		t.Errorf("message text = %q, want ship it", message.Text)
 	}
 }
 

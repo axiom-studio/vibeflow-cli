@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -56,11 +58,21 @@ type Project struct {
 type Session struct {
 	ID               string    `json:"session_id"`
 	ProjectID        int64     `json:"project_id"`
+	PersonaKey       string    `json:"persona_key"`
 	AgentType        string    `json:"agent_type"`
 	GitBranch        string    `json:"git_branch"`
 	WorkingDirectory string    `json:"working_directory"`
 	Status           string    `json:"status"`
 	LastHeartbeat    time.Time `json:"last_heartbeat"`
+}
+
+// SessionMessage is a chat/log entry returned for a cloud agent session.
+type SessionMessage struct {
+	Sender    string    `json:"sender"`
+	Text      string    `json:"text"`
+	Kind      string    `json:"kind"`
+	Timestamp time.Time `json:"timestamp"`
+	Pending   bool      `json:"pending,omitempty"`
 }
 
 // WorkItem represents a todo or issue from polling.
@@ -109,6 +121,61 @@ func (c *Client) ListSessions(projectID int64) ([]Session, error) {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
 	return sessions, nil
+}
+
+// ListPersonaSessions returns the most recent active cloud session per persona.
+func (c *Client) ListPersonaSessions(projectID int64) (map[string]*Session, error) {
+	sessions, err := c.ListSessions(projectID)
+	if err != nil {
+		return nil, err
+	}
+	byPersona := make(map[string]*Session)
+	for i := range sessions {
+		session := sessions[i]
+		if session.PersonaKey == "" || !isActiveSessionStatus(session.Status) {
+			continue
+		}
+		current := byPersona[session.PersonaKey]
+		if current == nil || session.LastHeartbeat.After(current.LastHeartbeat) {
+			copied := session
+			byPersona[session.PersonaKey] = &copied
+		}
+	}
+	return byPersona, nil
+}
+
+func isActiveSessionStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "running", "active", "idle", "waiting", "implementing", "planning":
+		return true
+	case "done", "stopped", "exited", "error", "failed", "archived":
+		return false
+	default:
+		return true
+	}
+}
+
+// GetSessionMessages returns chat history for a cloud agent session.
+func (c *Client) GetSessionMessages(sessionID string, sinceISO string) ([]SessionMessage, error) {
+	path := fmt.Sprintf("/rest/v1/vibeflow/sessions/%s/messages", sessionID)
+	if sinceISO != "" {
+		path += "?since=" + url.QueryEscape(sinceISO)
+	}
+	var messages []SessionMessage
+	if err := c.get(path, &messages); err != nil {
+		return nil, fmt.Errorf("get session messages: %w", err)
+	}
+	return messages, nil
+}
+
+// SendSessionPrompt sends a user prompt to a cloud agent session.
+func (c *Client) SendSessionPrompt(sessionID string, text string) (*SessionMessage, error) {
+	body := map[string]string{"text": text}
+	var message SessionMessage
+	if err := c.post(fmt.Sprintf("/rest/v1/vibeflow/sessions/%s/prompts", sessionID), body, &message); err != nil {
+		return nil, fmt.Errorf("send session prompt: %w", err)
+	}
+	return &message, nil
 }
 
 // PollPendingWork returns ready and stuck work items for a project.
