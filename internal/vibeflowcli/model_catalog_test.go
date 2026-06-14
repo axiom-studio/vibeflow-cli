@@ -18,15 +18,15 @@ package vibeflowcli
 
 import "testing"
 
-func TestValidateModelForProvider(t *testing.T) {
-	if err := ValidateModelForProvider("claude", "sonnet"); err != nil {
-		t.Fatalf("expected sonnet to validate for claude: %v", err)
+func TestIsKnownModelForProvider(t *testing.T) {
+	if !IsKnownModelForProvider("claude", "sonnet") {
+		t.Fatal("expected sonnet to be known for claude")
 	}
-	if err := ValidateModelForProvider("claude", "definitely-not-a-model"); err == nil {
-		t.Fatal("expected unknown built-in provider model to fail")
+	if IsKnownModelForProvider("claude", "definitely-not-a-model") {
+		t.Fatal("expected unknown built-in provider model to be unknown")
 	}
-	if err := ValidateModelForProvider("custom-provider", "whatever-model"); err != nil {
-		t.Fatalf("custom providers should not be constrained: %v", err)
+	if IsKnownModelForProvider("custom-provider", "whatever-model") {
+		t.Fatal("custom providers should not have a built-in catalog")
 	}
 }
 

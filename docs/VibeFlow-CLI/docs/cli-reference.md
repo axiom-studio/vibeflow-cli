@@ -51,7 +51,7 @@ vibeflow launch --provider qwen --skip-permissions
 vibeflow launch --provider codex --openshell --openshell-sandbox vf-main
 ```
 
-Model flags apply when the provider process starts and are stored in session metadata so `vibeflow restart` reuses the same model. They do not rewrite a model inside an already-running provider process. Built-in providers validate model ids against the CLI's curated catalog; custom providers accept any model string.
+Model flags apply when the provider process starts and are stored in session metadata so `vibeflow restart` reuses the same model. They do not rewrite a model inside an already-running provider process. The model catalog is advisory: use `vibeflow models` to discover known ids, but launch accepts explicit model strings so new provider models work before the catalog is updated.
 
 ### `vibeflow models [provider]`
 
