@@ -120,6 +120,7 @@ type LaunchTemplateVars struct {
 	ServerURL       string
 	SessionID       string
 	SkipPermissions bool
+	Model           string
 	Binary          string // Resolved binary path (absolute or bare name).
 }
 
@@ -129,7 +130,9 @@ func RenderLaunchCommand(tmpl string, vars LaunchTemplateVars) (string, error) {
 	if tmpl == "" {
 		return "", nil
 	}
-	t, err := template.New("launch").Parse(tmpl)
+	t, err := template.New("launch").Funcs(template.FuncMap{
+		"shellQuote": shellQuote,
+	}).Parse(tmpl)
 	if err != nil {
 		return "", fmt.Errorf("parse launch template: %w", err)
 	}

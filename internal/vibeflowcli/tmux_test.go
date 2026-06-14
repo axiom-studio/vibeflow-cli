@@ -113,6 +113,20 @@ func TestRenderLaunchCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("model template quotes shell values", func(t *testing.T) {
+		tmpl := "{{.Binary}}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}"
+		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
+			Binary: "claude",
+			Model:  "model with ' quote",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "claude --model 'model with '\\'' quote'" {
+			t.Errorf("got %q", got)
+		}
+	})
+
 	t.Run("qwen yolo on", func(t *testing.T) {
 		tmpl := "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}"
 		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{

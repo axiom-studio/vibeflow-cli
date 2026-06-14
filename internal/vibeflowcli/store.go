@@ -38,6 +38,7 @@ type SessionMeta struct {
 	VibeFlowSessionID string           `json:"vibeflow_session_id,omitempty"`
 	SessionType       string           `json:"session_type,omitempty"`
 	SkipPermissions   bool             `json:"skip_permissions,omitempty"`
+	Model             string           `json:"model,omitempty"`
 	LLMGatewayEnabled bool             `json:"llm_gateway_enabled,omitempty"`
 	MCPToolName       string           `json:"mcp_tool_name,omitempty"`
 	OpenShell         *OpenShellConfig `json:"openshell,omitempty"`

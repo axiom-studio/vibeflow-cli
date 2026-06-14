@@ -89,3 +89,42 @@ func TestRestartCmd_SkipPermissionsFlag(t *testing.T) {
 		})
 	}
 }
+
+func TestParsePersonaModels(t *testing.T) {
+	got, err := parsePersonaModels("developer=gpt-5.1-codex, architect=opus")
+	if err != nil {
+		t.Fatalf("parsePersonaModels failed: %v", err)
+	}
+	if got["developer"] != "gpt-5.1-codex" || got["architect"] != "opus" {
+		t.Fatalf("parsePersonaModels = %#v", got)
+	}
+
+	if _, err := parsePersonaModels("developer"); err == nil {
+		t.Fatal("expected malformed --models entry to fail")
+	}
+}
+
+func TestValidatePersonaModels(t *testing.T) {
+	models := map[string]string{"developer": "gpt-5.1-codex"}
+	if err := validatePersonaModels(models, []string{"developer", "architect"}); err != nil {
+		t.Fatalf("validatePersonaModels failed: %v", err)
+	}
+
+	if err := validatePersonaModels(map[string]string{"qa_lead": "sonnet"}, []string{"developer"}); err == nil {
+		t.Fatal("expected unknown persona model override to fail")
+	}
+
+	if err := validatePersonaModels(models, []string{""}); err == nil {
+		t.Fatal("expected --models without personas to fail")
+	}
+}
+
+func TestModelForPersona(t *testing.T) {
+	models := map[string]string{"developer": "gpt-5.1-codex"}
+	if got := modelForPersona("sonnet", models, "developer"); got != "gpt-5.1-codex" {
+		t.Errorf("developer model = %q", got)
+	}
+	if got := modelForPersona("sonnet", models, "architect"); got != "sonnet" {
+		t.Errorf("architect model = %q", got)
+	}
+}

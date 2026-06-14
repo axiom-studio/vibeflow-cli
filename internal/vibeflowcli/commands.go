@@ -69,7 +69,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 // --- launch ---
 
 func launchCmd() *cobra.Command {
-	var provider, branch, worktreeName, persona, personasRaw, project, sessionType string
+	var provider, branch, worktreeName, persona, personasRaw, project, sessionType, model, modelsRaw string
 	var openshellSandbox, openshellFrom, openshellPolicy, openshellProvidersRaw string
 	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders bool
 
@@ -145,28 +145,18 @@ func launchCmd() *cobra.Command {
 				return fmt.Errorf("invalid session-type %q — must be 'vanilla' or 'vibeflow'", effectiveSessionType)
 			}
 
-			command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
-				WorkDir:         workDir,
-				ServerURL:       cfg.ServerURL,
-				SkipPermissions: skipPermissions,
-				Binary:          prov.Binary,
-			})
-			if err != nil || command == "" {
-				command = prov.Binary
-			}
-
 			// Resolve provider env vars (e.g. codex bearer token).
 			envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
 			if missingVar != "" {
 				return fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 			}
-			sessionEnv := prov.Env
+			baseEnv := cloneStringMap(prov.Env)
 			if len(envVars) > 0 {
-				if sessionEnv == nil {
-					sessionEnv = make(map[string]string)
+				if baseEnv == nil {
+					baseEnv = make(map[string]string)
 				}
 				for k, v := range envVars {
-					sessionEnv[k] = v
+					baseEnv[k] = v
 				}
 			}
 
@@ -174,27 +164,20 @@ func launchCmd() *cobra.Command {
 			// Otherwise, explicitly clear gateway-related vars to prevent inheritance
 			// from the parent shell environment.
 			if llmGateway || cfg.LLMGatewayEnabled {
-				if sessionEnv == nil {
-					sessionEnv = make(map[string]string)
+				if baseEnv == nil {
+					baseEnv = make(map[string]string)
 				}
 				for k, v := range BuildLLMGatewayEnv(provider, cfg.ServerURL, cfg.APIToken) {
-					sessionEnv[k] = v
+					baseEnv[k] = v
 				}
 			} else {
-				if sessionEnv == nil {
-					sessionEnv = make(map[string]string)
+				if baseEnv == nil {
+					baseEnv = make(map[string]string)
 				}
 				for k, v := range ClearLLMGatewayEnv(provider) {
-					sessionEnv[k] = v
+					baseEnv[k] = v
 				}
 			}
-
-			// Mirror Codex gateway config and qwen launch env vars onto CLI
-			// flags so the agents see the routed configuration explicitly on
-			// every launch path.
-			command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
-			applyQwenModelPassthrough(provider, sessionEnv)
-			command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
 			openShellCfg := cfg.OpenShell
 			if openshell {
@@ -223,6 +206,13 @@ func launchCmd() *cobra.Command {
 			} else if sessionPersona != "" {
 				personasToLaunch = []string{sessionPersona}
 			}
+			personaModels, err := parsePersonaModels(modelsRaw)
+			if err != nil {
+				return err
+			}
+			if err := validatePersonaModels(personaModels, personasToLaunch); err != nil {
+				return err
+			}
 
 			// Ensure all agent-specific markdown docs exist in the working directory.
 			if effectiveSessionType == "vibeflow" {
@@ -231,6 +221,32 @@ func launchCmd() *cobra.Command {
 
 			for _, p := range personasToLaunch {
 				sessionName := sessionid.GenerateSessionID(workDir)
+				sessionModel := modelForPersona(model, personaModels, p)
+				sessionEnv := cloneStringMap(baseEnv)
+				if provider == "qwen" && sessionModel != "" {
+					if sessionEnv == nil {
+						sessionEnv = make(map[string]string)
+					}
+					sessionEnv["OPENAI_MODEL"] = sessionModel
+				}
+				command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
+					WorkDir:         workDir,
+					ServerURL:       cfg.ServerURL,
+					SkipPermissions: skipPermissions,
+					Model:           sessionModel,
+					Binary:          prov.Binary,
+				})
+				if err != nil || command == "" {
+					command = prov.Binary
+				}
+
+				// Mirror Codex gateway config and qwen launch env vars onto CLI
+				// flags so the agents see the routed configuration explicitly on
+				// every launch path.
+				command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
+				applyQwenModelPassthrough(provider, sessionEnv)
+				command = AppendQwenAPIFlags(command, provider, sessionEnv)
+
 				sessionCommand := command
 
 				if effectiveSessionType == "vibeflow" && p != "" {
@@ -278,6 +294,7 @@ func launchCmd() *cobra.Command {
 					WorkingDir:        workDir,
 					SessionType:       effectiveSessionType,
 					SkipPermissions:   skipPermissions,
+					Model:             sessionModel,
 					LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
 					OpenShell:         openShellMeta(openShellCfg),
 					CreatedAt:         time.Now(),
@@ -297,7 +314,7 @@ func launchCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider key (claude, codex, cursor, gemini)")
+	cmd.Flags().StringVar(&provider, "provider", "", "Provider key (claude, codex, cursor, gemini, qwen)")
 	cmd.Flags().StringVar(&branch, "branch", "", "Git branch (default: main)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "Create a new git worktree for the session")
 	cmd.Flags().StringVar(&worktreeName, "worktree-name", "", "Custom worktree directory name (default: auto-generated)")
@@ -310,6 +327,8 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&openshellPolicy, "openshell-policy", "", "OpenShell policy YAML path")
 	cmd.Flags().StringVar(&openshellProvidersRaw, "openshell-provider", "", "Comma-separated OpenShell provider names to attach")
 	cmd.Flags().BoolVar(&openshellNoAutoProviders, "openshell-no-auto-providers", false, "Disable OpenShell credential auto-provider discovery")
+	cmd.Flags().StringVar(&model, "model", "", "Model id to pass to each launched provider session")
+	cmd.Flags().StringVar(&modelsRaw, "models", "", "Comma-separated persona=model overrides for team launches")
 	cmd.Flags().StringVar(&persona, "persona", "", "Persona key for vibeflow sessions")
 	cmd.Flags().StringVar(&personasRaw, "personas", "", "Comma-separated persona keys for team mode")
 	cmd.Flags().StringVar(&project, "project", "", "Project name (overrides config default)")
@@ -512,6 +531,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		WorkDir:         workDir,
 		ServerURL:       cfg.ServerURL,
 		SkipPermissions: meta.SkipPermissions,
+		Model:           meta.Model,
 		Binary:          prov.Binary,
 	})
 	if err != nil || command == "" {
@@ -523,7 +543,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	if missingVar != "" {
 		return SessionMeta{}, fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 	}
-	sessionEnv := prov.Env
+	sessionEnv := cloneStringMap(prov.Env)
 	if len(envVars) > 0 {
 		if sessionEnv == nil {
 			sessionEnv = make(map[string]string)
@@ -553,6 +573,12 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	// Mirror Codex gateway config and qwen routed env vars onto CLI flags on
 	// restart too. Must run before the init-prompt append.
 	command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
+	if provider == "qwen" && meta.Model != "" {
+		if sessionEnv == nil {
+			sessionEnv = make(map[string]string)
+		}
+		sessionEnv["OPENAI_MODEL"] = meta.Model
+	}
 	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
@@ -609,6 +635,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		VibeFlowSessionID: meta.VibeFlowSessionID,
 		SessionType:       meta.SessionType,
 		SkipPermissions:   meta.SkipPermissions,
+		Model:             meta.Model,
 		LLMGatewayEnabled: meta.LLMGatewayEnabled,
 		MCPToolName:       meta.MCPToolName,
 		OpenShell:         meta.OpenShell,
@@ -637,6 +664,68 @@ func splitCommaList(raw string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+func parsePersonaModels(raw string) (map[string]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	out := make(map[string]string)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if !ok || key == "" || value == "" {
+			return nil, fmt.Errorf("invalid --models entry %q — expected persona=model", part)
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+
+func validatePersonaModels(models map[string]string, personas []string) error {
+	if len(models) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(personas))
+	for _, p := range personas {
+		if p != "" {
+			allowed[p] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return fmt.Errorf("--models requires --persona or --personas")
+	}
+	for p := range models {
+		if !allowed[p] {
+			return fmt.Errorf("--models specifies persona %q, but launch personas are %s", p, strings.Join(personas, ","))
+		}
+	}
+	return nil
+}
+
+func modelForPersona(defaultModel string, personaModels map[string]string, persona string) string {
+	if personaModels != nil {
+		if m := personaModels[persona]; m != "" {
+			return m
+		}
+	}
+	return defaultModel
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
 	}
 	return out
 }
