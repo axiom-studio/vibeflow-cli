@@ -282,6 +282,48 @@ func TestCloudChatModel_SendPromptWithoutActiveSessionShowsError(t *testing.T) {
 	}
 }
 
+func TestCloudChatModel_NoActiveSessionStateRendersAfterSessionLoad(t *testing.T) {
+	m := NewCloudChatModel()
+	m.sessionsLoaded = true
+
+	out := m.renderHistory("principal_engineer", 80)
+	if !strings.Contains(out, "No active Principal Eng session") {
+		t.Fatalf("no-active state missing persona-specific text: %q", out)
+	}
+	if !strings.Contains(out, "r to refresh") {
+		t.Errorf("no-active state missing refresh hint: %q", out)
+	}
+}
+
+func TestCloudChatModel_NoActiveSessionStartHintSetsGuidance(t *testing.T) {
+	m := NewCloudChatModelWithClient(&fakeCloudChatBackend{}, 13)
+	m.sessionsLoaded = true
+
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	if cmd != nil {
+		t.Fatal("start hint should not spawn a backend command")
+	}
+	if !strings.Contains(m.err, "Start a Principal Eng cloud agent") {
+		t.Fatalf("start guidance error = %q", m.err)
+	}
+}
+
+func TestCloudChatModel_RefreshKeyReloadsPersonaSessions(t *testing.T) {
+	fake := &fakeCloudChatBackend{}
+	m := NewCloudChatModelWithClient(fake, 13)
+
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd == nil {
+		t.Fatal("refresh key should return load sessions command")
+	}
+	m, _ = m.Update(cmd())
+	if fake.listProjectID != 13 {
+		t.Errorf("refresh ListPersonaSessions projectID = %d, want 13", fake.listProjectID)
+	}
+}
+
 func TestCloudChatModel_AppendMessageSanitizesANSIAndControlChars(t *testing.T) {
 	m := NewCloudChatModel()
 	m.appendMessage("architect", CloudChatMessage{
