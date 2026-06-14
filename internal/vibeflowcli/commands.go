@@ -31,6 +31,7 @@ import (
 // initSubcommands registers all CLI subcommands on the root command.
 func initSubcommands(root *cobra.Command) {
 	root.AddCommand(launchCmd())
+	root.AddCommand(modelsCmd())
 	root.AddCommand(listCmd())
 	root.AddCommand(switchCmd())
 	root.AddCommand(killCmd())
@@ -213,6 +214,9 @@ func launchCmd() *cobra.Command {
 			if err := validatePersonaModels(personaModels, personasToLaunch); err != nil {
 				return err
 			}
+			if err := validateLaunchModels(provider, model, personaModels); err != nil {
+				return err
+			}
 
 			// Ensure all agent-specific markdown docs exist in the working directory.
 			if effectiveSessionType == "vibeflow" {
@@ -337,6 +341,42 @@ func launchCmd() *cobra.Command {
 }
 
 // --- list ---
+
+func modelsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "models [provider]",
+		Short: "List built-in provider model ids",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return printProviderModels(args[0])
+			}
+			for _, provider := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
+				if err := printProviderModels(provider); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+func printProviderModels(provider string) error {
+	options := ModelsForProvider(provider)
+	if len(options) == 0 {
+		return fmt.Errorf("no curated model list for provider %q", provider)
+	}
+	fmt.Printf("%s:\n", provider)
+	for _, option := range options {
+		if option.Description != "" {
+			fmt.Printf("  %-20s %s\n", option.ID, option.Description)
+		} else {
+			fmt.Printf("  %s\n", option.ID)
+		}
+	}
+	return nil
+}
 
 func listCmd() *cobra.Command {
 	return &cobra.Command{
@@ -705,6 +745,18 @@ func validatePersonaModels(models map[string]string, personas []string) error {
 	for p := range models {
 		if !allowed[p] {
 			return fmt.Errorf("--models specifies persona %q, but launch personas are %s", p, strings.Join(personas, ","))
+		}
+	}
+	return nil
+}
+
+func validateLaunchModels(provider, defaultModel string, personaModels map[string]string) error {
+	if err := ValidateModelForProvider(provider, defaultModel); err != nil {
+		return err
+	}
+	for _, model := range personaModels {
+		if err := ValidateModelForProvider(provider, model); err != nil {
+			return err
 		}
 	}
 	return nil
