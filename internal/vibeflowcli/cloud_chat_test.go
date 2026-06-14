@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -182,6 +183,65 @@ func TestCloudChatModel_HistoryIsPerPersona(t *testing.T) {
 	}
 	if m.Messages("developer")[0].Text != "second" {
 		t.Errorf("developer first message = %q", m.Messages("developer")[0].Text)
+	}
+}
+
+func TestCloudChatModel_AppendMessageSanitizesANSIAndControlChars(t *testing.T) {
+	m := NewCloudChatModel()
+	m.appendMessage("architect", CloudChatMessage{
+		Sender: "Architect\x1b[31m\x00",
+		Text:   "hello\x1b[2J\x1b[Hworld\x07",
+	})
+
+	msgs := m.Messages("architect")
+	if len(msgs) != 1 {
+		t.Fatalf("history len = %d, want 1", len(msgs))
+	}
+	if strings.Contains(msgs[0].Text, "\x1b") || strings.Contains(msgs[0].Text, "\x07") {
+		t.Fatalf("message text still contains control sequences: %q", msgs[0].Text)
+	}
+	if got, want := msgs[0].Text, "helloworld"; got != want {
+		t.Errorf("sanitized text = %q, want %q", got, want)
+	}
+	if strings.Contains(msgs[0].Sender, "\x1b") || strings.Contains(msgs[0].Sender, "\x00") {
+		t.Errorf("sender still contains control sequences: %q", msgs[0].Sender)
+	}
+}
+
+func TestCloudChatModel_AppendMessageTruncatesLongText(t *testing.T) {
+	m := NewCloudChatModel()
+	m.appendMessage("architect", CloudChatMessage{
+		Sender: "Architect",
+		Text:   strings.Repeat("x", cloudChatMaxMessageRunes+1),
+	})
+
+	msg := m.Messages("architect")[0]
+	if got := []rune(msg.Text); len(got) != cloudChatMaxMessageRunes+1 {
+		t.Fatalf("truncated rune len = %d, want %d", len(got), cloudChatMaxMessageRunes+1)
+	}
+	if !strings.HasSuffix(msg.Text, "…") {
+		t.Errorf("truncated text missing ellipsis suffix")
+	}
+}
+
+func TestCloudChatModel_AppendMessageCapsHistoryPerPersona(t *testing.T) {
+	m := NewCloudChatModel()
+	for i := 0; i < cloudChatMaxMessagesPerPersona+5; i++ {
+		m.appendMessage("architect", CloudChatMessage{
+			Sender: "Architect",
+			Text:   fmt.Sprintf("msg-%03d", i),
+		})
+	}
+
+	msgs := m.Messages("architect")
+	if len(msgs) != cloudChatMaxMessagesPerPersona {
+		t.Fatalf("history len = %d, want %d", len(msgs), cloudChatMaxMessagesPerPersona)
+	}
+	if got, want := msgs[0].Text, "msg-005"; got != want {
+		t.Errorf("oldest retained message = %q, want %q", got, want)
+	}
+	if got, want := msgs[len(msgs)-1].Text, "msg-504"; got != want {
+		t.Errorf("newest retained message = %q, want %q", got, want)
 	}
 }
 

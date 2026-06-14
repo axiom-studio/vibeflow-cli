@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -53,6 +54,12 @@ type CloudChatFocus int
 const (
 	CloudFocusSidebar CloudChatFocus = iota
 	CloudFocusInput
+)
+
+const (
+	cloudChatMaxMessagesPerPersona = 500
+	cloudChatMaxMessageRunes       = 8 * 1024
+	cloudChatMaxSenderRunes        = 120
 )
 
 // CloudChatMessage is one entry in the chat history pane.
@@ -174,13 +181,45 @@ func (m *CloudChatModel) appendMessage(personaKey string, msg CloudChatMessage) 
 	if m.history == nil {
 		m.history = make(map[string][]CloudChatMessage)
 	}
-	m.history[personaKey] = append(m.history[personaKey], msg)
+	msg.Sender = sanitizeCloudChatText(msg.Sender, cloudChatMaxSenderRunes)
+	msg.Text = sanitizeCloudChatText(msg.Text, cloudChatMaxMessageRunes)
+
+	history := append(m.history[personaKey], msg)
+	if len(history) > cloudChatMaxMessagesPerPersona {
+		history = history[len(history)-cloudChatMaxMessagesPerPersona:]
+	}
+	m.history[personaKey] = history
 }
 
 // Messages returns the message history for the given persona (read-only view
 // used by tests; the renderer accesses m.history directly).
 func (m CloudChatModel) Messages(personaKey string) []CloudChatMessage {
 	return m.history[personaKey]
+}
+
+func sanitizeCloudChatText(s string, maxRunes int) string {
+	s = stripANSI(s)
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	return truncateRunes(s, maxRunes)
+}
+
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 // --- rendering ---
