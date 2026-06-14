@@ -127,25 +127,29 @@ func TestCloudChatModel_BackspaceTrimsLastRune(t *testing.T) {
 	}
 }
 
-func TestCloudChatModel_EnterSendsAndAppendsLocalEchoPlusPendingReply(t *testing.T) {
-	m := focusInput(NewCloudChatModel())
+func TestCloudChatModel_EnterWithActiveSessionAppendsPendingUserMessage(t *testing.T) {
+	m := focusInput(NewCloudChatModelWithClient(&fakeCloudChatBackend{}, 13))
+	m.sessionsByPersona = map[string]*Session{
+		"principal_engineer": {ID: "session-pe", PersonaKey: "principal_engineer"},
+	}
 	for _, r := range "hi" {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("expected backend send command")
+	}
 
 	msgs := m.Messages("principal_engineer")
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages (user + pending reply), got %d", len(msgs))
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 pending user message, got %d", len(msgs))
 	}
 	if msgs[0].Sender != "you" || msgs[0].Text != "hi" {
 		t.Errorf("user message wrong: sender=%q text=%q", msgs[0].Sender, msgs[0].Text)
 	}
-	if !msgs[1].Pending {
-		t.Errorf("reply should be marked Pending until backend wired")
-	}
-	if !strings.Contains(msgs[1].Text, "backend not yet wired") {
-		t.Errorf("pending reply text missing backend-pending marker: %q", msgs[1].Text)
+	if !msgs[0].Pending {
+		t.Errorf("user message should be marked Pending until backend acknowledges it")
 	}
 	if m.input != "" {
 		t.Errorf("input not cleared after send: %q", m.input)
@@ -161,16 +165,11 @@ func TestCloudChatModel_EnterOnEmptyInputDoesNotSend(t *testing.T) {
 }
 
 func TestCloudChatModel_HistoryIsPerPersona(t *testing.T) {
-	m := focusInput(NewCloudChatModel())
-	m = typeAndEnter(t, m, "first")
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if m.SelectedPersona().Key != "developer" {
-		t.Fatalf("expected developer selected, got %q", m.SelectedPersona().Key)
-	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = typeAndEnter(t, m, "second")
+	m := NewCloudChatModel()
+	m.appendMessage("principal_engineer", CloudChatMessage{Sender: "you", Text: "first"})
+	m.appendMessage("principal_engineer", CloudChatMessage{Sender: "Principal Eng", Text: "reply"})
+	m.appendMessage("developer", CloudChatMessage{Sender: "you", Text: "second"})
+	m.appendMessage("developer", CloudChatMessage{Sender: "Developer", Text: "reply"})
 
 	if got := len(m.Messages("principal_engineer")); got != 2 {
 		t.Errorf("principal_engineer history len = %d, want 2", got)
@@ -183,6 +182,103 @@ func TestCloudChatModel_HistoryIsPerPersona(t *testing.T) {
 	}
 	if m.Messages("developer")[0].Text != "second" {
 		t.Errorf("developer first message = %q", m.Messages("developer")[0].Text)
+	}
+}
+
+func TestCloudChatModel_LoadPersonaSessionsFetchesSelectedHistory(t *testing.T) {
+	fake := &fakeCloudChatBackend{
+		sessions: map[string]*Session{
+			"principal_engineer": {ID: "session-pe", PersonaKey: "principal_engineer"},
+		},
+		messages: []SessionMessage{
+			{Sender: "Principal Eng", Text: "ready", Kind: "agent"},
+		},
+	}
+	m := NewCloudChatModelWithClient(fake, 13)
+
+	cmd := m.loadPersonaSessionsCmd()
+	if cmd == nil {
+		t.Fatal("expected loadPersonaSessionsCmd to return a command")
+	}
+	var nextCmd tea.Cmd
+	m, nextCmd = m.Update(cmd())
+	if fake.listProjectID != 13 {
+		t.Errorf("ListPersonaSessions projectID = %d, want 13", fake.listProjectID)
+	}
+	if nextCmd == nil {
+		t.Fatal("expected persona session load to trigger selected history fetch")
+	}
+	m, _ = m.Update(nextCmd())
+
+	if fake.messagesSessionID != "session-pe" {
+		t.Errorf("GetSessionMessages sessionID = %q, want session-pe", fake.messagesSessionID)
+	}
+	msgs := m.Messages("principal_engineer")
+	if len(msgs) != 1 {
+		t.Fatalf("history len = %d, want 1", len(msgs))
+	}
+	if msgs[0].Text != "ready" {
+		t.Errorf("message text = %q, want ready", msgs[0].Text)
+	}
+}
+
+func TestCloudChatModel_SendPromptUsesBackendSession(t *testing.T) {
+	fake := &fakeCloudChatBackend{
+		sentMessage: &SessionMessage{Sender: "you", Text: "hello", Kind: "user"},
+	}
+	m := NewCloudChatModelWithClient(fake, 13)
+	m.sessionsByPersona = map[string]*Session{
+		"principal_engineer": {ID: "session-pe", PersonaKey: "principal_engineer"},
+	}
+	m = focusInput(m)
+	for _, r := range "hello" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected send command")
+	}
+	if fake.sentText != "" {
+		t.Fatalf("backend should not be called until command executes")
+	}
+	if msgs := m.Messages("principal_engineer"); len(msgs) != 1 || !msgs[0].Pending {
+		t.Fatalf("expected one pending local message, got %#v", msgs)
+	}
+	m, _ = m.Update(cmd())
+
+	if fake.sentSessionID != "session-pe" {
+		t.Errorf("SendSessionPrompt sessionID = %q, want session-pe", fake.sentSessionID)
+	}
+	if fake.sentText != "hello" {
+		t.Errorf("SendSessionPrompt text = %q, want hello", fake.sentText)
+	}
+	msgs := m.Messages("principal_engineer")
+	if len(msgs) != 1 {
+		t.Fatalf("history len = %d, want 1", len(msgs))
+	}
+	if msgs[0].Pending {
+		t.Errorf("sent message should no longer be pending")
+	}
+}
+
+func TestCloudChatModel_SendPromptWithoutActiveSessionShowsError(t *testing.T) {
+	m := focusInput(NewCloudChatModel())
+	for _, r := range "hello" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	var cmd tea.Cmd
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("expected no command without an active session")
+	}
+	if m.err == "" || !strings.Contains(m.err, "No active") {
+		t.Fatalf("expected no-active-session error, got %q", m.err)
+	}
+	if m.input != "hello" {
+		t.Errorf("input should be preserved on send failure, got %q", m.input)
 	}
 }
 
@@ -303,16 +399,29 @@ func focusInput(m CloudChatModel) CloudChatModel {
 	return next
 }
 
-// typeAndEnter feeds text into the focused input then presses Enter.
-// Caller must ensure focus is on the input pane.
-func typeAndEnter(t *testing.T, m CloudChatModel, text string) CloudChatModel {
-	t.Helper()
-	if m.focus != CloudFocusInput {
-		t.Fatalf("typeAndEnter requires CloudFocusInput, got %v", m.focus)
-	}
-	for _, r := range text {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	return m
+type fakeCloudChatBackend struct {
+	sessions    map[string]*Session
+	messages    []SessionMessage
+	sentMessage *SessionMessage
+
+	listProjectID     int64
+	messagesSessionID string
+	sentSessionID     string
+	sentText          string
+}
+
+func (f *fakeCloudChatBackend) ListPersonaSessions(projectID int64) (map[string]*Session, error) {
+	f.listProjectID = projectID
+	return f.sessions, nil
+}
+
+func (f *fakeCloudChatBackend) GetSessionMessages(sessionID string, sinceISO string) ([]SessionMessage, error) {
+	f.messagesSessionID = sessionID
+	return f.messages, nil
+}
+
+func (f *fakeCloudChatBackend) SendSessionPrompt(sessionID string, text string) (*SessionMessage, error) {
+	f.sentSessionID = sessionID
+	f.sentText = text
+	return f.sentMessage, nil
 }

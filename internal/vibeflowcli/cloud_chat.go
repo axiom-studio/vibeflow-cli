@@ -62,6 +62,30 @@ const (
 	cloudChatMaxSenderRunes        = 120
 )
 
+type cloudChatBackend interface {
+	ListPersonaSessions(projectID int64) (map[string]*Session, error)
+	GetSessionMessages(sessionID string, sinceISO string) ([]SessionMessage, error)
+	SendSessionPrompt(sessionID string, text string) (*SessionMessage, error)
+}
+
+type cloudPersonaSessionsMsg struct {
+	sessions map[string]*Session
+	err      error
+}
+
+type cloudSessionMessagesMsg struct {
+	personaKey string
+	messages   []SessionMessage
+	err        error
+}
+
+type cloudPromptSentMsg struct {
+	personaKey string
+	text       string
+	message    *SessionMessage
+	err        error
+}
+
 // CloudChatMessage is one entry in the chat history pane.
 type CloudChatMessage struct {
 	Sender    string    // "you" or a persona display name
@@ -80,20 +104,33 @@ type CloudChatModel struct {
 
 	// Per-persona chat history, keyed by persona key. Lazily initialized.
 	history map[string][]CloudChatMessage
+	sessionsByPersona map[string]*Session
 
 	focus CloudChatFocus
 	input string // current text in the composer
+	err   string
+
+	client   cloudChatBackend
+	projectID int64
 }
 
 // NewCloudChatModel constructs an empty cloud chat model. The persona list
 // defaults to CloudPersonas; tests may overwrite the field directly.
 func NewCloudChatModel() CloudChatModel {
 	return CloudChatModel{
-		personas: CloudPersonas,
-		cursor:   0,
-		history:  make(map[string][]CloudChatMessage),
-		focus:    CloudFocusSidebar,
+		personas:          CloudPersonas,
+		cursor:            0,
+		history:           make(map[string][]CloudChatMessage),
+		sessionsByPersona: make(map[string]*Session),
+		focus:             CloudFocusSidebar,
 	}
+}
+
+func NewCloudChatModelWithClient(client cloudChatBackend, projectID int64) CloudChatModel {
+	m := NewCloudChatModel()
+	m.client = client
+	m.projectID = projectID
+	return m
 }
 
 // SelectedPersona returns the persona currently highlighted in the sidebar.
@@ -107,8 +144,33 @@ func (m CloudChatModel) SelectedPersona() CloudPersona {
 // Update handles keyboard input. tea.WindowSizeMsg is intentionally not handled
 // here — the parent Model owns width/height and passes them to View().
 func (m CloudChatModel) Update(msg tea.Msg) (CloudChatModel, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		return m.handleKey(keyMsg)
+	switch msg := msg.(type) {
+	case cloudPersonaSessionsMsg:
+		if msg.err != nil {
+			m.err = fmt.Sprintf("Cloud sessions unavailable: %v", msg.err)
+			return m, nil
+		}
+		m.err = ""
+		m.sessionsByPersona = msg.sessions
+		return m, m.loadSelectedMessagesCmd()
+	case cloudSessionMessagesMsg:
+		if msg.err != nil {
+			m.err = fmt.Sprintf("Messages unavailable: %v", msg.err)
+			return m, nil
+		}
+		m.err = ""
+		m.replaceMessages(msg.personaKey, msg.messages)
+		return m, nil
+	case cloudPromptSentMsg:
+		if msg.err != nil {
+			m.err = fmt.Sprintf("Send failed: %v", msg.err)
+			return m, nil
+		}
+		m.err = ""
+		m.replaceLastPendingUserMessage(msg.personaKey, msg.text, msg.message)
+		return m, m.loadMessagesCmd(msg.personaKey)
+	case tea.KeyMsg:
+		return m.handleKey(msg)
 	}
 	return m, nil
 }
@@ -121,6 +183,7 @@ func (m CloudChatModel) handleKey(msg tea.KeyMsg) (CloudChatModel, tea.Cmd) {
 }
 
 func (m CloudChatModel) handleSidebarKey(msg tea.KeyMsg) (CloudChatModel, tea.Cmd) {
+	before := m.SelectedPersona().Key
 	switch msg.String() {
 	case "up", "k":
 		if m.cursor == 0 {
@@ -132,6 +195,9 @@ func (m CloudChatModel) handleSidebarKey(msg tea.KeyMsg) (CloudChatModel, tea.Cm
 		m.cursor = (m.cursor + 1) % len(m.personas)
 	case "enter", "i":
 		m.focus = CloudFocusInput
+	}
+	if after := m.SelectedPersona().Key; after != "" && after != before {
+		return m, m.loadMessagesCmd(after)
 	}
 	return m, nil
 }
@@ -147,19 +213,20 @@ func (m CloudChatModel) handleInputKey(msg tea.KeyMsg) (CloudChatModel, tea.Cmd)
 			return m, nil
 		}
 		persona := m.SelectedPersona()
+		session := m.sessionForPersona(persona.Key)
+		if session == nil {
+			m.err = fmt.Sprintf("No active %s session", persona.DisplayName)
+			return m, nil
+		}
 		m.appendMessage(persona.Key, CloudChatMessage{
 			Sender:    "you",
 			Text:      text,
 			Timestamp: time.Now(),
-		})
-		m.appendMessage(persona.Key, CloudChatMessage{
-			Sender:    persona.DisplayName,
-			Text:      "(backend not yet wired — message held locally; see feature 412 follow-ups)",
-			Timestamp: time.Now(),
 			Pending:   true,
 		})
 		m.input = ""
-		return m, nil
+		m.err = ""
+		return m, m.sendPromptCmd(persona.Key, session.ID, text)
 	case tea.KeyBackspace:
 		if len(m.input) > 0 {
 			r := []rune(m.input)
@@ -176,6 +243,49 @@ func (m CloudChatModel) handleInputKey(msg tea.KeyMsg) (CloudChatModel, tea.Cmd)
 	return m, nil
 }
 
+func (m CloudChatModel) loadPersonaSessionsCmd() tea.Cmd {
+	if m.client == nil || m.projectID == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		sessions, err := m.client.ListPersonaSessions(m.projectID)
+		return cloudPersonaSessionsMsg{sessions: sessions, err: err}
+	}
+}
+
+func (m CloudChatModel) loadSelectedMessagesCmd() tea.Cmd {
+	persona := m.SelectedPersona()
+	return m.loadMessagesCmd(persona.Key)
+}
+
+func (m CloudChatModel) loadMessagesCmd(personaKey string) tea.Cmd {
+	session := m.sessionForPersona(personaKey)
+	if m.client == nil || session == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		messages, err := m.client.GetSessionMessages(session.ID, "")
+		return cloudSessionMessagesMsg{personaKey: personaKey, messages: messages, err: err}
+	}
+}
+
+func (m CloudChatModel) sendPromptCmd(personaKey string, sessionID string, text string) tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		message, err := m.client.SendSessionPrompt(sessionID, text)
+		return cloudPromptSentMsg{personaKey: personaKey, text: text, message: message, err: err}
+	}
+}
+
+func (m CloudChatModel) sessionForPersona(personaKey string) *Session {
+	if m.sessionsByPersona == nil {
+		return nil
+	}
+	return m.sessionsByPersona[personaKey]
+}
+
 // appendMessage records a message under the given persona key.
 func (m *CloudChatModel) appendMessage(personaKey string, msg CloudChatMessage) {
 	if m.history == nil {
@@ -189,6 +299,66 @@ func (m *CloudChatModel) appendMessage(personaKey string, msg CloudChatMessage) 
 		history = history[len(history)-cloudChatMaxMessagesPerPersona:]
 	}
 	m.history[personaKey] = history
+}
+
+func (m *CloudChatModel) replaceMessages(personaKey string, messages []SessionMessage) {
+	m.history[personaKey] = nil
+	persona := cloudPersonaByKey(m.personas, personaKey)
+	for _, message := range messages {
+		m.appendMessage(personaKey, sessionMessageToCloudChatMessage(message, persona.DisplayName))
+	}
+}
+
+func (m *CloudChatModel) replaceLastPendingUserMessage(personaKey string, text string, message *SessionMessage) {
+	history := m.history[personaKey]
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Sender == "you" && history[i].Pending && history[i].Text == text {
+			if message != nil {
+				persona := cloudPersonaByKey(m.personas, personaKey)
+				history[i] = sessionMessageToCloudChatMessage(*message, persona.DisplayName)
+			} else {
+				history[i].Pending = false
+			}
+			m.history[personaKey] = history
+			return
+		}
+	}
+	if message != nil {
+		persona := cloudPersonaByKey(m.personas, personaKey)
+		m.appendMessage(personaKey, sessionMessageToCloudChatMessage(*message, persona.DisplayName))
+	}
+}
+
+func sessionMessageToCloudChatMessage(msg SessionMessage, personaDisplayName string) CloudChatMessage {
+	sender := strings.TrimSpace(msg.Sender)
+	if sender == "" {
+		if msg.Kind == "user" {
+			sender = "you"
+		} else if personaDisplayName != "" {
+			sender = personaDisplayName
+		} else {
+			sender = "agent"
+		}
+	}
+	timestamp := msg.Timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	return CloudChatMessage{
+		Sender:    sender,
+		Text:      msg.Text,
+		Timestamp: timestamp,
+		Pending:   msg.Pending,
+	}
+}
+
+func cloudPersonaByKey(personas []CloudPersona, key string) CloudPersona {
+	for _, persona := range personas {
+		if persona.Key == key {
+			return persona
+		}
+	}
+	return CloudPersona{}
 }
 
 // Messages returns the message history for the given persona (read-only view
@@ -323,6 +493,10 @@ func (m CloudChatModel) renderChatPane(width, height int) string {
 
 	history := m.renderHistory(p.Key, width)
 	inputBar := m.renderInputBar(width)
+	if m.err != "" {
+		warnStyle := lipgloss.NewStyle().Foreground(warningColor)
+		history = lipgloss.JoinVertical(lipgloss.Left, warnStyle.Render(m.err), history)
+	}
 
 	// Reserve lines: header (1) + blank (1) + icon (5) + blank (1) + inputBar (2 incl. border).
 	historyHeight := height - (1 + 1 + 5 + 1 + 2)

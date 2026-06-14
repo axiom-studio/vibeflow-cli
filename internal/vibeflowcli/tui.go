@@ -163,7 +163,7 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 		groupMode:       cfg.ViewMode == "grouped",
 		repoRootCache:   make(map[string]string),
 		collapsedGroups: make(map[string]bool),
-		cloudChat:       NewCloudChatModel(),
+		cloudChat:       NewCloudChatModelWithClient(client, projectID),
 	}
 }
 
@@ -469,12 +469,16 @@ func cacheGCTickCmd() tea.Cmd {
 
 // Init initializes the model.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		m.refreshSessions,
 		captureTickCmd(),
 		tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		cacheGCTickCmd(),
-	)
+	}
+	if m.activeView == ViewCloudChat {
+		cmds = append(cmds, m.cloudChat.loadPersonaSessionsCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update handles messages.
@@ -770,7 +774,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "c":
 			m.activeView = ViewCloudChat
-			return m, nil
+			return m, m.cloudChat.loadPersonaSessionsCmd()
 		case "?":
 			m.activeView = ViewHelp
 			return m, nil
