@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -213,6 +214,9 @@ func TestCloudChatModel_LoadPersonaSessionsFetchesSelectedHistory(t *testing.T) 
 	if fake.messagesSessionID != "session-pe" {
 		t.Errorf("GetSessionMessages sessionID = %q, want session-pe", fake.messagesSessionID)
 	}
+	if fake.messagesSinceISO != "" {
+		t.Errorf("initial GetSessionMessages since = %q, want empty", fake.messagesSinceISO)
+	}
 	msgs := m.Messages("principal_engineer")
 	if len(msgs) != 1 {
 		t.Fatalf("history len = %d, want 1", len(msgs))
@@ -260,6 +264,69 @@ func TestCloudChatModel_SendPromptUsesBackendSession(t *testing.T) {
 	}
 	if msgs[0].Pending {
 		t.Errorf("sent message should no longer be pending")
+	}
+}
+
+func TestCloudChatModel_PollTickFetchesMessagesSinceLatestStoredMessage(t *testing.T) {
+	latest := time.Date(2026, 6, 14, 13, 0, 0, 123, time.UTC)
+	fake := &fakeCloudChatBackend{
+		messages: []SessionMessage{
+			{Sender: "Principal Eng", Text: "ready", Kind: "agent", Timestamp: latest},
+			{Sender: "Principal Eng", Text: "new update", Kind: "agent", Timestamp: latest.Add(time.Second)},
+		},
+	}
+	m := NewCloudChatModelWithClient(fake, 13)
+	m.sessionsByPersona = map[string]*Session{
+		"principal_engineer": {ID: "session-pe", PersonaKey: "principal_engineer"},
+	}
+	m.appendMessage("principal_engineer", CloudChatMessage{
+		Sender:    "Principal Eng",
+		Text:      "ready",
+		Timestamp: latest,
+	})
+	m.appendMessage("principal_engineer", CloudChatMessage{
+		Sender:    "you",
+		Text:      "pending should not advance since",
+		Timestamp: latest.Add(time.Hour),
+		Pending:   true,
+	})
+
+	var cmd tea.Cmd
+	m, cmd = m.Update(cloudChatPollTickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatal("poll tick should return a batched history fetch and next poll command")
+	}
+	rawBatch := cmd()
+	batch, ok := rawBatch.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("poll tick command returned %T, want tea.BatchMsg", rawBatch)
+	}
+	if len(batch) != 2 {
+		t.Fatalf("poll tick batch len = %d, want 2", len(batch))
+	}
+
+	rawMsg := batch[0]()
+	msg, ok := rawMsg.(cloudSessionMessagesMsg)
+	if !ok {
+		t.Fatalf("poll history command returned %T, want cloudSessionMessagesMsg", rawMsg)
+	}
+	if msg.replace {
+		t.Fatal("poll history should merge incremental messages, not replace history")
+	}
+	m, _ = m.Update(msg)
+
+	if fake.messagesSessionID != "session-pe" {
+		t.Errorf("GetSessionMessages sessionID = %q, want session-pe", fake.messagesSessionID)
+	}
+	if want := latest.UTC().Format(time.RFC3339Nano); fake.messagesSinceISO != want {
+		t.Errorf("GetSessionMessages since = %q, want %q", fake.messagesSinceISO, want)
+	}
+	msgs := m.Messages("principal_engineer")
+	if len(msgs) != 3 {
+		t.Fatalf("history len after merge = %d, want 3", len(msgs))
+	}
+	if got := msgs[len(msgs)-1].Text; got != "new update" {
+		t.Errorf("last merged message = %q, want new update", got)
 	}
 }
 
@@ -448,6 +515,7 @@ type fakeCloudChatBackend struct {
 
 	listProjectID     int64
 	messagesSessionID string
+	messagesSinceISO  string
 	sentSessionID     string
 	sentText          string
 }
@@ -459,6 +527,7 @@ func (f *fakeCloudChatBackend) ListPersonaSessions(projectID int64) (map[string]
 
 func (f *fakeCloudChatBackend) GetSessionMessages(sessionID string, sinceISO string) ([]SessionMessage, error) {
 	f.messagesSessionID = sessionID
+	f.messagesSinceISO = sinceISO
 	return f.messages, nil
 }
 

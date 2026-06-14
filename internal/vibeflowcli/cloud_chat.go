@@ -60,6 +60,7 @@ const (
 	cloudChatMaxMessagesPerPersona = 500
 	cloudChatMaxMessageRunes       = 8 * 1024
 	cloudChatMaxSenderRunes        = 120
+	cloudChatPollInterval          = 2 * time.Second
 )
 
 type cloudChatBackend interface {
@@ -76,6 +77,7 @@ type cloudPersonaSessionsMsg struct {
 type cloudSessionMessagesMsg struct {
 	personaKey string
 	messages   []SessionMessage
+	replace    bool
 	err        error
 }
 
@@ -85,6 +87,8 @@ type cloudPromptSentMsg struct {
 	message    *SessionMessage
 	err        error
 }
+
+type cloudChatPollTickMsg time.Time
 
 // CloudChatMessage is one entry in the chat history pane.
 type CloudChatMessage struct {
@@ -161,7 +165,11 @@ func (m CloudChatModel) Update(msg tea.Msg) (CloudChatModel, tea.Cmd) {
 			return m, nil
 		}
 		m.err = ""
-		m.replaceMessages(msg.personaKey, msg.messages)
+		if msg.replace {
+			m.replaceMessages(msg.personaKey, msg.messages)
+		} else {
+			m.mergeMessages(msg.personaKey, msg.messages)
+		}
 		return m, nil
 	case cloudPromptSentMsg:
 		if msg.err != nil {
@@ -171,6 +179,14 @@ func (m CloudChatModel) Update(msg tea.Msg) (CloudChatModel, tea.Cmd) {
 		m.err = ""
 		m.replaceLastPendingUserMessage(msg.personaKey, msg.text, msg.message)
 		return m, m.loadMessagesCmd(msg.personaKey)
+	case cloudChatPollTickMsg:
+		if m.client == nil {
+			return m, nil
+		}
+		return m, tea.Batch(
+			m.loadMessagesSinceCmd(m.SelectedPersona().Key, m.latestMessageSinceISO(m.SelectedPersona().Key), false),
+			cloudChatPollCmd(),
+		)
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -268,13 +284,17 @@ func (m CloudChatModel) loadSelectedMessagesCmd() tea.Cmd {
 }
 
 func (m CloudChatModel) loadMessagesCmd(personaKey string) tea.Cmd {
+	return m.loadMessagesSinceCmd(personaKey, "", true)
+}
+
+func (m CloudChatModel) loadMessagesSinceCmd(personaKey string, sinceISO string, replace bool) tea.Cmd {
 	session := m.sessionForPersona(personaKey)
 	if m.client == nil || session == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		messages, err := m.client.GetSessionMessages(session.ID, "")
-		return cloudSessionMessagesMsg{personaKey: personaKey, messages: messages, err: err}
+		messages, err := m.client.GetSessionMessages(session.ID, sinceISO)
+		return cloudSessionMessagesMsg{personaKey: personaKey, messages: messages, replace: replace, err: err}
 	}
 }
 
@@ -316,6 +336,44 @@ func (m *CloudChatModel) replaceMessages(personaKey string, messages []SessionMe
 	for _, message := range messages {
 		m.appendMessage(personaKey, sessionMessageToCloudChatMessage(message, persona.DisplayName))
 	}
+}
+
+func (m *CloudChatModel) mergeMessages(personaKey string, messages []SessionMessage) {
+	persona := cloudPersonaByKey(m.personas, personaKey)
+	for _, message := range messages {
+		chatMessage := sessionMessageToCloudChatMessage(message, persona.DisplayName)
+		if !m.hasMessage(personaKey, chatMessage) {
+			m.appendMessage(personaKey, chatMessage)
+		}
+	}
+}
+
+func (m CloudChatModel) hasMessage(personaKey string, msg CloudChatMessage) bool {
+	for _, existing := range m.history[personaKey] {
+		if existing.Sender == msg.Sender &&
+			existing.Text == msg.Text &&
+			existing.Pending == msg.Pending &&
+			existing.Timestamp.Equal(msg.Timestamp) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m CloudChatModel) latestMessageSinceISO(personaKey string) string {
+	var latest time.Time
+	for _, msg := range m.history[personaKey] {
+		if msg.Pending || msg.Timestamp.IsZero() {
+			continue
+		}
+		if latest.IsZero() || msg.Timestamp.After(latest) {
+			latest = msg.Timestamp
+		}
+	}
+	if latest.IsZero() {
+		return ""
+	}
+	return latest.UTC().Format(time.RFC3339Nano)
 }
 
 func (m *CloudChatModel) replaceLastPendingUserMessage(personaKey string, text string, message *SessionMessage) {
@@ -585,4 +643,10 @@ func (m CloudChatModel) CloudChatHelpKeys() string {
 		return "esc: back  enter: send  ctrl+c: quit"
 	}
 	return "↑/↓: persona  enter: compose  r: refresh  s: start hint  esc: back  q: quit"
+}
+
+func cloudChatPollCmd() tea.Cmd {
+	return tea.Tick(cloudChatPollInterval, func(t time.Time) tea.Msg {
+		return cloudChatPollTickMsg(t)
+	})
 }
