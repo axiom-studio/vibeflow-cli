@@ -83,7 +83,7 @@ You can add entries under `providers:` in `config.yaml` with:
 
 Defaults from the built-in set are merged with your file; see the source `DefaultConfig()` in `internal/vibeflowcli/config.go` for the canonical templates.
 
-Built-in providers validate `--model` / `--models` values against a curated catalog. Use `vibeflow models` or `vibeflow models <provider>` to list the accepted ids. Custom provider keys do not have a catalog and accept any model string.
+The built-in model catalog is advisory. Use `vibeflow models` or `vibeflow models <provider>` to list known ids, but `--model` / `--models` accept explicit strings so new provider models work before the catalog is updated.
 
 ## MCP tool name
 

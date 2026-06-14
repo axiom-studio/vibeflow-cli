@@ -214,9 +214,6 @@ func launchCmd() *cobra.Command {
 			if err := validatePersonaModels(personaModels, personasToLaunch); err != nil {
 				return err
 			}
-			if err := validateLaunchModels(provider, model, personaModels); err != nil {
-				return err
-			}
 
 			// Ensure all agent-specific markdown docs exist in the working directory.
 			if effectiveSessionType == "vibeflow" {
@@ -745,18 +742,6 @@ func validatePersonaModels(models map[string]string, personas []string) error {
 	for p := range models {
 		if !allowed[p] {
 			return fmt.Errorf("--models specifies persona %q, but launch personas are %s", p, strings.Join(personas, ","))
-		}
-	}
-	return nil
-}
-
-func validateLaunchModels(provider, defaultModel string, personaModels map[string]string) error {
-	if err := ValidateModelForProvider(provider, defaultModel); err != nil {
-		return err
-	}
-	for _, model := range personaModels {
-		if err := ValidateModelForProvider(provider, model); err != nil {
-			return err
 		}
 	}
 	return nil

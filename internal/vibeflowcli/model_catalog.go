@@ -16,8 +16,6 @@
 
 package vibeflowcli
 
-import "fmt"
-
 // ModelOption describes a model id accepted by a built-in provider.
 type ModelOption struct {
 	ID          string
@@ -63,17 +61,11 @@ func ModelsForProvider(provider string) []ModelOption {
 	return out
 }
 
-func ValidateModelForProvider(provider, model string) error {
-	if model == "" {
-		return nil
-	}
+func IsKnownModelForProvider(provider, model string) bool {
 	for _, option := range ModelsForProvider(provider) {
 		if model == option.ID {
-			return nil
+			return true
 		}
 	}
-	if len(ModelsForProvider(provider)) == 0 {
-		return nil
-	}
-	return fmt.Errorf("unknown model %q for provider %q: run `vibeflow models %s` to list supported ids", model, provider, provider)
+	return false
 }

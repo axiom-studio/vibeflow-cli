@@ -128,15 +128,3 @@ func TestModelForPersona(t *testing.T) {
 		t.Errorf("architect model = %q", got)
 	}
 }
-
-func TestValidateLaunchModels(t *testing.T) {
-	if err := validateLaunchModels("claude", "sonnet", map[string]string{"architect": "opus"}); err != nil {
-		t.Fatalf("validateLaunchModels failed: %v", err)
-	}
-	if err := validateLaunchModels("claude", "sonnet", map[string]string{"architect": "bad-model"}); err == nil {
-		t.Fatal("expected invalid persona model to fail")
-	}
-	if err := validateLaunchModels("custom", "future-model", nil); err != nil {
-		t.Fatalf("custom provider model should pass: %v", err)
-	}
-}
