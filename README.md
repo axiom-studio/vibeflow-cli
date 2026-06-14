@@ -108,6 +108,7 @@ vibeflow launch --provider claude --branch main
 vibeflow launch --worktree --new-branch --provider codex
 vibeflow launch --skip-permissions  # Autonomous mode
 vibeflow launch --personas developer,architect --model sonnet --models developer=gpt-5.1-codex,architect=opus
+vibeflow models codex              # Show valid built-in model ids
 ```
 
 ### TUI Keybindings
