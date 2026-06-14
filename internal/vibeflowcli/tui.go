@@ -476,7 +476,7 @@ func (m Model) Init() tea.Cmd {
 		cacheGCTickCmd(),
 	}
 	if m.activeView == ViewCloudChat {
-		cmds = append(cmds, m.cloudChat.loadPersonaSessionsCmd())
+		cmds = append(cmds, m.cloudChat.loadPersonaSessionsCmd(), cloudChatPollCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -774,7 +774,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "c":
 			m.activeView = ViewCloudChat
-			return m, m.cloudChat.loadPersonaSessionsCmd()
+			return m, tea.Batch(m.cloudChat.loadPersonaSessionsCmd(), cloudChatPollCmd())
 		case "?":
 			m.activeView = ViewHelp
 			return m, nil
