@@ -198,7 +198,7 @@ func DefaultConfig() *Config {
 			"claude": {
 				Name:               "Claude Code",
 				Binary:             "claude",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: true,
@@ -208,7 +208,7 @@ func DefaultConfig() *Config {
 			"codex": {
 				Name:               "OpenAI Codex CLI",
 				Binary:             "codex",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}{{ if .Model }} -m {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: false,
@@ -217,7 +217,7 @@ func DefaultConfig() *Config {
 			"gemini": {
 				Name:               "Google Gemini CLI",
 				Binary:             "gemini",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}{{ if .Model }} -m {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: false,
@@ -228,7 +228,7 @@ func DefaultConfig() *Config {
 				Binary: "agent",
 				// Cursor CLI: https://cursor.com/docs/cli/overview — binary is `agent`.
 				// --yolo/--approve-mcps align with autonomous sessions (see CLI reference parameters).
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo --approve-mcps{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo --approve-mcps{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: true,

@@ -78,7 +78,7 @@ On the **LLM Gateway** path, `BuildLLMGatewayEnv("qwen", …)` injects the gatew
 You can add entries under `providers:` in `config.yaml` with:
 
 - `name`, `binary`
-- `launch_template` (Go text template with fields such as `Binary`, `SkipPermissions`)
+- `launch_template` (Go text template with fields such as `Binary`, `SkipPermissions`, `Model`; use `{{ shellQuote .Model }}` when rendering shell arguments)
 - Optional `env`, `session_file`, `default`
 
 Defaults from the built-in set are merged with your file; see the source `DefaultConfig()` in `internal/vibeflowcli/config.go` for the canonical templates.

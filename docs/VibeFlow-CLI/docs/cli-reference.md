@@ -30,6 +30,8 @@ Create and launch a session without the full wizard. Key flags:
 | `--new-branch` | Create a new git branch (used with `--worktree`) |
 | `--worktree-name` | Custom worktree directory name (default: auto-generated) |
 | `--skip-permissions` | Skip permission prompts (autonomous mode) |
+| `--model` | Model id to pass to each launched provider session |
+| `--models` | Comma-separated `persona=model` overrides for team launches |
 | `--llm-gateway` | Route LLM requests through the VibeFlow server's LLM Gateway |
 | `--openshell` | Run the agent command inside an NVIDIA OpenShell sandbox |
 | `--openshell-sandbox` | OpenShell sandbox name |
@@ -44,9 +46,12 @@ Examples:
 vibeflow launch --provider claude --branch main
 vibeflow launch --provider cursor --worktree --new-branch
 vibeflow launch --provider codex --skip-permissions --llm-gateway
+vibeflow launch --provider claude --personas developer,architect --model sonnet --models developer=gpt-5.1-codex,architect=opus
 vibeflow launch --provider qwen --skip-permissions
 vibeflow launch --provider codex --openshell --openshell-sandbox vf-main
 ```
+
+Model flags apply when the provider process starts and are stored in session metadata so `vibeflow restart` reuses the same model. They do not rewrite a model inside an already-running provider process.
 
 ### `vibeflow list` (alias: `ls`)
 
