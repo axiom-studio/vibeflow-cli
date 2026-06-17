@@ -89,7 +89,7 @@ func AppendCodexGatewayProviderFlags(baseCommand, providerKey string, env map[st
 			codexConfigStringArg("model_provider", codexGatewayProviderID),
 			codexConfigStringArg("model_providers."+codexGatewayProviderID+".name", codexGatewayProviderName),
 			codexConfigStringArg("model_providers."+codexGatewayProviderID+".base_url", v),
-			codexConfigStringArg("model_providers."+codexGatewayProviderID+".env_key", "OPENAI_API_KEY"),
+			codexConfigBoolArg("model_providers."+codexGatewayProviderID+".requires_openai_auth", true),
 			// codex-cli >= 0.139 hard-removed the chat wire API (config-load
 			// error on wire_api="chat"), so Responses is the only wire API
 			// codex accepts. The gateway does not serve /v1/responses yet —
@@ -97,7 +97,7 @@ func AppendCodexGatewayProviderFlags(baseCommand, providerKey string, env map[st
 			// codex requests through the gateway fail with 404.
 			codexConfigStringArg("model_providers."+codexGatewayProviderID+".wire_api", "responses"),
 			codexConfigBoolArg("model_providers."+codexGatewayProviderID+".supports_websockets", false),
-			codexConfigRawArg("model_providers."+codexGatewayProviderID+".env_http_headers={ \"x-axiom-api-key\" = \"GATEWAY_API_KEY\" }"),
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".env_http_headers.x-axiom-api-key", "GATEWAY_API_KEY"),
 		}
 		for _, flag := range flags {
 			baseCommand += " -c " + flag

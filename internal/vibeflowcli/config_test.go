@@ -691,10 +691,11 @@ func TestBuildLLMGatewayEnv_Qwen(t *testing.T) {
 	if env["OPENAI_BASE_URL"] != want {
 		t.Errorf("OPENAI_BASE_URL = %q, want %q", env["OPENAI_BASE_URL"], want)
 	}
-	// Must be a superset of the codex/gemini shape (OPENAI_* pair identical)…
-	codex := BuildLLMGatewayEnv("codex", "https://server.example.com", "tok-123")
-	if env["OPENAI_API_KEY"] != codex["OPENAI_API_KEY"] || env["OPENAI_BASE_URL"] != codex["OPENAI_BASE_URL"] {
-		t.Error("qwen gateway env should match codex OPENAI_* shape")
+	// Must be a superset of the Gemini OpenAI-compatible shape
+	// (OPENAI_* pair identical)…
+	gemini := BuildLLMGatewayEnv("gemini", "https://server.example.com", "tok-123")
+	if env["OPENAI_API_KEY"] != gemini["OPENAI_API_KEY"] || env["OPENAI_BASE_URL"] != gemini["OPENAI_BASE_URL"] {
+		t.Error("qwen gateway env should match gemini OPENAI_* shape")
 	}
 	// …plus the qwen custom-API-key var binding the gateway endpoint, whose
 	// value is the same bearer token.
@@ -709,8 +710,8 @@ func TestBuildLLMGatewayEnv_Qwen(t *testing.T) {
 
 func TestBuildLLMGatewayEnv_CodexAddsGatewayAPIKey(t *testing.T) {
 	env := BuildLLMGatewayEnv("codex", "https://server.example.com", "tok-123")
-	if env["OPENAI_API_KEY"] != "tok-123" {
-		t.Errorf("OPENAI_API_KEY = %q, want tok-123", env["OPENAI_API_KEY"])
+	if env["OPENAI_API_KEY"] != "" {
+		t.Errorf("OPENAI_API_KEY = %q, want empty (Codex gateway auth uses GATEWAY_API_KEY)", env["OPENAI_API_KEY"])
 	}
 	if env["GATEWAY_API_KEY"] != "tok-123" {
 		t.Errorf("GATEWAY_API_KEY = %q, want tok-123", env["GATEWAY_API_KEY"])
