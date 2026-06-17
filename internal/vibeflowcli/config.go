@@ -385,12 +385,12 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	case "claude":
 		env["ANTHROPIC_CUSTOM_HEADERS"] = "x-axiom-api-key: " + apiToken
 		env["ANTHROPIC_BASE_URL"] = gatewayBaseURL
-	case "codex", "gemini", "qwen":
+	case "codex":
+		env["GATEWAY_API_KEY"] = apiToken
+		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
+	case "gemini", "qwen":
 		env["OPENAI_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
-		if providerKey == "codex" {
-			env["GATEWAY_API_KEY"] = apiToken
-		}
 		if providerKey == "qwen" {
 			env[QwenCustomAPIKeyEnvName("OPENAI", gatewayBaseURL+"/v1")] = apiToken
 		}

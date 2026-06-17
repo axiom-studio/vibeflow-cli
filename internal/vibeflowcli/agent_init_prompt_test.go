@@ -304,10 +304,10 @@ func TestAppendCodexGatewayProviderFlags(t *testing.T) {
 				`codex --yolo -c 'model_provider="vibeflow_gateway"'`,
 				`-c 'model_providers.vibeflow_gateway.name="VibeFlowGateway"'`,
 				`-c 'model_providers.vibeflow_gateway.base_url="https://gateway.example/rest/v1/llm-gateway/v1"'`,
-				`-c 'model_providers.vibeflow_gateway.env_key="OPENAI_API_KEY"'`,
+				`-c model_providers.vibeflow_gateway.requires_openai_auth=true`,
 				`-c 'model_providers.vibeflow_gateway.wire_api="responses"'`,
 				`-c model_providers.vibeflow_gateway.supports_websockets=false`,
-				`-c 'model_provoders.vibeflow_gateway.env_http_headers={ "x-axiom-api-key" = "GATEWAY_API_KEY" }'`,
+				`-c 'model_providers.vibeflow_gateway.env_http_headers.x-axiom-api-key="GATEWAY_API_KEY"'`,
 			},
 		},
 		{
@@ -380,8 +380,11 @@ func TestAppendCodexGatewayProviderFlags_OrderingWithInitPrompt(t *testing.T) {
 	if !strings.Contains(cmd, `-c 'model_provider="vibeflow_gateway"'`) {
 		t.Fatalf("ordering integration: missing Codex gateway provider flags in %q", cmd)
 	}
-	if !strings.Contains(cmd, `-c 'env_http_headers = { "x-axiom-api-key" = "GATEWAY_API_KEY" }'`) {
+	if !strings.Contains(cmd, `-c 'model_providers.vibeflow_gateway.env_http_headers.x-axiom-api-key="GATEWAY_API_KEY"'`) {
 		t.Fatalf("ordering integration: missing Codex gateway env_http_headers flag in %q", cmd)
+	}
+	if strings.Contains(cmd, "env_key") {
+		t.Fatalf("ordering integration: Codex gateway auth must not use env_key, got %q", cmd)
 	}
 }
 
