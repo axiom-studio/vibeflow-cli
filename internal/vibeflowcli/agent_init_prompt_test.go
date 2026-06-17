@@ -307,7 +307,7 @@ func TestAppendCodexGatewayProviderFlags(t *testing.T) {
 				`-c 'model_providers.vibeflow_gateway.env_key="OPENAI_API_KEY"'`,
 				`-c 'model_providers.vibeflow_gateway.wire_api="responses"'`,
 				`-c model_providers.vibeflow_gateway.supports_websockets=false`,
-				`-c 'env_http_headers = { "x-axiom-api-key" = "GATEWAY_API_KEY" }'`,
+				`-c 'model_provoders.vibeflow_gateway.env_http_headers={ "x-axiom-api-key" = "GATEWAY_API_KEY" }'`,
 			},
 		},
 		{
