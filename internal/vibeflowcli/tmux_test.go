@@ -372,6 +372,7 @@ func TestRedactSpawnArg(t *testing.T) {
 		{"gemini key env", "GEMINI_API_KEY=abc123", "GEMINI_API_KEY=<redacted>"},
 		{"mcp token env", "MCP_TOKEN=tok", "MCP_TOKEN=<redacted>"},
 		{"vibeflow token env", "VIBEFLOW_TOKEN=tok", "VIBEFLOW_TOKEN=<redacted>"},
+		{"gateway api key env", "GATEWAY_API_KEY=tok", "GATEWAY_API_KEY=<redacted>"},
 		{"openai key env", "OPENAI_API_KEY=sk-test", "OPENAI_API_KEY=<redacted>"},
 		{
 			name: "qwen custom api key env (dynamic endpoint-encoded name)",
@@ -410,6 +411,7 @@ func TestIsSecretEnvKey(t *testing.T) {
 		{"GEMINI_API_KEY", true},
 		{"MCP_TOKEN", true},
 		{"VIBEFLOW_TOKEN", true},
+		{"GATEWAY_API_KEY", true},
 		{"OPENAI_API_KEY", true},
 		{"ANTHROPIC_CUSTOM_HEADERS", true},
 		{"ANTHROPIC_AUTH_TOKEN", true},

@@ -707,6 +707,19 @@ func TestBuildLLMGatewayEnv_Qwen(t *testing.T) {
 	}
 }
 
+func TestBuildLLMGatewayEnv_CodexAddsGatewayAPIKey(t *testing.T) {
+	env := BuildLLMGatewayEnv("codex", "https://server.example.com", "tok-123")
+	if env["OPENAI_API_KEY"] != "tok-123" {
+		t.Errorf("OPENAI_API_KEY = %q, want tok-123", env["OPENAI_API_KEY"])
+	}
+	if env["GATEWAY_API_KEY"] != "tok-123" {
+		t.Errorf("GATEWAY_API_KEY = %q, want tok-123", env["GATEWAY_API_KEY"])
+	}
+	if env["OPENAI_BASE_URL"] != "https://server.example.com/rest/v1/llm-gateway/v1" {
+		t.Errorf("OPENAI_BASE_URL = %q", env["OPENAI_BASE_URL"])
+	}
+}
+
 func TestQwenCustomAPIKeyEnvName(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -307,6 +307,7 @@ func TestAppendCodexGatewayProviderFlags(t *testing.T) {
 				`-c 'model_providers.vibeflow_gateway.env_key="OPENAI_API_KEY"'`,
 				`-c 'model_providers.vibeflow_gateway.wire_api="responses"'`,
 				`-c model_providers.vibeflow_gateway.supports_websockets=false`,
+				`-c 'env_http_headers = { "x-axiom-api-key" = "GATEWAY_API_KEY" }'`,
 			},
 		},
 		{
@@ -378,6 +379,9 @@ func TestAppendCodexGatewayProviderFlags_OrderingWithInitPrompt(t *testing.T) {
 	}
 	if !strings.Contains(cmd, `-c 'model_provider="vibeflow_gateway"'`) {
 		t.Fatalf("ordering integration: missing Codex gateway provider flags in %q", cmd)
+	}
+	if !strings.Contains(cmd, `-c 'env_http_headers = { "x-axiom-api-key" = "GATEWAY_API_KEY" }'`) {
+		t.Fatalf("ordering integration: missing Codex gateway env_http_headers flag in %q", cmd)
 	}
 }
 

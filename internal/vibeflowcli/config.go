@@ -388,6 +388,9 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	case "codex", "gemini", "qwen":
 		env["OPENAI_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
+		if providerKey == "codex" {
+			env["GATEWAY_API_KEY"] = apiToken
+		}
 		if providerKey == "qwen" {
 			env[QwenCustomAPIKeyEnvName("OPENAI", gatewayBaseURL+"/v1")] = apiToken
 		}
