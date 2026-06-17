@@ -97,7 +97,7 @@ func AppendCodexGatewayProviderFlags(baseCommand, providerKey string, env map[st
 			// codex requests through the gateway fail with 404.
 			codexConfigStringArg("model_providers."+codexGatewayProviderID+".wire_api", "responses"),
 			codexConfigBoolArg("model_providers."+codexGatewayProviderID+".supports_websockets", false),
-			codexConfigRawArg(`env_http_headers = { "x-axiom-api-key" = "GATEWAY_API_KEY" }`),
+			codexConfigRawArg("model_providers."+codexGatewayProviderID+".env_http_headers={ \"x-axiom-api-key\" = \"GATEWAY_API_KEY\" }"),
 		}
 		for _, flag := range flags {
 			baseCommand += " -c " + flag
