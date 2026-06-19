@@ -461,15 +461,28 @@ func ClearLLMGatewayEnv(providerKey string) map[string]string {
 	return env
 }
 
-// ReadCodexBearerTokenEnvVar reads ~/.codex/config.toml and returns the
-// bearer_token_env_var value from the [mcp_servers.vibeflow] section.
-// Returns "" if the file or key is not found.
-func ReadCodexBearerTokenEnvVar() string {
+// CodexConfigPath returns the Codex config path used for VibeFlow-managed
+// Codex sessions. Custom roots keep this lookup isolated under RootDir().
+func CodexConfigPath() string {
+	if rootDir != "" || os.Getenv("VIBEFLOW_ROOT") != "" {
+		return filepath.Join(RootDir(), ".codex", "config.toml")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	return filepath.Join(home, ".codex", "config.toml")
+}
+
+// ReadCodexBearerTokenEnvVar reads the Codex config and returns the
+// bearer_token_env_var value from the [mcp_servers.vibeflow] section.
+// Returns "" if the file or key is not found.
+func ReadCodexBearerTokenEnvVar() string {
+	path := CodexConfigPath()
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}

@@ -402,6 +402,109 @@ bearer_token_env_var = "ACTUAL"
 	})
 }
 
+func TestCodexConfigPath_UsesRootWhenCustomRootIsActive(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	home := t.TempDir()
+	customRoot := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+
+	SetRootDir(customRoot)
+
+	want := filepath.Join(customRoot, ".codex", "config.toml")
+	if got := CodexConfigPath(); got != want {
+		t.Errorf("CodexConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveProviderEnvVars_CodexUsesRootScopedMCPConfig(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	home := t.TempDir()
+	customRoot := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	SetRootDir(customRoot)
+
+	homeCodexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(homeCodexDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeCodexDir, "config.toml"), []byte(`[mcp_servers.vibeflow]
+bearer_token_env_var = "DEFAULT_ROOT_TOKEN"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rootCodexDir := filepath.Join(customRoot, ".codex")
+	if err := os.MkdirAll(rootCodexDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootCodexDir, "config.toml"), []byte(`[mcp_servers.vibeflow]
+bearer_token_env_var = "CUSTOM_ROOT_TOKEN"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.SavedEnvVars = map[string]string{
+		"DEFAULT_ROOT_TOKEN": "wrong-token",
+		"CUSTOM_ROOT_TOKEN":  "right-token",
+	}
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != "" {
+		t.Fatalf("missing = %q, want empty", missing)
+	}
+	if got := env["CUSTOM_ROOT_TOKEN"]; got != "right-token" {
+		t.Errorf("CUSTOM_ROOT_TOKEN = %q, want right-token", got)
+	}
+	if _, ok := env["DEFAULT_ROOT_TOKEN"]; ok {
+		t.Errorf("default-root token leaked into custom-root launch env: %v", env)
+	}
+}
+
+func TestResolveProviderEnvVars_CodexCustomRootDoesNotFallbackToHome(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	home := t.TempDir()
+	customRoot := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	SetRootDir(customRoot)
+
+	homeCodexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(homeCodexDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeCodexDir, "config.toml"), []byte(`[mcp_servers.vibeflow]
+bearer_token_env_var = "DEFAULT_ROOT_TOKEN"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.SavedEnvVars = map[string]string{
+		"DEFAULT_ROOT_TOKEN": "wrong-token",
+	}
+	t.Setenv("DEFAULT_ROOT_TOKEN", "wrong-env-token")
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != "" {
+		t.Fatalf("missing = %q, want empty because custom root has no Codex MCP config", missing)
+	}
+	if len(env) != 0 {
+		t.Errorf("env = %v, want empty; custom root must not read home Codex config", env)
+	}
+}
+
 func TestCleanEnvToken(t *testing.T) {
 	tests := []struct {
 		input string
