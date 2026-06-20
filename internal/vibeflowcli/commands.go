@@ -179,6 +179,7 @@ func launchCmd() *cobra.Command {
 					baseEnv[k] = v
 				}
 			}
+			baseEnv = WithMCPTokenEnv(baseEnv, cfg)
 
 			openShellCfg := cfg.OpenShell
 			if openshell {
@@ -606,6 +607,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 			sessionEnv[k] = v
 		}
 	}
+	sessionEnv = WithMCPTokenEnv(sessionEnv, cfg)
 
 	// Mirror Codex gateway config and qwen routed env vars onto CLI flags on
 	// restart too. Must run before the init-prompt append.

@@ -1229,6 +1229,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			result.Provider.Env[k] = v
 		}
 	}
+	result.Provider.Env = WithMCPTokenEnv(result.Provider.Env, m.config)
 
 	// Mirror Codex gateway config and qwen routed env vars onto the command
 	// line so each provider sees the explicit launch-time configuration it

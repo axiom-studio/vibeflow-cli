@@ -892,6 +892,60 @@ func TestClearLLMGatewayEnv_Qwen(t *testing.T) {
 	}
 }
 
+func TestWithMCPTokenEnv_FromConfig(t *testing.T) {
+	t.Setenv("MCP_TOKEN", "shell-token")
+	cfg := &Config{APIToken: "  [config-token]  "}
+	env := map[string]string{"EXISTING": "value"}
+
+	got := WithMCPTokenEnv(env, cfg)
+
+	if got["MCP_TOKEN"] != "config-token" {
+		t.Errorf("MCP_TOKEN = %q, want config-token", got["MCP_TOKEN"])
+	}
+	if got["EXISTING"] != "value" {
+		t.Errorf("EXISTING env was not preserved: %v", got)
+	}
+}
+
+func TestWithMCPTokenEnv_FromShellFallback(t *testing.T) {
+	t.Setenv("MCP_TOKEN", "  [shell-token]  ")
+
+	got := WithMCPTokenEnv(nil, &Config{})
+
+	if got["MCP_TOKEN"] != "shell-token" {
+		t.Errorf("MCP_TOKEN = %q, want shell-token", got["MCP_TOKEN"])
+	}
+}
+
+func TestWithMCPTokenEnv_EmptyTokenLeavesEnvUnchanged(t *testing.T) {
+	t.Setenv("MCP_TOKEN", "")
+	os.Unsetenv("MCP_TOKEN")
+	env := map[string]string{"EXISTING": "value"}
+
+	got := WithMCPTokenEnv(env, &Config{})
+
+	if _, ok := got["MCP_TOKEN"]; ok {
+		t.Errorf("MCP_TOKEN should not be set without a token: %v", got)
+	}
+	if got["EXISTING"] != "value" {
+		t.Errorf("EXISTING env was not preserved: %v", got)
+	}
+}
+
+func TestWithMCPTokenEnv_AllBuiltInProviders(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.APIToken = "api-token"
+
+	for providerKey, provider := range cfg.Providers {
+		t.Run(providerKey, func(t *testing.T) {
+			env := WithMCPTokenEnv(cloneStringMap(provider.Env), cfg)
+			if env["MCP_TOKEN"] != "api-token" {
+				t.Errorf("MCP_TOKEN = %q, want api-token", env["MCP_TOKEN"])
+			}
+		})
+	}
+}
+
 // --- OpenShell compatibility tests ---
 
 func TestRootDir_Priority(t *testing.T) {
