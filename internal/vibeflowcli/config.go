@@ -461,6 +461,27 @@ func ClearLLMGatewayEnv(providerKey string) map[string]string {
 	return env
 }
 
+// WithMCPTokenEnv returns env with MCP_TOKEN populated from the resolved
+// VibeFlow API token. The loaded config already honors VIBEFLOW_TOKEN, so the
+// parent MCP_TOKEN is only a fallback for callers without a saved api_token.
+func WithMCPTokenEnv(env map[string]string, cfg *Config) map[string]string {
+	token := ""
+	if cfg != nil {
+		token = cleanEnvToken(cfg.APIToken)
+	}
+	if token == "" {
+		token = cleanEnvToken(os.Getenv("MCP_TOKEN"))
+	}
+	if token == "" {
+		return env
+	}
+	if env == nil {
+		env = make(map[string]string)
+	}
+	env["MCP_TOKEN"] = token
+	return env
+}
+
 // CodexConfigPath returns the Codex config path used for VibeFlow-managed
 // Codex sessions. Custom roots keep this lookup isolated under RootDir().
 func CodexConfigPath() string {
