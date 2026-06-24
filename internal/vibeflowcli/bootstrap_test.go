@@ -40,6 +40,28 @@ func readJSONFile(t *testing.T, path string) map[string]any {
 	return m
 }
 
+// withTempRoot points RootDir() at a fresh temp dir for the test so that
+// backup files (written under <RootDir>/.backup) never touch the real
+// ~/.vibeflow-cli. Returns the temp root.
+func withTempRoot(t *testing.T) string {
+	t.Helper()
+	orig := rootDir
+	t.Cleanup(func() { rootDir = orig })
+	dir := t.TempDir()
+	SetRootDir(dir)
+	return dir
+}
+
+// backupFiles lists the backup files under <root>/.backup.
+func backupFiles(t *testing.T, root string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(root, ".backup", "*"))
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	return matches
+}
+
 func mcpServerEntry(t *testing.T, root map[string]any, name string) map[string]any {
 	t.Helper()
 	servers, ok := root["mcpServers"].(map[string]any)
@@ -56,6 +78,7 @@ func mcpServerEntry(t *testing.T, root map[string]any, name string) map[string]a
 // --- JSON mcpServers writers ---
 
 func TestWriteJSONMCPServer_PreservesSiblingsAndKeys(t *testing.T) {
+	withTempRoot(t)
 	path := filepath.Join(t.TempDir(), ".claude.json")
 	seed := map[string]any{
 		"numStartups": 3,
@@ -71,12 +94,15 @@ func TestWriteJSONMCPServer_PreservesSiblingsAndKeys(t *testing.T) {
 	}
 
 	entry := jsonHTTPEntry("http", false)("https://cloud.example/rest/v1/vibeflow/mcp", "secret")
-	action, err := writeJSONMCPServer(path, "vibeflow", entry)
+	action, backup, err := writeJSONMCPServer(path, "vibeflow", entry)
 	if err != nil {
 		t.Fatalf("writeJSONMCPServer: %v", err)
 	}
 	if action != "updated" {
 		t.Fatalf("action = %q, want updated", action)
+	}
+	if backup == "" {
+		t.Errorf("expected a backup path for an updated existing file")
 	}
 
 	root := readJSONFile(t, path)
@@ -100,15 +126,19 @@ func TestWriteJSONMCPServer_PreservesSiblingsAndKeys(t *testing.T) {
 }
 
 func TestWriteJSONMCPServer_CreatesFileWhenAbsent(t *testing.T) {
+	withTempRoot(t)
 	path := filepath.Join(t.TempDir(), "nested", "mcp.json")
 	entry := jsonHTTPEntry("streamable-http", true)("https://cloud.example/rest/v1/vibeflow/mcp", "")
 
-	action, err := writeJSONMCPServer(path, "vibeflow", entry)
+	action, backup, err := writeJSONMCPServer(path, "vibeflow", entry)
 	if err != nil {
 		t.Fatalf("writeJSONMCPServer: %v", err)
 	}
 	if action != "created" {
 		t.Fatalf("action = %q, want created", action)
+	}
+	if backup != "" {
+		t.Errorf("a newly-created file should have no backup, got %q", backup)
 	}
 	vibe := mcpServerEntry(t, readJSONFile(t, path), "vibeflow")
 	if vibe["type"] != "streamable-http" {
@@ -120,22 +150,27 @@ func TestWriteJSONMCPServer_CreatesFileWhenAbsent(t *testing.T) {
 }
 
 func TestWriteJSONMCPServer_Idempotent(t *testing.T) {
+	withTempRoot(t)
 	path := filepath.Join(t.TempDir(), "mcp.json")
 	entry := jsonHTTPEntry("streamable-http", true)("https://cloud.example/rest/v1/vibeflow/mcp", "")
 
-	if _, err := writeJSONMCPServer(path, "vibeflow", entry); err != nil {
+	if _, _, err := writeJSONMCPServer(path, "vibeflow", entry); err != nil {
 		t.Fatal(err)
 	}
-	action, err := writeJSONMCPServer(path, "vibeflow", entry)
+	action, backup, err := writeJSONMCPServer(path, "vibeflow", entry)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if action != "unchanged" {
 		t.Fatalf("second write action = %q, want unchanged", action)
 	}
+	if backup != "" {
+		t.Errorf("unchanged re-run should not back up, got %q", backup)
+	}
 }
 
 func TestRemoveJSONMCPServer_RemovesOnlyVibeflow(t *testing.T) {
+	withTempRoot(t)
 	path := filepath.Join(t.TempDir(), "mcp.json")
 	seed := map[string]any{
 		"mcpServers": map[string]any{
@@ -148,12 +183,15 @@ func TestRemoveJSONMCPServer_RemovesOnlyVibeflow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	action, err := removeJSONMCPServer(path, "vibeflow")
+	action, backup, err := removeJSONMCPServer(path, "vibeflow")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if action != "removed" {
 		t.Fatalf("action = %q, want removed", action)
+	}
+	if backup == "" {
+		t.Errorf("removal of an existing entry should back up the prior file")
 	}
 	root := readJSONFile(t, path)
 	servers, _ := root["mcpServers"].(map[string]any)
@@ -165,11 +203,11 @@ func TestRemoveJSONMCPServer_RemovesOnlyVibeflow(t *testing.T) {
 	}
 
 	// Second removal is a no-op.
-	if action, _ := removeJSONMCPServer(path, "vibeflow"); action != "unchanged" {
+	if action, _, _ := removeJSONMCPServer(path, "vibeflow"); action != "unchanged" {
 		t.Errorf("repeat removal action = %q, want unchanged", action)
 	}
 	// Missing file is absent, not an error.
-	if action, err := removeJSONMCPServer(filepath.Join(t.TempDir(), "nope.json"), "vibeflow"); err != nil || action != "absent" {
+	if action, _, err := removeJSONMCPServer(filepath.Join(t.TempDir(), "nope.json"), "vibeflow"); err != nil || action != "absent" {
 		t.Errorf("absent file: action=%q err=%v", action, err)
 	}
 }
@@ -190,18 +228,22 @@ bearer_token_env_var = "MCP_TOKEN"
 `
 
 func TestWriteCodexTOMLServer_UpsertPreservesOtherSections(t *testing.T) {
+	withTempRoot(t)
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(seedCodexTOML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	newURL := "https://cloud.example/rest/v1/vibeflow/mcp"
-	action, err := writeCodexTOMLServer(path, "vibeflow", newURL)
+	action, backup, err := writeCodexTOMLServer(path, "vibeflow", newURL)
 	if err != nil {
 		t.Fatalf("writeCodexTOMLServer: %v", err)
 	}
 	if action != "updated" {
 		t.Fatalf("action = %q, want updated", action)
+	}
+	if backup == "" {
+		t.Errorf("expected a backup path for an updated existing file")
 	}
 
 	got, _ := os.ReadFile(path)
@@ -220,13 +262,17 @@ func TestWriteCodexTOMLServer_UpsertPreservesOtherSections(t *testing.T) {
 }
 
 func TestWriteCodexTOMLServer_CreatesFileWhenAbsent(t *testing.T) {
+	withTempRoot(t)
 	path := filepath.Join(t.TempDir(), "nested", "config.toml")
-	action, err := writeCodexTOMLServer(path, "vibeflow", "https://cloud.example/rest/v1/vibeflow/mcp")
+	action, backup, err := writeCodexTOMLServer(path, "vibeflow", "https://cloud.example/rest/v1/vibeflow/mcp")
 	if err != nil {
 		t.Fatalf("writeCodexTOMLServer: %v", err)
 	}
 	if action != "created" {
 		t.Fatalf("action = %q, want created", action)
+	}
+	if backup != "" {
+		t.Errorf("a newly-created file should have no backup, got %q", backup)
 	}
 	data, _ := os.ReadFile(path)
 	if got := parseCodexBearerTokenEnvVar(string(data)); got != "MCP_TOKEN" {
@@ -235,32 +281,40 @@ func TestWriteCodexTOMLServer_CreatesFileWhenAbsent(t *testing.T) {
 }
 
 func TestWriteCodexTOMLServer_Idempotent(t *testing.T) {
+	withTempRoot(t)
 	path := filepath.Join(t.TempDir(), "config.toml")
 	url := "https://cloud.example/rest/v1/vibeflow/mcp"
-	if _, err := writeCodexTOMLServer(path, "vibeflow", url); err != nil {
+	if _, _, err := writeCodexTOMLServer(path, "vibeflow", url); err != nil {
 		t.Fatal(err)
 	}
-	action, err := writeCodexTOMLServer(path, "vibeflow", url)
+	action, backup, err := writeCodexTOMLServer(path, "vibeflow", url)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if action != "unchanged" {
 		t.Fatalf("second write action = %q, want unchanged", action)
 	}
+	if backup != "" {
+		t.Errorf("unchanged re-run should not back up, got %q", backup)
+	}
 }
 
 func TestRemoveCodexTOMLServer_RemovesOnlyTarget(t *testing.T) {
+	withTempRoot(t)
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(seedCodexTOML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	action, err := removeCodexTOMLServer(path, "vibeflow")
+	action, backup, err := removeCodexTOMLServer(path, "vibeflow")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if action != "removed" {
 		t.Fatalf("action = %q, want removed", action)
+	}
+	if backup == "" {
+		t.Errorf("removal of an existing section should back up the prior file")
 	}
 	data, _ := os.ReadFile(path)
 	content := string(data)
@@ -274,10 +328,10 @@ func TestRemoveCodexTOMLServer_RemovesOnlyTarget(t *testing.T) {
 		}
 	}
 
-	if action, _ := removeCodexTOMLServer(path, "vibeflow"); action != "unchanged" {
+	if action, _, _ := removeCodexTOMLServer(path, "vibeflow"); action != "unchanged" {
 		t.Errorf("repeat removal action = %q, want unchanged", action)
 	}
-	if action, err := removeCodexTOMLServer(filepath.Join(t.TempDir(), "nope.toml"), "vibeflow"); err != nil || action != "absent" {
+	if action, _, err := removeCodexTOMLServer(filepath.Join(t.TempDir(), "nope.toml"), "vibeflow"); err != nil || action != "absent" {
 		t.Errorf("absent file: action=%q err=%v", action, err)
 	}
 }
@@ -344,14 +398,18 @@ func TestBootstrapMCPURL(t *testing.T) {
 // --- initial config setup ---
 
 func TestSetupInitialConfig_StoresValuesAndHonorsName(t *testing.T) {
+	withTempRoot(t)
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 
-	action, err := setupInitialConfig(cfgPath, "https://cloud.example/", "the-key", "custommcp")
+	action, backup, err := setupInitialConfig(cfgPath, "https://cloud.example/", "the-key", "custommcp")
 	if err != nil {
 		t.Fatalf("setupInitialConfig: %v", err)
 	}
 	if action != "created" {
 		t.Fatalf("action = %q, want created", action)
+	}
+	if backup != "" {
+		t.Errorf("creating a new config should not back up, got %q", backup)
 	}
 	cfg, err := LoadConfig(cfgPath)
 	if err != nil {
@@ -367,9 +425,13 @@ func TestSetupInitialConfig_StoresValuesAndHonorsName(t *testing.T) {
 		t.Errorf("MCPToolName = %q, want custommcp", cfg.MCPToolName)
 	}
 
-	// Re-running updates rather than re-creating.
-	if action, _ := setupInitialConfig(cfgPath, "https://cloud.example", "the-key", "custommcp"); action != "updated" {
-		t.Errorf("second run action = %q, want updated", action)
+	// Re-running updates rather than re-creating, and backs up the prior file.
+	action2, backup2, _ := setupInitialConfig(cfgPath, "https://cloud.example", "the-key", "custommcp")
+	if action2 != "updated" {
+		t.Errorf("second run action = %q, want updated", action2)
+	}
+	if backup2 == "" {
+		t.Errorf("re-running over an existing config should back it up")
 	}
 }
 
@@ -550,6 +612,70 @@ func TestBootstrapCmd_CancelWritesNothing(t *testing.T) {
 	}
 	if ConfigFileExists(filepath.Join(home, ".claude.json")) {
 		t.Errorf("cancel should not write any agent config")
+	}
+}
+
+func TestBackup_OnUpdate_CarriesOriginalContent(t *testing.T) {
+	root := withTempRoot(t)
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	original := `{"mcpServers":{"vibeflow":{"old":"entry"}}}` + "\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := jsonHTTPEntry("http", false)("https://cloud.example/rest/v1/vibeflow/mcp", "")
+	if _, backup, err := writeJSONMCPServer(path, "vibeflow", entry); err != nil || backup == "" {
+		t.Fatalf("write: backup=%q err=%v", backup, err)
+	}
+
+	files := backupFiles(t, root)
+	if len(files) != 1 {
+		t.Fatalf("expected exactly 1 backup file, got %d: %v", len(files), files)
+	}
+	got, _ := os.ReadFile(files[0])
+	if string(got) != original {
+		t.Errorf("backup content = %q, want the original pre-write content %q", got, original)
+	}
+	if !strings.HasSuffix(files[0], ".bak") {
+		t.Errorf("backup name %q should end in .bak", files[0])
+	}
+}
+
+func TestBootstrapCmd_MCPNameHonored(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	SetRootDir("")
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	root := newBootstrapTestRoot()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"bootstrap", "--api-key", "K", "--config", cfgPath, "--mcp", "myflow", "--agents", "codex,gemini"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\n%s", err, out.String())
+	}
+
+	codexPath, _ := codexBootstrapConfigPath()
+	codexData, _ := os.ReadFile(codexPath)
+	if !strings.Contains(string(codexData), "[mcp_servers.myflow]") {
+		t.Errorf("codex config missing [mcp_servers.myflow]:\n%s", codexData)
+	}
+	gemPath, _ := geminiConfigPath()
+	servers, _ := readJSONFile(t, gemPath)["mcpServers"].(map[string]any)
+	if _, ok := servers["myflow"]; !ok {
+		t.Errorf("gemini mcpServers missing 'myflow' key: %v", servers)
+	}
+	if _, ok := servers["vibeflow"]; ok {
+		t.Errorf("gemini should not have a default 'vibeflow' entry when --mcp=myflow")
+	}
+	cfg, _ := LoadConfig(cfgPath)
+	if cfg.MCPToolName != "myflow" {
+		t.Errorf("config MCPToolName = %q, want myflow", cfg.MCPToolName)
 	}
 }
 
