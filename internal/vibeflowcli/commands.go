@@ -42,6 +42,8 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(configCmd())
 	root.AddCommand(agentDocCmd())
 	root.AddCommand(projectsCmd())
+	root.AddCommand(bootstrapCmd())
+	root.AddCommand(uninstallCmd())
 }
 
 // --- helpers shared by subcommands ---

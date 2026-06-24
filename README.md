@@ -98,7 +98,26 @@ vibeflow restart <name>  # Restart a session using cached parameters
 vibeflow worktrees       # List git worktrees (alias: wt)
 vibeflow check [dir]     # Check for session conflicts
 vibeflow config          # Re-run interactive configuration setup
+vibeflow bootstrap       # Configure the VibeFlow MCP server for your coding agents
+vibeflow uninstall       # Remove the MCP server config that bootstrap installed
 vibeflow version         # Print version information
+```
+
+### Bootstrap
+
+`vibeflow bootstrap` writes the initial vibeflow-cli config and installs the
+VibeFlow MCP server into the config files of the coding agents you select
+(Codex, Gemini, Cursor, Claude CLI, Claude Desktop). Each agent config
+references the bearer token via the `MCP_TOKEN` environment variable, which
+vibeflow-cli injects when it launches an agent; the `--api-key` value is stored
+in the vibeflow-cli config. Every changed file's full path is printed.
+
+```bash
+vibeflow bootstrap --api-key <api-key>                       # interactive agent picker
+vibeflow bootstrap --api-key <api-key> --all                 # configure every agent
+vibeflow bootstrap --api-key <api-key> --agents codex,cursor # configure a subset
+vibeflow bootstrap --api-key <api-key> --base-url https://cloud.axiomstudio.ai --root /custom/root --mcp vibeflow
+vibeflow uninstall --all                                     # remove the MCP entry from every agent
 ```
 
 ### Launch Flags
