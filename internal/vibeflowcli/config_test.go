@@ -794,13 +794,7 @@ func TestBuildLLMGatewayEnv_Qwen(t *testing.T) {
 	if env["OPENAI_BASE_URL"] != want {
 		t.Errorf("OPENAI_BASE_URL = %q, want %q", env["OPENAI_BASE_URL"], want)
 	}
-	// Must be a superset of the Gemini OpenAI-compatible shape
-	// (OPENAI_* pair identical)…
-	gemini := BuildLLMGatewayEnv("gemini", "https://server.example.com", "tok-123")
-	if env["OPENAI_API_KEY"] != gemini["OPENAI_API_KEY"] || env["OPENAI_BASE_URL"] != gemini["OPENAI_BASE_URL"] {
-		t.Error("qwen gateway env should match gemini OPENAI_* shape")
-	}
-	// …plus the qwen custom-API-key var binding the gateway endpoint, whose
+	// Qwen also gets a custom-API-key var binding the gateway endpoint, whose
 	// value is the same bearer token.
 	customVar := "QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_SERVER_EXAMPLE_COM_REST_V1_LLM_GATEWAY_V1"
 	if env[customVar] != "tok-123" {
@@ -808,6 +802,26 @@ func TestBuildLLMGatewayEnv_Qwen(t *testing.T) {
 	}
 	if len(env) != 3 {
 		t.Errorf("qwen gateway env has %d vars, want 3: %v", len(env), env)
+	}
+}
+
+func TestBuildLLMGatewayEnv_Gemini(t *testing.T) {
+	env := BuildLLMGatewayEnv("gemini", "https://server.example.com", "tok-123")
+	if env["GEMINI_API_KEY"] != "tok-123" {
+		t.Errorf("GEMINI_API_KEY = %q, want tok-123", env["GEMINI_API_KEY"])
+	}
+	want := "https://server.example.com/rest/v1/llm-gateway"
+	if env["GOOGLE_GEMINI_BASE_URL"] != want {
+		t.Errorf("GOOGLE_GEMINI_BASE_URL = %q, want %q", env["GOOGLE_GEMINI_BASE_URL"], want)
+	}
+	if _, ok := env["OPENAI_API_KEY"]; ok {
+		t.Errorf("gemini gateway env must not set OPENAI_API_KEY: %v", env)
+	}
+	if _, ok := env["OPENAI_BASE_URL"]; ok {
+		t.Errorf("gemini gateway env must not set OPENAI_BASE_URL: %v", env)
+	}
+	if len(env) != 2 {
+		t.Errorf("gemini gateway env has %d vars, want 2: %v", len(env), env)
 	}
 }
 
@@ -870,6 +884,34 @@ func TestBuildLLMGatewayEnv_QwenEmpty(t *testing.T) {
 			t.Errorf("expected empty env, got %v", env)
 		}
 	})
+}
+
+func TestBuildLLMGatewayEnv_GeminiEmpty(t *testing.T) {
+	t.Run("empty token", func(t *testing.T) {
+		env := BuildLLMGatewayEnv("gemini", "https://server.example.com", "")
+		if len(env) != 0 {
+			t.Errorf("expected empty env, got %v", env)
+		}
+	})
+	t.Run("empty url", func(t *testing.T) {
+		env := BuildLLMGatewayEnv("gemini", "", "tok")
+		if len(env) != 0 {
+			t.Errorf("expected empty env, got %v", env)
+		}
+	})
+}
+
+func TestClearLLMGatewayEnv_Gemini(t *testing.T) {
+	env := ClearLLMGatewayEnv("gemini")
+	if env["GOOGLE_GEMINI_BASE_URL"] != "" {
+		t.Errorf("GOOGLE_GEMINI_BASE_URL = %q, want empty clear marker", env["GOOGLE_GEMINI_BASE_URL"])
+	}
+	if _, ok := env["GEMINI_API_KEY"]; ok {
+		t.Error("gemini clear must not blank GEMINI_API_KEY")
+	}
+	if _, ok := env["OPENAI_BASE_URL"]; ok {
+		t.Error("gemini clear must not touch OPENAI_BASE_URL")
+	}
 }
 
 func TestClearLLMGatewayEnv_Qwen(t *testing.T) {

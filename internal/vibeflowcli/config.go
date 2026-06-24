@@ -368,9 +368,8 @@ func CheckServerReachable(serverURL string) error {
 //
 // For Claude: uses ANTHROPIC_CUSTOM_HEADERS with x-axiom-api-key to keep
 // standard auth headers free for the user's own OAuth tokens.
-// For Codex/Gemini/Qwen: uses OPENAI_API_KEY + OPENAI_BASE_URL (these CLIs
-// share the OpenAI-compatible client surface; SDK does not support custom
-// header env vars).
+// For Gemini: uses GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL.
+// For Qwen: uses OPENAI_API_KEY + OPENAI_BASE_URL.
 // Qwen additionally gets a QWEN_CUSTOM_API_KEY_* var binding the gateway
 // endpoint via qwen-code's custom-API-key mechanism (the var NAME encodes
 // the protocol + endpoint URL; the VALUE is the bearer token), so gateway
@@ -388,12 +387,13 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	case "codex":
 		env["GATEWAY_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
-	case "gemini", "qwen":
+	case "gemini":
+		env["GEMINI_API_KEY"] = apiToken
+		env["GOOGLE_GEMINI_BASE_URL"] = gatewayBaseURL
+	case "qwen":
 		env["OPENAI_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
-		if providerKey == "qwen" {
-			env[QwenCustomAPIKeyEnvName("OPENAI", gatewayBaseURL+"/v1")] = apiToken
-		}
+		env[QwenCustomAPIKeyEnvName("OPENAI", gatewayBaseURL+"/v1")] = apiToken
 	}
 	return env
 }
@@ -455,8 +455,10 @@ func ClearLLMGatewayEnv(providerKey string) map[string]string {
 	case "claude":
 		env["ANTHROPIC_CUSTOM_HEADERS"] = ""
 		env["ANTHROPIC_BASE_URL"] = ""
-	case "codex", "gemini":
+	case "codex":
 		env["OPENAI_BASE_URL"] = ""
+	case "gemini":
+		env["GOOGLE_GEMINI_BASE_URL"] = ""
 	}
 	return env
 }

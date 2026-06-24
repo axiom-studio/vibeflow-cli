@@ -79,6 +79,30 @@ func TestRenderDetailPanel_GatewayEnv_QwenMasksSecrets(t *testing.T) {
 	}
 }
 
+func TestRenderDetailPanel_GatewayEnv_GeminiUsesGeminiVars(t *testing.T) {
+	cfg := &Config{ServerURL: "https://cloud.example.com", APIToken: "secret-jwt-token"}
+	m := detailPanelModel(SessionRow{
+		Name:              "s1",
+		Provider:          "gemini",
+		LLMGatewayEnabled: true,
+	}, cfg)
+
+	out := ansiRe.ReplaceAllString(m.renderDetailPanel(200, 40), "")
+
+	if !strings.Contains(out, "GEMINI_API_KEY=<redacted>") {
+		t.Errorf("detail panel must mask GEMINI_API_KEY:\n%s", out)
+	}
+	if !strings.Contains(out, "GOOGLE_GEMINI_BASE_URL=https://cloud.example.com/rest/v1/llm-gateway") {
+		t.Errorf("detail panel missing Gemini gateway base URL:\n%s", out)
+	}
+	if strings.Contains(out, "OPENAI_API_KEY=") || strings.Contains(out, "OPENAI_BASE_URL=") {
+		t.Errorf("gemini gateway env must not display OPENAI_* vars:\n%s", out)
+	}
+	if strings.Contains(out, "secret-jwt-token") {
+		t.Errorf("detail panel leaked the API token:\n%s", out)
+	}
+}
+
 func TestRenderDetailPanel_GatewayDisabled_NoEnvSection(t *testing.T) {
 	cfg := &Config{ServerURL: "https://cloud.example.com", APIToken: "secret-jwt-token"}
 	m := detailPanelModel(SessionRow{
