@@ -71,7 +71,7 @@ type bootstrapAgent struct {
 func bootstrapAgents() []bootstrapAgent {
 	return []bootstrapAgent{
 		{key: "codex", label: "Codex CLI", path: codexBootstrapConfigPath, codex: true},
-		{key: "gemini", label: "Gemini CLI", path: geminiConfigPath, entry: jsonHTTPEntry("streamable-http", true)},
+		{key: "gemini", label: "Gemini CLI", path: geminiConfigPath, entry: jsonHTTPEntry("http", true)},
 		{key: "cursor", label: "Cursor", path: cursorConfigPath, entry: jsonHTTPEntry("streamable-http", true)},
 		{key: "claude-cli", label: "Claude CLI", path: claudeCLIConfigPath, entry: jsonHTTPEntry("http", false)},
 		{key: "claude-desktop", label: "Claude Desktop", path: claudeDesktopConfigPath, entry: claudeDesktopEntry},

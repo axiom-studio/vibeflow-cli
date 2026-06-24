@@ -366,19 +366,105 @@ func TestJSONHTTPEntry_TransportAndTimeout(t *testing.T) {
 		t.Errorf("claude-cli should not carry a per-server timeout: %v", cli["timeout"])
 	}
 
-	gem := jsonHTTPEntry("streamable-http", true)("https://u", "")
-	if gem["type"] != "streamable-http" {
-		t.Errorf("gemini type = %v, want streamable-http", gem["type"])
+	gem := jsonHTTPEntry("http", true)("https://u", "")
+	if gem["type"] != "http" {
+		t.Errorf("gemini type = %v, want http", gem["type"])
 	}
 	if !equalJSON(gem["timeout"], mcpClientTimeoutMS) {
 		t.Errorf("gemini timeout = %v, want %d", gem["timeout"], mcpClientTimeoutMS)
 	}
+
+	cursor := jsonHTTPEntry("streamable-http", true)("https://u", "")
+	if cursor["type"] != "streamable-http" {
+		t.Errorf("cursor type = %v, want streamable-http", cursor["type"])
+	}
+	if !equalJSON(cursor["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("cursor timeout = %v, want %d", cursor["timeout"], mcpClientTimeoutMS)
+	}
+
 	// No agent's HTTP entry should embed the literal token.
-	for _, e := range []map[string]any{cli, gem} {
+	for _, e := range []map[string]any{cli, gem, cursor} {
 		h, _ := e["headers"].(map[string]any)
 		if h["Authorization"] != "Bearer ${MCP_TOKEN}" {
 			t.Errorf("Authorization = %v, want Bearer ${MCP_TOKEN}", h["Authorization"])
 		}
+	}
+}
+
+func TestBootstrapAgents_GeminiUsesHTTPTransport(t *testing.T) {
+	agents := bootstrapAgents()
+	var gem bootstrapAgent
+	for _, a := range agents {
+		if a.key == "gemini" {
+			gem = a
+			break
+		}
+	}
+	if gem.entry == nil {
+		t.Fatal("gemini bootstrap agent missing entry builder")
+	}
+	entry := gem.entry("https://cloud.example/rest/v1/vibeflow/mcp", "")
+	if entry["type"] != "http" {
+		t.Errorf("gemini type = %v, want http", entry["type"])
+	}
+	if !equalJSON(entry["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("gemini timeout = %v, want %d", entry["timeout"], mcpClientTimeoutMS)
+	}
+}
+
+func TestBootstrapAgents_CursorUsesStreamableHTTPTransport(t *testing.T) {
+	agents := bootstrapAgents()
+	var cursor bootstrapAgent
+	for _, a := range agents {
+		if a.key == "cursor" {
+			cursor = a
+			break
+		}
+	}
+	if cursor.entry == nil {
+		t.Fatal("cursor bootstrap agent missing entry builder")
+	}
+	entry := cursor.entry("https://cloud.example/rest/v1/vibeflow/mcp", "")
+	if entry["type"] != "streamable-http" {
+		t.Errorf("cursor type = %v, want streamable-http", entry["type"])
+	}
+	if !equalJSON(entry["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("cursor timeout = %v, want %d", entry["timeout"], mcpClientTimeoutMS)
+	}
+}
+
+func TestBootstrapCmd_WritesGeminiHTTPTransport(t *testing.T) {
+	withTempRoot(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	root := newBootstrapTestRoot()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"bootstrap", "--api-key", "K", "--config", cfgPath, "--agents", "gemini"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\n%s", err, out.String())
+	}
+
+	gemPath, _ := geminiConfigPath()
+	entry := mcpServerEntry(t, readJSONFile(t, gemPath), "vibeflow")
+	if entry["type"] != "http" {
+		t.Errorf("gemini type = %v, want http", entry["type"])
+	}
+	if !equalJSON(entry["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("gemini timeout = %v, want %d", entry["timeout"], mcpClientTimeoutMS)
+	}
+}
+
+func TestJSONHTTPEntry_StreamableTransport(t *testing.T) {
+	gem := jsonHTTPEntry("streamable-http", true)("https://u", "")
+	if gem["type"] != "streamable-http" {
+		t.Errorf("type = %v, want streamable-http", gem["type"])
+	}
+	if !equalJSON(gem["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("timeout = %v, want %d", gem["timeout"], mcpClientTimeoutMS)
 	}
 }
 
