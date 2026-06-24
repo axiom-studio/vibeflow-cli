@@ -110,7 +110,10 @@ VibeFlow MCP server into the config files of the coding agents you select
 (Codex, Gemini, Cursor, Claude CLI, Claude Desktop). Each agent config
 references the bearer token via the `MCP_TOKEN` environment variable, which
 vibeflow-cli injects when it launches an agent; the `--api-key` value is stored
-in the vibeflow-cli config. Every changed file's full path is printed.
+in the vibeflow-cli config. Before any config file is modified, the existing
+file is copied into `<vibeflow-root>/.backup/`. Every changed file's full path
+(and its backup) is printed. The MCP server name honors `--mcp` (default
+`vibeflow`).
 
 ```bash
 vibeflow bootstrap --api-key <api-key>                       # interactive agent picker

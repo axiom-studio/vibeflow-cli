@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -127,7 +128,7 @@ func claudeDesktopEntry(url, apiKey string) map[string]any {
 
 // install writes the agent's MCP server entry, returning the action taken
 // ("created" | "updated" | "unchanged").
-func (a bootstrapAgent) install(path, serverName, url, apiKey string) (string, error) {
+func (a bootstrapAgent) install(path, serverName, url, apiKey string) (action, backup string, err error) {
 	if a.codex {
 		return writeCodexTOMLServer(path, serverName, url)
 	}
@@ -135,8 +136,8 @@ func (a bootstrapAgent) install(path, serverName, url, apiKey string) (string, e
 }
 
 // remove deletes the agent's MCP server entry, returning the action taken
-// ("removed" | "unchanged" | "absent").
-func (a bootstrapAgent) remove(path, serverName string) (string, error) {
+// ("removed" | "unchanged" | "absent") and the backup path of the prior config.
+func (a bootstrapAgent) remove(path, serverName string) (action, backup string, err error) {
 	if a.codex {
 		return removeCodexTOMLServer(path, serverName)
 	}
@@ -209,53 +210,55 @@ func bootstrapMCPURL(baseURL string) string {
 // writeJSONMCPServer loads (or creates) a JSON config file, sets
 // mcpServers[serverName] to entry, and writes it back — preserving every other
 // top-level key and sibling MCP server.
-func writeJSONMCPServer(path, serverName string, entry map[string]any) (string, error) {
+func writeJSONMCPServer(path, serverName string, entry map[string]any) (action, backup string, err error) {
 	existed := ConfigFileExists(path)
 	root, err := readJSONObject(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	servers, _ := root["mcpServers"].(map[string]any)
 	if servers == nil {
 		servers = map[string]any{}
 	}
 	if existed && equalJSON(servers[serverName], entry) {
-		return "unchanged", nil
+		return "unchanged", "", nil
 	}
 	servers[serverName] = entry
 	root["mcpServers"] = servers
-	if err := writeJSONObject(path, root); err != nil {
-		return "", err
+	backup, err = writeJSONObject(path, root)
+	if err != nil {
+		return "", "", err
 	}
 	if existed {
-		return "updated", nil
+		return "updated", backup, nil
 	}
-	return "created", nil
+	return "created", backup, nil
 }
 
 // removeJSONMCPServer deletes mcpServers[serverName] from a JSON config file,
 // leaving all sibling servers and other keys intact.
-func removeJSONMCPServer(path, serverName string) (string, error) {
+func removeJSONMCPServer(path, serverName string) (action, backup string, err error) {
 	if !ConfigFileExists(path) {
-		return "absent", nil
+		return "absent", "", nil
 	}
 	root, err := readJSONObject(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	servers, _ := root["mcpServers"].(map[string]any)
 	if servers == nil {
-		return "unchanged", nil
+		return "unchanged", "", nil
 	}
 	if _, ok := servers[serverName]; !ok {
-		return "unchanged", nil
+		return "unchanged", "", nil
 	}
 	delete(servers, serverName)
 	root["mcpServers"] = servers
-	if err := writeJSONObject(path, root); err != nil {
-		return "", err
+	backup, err = writeJSONObject(path, root)
+	if err != nil {
+		return "", "", err
 	}
-	return "removed", nil
+	return "removed", backup, nil
 }
 
 func readJSONObject(path string) (map[string]any, error) {
@@ -279,21 +282,63 @@ func readJSONObject(path string) (map[string]any, error) {
 	return root, nil
 }
 
-func writeJSONObject(path string, root map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create dir for %s: %w", path, err)
-	}
+func writeJSONObject(path string, root map[string]any) (string, error) {
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal %s: %w", path, err)
+		return "", fmt.Errorf("marshal %s: %w", path, err)
 	}
 	data = append(data, '\n')
-	// 0o600: agent config files may carry bearer tokens (e.g. Claude Desktop's
-	// env block) — keep them owner-readable only when we create them.
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	return writeConfigFileWithBackup(path, data)
+}
+
+// --- backup-before-write ---
+
+// backupConfigFile copies an existing config file into <RootDir>/.backup before
+// it is modified, so a bootstrap/uninstall run never destroys the prior config
+// irretrievably. Returns the backup path, or "" when the source does not exist
+// (a freshly-created file has nothing to back up).
+func backupConfigFile(path string) (string, error) {
+	if !ConfigFileExists(path) {
+		return "", nil
 	}
-	return nil
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s for backup: %w", path, err)
+	}
+	backupDir := filepath.Join(RootDir(), ".backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		return "", fmt.Errorf("create backup dir %s: %w", backupDir, err)
+	}
+	dst := filepath.Join(backupDir, filepath.Base(path)+"."+backupTimestamp()+".bak")
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return "", fmt.Errorf("write backup %s: %w", dst, err)
+	}
+	return dst, nil
+}
+
+// backupTimestamp returns a sortable UTC timestamp with nanosecond precision so
+// two backups of the same file in quick succession (e.g. repeated bootstrap
+// runs within the same second) never collide and overwrite each other.
+func backupTimestamp() string {
+	return time.Now().UTC().Format("20060102T150405.000000000")
+}
+
+// writeConfigFileWithBackup backs up an existing file (into <RootDir>/.backup),
+// then writes data to path. Returns the backup path ("" when the file did not
+// previously exist). 0o600: config files may carry bearer tokens (e.g. Claude
+// Desktop's env block).
+func writeConfigFileWithBackup(path string, data []byte) (string, error) {
+	backup, err := backupConfigFile(path)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("create dir for %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return backup, nil
 }
 
 // equalJSON reports whether two values serialize to identical JSON. json.Marshal
@@ -313,13 +358,13 @@ func equalJSON(a, b any) bool {
 // writeCodexTOMLServer upserts a [mcp_servers.<name>] section into the Codex
 // TOML config, preserving every other section, key, comment, and ordering. The
 // token is referenced via bearer_token_env_var=MCP_TOKEN, never written to disk.
-func writeCodexTOMLServer(path, serverName, url string) (string, error) {
+func writeCodexTOMLServer(path, serverName, url string) (action, backup string, err error) {
 	existed := ConfigFileExists(path)
 	content := ""
 	if existed {
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("read %s: %w", path, err)
+			return "", "", fmt.Errorf("read %s: %w", path, err)
 		}
 		content = string(b)
 	}
@@ -330,38 +375,37 @@ func writeCodexTOMLServer(path, serverName, url string) (string, error) {
 	}
 	updated, changed := upsertTOMLSection(content, header, body)
 	if existed && !changed {
-		return "unchanged", nil
+		return "unchanged", "", nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", fmt.Errorf("create dir for %s: %w", path, err)
-	}
-	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	backup, err = writeConfigFileWithBackup(path, []byte(updated))
+	if err != nil {
+		return "", "", err
 	}
 	if existed {
-		return "updated", nil
+		return "updated", backup, nil
 	}
-	return "created", nil
+	return "created", backup, nil
 }
 
 // removeCodexTOMLServer deletes a [mcp_servers.<name>] section from the Codex
 // TOML config, leaving all other sections intact.
-func removeCodexTOMLServer(path, serverName string) (string, error) {
+func removeCodexTOMLServer(path, serverName string) (action, backup string, err error) {
 	if !ConfigFileExists(path) {
-		return "absent", nil
+		return "absent", "", nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
+		return "", "", fmt.Errorf("read %s: %w", path, err)
 	}
 	updated, changed := removeTOMLSection(string(b), codexSectionHeader(serverName))
 	if !changed {
-		return "unchanged", nil
+		return "unchanged", "", nil
 	}
-	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	backup, err = writeConfigFileWithBackup(path, []byte(updated))
+	if err != nil {
+		return "", "", err
 	}
-	return "removed", nil
+	return "removed", backup, nil
 }
 
 func codexSectionHeader(serverName string) string {
@@ -466,24 +510,32 @@ func countTrailingBlanks(section []string) int {
 // the api key as APIToken (which vibeflow-cli injects as MCP_TOKEN at launch),
 // the base URL as ServerURL, and the MCP server name. Existing config values
 // are loaded first and preserved.
-func setupInitialConfig(cfgPath, baseURL, apiKey, serverName string) (string, error) {
+func setupInitialConfig(cfgPath, baseURL, apiKey, serverName string) (action, backup string, err error) {
 	existed := ConfigFileExists(cfgPath)
 	cfg, err := LoadConfig(cfgPath)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	cfg.ServerURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	cfg.APIToken = strings.TrimSpace(apiKey)
 	if serverName != "" {
 		cfg.MCPToolName = serverName
 	}
+	if existed {
+		// Back up before SaveConfig overwrites. SaveConfig is shared with other
+		// callers (wizard, migrations) and must stay backup-free, so the backup
+		// lives here in the bootstrap path only.
+		if backup, err = backupConfigFile(cfgPath); err != nil {
+			return "", "", err
+		}
+	}
 	if err := SaveConfig(cfg, cfgPath); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if existed {
-		return "updated", nil
+		return "updated", backup, nil
 	}
-	return "created", nil
+	return "created", backup, nil
 }
 
 // --- agent selection ---
@@ -581,12 +633,16 @@ type bootstrapChange struct {
 	target string
 	path   string
 	action string
+	backup string
 }
 
 func printBootstrapChanges(out io.Writer, heading string, changes []bootstrapChange) {
 	fmt.Fprintln(out, heading)
 	for _, c := range changes {
 		fmt.Fprintf(out, "  %-16s %-11s %s\n", c.target, "("+c.action+")", c.path)
+		if c.backup != "" {
+			fmt.Fprintf(out, "  %-16s %-11s backed up to %s\n", "", "", c.backup)
+		}
 	}
 }
 
@@ -635,11 +691,11 @@ vibeflow-cli config.`,
 
 			// 1. vibeflow-cli config: stores the api key (becomes MCP_TOKEN at
 			//    launch) and honors --root/--mcp.
-			cfgAction, err := setupInitialConfig(cfgPath, baseURL, apiKey, serverName)
+			cfgAction, cfgBackup, err := setupInitialConfig(cfgPath, baseURL, apiKey, serverName)
 			if err != nil {
 				return fmt.Errorf("setup vibeflow-cli config: %w", err)
 			}
-			changes = append(changes, bootstrapChange{target: "vibeflow-cli", path: cfgPath, action: cfgAction})
+			changes = append(changes, bootstrapChange{target: "vibeflow-cli", path: cfgPath, action: cfgAction, backup: cfgBackup})
 
 			// 2. Per-agent MCP config.
 			haveClaudeCLI := false
@@ -655,11 +711,11 @@ vibeflow-cli config.`,
 					changes = append(changes, bootstrapChange{target: a.label, path: "(unsupported on this OS)", action: "skipped"})
 					continue
 				}
-				action, err := a.install(path, serverName, url, apiKey)
+				action, backup, err := a.install(path, serverName, url, apiKey)
 				if err != nil {
 					return fmt.Errorf("%s: %w", a.label, err)
 				}
-				changes = append(changes, bootstrapChange{target: a.label, path: path, action: action})
+				changes = append(changes, bootstrapChange{target: a.label, path: path, action: action, backup: backup})
 			}
 
 			printBootstrapChanges(out, "Bootstrap complete. Changes:", changes)
@@ -714,11 +770,11 @@ config keys are preserved. You will be prompted for which agents to clean unless
 					changes = append(changes, bootstrapChange{target: a.label, path: "(unsupported on this OS)", action: "skipped"})
 					continue
 				}
-				action, err := a.remove(path, serverName)
+				action, backup, err := a.remove(path, serverName)
 				if err != nil {
 					return fmt.Errorf("%s: %w", a.label, err)
 				}
-				changes = append(changes, bootstrapChange{target: a.label, path: path, action: action})
+				changes = append(changes, bootstrapChange{target: a.label, path: path, action: action, backup: backup})
 			}
 
 			printBootstrapChanges(out, "Uninstall complete. Changes:", changes)
