@@ -25,14 +25,31 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git init -q .
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch -q --depth 1 origin "$GITHUB_SHA"
+          # Auth via a transient http.extraHeader passed per-command — never
+          # written to .git/config, so the token is not left on the runner FS
+          # for later steps to read.
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c http.extraHeader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" \
+            fetch -q --depth 1 origin "$GITHUB_SHA"
           git checkout -q --detach FETCH_HEAD
 
       - name: Set up Go
         run: |
           GO_VERSION="$(awk '$1 == "go" {print $2}' go.mod)"
-          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
+          GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
+          # Verify the toolchain tarball against the SHA256 go.dev publishes in
+          # its download manifest before extracting. The toolchain compiles the
+          # release binaries, so a tampered tarball would backdoor every
+          # artifact. Fetching the hash (vs. hardcoding) keeps the check working
+          # when go.mod bumps the Go version. Fails closed on mismatch.
+          GO_SHA256="$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' \
+            | jq -r --arg f "$GO_TARBALL" '.[].files[] | select(.filename == $f) | .sha256')"
+          if [ -z "$GO_SHA256" ]; then
+            echo "::error::no published SHA256 for ${GO_TARBALL} in go.dev manifest" >&2
+            exit 1
+          fi
+          curl -fsSL "https://go.dev/dl/${GO_TARBALL}" -o /tmp/go.tgz
+          echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c -
           sudo rm -rf /usr/local/go
           sudo tar -C /usr/local -xzf /tmp/go.tgz
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
@@ -54,14 +71,31 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git init -q .
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git fetch -q --prune --tags origin "$GITHUB_SHA"
+          # Auth via a transient http.extraHeader passed per-command — never
+          # written to .git/config, so the token is not left on the runner FS
+          # for later steps to read.
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c http.extraHeader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" \
+            fetch -q --prune --tags origin "$GITHUB_SHA"
           git checkout -q --detach FETCH_HEAD
 
       - name: Set up Go
         run: |
           GO_VERSION="$(awk '$1 == "go" {print $2}' go.mod)"
-          curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
+          GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
+          # Verify the toolchain tarball against the SHA256 go.dev publishes in
+          # its download manifest before extracting. The toolchain compiles the
+          # release binaries, so a tampered tarball would backdoor every
+          # artifact. Fetching the hash (vs. hardcoding) keeps the check working
+          # when go.mod bumps the Go version. Fails closed on mismatch.
+          GO_SHA256="$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' \
+            | jq -r --arg f "$GO_TARBALL" '.[].files[] | select(.filename == $f) | .sha256')"
+          if [ -z "$GO_SHA256" ]; then
+            echo "::error::no published SHA256 for ${GO_TARBALL} in go.dev manifest" >&2
+            exit 1
+          fi
+          curl -fsSL "https://go.dev/dl/${GO_TARBALL}" -o /tmp/go.tgz
+          echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c -
           sudo rm -rf /usr/local/go
           sudo tar -C /usr/local -xzf /tmp/go.tgz
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
@@ -69,7 +103,10 @@ jobs:
           /usr/local/go/bin/go version
 
       - name: Install GoReleaser
-        run: go install github.com/goreleaser/goreleaser/v2@latest
+        # Pinned to an exact reviewed version (not @latest) so a compromised
+        # upstream tag can't be auto-adopted into a build. Bump deliberately
+        # via PR.
+        run: go install github.com/goreleaser/goreleaser/v2@v2.16.0
 
       # Snapshot build validates the GoReleaser config and cross-compilation.
       # Artifacts are not uploaded: actions/upload-artifact is blocked by the
