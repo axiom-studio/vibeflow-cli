@@ -550,7 +550,7 @@ func TestWizardResult_PersonaProvidersFromConfirm(t *testing.T) {
 	// Drive to the state right before StepConfirm advance.
 	qwenIdx := providerIdxByKey(t, wm, "qwen")
 	personas := wm.selectedPersonaIndices()
-	wm.personaProviderIdx[personas[0]] = qwenIdx           // explicit override
+	wm.personaProviderIdx[personas[0]] = qwenIdx             // explicit override
 	wm.personaProviderIdx[personas[1]] = wm.selectedProvider // override matching default — should be elided
 	// personas[2] left at -1 (inherit)
 
@@ -768,6 +768,145 @@ func TestPostProviderConfigStep_RoutingMatrix(t *testing.T) {
 			}
 			if got := w.postProviderConfigStep(); got != tt.want {
 				t.Errorf("postProviderConfigStep() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProviderSupportsGateway(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"claude", true},
+		{"codex", true},
+		{"gemini", true},
+		{"qwen", false},
+		{"cursor", false},
+		{"some-future-custom-provider", true}, // default: gateway-eligible
+	}
+	for _, tt := range tests {
+		if got := providerSupportsGateway(tt.key); got != tt.want {
+			t.Errorf("providerSupportsGateway(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
+func gatewayTestProviders() []providerEntry {
+	return []providerEntry{
+		{key: "claude", provider: Provider{}, available: true},
+		{key: "codex", provider: Provider{}, available: true},
+		{key: "cursor", provider: Provider{}, available: true},
+		{key: "gemini", provider: Provider{}, available: true},
+		{key: "qwen", provider: Provider{}, available: true},
+	}
+}
+
+func TestShouldShowGatewayStep(t *testing.T) {
+	providers := gatewayTestProviders()
+	tokenCfg := &Config{APIToken: "tok"}
+	tests := []struct {
+		name        string
+		sessionType int
+		cfg         *Config
+		provider    string
+		want        bool
+	}{
+		{"claude vibeflow+token shows", 1, tokenCfg, "claude", true},
+		{"codex vibeflow+token shows", 1, tokenCfg, "codex", true},
+		{"gemini vibeflow+token shows", 1, tokenCfg, "gemini", true},
+		{"qwen vibeflow+token hidden", 1, tokenCfg, "qwen", false},
+		{"cursor vibeflow+token hidden", 1, tokenCfg, "cursor", false},
+		{"claude vanilla session hidden", 0, tokenCfg, "claude", false},
+		{"claude no api token hidden", 1, &Config{}, "claude", false},
+		{"claude nil config hidden", 1, nil, "claude", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := WizardModel{
+				selectedSessionType: tt.sessionType,
+				config:              tt.cfg,
+				providers:           providers,
+				selectedProvider:    providerIdxByKey(t, WizardModel{providers: providers}, tt.provider),
+			}
+			if got := w.shouldShowGatewayStep(); got != tt.want {
+				t.Errorf("shouldShowGatewayStep() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWizardAdvance_SkipsGatewayForQwenAndCursor proves the forward flow: qwen
+// and cursor jump straight past StepLLMGateway (qwen → its launch config,
+// cursor → branch) and a stale gateway "yes" carried in from a prior provider
+// is forced back off, while claude still lands on the gateway step.
+func TestWizardAdvance_SkipsGatewayForQwenAndCursor(t *testing.T) {
+	providers := gatewayTestProviders()
+	tests := []struct {
+		name          string
+		provider      string
+		wantStep      WizardStep
+		wantGatewayOn bool
+	}{
+		{"claude shows gateway step", "claude", StepLLMGateway, true},
+		{"cursor skips to branch", "cursor", StepBranch, false},
+		{"qwen skips to qwen launch config", "qwen", StepQwenLaunchConfig, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := providerIdxByKey(t, WizardModel{providers: providers}, tt.provider)
+			w := WizardModel{
+				selectedSessionType: 1,
+				// qwen reads OPENAI_API_KEY via ResolveProviderEnvVars; provide it
+				// so the flow reaches the gateway decision instead of StepEnvToken.
+				config:            &Config{APIToken: "tok", SavedEnvVars: map[string]string{"OPENAI_API_KEY": "x"}},
+				providers:         providers,
+				selectedProvider:  idx,
+				cursor:            idx,
+				step:              StepProvider,
+				llmGatewayEnabled: true, // stale "yes" from a previous provider
+			}
+			got, _ := w.advance()
+			if got.step != tt.wantStep {
+				t.Errorf("step after advance = %v, want %v", got.step, tt.wantStep)
+			}
+			if got.llmGatewayEnabled != tt.wantGatewayOn {
+				t.Errorf("llmGatewayEnabled = %v, want %v", got.llmGatewayEnabled, tt.wantGatewayOn)
+			}
+		})
+	}
+}
+
+// TestWizardGoBack_SkipsGatewayForQwenAndCursor proves back-navigation stays
+// symmetric: qwen and cursor never land on StepLLMGateway when reversing, while
+// claude does.
+func TestWizardGoBack_SkipsGatewayForQwenAndCursor(t *testing.T) {
+	providers := gatewayTestProviders()
+	tokenCfg := &Config{APIToken: "tok"}
+	tests := []struct {
+		name     string
+		provider string
+		fromStep WizardStep
+		wantStep WizardStep
+	}{
+		{"claude back from branch hits gateway", "claude", StepBranch, StepLLMGateway},
+		{"cursor back from branch skips gateway", "cursor", StepBranch, StepProvider},
+		{"qwen back from branch hits qwen config", "qwen", StepBranch, StepQwenLaunchConfig},
+		{"qwen back from qwen config skips gateway", "qwen", StepQwenLaunchConfig, StepProvider},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := providerIdxByKey(t, WizardModel{providers: providers}, tt.provider)
+			w := WizardModel{
+				selectedSessionType: 1,
+				config:              tokenCfg,
+				providers:           providers,
+				selectedProvider:    idx,
+				step:                tt.fromStep,
+			}
+			got, _ := w.goBack()
+			if got.step != tt.wantStep {
+				t.Errorf("step after goBack from %v = %v, want %v", tt.fromStep, got.step, tt.wantStep)
 			}
 		})
 	}
