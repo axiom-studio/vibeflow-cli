@@ -45,12 +45,12 @@ var personaColors = map[string]lipgloss.Color{
 	"principal_engineer": lipgloss.Color("#ffd700"), // gold — royalty/mastery
 	"developer":          lipgloss.Color("#61afef"), // soft blue — code/tech
 	"architect":          lipgloss.Color("#c678dd"), // purple — design/wisdom
-	"ux_designer":     lipgloss.Color("#e88fd2"), // pink — design/creativity
-	"qa_lead":         lipgloss.Color("#98c379"), // green — verification
-	"security_lead":   lipgloss.Color("#e06c75"), // red — security/alerts
-	"product_manager": lipgloss.Color("#e5c07b"), // gold — innovation
-	"project_manager": lipgloss.Color("#d19a66"), // orange — organization
-	"customer":        lipgloss.Color("#56b6c2"), // teal — communication
+	"ux_designer":        lipgloss.Color("#e88fd2"), // pink — design/creativity
+	"qa_lead":            lipgloss.Color("#98c379"), // green — verification
+	"security_lead":      lipgloss.Color("#e06c75"), // red — security/alerts
+	"product_manager":    lipgloss.Color("#e5c07b"), // gold — innovation
+	"project_manager":    lipgloss.Color("#d19a66"), // orange — organization
+	"customer":           lipgloss.Color("#56b6c2"), // teal — communication
 }
 
 // personaCompactIcons maps persona keys to small Unicode glyphs for inline display.
@@ -58,12 +58,12 @@ var personaCompactIcons = map[string]string{
 	"principal_engineer": "♛",
 	"developer":          "⟨⟩",
 	"architect":          "△",
-	"ux_designer":     "✎",
-	"qa_lead":         "◎",
-	"security_lead":   "◆",
-	"product_manager": "✦",
-	"project_manager": "☰",
-	"customer":        "◈",
+	"ux_designer":        "✎",
+	"qa_lead":            "◎",
+	"security_lead":      "◆",
+	"product_manager":    "✦",
+	"project_manager":    "☰",
+	"customer":           "◈",
 }
 
 // personaLargeIcons maps persona keys to 5-line pixel art icons using Unicode block characters.

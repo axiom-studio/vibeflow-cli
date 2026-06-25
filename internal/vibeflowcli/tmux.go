@@ -95,14 +95,14 @@ type TmuxSession struct {
 
 // SessionOpts holds parameters for creating a provider-aware tmux session.
 type SessionOpts struct {
-	Name      string            // Short session name (without prefix).
-	Provider  string            // Provider key (e.g. "claude", "codex").
-	WorkDir   string            // Working directory for the session.
-	Command   string            // Resolved launch command.
-	Env       map[string]string // Provider-specific environment variables.
-	Branch    string            // Git branch for status bar display.
-	Project   string            // Project name for status bar display.
-	Persona   string            // Persona key for vibeflow sessions.
+	Name     string            // Short session name (without prefix).
+	Provider string            // Provider key (e.g. "claude", "codex").
+	WorkDir  string            // Working directory for the session.
+	Command  string            // Resolved launch command.
+	Env      map[string]string // Provider-specific environment variables.
+	Branch   string            // Git branch for status bar display.
+	Project  string            // Project name for status bar display.
+	Persona  string            // Persona key for vibeflow sessions.
 }
 
 // StatusBarOpts holds display parameters for the tmux status bar.
@@ -236,7 +236,7 @@ var secretEnvPrefixes = []string{
 
 // openaiAPIKeyFlagRe matches `--openai-api-key <value>` (or `=<value>`) inside
 // an assembled launch command, where <value> is either a sh-single-quoted
-// token (including the `'\''` embedded-quote idiom) or a bare word.
+// token (including the `'\”` embedded-quote idiom) or a bare word.
 var openaiAPIKeyFlagRe = regexp.MustCompile(`--openai-api-key[= ]('[^']*'(?:\\''[^']*')*|\S+)`)
 
 // redactCommandSecrets masks API-key values embedded in a launch command

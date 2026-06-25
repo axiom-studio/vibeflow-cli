@@ -446,8 +446,8 @@ func TestResolvePersonaProvider(t *testing.T) {
 		// exercised together in the realistic shape that launchFromWizard sees.
 		personas := []string{"developer", "qa_lead", "architect"}
 		overrides := map[string]string{
-			"developer": "qwen",   // explicit override
-			"qa_lead":   "",       // empty → inherit
+			"developer": "qwen", // explicit override
+			"qa_lead":   "",     // empty → inherit
 			// architect: missing key → inherit
 		}
 		want := map[string]string{

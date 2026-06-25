@@ -56,6 +56,20 @@ jobs:
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           /usr/local/go/bin/go version
 
+      - name: Gofmt
+        run: |
+          # Fail if any Go source file is not gofmt-clean. `go vet` does not
+          # catch formatting, so without this gate unformatted code passes CI
+          # (issue #3163). Scoped to the source roots (matches the fix command
+          # below and avoids scanning untracked local dirs). Action-free shell
+          # per the org Actions policy (see header comment / #2716).
+          unformatted="$(gofmt -l cmd internal sessionid)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files (run: gofmt -w cmd internal sessionid):" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
       - name: Vet
         run: go vet ./...
 

@@ -23,7 +23,6 @@ import (
 	"time"
 )
 
-
 func testHealthMonitor(t *testing.T) *HealthMonitor {
 	t.Helper()
 	reg := NewErrorPatternRegistry()
