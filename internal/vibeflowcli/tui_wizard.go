@@ -62,62 +62,62 @@ const (
 
 // WizardResult holds the output of a completed wizard.
 type WizardResult struct {
-	SessionType          string // "vanilla" or "vibeflow"
-	ProjectID            int64  // VibeFlow project ID (vibeflow sessions only).
-	ProjectName          string // VibeFlow project name (vibeflow sessions only).
+	SessionType          string   // "vanilla" or "vibeflow"
+	ProjectID            int64    // VibeFlow project ID (vibeflow sessions only).
+	ProjectName          string   // VibeFlow project name (vibeflow sessions only).
 	Persona              string   // Persona key (vibeflow sessions only, e.g. "developer"). First selected persona for backward compat.
 	Personas             []string // All selected persona keys (vibeflow sessions only). Used for multi-session spawning.
 	Provider             Provider
 	ProviderKey          string
 	PersonaProviders     map[string]string // Optional persona key → provider key override for team mode. Missing/empty value means inherit ProviderKey.
 	Branch               string
-	NewBranch            bool   // True if user chose to create a new branch.
+	NewBranch            bool // True if user chose to create a new branch.
 	WorktreeChoice       WorktreeChoice
 	SkipPermissions      bool
-	WorktreeName         string // Custom worktree directory name, or "" for auto-generated.
-	CustomBinaryPath     string // User-provided absolute path if binary was not on PATH.
-	ExistingWorktreePath string // Path of existing worktree to reuse (when WorktreeExisting).
-	CustomBaseDir        string // Custom base directory for worktree (when WorktreeCustom).
-	SpecifiedWorkDir     string // User-specified working directory (when WorktreeSpecifyDir).
-	NewBranchBase        string // Start-point for new branch creation (e.g. "main"). Empty means git default.
-	ReuseSessionID       string // Session ID from a previous conflict to reuse via session_init.
-	WorkDir              string // Project root directory selected in StepWorkDir.
+	WorktreeName         string            // Custom worktree directory name, or "" for auto-generated.
+	CustomBinaryPath     string            // User-provided absolute path if binary was not on PATH.
+	ExistingWorktreePath string            // Path of existing worktree to reuse (when WorktreeExisting).
+	CustomBaseDir        string            // Custom base directory for worktree (when WorktreeCustom).
+	SpecifiedWorkDir     string            // User-specified working directory (when WorktreeSpecifyDir).
+	NewBranchBase        string            // Start-point for new branch creation (e.g. "main"). Empty means git default.
+	ReuseSessionID       string            // Session ID from a previous conflict to reuse via session_init.
+	WorkDir              string            // Project root directory selected in StepWorkDir.
 	EnvVars              map[string]string // Extra env vars to set on the tmux session.
-	LLMGatewayEnabled    bool   // True if user opted to route LLM requests through the gateway.
+	LLMGatewayEnabled    bool              // True if user opted to route LLM requests through the gateway.
 }
 
 // WizardModel is a Bubble Tea sub-model for multi-step session creation.
 type WizardModel struct {
-	step     WizardStep
-	cursor   int
-	done     bool
+	step      WizardStep
+	cursor    int
+	done      bool
 	cancelled bool
 
 	// Data sources.
-	sessionTypeOpts    []string
-	projects           []Project
-	filteredProjects   []int // indices into projects slice after filtering
-	providers          []providerEntry
-	branches           []string
-	worktreeOpts       []string
-	permissionOpts     []string
-	existingWorktrees  map[string]string // branch → existing worktree path
-	defaultProject     string            // pre-select from config
+	sessionTypeOpts   []string
+	projects          []Project
+	filteredProjects  []int // indices into projects slice after filtering
+	providers         []providerEntry
+	branches          []string
+	worktreeOpts      []string
+	permissionOpts    []string
+	existingWorktrees map[string]string // branch → existing worktree path
+	defaultProject    string            // pre-select from config
 
 	// Persona data.
-	personas         []personaEntry
+	personas []personaEntry
 
 	// Directory selection (StepWorkDir).
-	dirHistory       []string // Recent directories from config.
-	dirOpts          []string // Display options: "[+] Enter new path" + history entries.
-	selectedWorkDir  string   // Resolved working directory path.
-	editingWorkDir   bool     // True when text input for new directory is active.
-	workDirInput     string   // Text input for new directory.
-	workDirErr       string   // Validation error for directory.
-	repoRoot         string   // Initial repo root from caller.
-	registry         *ProviderRegistry // Provider registry for re-loading on dir change.
-	client           *Client           // API client (may be nil).
-	config           *Config           // Config for saved env vars and persisting.
+	dirHistory      []string          // Recent directories from config.
+	dirOpts         []string          // Display options: "[+] Enter new path" + history entries.
+	selectedWorkDir string            // Resolved working directory path.
+	editingWorkDir  bool              // True when text input for new directory is active.
+	workDirInput    string            // Text input for new directory.
+	workDirErr      string            // Validation error for directory.
+	repoRoot        string            // Initial repo root from caller.
+	registry        *ProviderRegistry // Provider registry for re-loading on dir change.
+	client          *Client           // API client (may be nil).
+	config          *Config           // Config for saved env vars and persisting.
 
 	// Selections.
 	selectedSessionType int
@@ -141,13 +141,13 @@ type WizardModel struct {
 	filteredBranches   []int // indices into branches slice (always includes index 0 = "[+] Create new")
 
 	// Text input state.
-	worktreeName    string // Custom name entered by user.
-	editingName     bool   // True when text input for worktree name is active.
-	newBranchName   string // New branch name entered by user.
-	editingBranch   bool   // True when text input for new branch name is active.
-	binaryPath      string // Custom binary path entered by user.
-	editingBinary   bool   // True when text input for binary path is active.
-	binaryPathErr   string // Validation error for binary path.
+	worktreeName        string // Custom name entered by user.
+	editingName         bool   // True when text input for worktree name is active.
+	newBranchName       string // New branch name entered by user.
+	editingBranch       bool   // True when text input for new branch name is active.
+	binaryPath          string // Custom binary path entered by user.
+	editingBinary       bool   // True when text input for binary path is active.
+	binaryPathErr       string // Validation error for binary path.
 	customBaseDir       string // Custom base directory for worktree.
 	editingCustomDir    bool   // True when text input for custom dir is active.
 	customDirErr        string // Validation error for custom dir.
@@ -156,15 +156,15 @@ type WizardModel struct {
 	specifiedWorkDirErr string // Validation error for specified work dir.
 
 	// Env token input (StepEnvToken).
-	envTokenVarName string // Name of the env var to prompt for (e.g. "MCP_TOKEN").
-	envTokenValue   string // User-entered value for the env var.
-	editingEnvToken bool   // True when text input for env token is active.
+	envTokenVarName string            // Name of the env var to prompt for (e.g. "MCP_TOKEN").
+	envTokenValue   string            // User-entered value for the env var.
+	editingEnvToken bool              // True when text input for env token is active.
 	envVars         map[string]string // Resolved env vars to pass to session.
 
 	// LLM Gateway (StepLLMGateway).
-	llmGatewayOpts    []string // Display options for gateway step.
-	selectedLLMGateway int     // 0 = Yes, 1 = No.
-	llmGatewayEnabled bool     // True if user chose to route through gateway.
+	llmGatewayOpts     []string // Display options for gateway step.
+	selectedLLMGateway int      // 0 = Yes, 1 = No.
+	llmGatewayEnabled  bool     // True if user chose to route through gateway.
 
 	// Qwen launch config (StepQwenLaunchConfig — all qwen flows; in gateway
 	// mode only the model selection is committed).
@@ -305,32 +305,32 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		personaProviderIdx[i] = -1 // -1 = inherit team default
 	}
 	return WizardModel{
-		step:              StepWorkDir,
-		sessionTypeOpts:   []string{"Vanilla", "VibeFlow"},
-		projects:          projects,
-		filteredProjects:  filtered,
-		defaultProject:    defaultProject,
-		projectErr:        projectErr,
-		personas:          personasList,
-		selectedPersonas:  map[int]bool{0: true}, // Pre-select "developer" (index 0).
+		step:               StepWorkDir,
+		sessionTypeOpts:    []string{"Vanilla", "VibeFlow"},
+		projects:           projects,
+		filteredProjects:   filtered,
+		defaultProject:     defaultProject,
+		projectErr:         projectErr,
+		personas:           personasList,
+		selectedPersonas:   map[int]bool{0: true}, // Pre-select "developer" (index 0).
 		personaProviderIdx: personaProviderIdx,
-		providers:         entries,
-		branches:          branches,
-		filteredBranches:  filteredBr,
-		existingWorktrees: existingWts,
-		worktreeOpts:      []string{"New worktree", "Specify directory", "Current directory"},
-		llmGatewayOpts:    []string{"Yes — Route through gateway", "No — Connect directly to provider"},
+		providers:          entries,
+		branches:           branches,
+		filteredBranches:   filteredBr,
+		existingWorktrees:  existingWts,
+		worktreeOpts:       []string{"New worktree", "Specify directory", "Current directory"},
+		llmGatewayOpts:     []string{"Yes — Route through gateway", "No — Connect directly to provider"},
 		selectedLLMGateway: savedGatewayChoice,
-		llmGatewayEnabled: cfg != nil && cfg.LLMGatewayEnabled,
-		permissionOpts:    []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
-		dirHistory:        dirHistory,
-		dirOpts:           dirOpts,
-		repoRoot:          repoRoot,
-		registry:          registry,
-		client:            client,
-		config:            cfg,
-		currentBranch:     GetGitBranch(repoRoot),
-		defaultBranch:     getDefaultBranch(repoRoot),
+		llmGatewayEnabled:  cfg != nil && cfg.LLMGatewayEnabled,
+		permissionOpts:     []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
+		dirHistory:         dirHistory,
+		dirOpts:            dirOpts,
+		repoRoot:           repoRoot,
+		registry:           registry,
+		client:             client,
+		config:             cfg,
+		currentBranch:      GetGitBranch(repoRoot),
+		defaultBranch:      getDefaultBranch(repoRoot),
 	}
 }
 
@@ -397,28 +397,28 @@ func NewQuickSwitchWizard(meta SessionMeta, registry *ProviderRegistry, repoRoot
 		personaProviderIdx[i] = -1
 	}
 	w := WizardModel{
-		step:               StepBranch,
-		personas:           personas,
-		selectedPersonas:   selectedPersonas,
-		selectedPersona:    selectedPersona,
+		step:                StepBranch,
+		personas:            personas,
+		selectedPersonas:    selectedPersonas,
+		selectedPersona:     selectedPersona,
 		selectedSessionType: sessionType,
-		providers:          entries,
-		selectedProvider:   selectedProvider,
-		personaProviderIdx: personaProviderIdx,
-		branches:           branches,
-		filteredBranches:   filteredBr,
-		existingWorktrees:  existingWts,
-		worktreeOpts:       []string{"New worktree", "Custom location", "Specify directory", "Current directory"},
-		permissionOpts:     []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
-		repoRoot:           repoRoot,
-		registry:           registry,
-		config:             cfg,
-		currentBranch:      GetGitBranch(repoRoot),
-		defaultBranch:      getDefaultBranch(repoRoot),
-		selectedWorkDir:    repoRoot,
-		llmGatewayEnabled:  meta.LLMGatewayEnabled,
-		quickSwitch:        true,
-		switchSource:       &meta,
+		providers:           entries,
+		selectedProvider:    selectedProvider,
+		personaProviderIdx:  personaProviderIdx,
+		branches:            branches,
+		filteredBranches:    filteredBr,
+		existingWorktrees:   existingWts,
+		worktreeOpts:        []string{"New worktree", "Custom location", "Specify directory", "Current directory"},
+		permissionOpts:      []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
+		repoRoot:            repoRoot,
+		registry:            registry,
+		config:              cfg,
+		currentBranch:       GetGitBranch(repoRoot),
+		defaultBranch:       getDefaultBranch(repoRoot),
+		selectedWorkDir:     repoRoot,
+		llmGatewayEnabled:   meta.LLMGatewayEnabled,
+		quickSwitch:         true,
+		switchSource:        &meta,
 	}
 	w.cursorToCurrentBranch()
 	return w

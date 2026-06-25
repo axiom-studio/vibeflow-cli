@@ -65,13 +65,13 @@ type Session struct {
 
 // WorkItem represents a todo or issue from polling.
 type WorkItem struct {
-	Type       string `json:"type"`
-	ID         int64  `json:"id"`
-	Title      string `json:"title"`
-	Status     string `json:"status"`
-	Priority   string `json:"priority"`
-	ProjectID  int64  `json:"project_id"`
-	FeatureID  int64  `json:"feature_id,omitempty"`
+	Type        string `json:"type"`
+	ID          int64  `json:"id"`
+	Title       string `json:"title"`
+	Status      string `json:"status"`
+	Priority    string `json:"priority"`
+	ProjectID   int64  `json:"project_id"`
+	FeatureID   int64  `json:"feature_id,omitempty"`
 	FeatureName string `json:"feature_name,omitempty"`
 }
 
