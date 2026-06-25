@@ -863,17 +863,25 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.config.SavedEnvVars[w.envTokenVarName] = w.envTokenValue
 						_ = SaveConfig(w.config, ConfigPath())
 					}
-					// For vibeflow sessions, show gateway step; otherwise jump to
-					// the qwen launch config (qwen-only) or directly to branch.
-					if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+					// Gateway-eligible vibeflow sessions get the gateway step;
+					// otherwise jump to the qwen launch config (qwen-only) or
+					// directly to branch.
+					if w.shouldShowGatewayStep() {
 						w.step = StepLLMGateway
 						w.cursor = w.selectedLLMGateway
-					} else if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
-						w.enterQwenLaunchConfig()
 					} else {
-						w.step = StepBranch
-						w.cursor = 0
-						w.cursorToCurrentBranch()
+						// Gateway step skipped (non-vibeflow session, no API
+						// token, or a direct-only provider like qwen/cursor):
+						// force direct mode so a gateway preference saved by a
+						// previous provider can't leak in.
+						w.llmGatewayEnabled = false
+						if w.postProviderConfigStep() == StepQwenLaunchConfig {
+							w.enterQwenLaunchConfig()
+						} else {
+							w.step = StepBranch
+							w.cursor = 0
+							w.cursorToCurrentBranch()
+						}
 					}
 				}
 			case "esc":
@@ -1832,17 +1840,23 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			return w, nil
 		}
 		w.envVars = env
-		// For vibeflow sessions with API token, show gateway step. Otherwise
+		// Gateway-eligible vibeflow sessions get the gateway step; otherwise
 		// advance to the qwen launch config (qwen-only) or directly to branch.
-		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+		if w.shouldShowGatewayStep() {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
-		} else if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
-			w.enterQwenLaunchConfig()
 		} else {
-			w.step = StepBranch
-			w.cursor = 0
-			w.cursorToCurrentBranch()
+			// Gateway step skipped (non-vibeflow session, no API token, or a
+			// direct-only provider like qwen/cursor): force direct mode so a
+			// gateway preference saved by a previous provider can't leak in.
+			w.llmGatewayEnabled = false
+			if w.postProviderConfigStep() == StepQwenLaunchConfig {
+				w.enterQwenLaunchConfig()
+			} else {
+				w.step = StepBranch
+				w.cursor = 0
+				w.cursorToCurrentBranch()
+			}
 		}
 	case StepLLMGateway:
 		w.selectedLLMGateway = w.cursor
@@ -2168,7 +2182,7 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		// else fall back to the provider step.
 		if w.postProviderConfigStep() == StepQwenLaunchConfig {
 			w.enterQwenLaunchConfig()
-		} else if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+		} else if w.shouldShowGatewayStep() {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
 		} else {
@@ -2178,7 +2192,7 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 	case StepQwenLaunchConfig:
 		// Reverse of advance(): if the user came from the gateway step, return
 		// there; otherwise jump back to the provider step.
-		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+		if w.shouldShowGatewayStep() {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
 		} else {
@@ -2459,6 +2473,32 @@ func (w *WizardModel) applyQwenPreset() {
 	w.qwenModelInput = p.model
 	w.qwenBaseURLInput = p.baseURL
 	w.qwenUserEdited = false
+}
+
+// providerSupportsGateway reports whether a provider can route LLM requests
+// through the Axiom Cloud LLM Gateway. qwen and cursor connect directly to the
+// provider, so the wizard never offers them the gateway routing choice.
+func providerSupportsGateway(providerKey string) bool {
+	switch providerKey {
+	case "qwen", "cursor":
+		return false
+	default:
+		return true
+	}
+}
+
+// shouldShowGatewayStep reports whether the wizard should present the LLM
+// Gateway routing choice (StepLLMGateway). It is offered only for vibeflow
+// sessions that have an API token configured AND a selected provider that
+// supports gateway routing (see providerSupportsGateway).
+func (w WizardModel) shouldShowGatewayStep() bool {
+	if w.selectedSessionType != 1 || w.config == nil || w.config.APIToken == "" {
+		return false
+	}
+	if w.selectedProvider < 0 || w.selectedProvider >= len(w.providers) {
+		return false
+	}
+	return providerSupportsGateway(w.providers[w.selectedProvider].key)
 }
 
 // postProviderConfigStep returns the wizard step that should follow the
