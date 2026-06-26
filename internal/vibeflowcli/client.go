@@ -83,6 +83,34 @@ type PollResult struct {
 	ReadyIssues []WorkItem `json:"ready_issues"`
 }
 
+type DispatchQueueItem struct {
+	ID           int64           `json:"id"`
+	ProjectID    int64           `json:"project_id"`
+	SessionID    string          `json:"session_id"`
+	PersonaKey   string          `json:"persona_key"`
+	GitBranch    string          `json:"git_branch"`
+	Kind         string          `json:"kind"`
+	WorkItemType string          `json:"work_item_type,omitempty"`
+	WorkItemID   *int64          `json:"work_item_id,omitempty"`
+	PromptID     string          `json:"prompt_id,omitempty"`
+	Payload      json.RawMessage `json:"payload"`
+	State        string          `json:"state"`
+}
+
+type DispatchNextRequest struct {
+	SessionID       string `json:"session_id"`
+	ProjectID       int64  `json:"project_id"`
+	PersonaKey      string `json:"persona_key"`
+	GitBranch       string `json:"git_branch"`
+	LeaseOwner      string `json:"lease_owner"`
+	LeaseTTLSeconds int    `json:"lease_ttl_seconds"`
+}
+
+type DispatchNextResponse struct {
+	Status   string             `json:"status"`
+	Dispatch *DispatchQueueItem `json:"dispatch"`
+}
+
 // ListProjects returns all non-archived projects.
 func (c *Client) ListProjects() ([]Project, error) {
 	var projects []Project
@@ -166,6 +194,31 @@ func (c *Client) SessionRegister(req SessionRegisterRequest) error {
 	var discard json.RawMessage
 	if err := c.post("/rest/v1/vibeflow/sessions/register", req, &discard); err != nil {
 		return fmt.Errorf("session register: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) DispatchNext(req DispatchNextRequest) (*DispatchNextResponse, error) {
+	var result DispatchNextResponse
+	if err := c.post("/rest/v1/vibeflow/dispatch/next", req, &result); err != nil {
+		return nil, fmt.Errorf("dispatch next: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) DispatchAck(id int64, leaseOwner string) error {
+	var discard json.RawMessage
+	if err := c.post(fmt.Sprintf("/rest/v1/vibeflow/dispatch/%d/ack", id), map[string]string{"lease_owner": leaseOwner}, &discard); err != nil {
+		return fmt.Errorf("dispatch ack: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) DispatchNack(id int64, leaseOwner, reason string) error {
+	var discard json.RawMessage
+	body := map[string]string{"lease_owner": leaseOwner, "reason": reason}
+	if err := c.post(fmt.Sprintf("/rest/v1/vibeflow/dispatch/%d/nack", id), body, &discard); err != nil {
+		return fmt.Errorf("dispatch nack: %w", err)
 	}
 	return nil
 }

@@ -31,12 +31,15 @@ type SessionMeta struct {
 	TmuxSession       string           `json:"tmux_session"`
 	Provider          string           `json:"provider"`
 	Project           string           `json:"project"`
+	ProjectID         int64            `json:"project_id,omitempty"`
 	Persona           string           `json:"persona,omitempty"`
 	Branch            string           `json:"branch"`
 	WorktreePath      string           `json:"worktree_path,omitempty"`
 	WorkingDir        string           `json:"working_dir"`
 	VibeFlowSessionID string           `json:"vibeflow_session_id,omitempty"`
 	SessionType       string           `json:"session_type,omitempty"`
+	DispatchMode      string           `json:"dispatch_mode,omitempty"`
+	CloudDispatch     bool             `json:"cloud_dispatch,omitempty"`
 	SkipPermissions   bool             `json:"skip_permissions,omitempty"`
 	Model             string           `json:"model,omitempty"`
 	LLMGatewayEnabled bool             `json:"llm_gateway_enabled,omitempty"`
