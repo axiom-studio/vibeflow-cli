@@ -69,6 +69,21 @@ func TestBuildVibeflowInitPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildVibeflowCloudDispatchInitPrompt(t *testing.T) {
+	got := BuildVibeflowCloudDispatchInitPrompt("", "demo", "developer", "session-20260626-120000-abcd1234")
+	for _, want := range []string{
+		"Initialize a vibeflow session",
+		`dispatch_mode="cloud_queue"`,
+		"Do not call wait_for_work",
+		"VIBEFLOW_DISPATCH",
+		"session-20260626-120000-abcd1234",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloud dispatch prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestDefaultMCPToolName(t *testing.T) {
 	if DefaultMCPToolName != "vibeflow" {
 		t.Errorf("DefaultMCPToolName = %q, want %q (changing this is a breaking behavioral change — every existing session restart would receive a different init prompt)", DefaultMCPToolName, "vibeflow")
@@ -284,7 +299,6 @@ func TestAppendQwenAPIFlags_OrderingWithInitPrompt(t *testing.T) {
 		t.Errorf("Ordering integration:\n got:  %q\n want: %q", cmd, want)
 	}
 }
-
 func TestAppendCodexGatewayProviderFlags(t *testing.T) {
 	tests := []struct {
 		name        string

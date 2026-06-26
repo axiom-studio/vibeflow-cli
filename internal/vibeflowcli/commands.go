@@ -44,6 +44,7 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(projectsCmd())
 	root.AddCommand(bootstrapCmd())
 	root.AddCommand(uninstallCmd())
+	root.AddCommand(dispatchCmd())
 }
 
 // --- helpers shared by subcommands ---
@@ -74,7 +75,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 func launchCmd() *cobra.Command {
 	var provider, branch, worktreeName, persona, personasRaw, project, sessionType, model, modelsRaw string
 	var openshellSandbox, openshellFrom, openshellPolicy, openshellProvidersRaw string
-	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders bool
+	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders, cloudDispatch bool
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -146,6 +147,14 @@ func launchCmd() *cobra.Command {
 			}
 			if effectiveSessionType != "vanilla" && effectiveSessionType != "vibeflow" {
 				return fmt.Errorf("invalid session-type %q — must be 'vanilla' or 'vibeflow'", effectiveSessionType)
+			}
+			if cloudDispatch {
+				if effectiveSessionType != "vibeflow" {
+					return fmt.Errorf("--cloud-dispatch requires a vibeflow session")
+				}
+				if cfg.APIToken == "" {
+					return fmt.Errorf("--cloud-dispatch requires api_token in config or VIBEFLOW_TOKEN")
+				}
 			}
 
 			// Resolve provider env vars (e.g. codex bearer token).
@@ -223,6 +232,15 @@ func launchCmd() *cobra.Command {
 				EnsureAllAgentDocs(workDir)
 			}
 
+			var dispatchProjectID int64
+			if cloudDispatch {
+				projectInfo, err := ensureCloudDispatchProject(cfg, sessionProject)
+				if err != nil {
+					return fmt.Errorf("resolve cloud-dispatch project: %w", err)
+				}
+				dispatchProjectID = projectInfo.ID
+			}
+
 			for _, p := range personasToLaunch {
 				sessionName := sessionid.GenerateSessionID(workDir)
 				sessionModel := modelForPersona(model, personaModels, p)
@@ -259,6 +277,9 @@ func launchCmd() *cobra.Command {
 						mcpName = DefaultMCPToolName
 					}
 					initPrompt := BuildVibeflowInitPrompt(mcpName, sessionProject, p)
+					if cloudDispatch {
+						initPrompt = BuildVibeflowCloudDispatchInitPrompt(mcpName, sessionProject, p, sessionName)
+					}
 					sessionCommand = AppendVibeflowInitPrompt(command, provider, initPrompt)
 				}
 				sessionCommand, err = WrapOpenShellCommand(sessionCommand, openShellCfg)
@@ -293,10 +314,14 @@ func launchCmd() *cobra.Command {
 					TmuxSession:       tmuxName,
 					Provider:          provider,
 					Project:           sessionProject,
+					ProjectID:         dispatchProjectID,
 					Persona:           p,
 					Branch:            branch,
 					WorkingDir:        workDir,
+					VibeFlowSessionID: sessionName,
 					SessionType:       effectiveSessionType,
+					DispatchMode:      mapCloudDispatchMode(cloudDispatch),
+					CloudDispatch:     cloudDispatch,
 					SkipPermissions:   skipPermissions,
 					Model:             sessionModel,
 					LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
@@ -308,6 +333,11 @@ func launchCmd() *cobra.Command {
 				// Add to session cache for restart-without-intervention.
 				cache := NewSessionCache()
 				_ = cache.Add(sessionMeta)
+				if cloudDispatch {
+					if err := StartCloudDispatchProcess(cfgPath, sessionName); err != nil {
+						return fmt.Errorf("start cloud-dispatch loop: %w", err)
+					}
+				}
 
 				if p != "" {
 					fmt.Printf("Session %q launched (provider: %s, persona: %s, branch: %s)\n", sessionName, provider, p, branch)
@@ -337,7 +367,15 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&personasRaw, "personas", "", "Comma-separated persona keys for team mode")
 	cmd.Flags().StringVar(&project, "project", "", "Project name (overrides config default)")
 	cmd.Flags().StringVar(&sessionType, "session-type", "", "Session type: vanilla or vibeflow (default: inferred from persona)")
+	cmd.Flags().BoolVar(&cloudDispatch, "cloud-dispatch", false, "Let vibeflow-cli wait for AxiomCloud work and inject dispatch handoffs into the session")
 	return cmd
+}
+
+func mapCloudDispatchMode(enabled bool) string {
+	if enabled {
+		return "cloud_queue"
+	}
+	return ""
 }
 
 // --- list ---
@@ -630,6 +668,13 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 	if meta.SessionType == "vibeflow" {
 		initPrompt := BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona)
+		if meta.CloudDispatch || meta.DispatchMode == "cloud_queue" {
+			sessionID := meta.VibeFlowSessionID
+			if sessionID == "" {
+				sessionID = meta.Name
+			}
+			initPrompt = BuildVibeflowCloudDispatchInitPrompt(meta.MCPToolName, projectName, meta.Persona, sessionID)
+		}
 		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
 	}
 	command, err = WrapOpenShellCommand(command, openShellValue(meta.OpenShell))
@@ -660,7 +705,22 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	_ = tmux.BindSessionKeys(tmuxName)
 
 	if prov.SessionFile != "" {
-		_ = WriteSessionFileIfNeeded(workDir, meta.Persona, meta.Name)
+		sessionFileID := meta.Name
+		if meta.VibeFlowSessionID != "" {
+			sessionFileID = meta.VibeFlowSessionID
+		}
+		_ = WriteSessionFileIfNeeded(workDir, meta.Persona, sessionFileID)
+	}
+
+	if (meta.CloudDispatch || meta.DispatchMode == "cloud_queue") && meta.ProjectID == 0 {
+		projectInfo, err := ensureCloudDispatchProject(cfg, projectName)
+		if err != nil {
+			return SessionMeta{}, fmt.Errorf("resolve cloud-dispatch project: %w", err)
+		}
+		meta.ProjectID = projectInfo.ID
+	}
+	if (meta.CloudDispatch || meta.DispatchMode == "cloud_queue") && meta.VibeFlowSessionID == "" {
+		meta.VibeFlowSessionID = meta.Name
 	}
 
 	// Build updated metadata.
@@ -669,12 +729,15 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		TmuxSession:       tmuxName,
 		Provider:          provider,
 		Project:           projectName,
+		ProjectID:         meta.ProjectID,
 		Persona:           meta.Persona,
 		Branch:            branch,
 		WorktreePath:      meta.WorktreePath,
 		WorkingDir:        workDir,
 		VibeFlowSessionID: meta.VibeFlowSessionID,
 		SessionType:       meta.SessionType,
+		DispatchMode:      meta.DispatchMode,
+		CloudDispatch:     meta.CloudDispatch,
 		SkipPermissions:   meta.SkipPermissions,
 		Model:             meta.Model,
 		LLMGatewayEnabled: meta.LLMGatewayEnabled,
@@ -689,6 +752,11 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 	if cache != nil {
 		_ = cache.Add(updated)
+	}
+	if updated.CloudDispatch || updated.DispatchMode == "cloud_queue" {
+		if err := StartCloudDispatchProcess("", updated.Name); err != nil {
+			return SessionMeta{}, fmt.Errorf("start cloud-dispatch loop: %w", err)
+		}
 	}
 
 	return updated, nil

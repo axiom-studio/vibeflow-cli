@@ -43,6 +43,16 @@ func BuildVibeflowInitPrompt(mcpName, projectName, persona string) string {
 	)
 }
 
+func BuildVibeflowCloudDispatchInitPrompt(mcpName, projectName, persona, sessionID string) string {
+	if mcpName == "" {
+		mcpName = DefaultMCPToolName
+	}
+	return fmt.Sprintf(
+		"Initialize a %s session for project %s with persona %q using session_id %s. Pass dispatch_mode=\"cloud_queue\" to session_init. Do not call wait_for_work; vibeflow-cli will inject VIBEFLOW_DISPATCH handoffs when work is available.",
+		mcpName, projectName, persona, sessionID,
+	)
+}
+
 // AppendVibeflowInitPrompt appends a vibeflow init prompt to a rendered
 // launch command in the argument shape each provider's CLI expects, and
 // sh-escapes embedded single quotes so the result is a safe single-string
