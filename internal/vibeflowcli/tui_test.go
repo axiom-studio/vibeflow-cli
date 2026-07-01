@@ -194,10 +194,14 @@ func TestWorkbenchMetadataSurvivesPruneAndReapply(t *testing.T) {
 }
 
 func TestWorkbenchTitles(t *testing.T) {
+	// SessionRow.Name is the SHORT name — refreshSessions strips the vibeflow_
+	// prefix. The header map MUST be keyed by the FULL name because composeInto
+	// looks it up via titles[ensurePrefix(name)]; keying by the short name made
+	// every lookup miss so panes fell back to the session id (#3291).
 	m := Model{sessions: []SessionRow{
-		{Name: "vibeflow_claude-a", Persona: "principal_engineer", Project: "vibeflow-cli", Branch: "main"},
-		{Name: "vibeflow_codex-b", Persona: "", Project: "demo", Branch: "feat"},
-		{Name: "vibeflow_gemini-c"}, // no metadata → omitted (empty header)
+		{Name: "claude-a", Persona: "principal_engineer", Project: "vibeflow-cli", Branch: "main"},
+		{Name: "codex-b", Persona: "", Project: "demo", Branch: "feat"},
+		{Name: "gemini-c"}, // no metadata → omitted (empty header)
 	}}
 	titles := m.workbenchTitles()
 	if got, want := titles["vibeflow_claude-a"], "principal_engineer · vibeflow-cli · main"; got != want {
@@ -208,6 +212,10 @@ func TestWorkbenchTitles(t *testing.T) {
 	}
 	if _, ok := titles["vibeflow_gemini-c"]; ok {
 		t.Errorf("session with no persona/project/branch must be omitted, got %q", titles["vibeflow_gemini-c"])
+	}
+	// Regression guard for #3291: must NOT be keyed by the short name.
+	if _, ok := titles["claude-a"]; ok {
+		t.Errorf("titles must be keyed by the full vibeflow_ name, not the short name")
 	}
 }
 

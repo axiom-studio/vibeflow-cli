@@ -568,7 +568,11 @@ func (m Model) workbenchTitles() map[string]string {
 	titles := make(map[string]string, len(m.sessions))
 	for _, s := range m.sessions {
 		if h := workbenchHeader(s.Persona, s.Project, s.Branch); h != "" {
-			titles[s.Name] = h
+			// Key by the FULL tmux name (with the vibeflow_ prefix): composeInto
+			// looks the header up via titles[ensurePrefix(name)], and s.Name has
+			// the prefix stripped. Keying by the short name made every lookup
+			// miss, so panes fell back to the session-name title (#3291).
+			titles[sessionPrefix+s.Name] = h
 		}
 	}
 	return titles
