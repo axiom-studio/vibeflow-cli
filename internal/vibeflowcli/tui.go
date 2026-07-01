@@ -1859,8 +1859,6 @@ func (m Model) renderMatrixPane(width, height int) string {
 
 	b.WriteString(renderRow(0))
 	b.WriteString("\n")
-	b.WriteString(dim.Render(strings.Repeat("─", width)))
-	b.WriteString("\n")
 	b.WriteString(renderRow(2))
 
 	return strings.TrimRight(b.String(), "\n")
@@ -1869,60 +1867,79 @@ func (m Model) renderMatrixPane(width, height int) string {
 // matrixCells is the number of panes shown at once in the 2x2 matrix grid.
 const matrixCells = 4
 
-// matrixGridDims derives the per-cell dimensions of the 2x2 grid for a given
-// content area. Kept as the single source of truth shared by renderMatrixPane
-// (rendering) and hitTestMatrix (click mapping) so the two never diverge.
-// Layout: 1 header line + rowH cellH + 1 separator line + rowH cellH, with a
-// 1-column gutter between the left and right cells.
+// matrixGridDims derives the per-cell OUTER dimensions (border-inclusive) of the
+// 2x2 grid for a given content area. Single source of truth shared by
+// renderMatrixPane (rendering) and hitTestMatrix (click mapping). Layout:
+// 1 header line, then two rows of bordered cells (each cellH tall) stacked
+// directly — the rounded cell borders provide the row separation, so there is
+// no separator line — with a 1-column gutter between the left and right cells.
 func matrixGridDims(width, height int) (leftCellW, rightCellW, cellH int) {
 	if width < 2 {
 		width = 2
 	}
 	const gutter = 1
 	leftCellW = (width - gutter) / 2
-	if leftCellW < 1 {
-		leftCellW = 1
+	if leftCellW < 3 { // rounded border eats 2 cols; keep >=1 content col
+		leftCellW = 3
 	}
 	rightCellW = width - gutter - leftCellW
-	if rightCellW < 1 {
-		rightCellW = 1
+	if rightCellW < 3 {
+		rightCellW = 3
 	}
-	gridH := height - 2 // header(1) + separator(1)
-	if gridH < 2 {
-		gridH = 2
+	gridH := height - 1 // header(1); cell borders separate the two rows
+	if gridH < 6 {      // 2 rows x min cellH 3 (2 border + 1 content)
+		gridH = 6
 	}
 	cellH = gridH / 2
-	if cellH < 1 {
-		cellH = 1
+	if cellH < 3 { // border(2) + >=1 content row
+		cellH = 3
 	}
 	return leftCellW, rightCellW, cellH
 }
 
-// renderMatrixCell renders one grid cell as exactly cellH lines, each padded to
-// cellW columns, so the grid geometry stays predictable for hit-testing. An
-// out-of-range index renders a blank placeholder cell.
+// renderMatrixCell renders one grid cell as a bordered box of exactly cellW x
+// cellH OUTER cells (rounded border — dim by default, accent when focused) so
+// the grid geometry stays predictable for hit-testing. Content is clipped to the
+// inner area (cellW-2 x cellH-2). An out-of-range index renders an empty box.
 func (m Model) renderMatrixCell(idx, focus, cellW, cellH int) string {
-	blank := lipgloss.NewStyle().Width(cellW).MaxWidth(cellW).Render("")
-	lines := make([]string, 0, cellH)
+	innerW := cellW - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	innerH := cellH - 2
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	// The rounded border adds 1 cell on each side, so the style is sized to the
+	// INNER area; the rendered box is cellW x cellH OUTER (matches matrixGridDims
+	// and hitTestMatrix).
+	box := lipgloss.NewStyle().
+		Width(innerW).
+		Height(innerH).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(dimColor)
 
 	if idx < 0 || idx >= len(m.sessions) {
-		for len(lines) < cellH {
-			lines = append(lines, blank)
-		}
-		return strings.Join(lines, "\n")
+		return box.Render("")
+	}
+	if idx == focus {
+		box = box.BorderForeground(accentColor)
 	}
 
 	s := m.sessions[idx]
+	var lines []string
+
 	headerTxt := s.Name
 	if s.Status != "" {
 		headerTxt += " · " + s.Status
 	}
-	hStyle := lipgloss.NewStyle().Width(cellW).MaxWidth(cellW).Bold(true)
+	hStyle := lipgloss.NewStyle().Width(innerW).MaxWidth(innerW).Bold(true)
 	if idx == focus {
-		hStyle = hStyle.Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#333333"))
+		hStyle = hStyle.Foreground(lipgloss.Color("#ffffff"))
 		headerTxt = "▸ " + headerTxt
 	}
-	lines = append(lines, hStyle.Render(truncate(headerTxt, cellW)))
+	lines = append(lines, hStyle.Render(truncate(headerTxt, innerW)))
 
 	output := m.captureOutputs[s.Name]
 	if output == "" && m.captureName == s.Name {
@@ -1932,25 +1949,21 @@ func (m Model) renderMatrixCell(idx, focus, cellW, cellH int) string {
 		output = "(no output yet)"
 	}
 	outLines := strings.Split(output, "\n")
-	room := cellH - 1
+	room := innerH - 1
 	if room < 0 {
 		room = 0
 	}
 	if len(outLines) > room {
 		outLines = outLines[len(outLines)-room:]
 	}
-	outStyle := lipgloss.NewStyle().Width(cellW).MaxWidth(cellW).Foreground(lipgloss.Color("#aaaaaa"))
+	outStyle := lipgloss.NewStyle().Width(innerW).MaxWidth(innerW).Foreground(lipgloss.Color("#aaaaaa"))
 	for _, ln := range outLines {
-		lines = append(lines, outStyle.Render(truncate(ln, cellW)))
+		lines = append(lines, outStyle.Render(truncate(ln, innerW)))
 	}
-
-	for len(lines) < cellH {
-		lines = append(lines, blank)
+	if len(lines) > innerH {
+		lines = lines[:innerH]
 	}
-	if len(lines) > cellH {
-		lines = lines[:cellH]
-	}
-	return strings.Join(lines, "\n")
+	return box.Render(strings.Join(lines, "\n"))
 }
 
 // clampMatrixOffset keeps the matrix window start within [0, max(0, total-4)]
@@ -2360,7 +2373,7 @@ func (m Model) hitTestMatrix(x, y int) (sessionIdx int, ok bool) {
 	switch {
 	case y >= gridTop && y < gridTop+cellH:
 		row = 0
-	case y >= gridTop+cellH+1 && y < gridTop+cellH+1+cellH:
+	case y >= gridTop+cellH && y < gridTop+2*cellH:
 		row = 1
 	}
 	if row < 0 {
