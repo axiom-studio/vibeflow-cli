@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -141,6 +142,68 @@ func TestProjectGrouping(t *testing.T) {
 	label, names = m.selectedProjectSessions()
 	if label != "alpha" || len(names) != 2 {
 		t.Errorf("selectedProjectSessions@alpha = %q %v, want alpha with 2 sessions", label, names)
+	}
+}
+
+func TestWorkbenchMetas(t *testing.T) {
+	st := &Store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	_ = st.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_claude-a", Persona: "dev", Project: "p1"})
+	_ = st.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_codex-b", Persona: "qa", Project: "p2"})
+	m := Model{store: st}
+
+	got := m.workbenchMetas([]string{"vibeflow_claude-a"})
+	if len(got) != 1 || got[0].Persona != "dev" || got[0].Project != "p1" {
+		t.Fatalf("workbenchMetas = %+v, want one meta a/dev/p1", got)
+	}
+}
+
+// TestWorkbenchMetadataSurvivesPruneAndReapply validates the fix mechanism at
+// the store level: a session's full metadata is captured, then pruned by Sync
+// while the session is (transiently) absent, then re-applied by Add — restoring
+// the persona/project that tmux alone cannot reconstruct (issue #3282).
+func TestWorkbenchMetadataSurvivesPruneAndReapply(t *testing.T) {
+	st := &Store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	full := SessionMeta{
+		Name: "s", TmuxSession: "vibeflow_claude-s", Provider: "claude",
+		Persona: "principal_engineer", Project: "vibeflow-cli", Branch: "main",
+	}
+	if err := st.Add(full); err != nil {
+		t.Fatal(err)
+	}
+	m := Model{store: st}
+	captured := m.workbenchMetas([]string{"vibeflow_claude-s"})
+
+	// Session is absent from tmux (composed into the holder) → a refresh prunes it.
+	if err := st.Sync([]string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.Get("s"); ok {
+		t.Fatal("expected Sync to prune the absent session's metadata")
+	}
+
+	// After Restore, the workbench re-applies the captured metadata.
+	for _, meta := range captured {
+		if err := st.Add(meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, ok, _ := st.Get("s")
+	if !ok || got.Persona != "principal_engineer" || got.Project != "vibeflow-cli" {
+		t.Fatalf("metadata not restored after reapply: %+v (ok=%v)", got, ok)
+	}
+}
+
+func TestWorkbenchKey_MultiSession_SetsWorkbenchActive(t *testing.T) {
+	m := Model{tmux: NewTmuxManager("vftest"), sessions: []SessionRow{
+		{Name: "vibeflow_claude-a"},
+		{Name: "vibeflow_codex-b"},
+	}}
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	if cmd == nil {
+		t.Fatal("expected a compose command")
+	}
+	if !nm.(Model).workbenchActive {
+		t.Fatal("composing a workbench must set workbenchActive to pause store prune")
 	}
 }
 
