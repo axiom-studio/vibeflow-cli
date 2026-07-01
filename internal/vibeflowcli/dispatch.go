@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -55,7 +54,9 @@ func StartCloudDispatchProcess(cfgPath, sessionName string) error {
 	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Detach the child into its own process group so it survives the parent
+	// (Unix). No-op on Windows — see dispatch_unix.go / dispatch_windows.go.
+	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return err
