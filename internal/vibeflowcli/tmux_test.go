@@ -584,8 +584,11 @@ func TestWorkbenchHeader(t *testing.T) {
 // panes, and that they stay within the status-left-length budget (220).
 func TestWorkbenchHints_AdvertiseSessionNavigation(t *testing.T) {
 	for name, hint := range map[string]string{"single": workbenchHintSingle, "multi": workbenchHintMulti} {
-		if !strings.Contains(hint, "Ctrl-b o") || !strings.Contains(hint, "switch session") {
-			t.Errorf("%s hint must advertise session navigation, got %q", name, hint)
+		if !strings.Contains(hint, "Ctrl ←/→") || !strings.Contains(hint, "switch session") {
+			t.Errorf("%s hint must advertise Ctrl ←/→ session navigation, got %q", name, hint)
+		}
+		if strings.Contains(hint, "Ctrl-b o") {
+			t.Errorf("%s hint must not advertise the removed (non-working) Ctrl-b o, got %q", name, hint)
 		}
 		if len(hint) > 220 {
 			t.Errorf("%s hint length %d exceeds status-left-length 220", name, len(hint))
@@ -593,6 +596,46 @@ func TestWorkbenchHints_AdvertiseSessionNavigation(t *testing.T) {
 	}
 	if !strings.Contains(workbenchHintMulti, "next / prev project") {
 		t.Errorf("multi hint must still advertise project switching, got %q", workbenchHintMulti)
+	}
+}
+
+// TestBindWorkbenchNavKeys installs the Ctrl+arrow pane-navigation bindings and
+// verifies they land in the tmux root key table, guarded so single-pane windows
+// pass the key through to the agent. Skipped when tmux is absent.
+func TestBindWorkbenchNavKeys(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-wbnavkeys")
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	// A session must exist for the tmux server to persist and accept bindings
+	// (in production bindWorkbenchNavKeys runs after the workbench holder exists).
+	if _, err := tm.run("new-session", "-d", "-s", "navkeys-holder"); err != nil {
+		t.Skipf("cannot create tmux session: %v", err)
+	}
+
+	tm.bindWorkbenchNavKeys()
+
+	out, err := tm.run("list-keys", "-T", "root")
+	if err != nil {
+		t.Fatalf("list-keys: %v", err)
+	}
+	for _, key := range []string{"C-Left", "C-Right"} {
+		if !strings.Contains(out, key) {
+			t.Errorf("root key table missing %s binding:\n%s", key, out)
+		}
+	}
+	// The guard scopes pane-switching to multi-pane windows; single-pane windows
+	// (a directly-attached agent) pass the key through so word-nav still works.
+	if !strings.Contains(out, "window_panes") {
+		t.Errorf("nav bindings must be guarded by window_panes>1:\n%s", out)
+	}
+	if !strings.Contains(out, "send-keys") {
+		t.Errorf("nav bindings must pass the key through on single-pane windows:\n%s", out)
 	}
 }
 
