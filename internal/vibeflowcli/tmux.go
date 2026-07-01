@@ -575,10 +575,13 @@ func (tm *TmuxManager) ComposeWorkbench(names []string, titles map[string]string
 	return comp, nil
 }
 
-// Keyboard-shortcut hints shown in the workbench status bar.
+// Keyboard-shortcut hints shown in the workbench status bar. Both advertise
+// "Ctrl-b o or arrows: switch session" so users can move between session panes
+// with the keyboard (not just the mouse); the multi-project hint additionally
+// advertises Ctrl-b n/p for cycling projects.
 const (
-	workbenchHintSingle = "  Ctrl-q or Ctrl-b d: back to menu  "
-	workbenchHintMulti  = "  Ctrl-b n / Ctrl-b p: next / prev project   |   Ctrl-q or Ctrl-b d: back to menu  "
+	workbenchHintSingle = "  Ctrl-b o or arrows: switch session   |   Ctrl-q or Ctrl-b d: back to menu  "
+	workbenchHintMulti  = "  Ctrl-b o or arrows: switch session   |   Ctrl-b n / Ctrl-b p: next / prev project   |   Ctrl-q or Ctrl-b d: back to menu  "
 )
 
 // WorkbenchProject is a named group of sessions (one project / working

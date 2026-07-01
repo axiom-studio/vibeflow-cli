@@ -571,6 +571,23 @@ func TestWorkbenchHeader(t *testing.T) {
 	}
 }
 
+// TestWorkbenchHints_AdvertiseSessionNavigation guards that both workbench
+// status-bar hints advertise the keyboard shortcut for moving between session
+// panes, and that they stay within the status-left-length budget (220).
+func TestWorkbenchHints_AdvertiseSessionNavigation(t *testing.T) {
+	for name, hint := range map[string]string{"single": workbenchHintSingle, "multi": workbenchHintMulti} {
+		if !strings.Contains(hint, "Ctrl-b o") || !strings.Contains(hint, "switch session") {
+			t.Errorf("%s hint must advertise session navigation, got %q", name, hint)
+		}
+		if len(hint) > 220 {
+			t.Errorf("%s hint length %d exceeds status-left-length 220", name, len(hint))
+		}
+	}
+	if !strings.Contains(workbenchHintMulti, "next / prev project") {
+		t.Errorf("multi hint must still advertise project switching, got %q", workbenchHintMulti)
+	}
+}
+
 // TestComposeProjectWorkbench_RoundTrip exercises the multi-window (Option A)
 // compose: two projects, each a window of two panes, then a non-destructive
 // restore. Skipped when tmux is absent.
