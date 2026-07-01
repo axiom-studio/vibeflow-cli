@@ -438,6 +438,189 @@ func (tm *TmuxManager) SendKeys(name, keys string) error {
 	return nil
 }
 
+// --- Native multi-session workbench (tmux pane-join composition) ---
+
+// workbenchHolderName is the throwaway session that hosts the composed panes
+// while the user is in the workbench. It is created on compose and destroyed on
+// restore. The name carries the vibeflow prefix but has no provider dash, so it
+// never collides with an agent session ("vibeflow_<provider>-<name>").
+const workbenchHolderName = sessionPrefix + "workbench"
+
+// workbenchStatusKeys are the per-session status-bar options ConfigureStatusBar
+// sets. They are captured before a session's pane is joined into the workbench
+// and re-applied when the pane is restored, so the vibeflow-themed status bar
+// survives the round trip (a recreated session would otherwise fall back to the
+// default tmux status bar).
+var workbenchStatusKeys = []string{
+	"status", "status-style", "status-left", "status-right",
+	"status-left-length", "status-right-length",
+}
+
+// workbenchSource records a session whose active pane was moved into the
+// workbench holder, plus the state needed to return it to a session with the
+// same name.
+type workbenchSource struct {
+	name   string            // original full tmux session name
+	paneID string            // pane id, stable across join/break (e.g. "%4")
+	status map[string]string // captured status-bar options to re-apply
+}
+
+// WorkbenchComposition is a live pane-join workbench. Restore returns every
+// joined pane to its own session (by name) and tears down the holder.
+type WorkbenchComposition struct {
+	tm      *TmuxManager
+	holder  string
+	sources []workbenchSource
+}
+
+// HolderName returns the tmux session to attach to for the composed view.
+func (c *WorkbenchComposition) HolderName() string { return c.holder }
+
+// joinPaneArgs builds the tmux command that moves the src pane (or a session's
+// active pane) into the dst window: join-pane -s src -t dst.
+func joinPaneArgs(src, dst string) []string {
+	return []string{"join-pane", "-s", src, "-t", dst}
+}
+
+// tiledLayoutArgs builds the tmux command that arranges the holder's panes in a
+// tiled grid.
+func tiledLayoutArgs(holder string) []string {
+	return []string{"select-layout", "-t", holder, "tiled"}
+}
+
+// paneID returns the id of a session's active pane. The id is stable for the
+// life of the pane, so it survives being joined into (and broken back out of)
+// the workbench holder.
+func (tm *TmuxManager) paneID(fullName string) (string, error) {
+	out, err := tm.run("display-message", "-t", fullName, "-p", "#{pane_id}")
+	if err != nil {
+		return "", fmt.Errorf("pane id for %q: %w", fullName, err)
+	}
+	id := strings.TrimSpace(out)
+	if id == "" {
+		return "", fmt.Errorf("pane id for %q: empty", fullName)
+	}
+	return id, nil
+}
+
+// captureSessionStatus reads the per-session status-bar options so they can be
+// re-applied after the session is recreated during Restore.
+func (tm *TmuxManager) captureSessionStatus(fullName string) map[string]string {
+	vals := make(map[string]string, len(workbenchStatusKeys))
+	for _, k := range workbenchStatusKeys {
+		out, err := tm.run("show-options", "-t", fullName, "-v", k)
+		if err != nil {
+			continue
+		}
+		if v := strings.TrimRight(out, "\n"); v != "" {
+			vals[k] = v
+		}
+	}
+	return vals
+}
+
+// applySessionStatus re-applies captured status-bar options to a session.
+func (tm *TmuxManager) applySessionStatus(fullName string, vals map[string]string) {
+	for _, k := range workbenchStatusKeys {
+		if v, ok := vals[k]; ok {
+			_, _ = tm.run("set-option", "-t", fullName, k, v)
+		}
+	}
+}
+
+// ComposeWorkbench joins the active pane of each named session into a single
+// throwaway holder window arranged in a tiled grid, giving one natively
+// interactive multi-pane view. Attach to the returned composition's HolderName
+// for true interactivity, then call Restore to return every pane to its own
+// session. At least two sessions are required (fewer has nothing to compose).
+// join-pane MOVES a pane — the source session is consumed — so on any failure
+// the panes already moved are restored before the error is returned, leaving no
+// session stranded in the holder.
+func (tm *TmuxManager) ComposeWorkbench(names []string) (*WorkbenchComposition, error) {
+	full := make([]string, 0, len(names))
+	for _, n := range names {
+		full = append(full, tm.ensurePrefix(n))
+	}
+	if len(full) < 2 {
+		return nil, fmt.Errorf("workbench needs at least 2 sessions, got %d", len(full))
+	}
+
+	holder := workbenchHolderName
+	// A stale holder left by a previous crash would fail new-session; clear it.
+	if tm.HasSession(holder) {
+		_, _ = tm.run("kill-session", "-t", holder)
+	}
+	if _, err := tm.run("new-session", "-d", "-s", holder); err != nil {
+		return nil, fmt.Errorf("create workbench holder: %w", err)
+	}
+	placeholder, err := tm.paneID(holder)
+	if err != nil {
+		_, _ = tm.run("kill-session", "-t", holder)
+		return nil, err
+	}
+
+	comp := &WorkbenchComposition{tm: tm, holder: holder}
+	for _, name := range full {
+		pid, err := tm.paneID(name)
+		if err != nil {
+			comp.Restore()
+			return nil, err
+		}
+		status := tm.captureSessionStatus(name)
+		if _, err := tm.run(joinPaneArgs(name, holder)...); err != nil {
+			comp.Restore()
+			return nil, fmt.Errorf("join %q into workbench: %w", name, err)
+		}
+		comp.sources = append(comp.sources, workbenchSource{name: name, paneID: pid, status: status})
+	}
+
+	// Drop the holder's original shell pane so only agent panes remain, then
+	// tile them into a grid.
+	_, _ = tm.run("kill-pane", "-t", placeholder)
+	_, _ = tm.run(tiledLayoutArgs(holder)...)
+	return comp, nil
+}
+
+// Restore dismantles the workbench: each joined pane is moved back into a fresh
+// session with its original name (reverse join-pane, which preserves the pane's
+// running process), its status bar is re-applied, and the holder is destroyed.
+// It is best-effort per pane — a failure on one session does not abort the rest,
+// so a partial failure strands at most one pane rather than losing every
+// session. The first error encountered is returned for logging.
+func (c *WorkbenchComposition) Restore() error {
+	tm := c.tm
+	var firstErr error
+	for _, s := range c.sources {
+		// Recreate the session by name with a throwaway shell pane, move the
+		// agent pane back in, then drop the throwaway.
+		if _, err := tm.run("new-session", "-d", "-s", s.name); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("recreate %q: %w", s.name, err)
+			}
+			continue
+		}
+		ph, err := tm.paneID(s.name)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if _, err := tm.run(joinPaneArgs(s.paneID, s.name)...); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("restore pane for %q: %w", s.name, err)
+			}
+			continue
+		}
+		_, _ = tm.run("kill-pane", "-t", ph)
+		tm.applySessionStatus(s.name, s.status)
+	}
+	// The holder loses its last pane as the final source is restored and is
+	// destroyed automatically; kill it explicitly in case a restore failed.
+	_, _ = tm.run("kill-session", "-t", c.holder)
+	return firstErr
+}
+
 // BindSessionKeys sets up key bindings for a vibeflow tmux session.
 // Binds Ctrl+Q (and Ctrl+\ as backup) to toggle between the agent session
 // and the vibeflow TUI. Uses tmux if-shell to conditionally detach (when

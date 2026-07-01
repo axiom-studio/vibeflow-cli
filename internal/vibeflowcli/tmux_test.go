@@ -17,6 +17,8 @@
 package vibeflowcli
 
 import (
+	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -400,6 +402,128 @@ func TestRedactSpawnArg(t *testing.T) {
 				t.Errorf("redactSpawnArg(%q):\n got:  %q\n want: %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestJoinPaneArgs(t *testing.T) {
+	got := joinPaneArgs("vibeflow_claude-a", "vibeflow_workbench")
+	want := []string{"join-pane", "-s", "vibeflow_claude-a", "-t", "vibeflow_workbench"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("joinPaneArgs = %v, want %v", got, want)
+	}
+}
+
+func TestTiledLayoutArgs(t *testing.T) {
+	got := tiledLayoutArgs("vibeflow_workbench")
+	want := []string{"select-layout", "-t", "vibeflow_workbench", "tiled"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tiledLayoutArgs = %v, want %v", got, want)
+	}
+}
+
+func TestWorkbenchHolderName_NoProviderCollision(t *testing.T) {
+	if !strings.HasPrefix(workbenchHolderName, sessionPrefix) {
+		t.Errorf("holder %q must carry the vibeflow prefix", workbenchHolderName)
+	}
+	// No provider dash → the holder can never be mistaken for an agent session
+	// ("vibeflow_<provider>-<name>").
+	if p := ParseSessionProvider(workbenchHolderName); p != "" {
+		t.Errorf("holder %q must not parse as a provider session (got %q)", workbenchHolderName, p)
+	}
+}
+
+func TestComposeWorkbench_TooFewSessions(t *testing.T) {
+	// The <2 guard returns before any tmux call, so no server is required.
+	tm := NewTmuxManager("vftest-workbench-few")
+	if _, err := tm.ComposeWorkbench([]string{"only-one"}); err == nil {
+		t.Fatal("expected an error when composing fewer than 2 sessions")
+	}
+}
+
+// TestComposeWorkbench_RoundTrip exercises the real tmux compose+restore path on
+// an isolated throwaway socket: three sessions are joined into one holder window
+// and then restored to their own sessions. It proves the restore is
+// non-destructive — each session comes back by name with the SAME pane id, so
+// the agent process was preserved rather than restarted. Skipped when tmux is
+// not installed.
+func TestComposeWorkbench_RoundTrip(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-workbench-roundtrip")
+	// Guarantee a clean slate and always tear the server down.
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+
+	dir := t.TempDir()
+	names := []string{"a", "b", "c"}
+	full := make([]string, len(names))
+	for i, n := range names {
+		if err := tm.CreateSessionWithOpts(SessionOpts{
+			Name: n, Provider: "claude", WorkDir: dir, Command: "sleep 300",
+		}); err != nil {
+			t.Fatalf("create session %s: %v", n, err)
+		}
+		full[i] = tm.FullSessionName("claude", n)
+	}
+
+	// Capture each pane id up front to prove the process survives the round trip.
+	before := make(map[string]string, len(full))
+	for _, fn := range full {
+		pid, err := tm.paneID(fn)
+		if err != nil {
+			t.Fatalf("paneID(%s): %v", fn, err)
+		}
+		before[fn] = pid
+	}
+
+	comp, err := tm.ComposeWorkbench(full)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+
+	// join-pane MOVES panes, so the source sessions are consumed by the compose.
+	for _, fn := range full {
+		if tm.HasSession(fn) {
+			t.Errorf("source session %s should be consumed by compose", fn)
+		}
+	}
+	if !tm.HasSession(comp.HolderName()) {
+		t.Fatalf("holder %s missing after compose", comp.HolderName())
+	}
+	// Holder holds exactly one pane per source (the placeholder was dropped).
+	out, err := tm.run("list-panes", "-t", comp.HolderName(), "-F", "#{pane_id}")
+	if err != nil {
+		t.Fatalf("list-panes holder: %v", err)
+	}
+	if got := len(strings.Fields(out)); got != len(full) {
+		t.Errorf("holder pane count = %d, want %d:\n%s", got, len(full), out)
+	}
+
+	if err := comp.Restore(); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	// Holder is gone; every source is back by name with its ORIGINAL pane id.
+	if tm.HasSession(comp.HolderName()) {
+		t.Errorf("holder %s should be destroyed after restore", comp.HolderName())
+	}
+	for _, fn := range full {
+		if !tm.HasSession(fn) {
+			t.Errorf("session %s was not restored", fn)
+			continue
+		}
+		pid, err := tm.paneID(fn)
+		if err != nil {
+			t.Errorf("paneID(%s) after restore: %v", fn, err)
+			continue
+		}
+		if pid != before[fn] {
+			t.Errorf("session %s pane id changed %s -> %s (process not preserved)", fn, before[fn], pid)
+		}
 	}
 }
 
