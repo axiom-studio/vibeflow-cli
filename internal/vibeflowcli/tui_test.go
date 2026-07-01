@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // detailPanelModel builds a minimal Model with a single session row selected,
@@ -258,6 +259,10 @@ func TestRenderMatrixPane_ShowsMultipleSessionOutputs(t *testing.T) {
 	if !strings.Contains(out, "of 2") {
 		t.Errorf("matrix header should report the window position:\n%s", out)
 	}
+	// Each pane is drawn as its own bordered rectangle (rounded border chars).
+	if !strings.Contains(out, "│") || !strings.Contains(out, "╮") {
+		t.Errorf("matrix cells should render as bordered rectangles:\n%s", out)
+	}
 }
 
 func sixSessions() []SessionRow {
@@ -329,10 +334,10 @@ func TestHitTestMatrix_MapsCellsToSessions(t *testing.T) {
 		{"top-left", x0, gridTop, 0, true},
 		{"top-left-inner", x0 + lcw - 1, gridTop + cellH - 1, 0, true},
 		{"top-right", x0 + lcw + 1, gridTop, 1, true},
-		{"bottom-left", x0, gridTop + cellH + 1, 2, true},
-		{"bottom-right", x0 + lcw + 1, gridTop + cellH + 1, 3, true},
+		{"bottom-left", x0, gridTop + cellH, 2, true},
+		{"bottom-right", x0 + lcw + 1, gridTop + cellH, 3, true},
 		{"gutter-column", x0 + lcw, gridTop, 0, false},
-		{"row-separator", x0, gridTop + cellH, 0, false},
+		{"below-grid", x0, gridTop + 2*cellH, 0, false},
 		{"left-of-grid", x0 - 1, gridTop, 0, false},
 	}
 	for _, tc := range cases {
@@ -375,7 +380,7 @@ func TestUpdate_MouseClickFocusesMatrixPane(t *testing.T) {
 	lcw, _, cellH := matrixGridDims(tcw, contentH)
 	// Bottom-right cell → session index 3.
 	x := leftWidth + 2 + lcw + 1
-	y := m.headerOffset() + 2 + cellH + 1
+	y := m.headerOffset() + 2 + cellH
 
 	updated, cmd := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y})
 	m = updated.(Model)
@@ -384,6 +389,21 @@ func TestUpdate_MouseClickFocusesMatrixPane(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("focusing a matrix pane should request a capture refresh")
+	}
+}
+
+// TestRenderMatrixPane_NoLineOverflow guards that the bordered 2x2 grid never
+// renders a line wider than its content area (which would break the workbench
+// column layout).
+func TestRenderMatrixPane_NoLineOverflow(t *testing.T) {
+	m := Model{matrixMode: true, width: 120, height: 40, sessions: sixSessions()}
+	for _, d := range []struct{ w, h int }{{80, 28}, {60, 24}} {
+		out := m.renderWorkbenchTerminal(d.w, d.h)
+		for i, line := range strings.Split(out, "\n") {
+			if w := lipgloss.Width(line); w > d.w {
+				t.Errorf("matrix %dx%d line %d width %d exceeds %d: %q", d.w, d.h, i, w, d.w, line)
+			}
+		}
 	}
 }
 
