@@ -639,7 +639,10 @@ func (tm *TmuxManager) composeInto(target string, sessions []string, titles map[
 		if h := titles[full]; h != "" {
 			title = h
 		}
-		_, _ = tm.run("select-pane", "-t", pid, "-T", title)
+		// Store the header in the pane-scoped user option @vfheader (see
+		// configureWorkbenchBorders) so the running agent's OSC pane-title
+		// writes cannot overwrite it.
+		_, _ = tm.run("set-option", "-p", "-t", pid, "@vfheader", title)
 		comp.sources = append(comp.sources, workbenchSource{name: full, paneID: pid, status: status})
 		_, _ = tm.run(tiledLayoutArgs(target)...)
 	}
@@ -649,10 +652,14 @@ func (tm *TmuxManager) composeInto(target string, sessions []string, titles map[
 // configureWorkbenchBorders enables a labeled top border on every pane of the
 // target window and colors the borders so each session window is visibly its
 // own bordered box (dim for inactive panes, highlighted for the focused one).
+// The header is rendered from the pane-scoped user option @vfheader (set by
+// composeInto), NOT #{pane_title}: a running agent emits OSC terminal-title
+// escape sequences that overwrite pane_title, which would clobber our header —
+// tmux user options are immune to that.
 func (tm *TmuxManager) configureWorkbenchBorders(target string) {
 	for _, opt := range []struct{ key, val string }{
 		{"pane-border-status", "top"},
-		{"pane-border-format", " #{pane_title} "},
+		{"pane-border-format", " #{@vfheader} "},
 		{"pane-border-lines", "single"},
 		{"pane-border-style", "fg=" + oceanHexMuted},
 		{"pane-active-border-style", "fg=" + oceanHexPrimary},

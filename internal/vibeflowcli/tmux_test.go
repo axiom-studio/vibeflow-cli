@@ -483,8 +483,9 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 		before[fn] = pid
 	}
 
-	// Give the first pane a persona/project/branch header and verify it lands on
-	// the composed pane's border title.
+	// Give the first pane a persona/project/branch header and verify it lands in
+	// the pane-scoped @vfheader user option (NOT pane_title, which a running
+	// agent's OSC title sequences would overwrite).
 	wantTitle := "titan · demo · main"
 	titles := map[string]string{full[0]: wantTitle}
 	comp, err := tm.ComposeWorkbench(full, titles)
@@ -492,10 +493,17 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 		t.Fatalf("ComposeWorkbench: %v", err)
 	}
 
-	if got, err := tm.run("display-message", "-p", "-t", before[full[0]], "#{pane_title}"); err != nil {
-		t.Errorf("read pane_title: %v", err)
+	if got, err := tm.run("display-message", "-p", "-t", before[full[0]], "#{@vfheader}"); err != nil {
+		t.Errorf("read @vfheader: %v", err)
 	} else if strings.TrimSpace(got) != wantTitle {
-		t.Errorf("pane_title = %q, want %q", strings.TrimSpace(got), wantTitle)
+		t.Errorf("@vfheader = %q, want %q", strings.TrimSpace(got), wantTitle)
+	}
+	// The border must actually render FROM @vfheader (not pane_title) or the
+	// header would be clobbered by the agent's OSC title.
+	if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "pane-border-format"); err != nil {
+		t.Errorf("read pane-border-format: %v", err)
+	} else if !strings.Contains(got, "@vfheader") {
+		t.Errorf("pane-border-format = %q, want it to reference @vfheader", got)
 	}
 
 	// join-pane MOVES panes, so the source sessions are consumed by the compose.
