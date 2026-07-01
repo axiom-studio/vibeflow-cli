@@ -435,7 +435,7 @@ func TestWorkbenchHolderName_NoProviderCollision(t *testing.T) {
 func TestComposeWorkbench_TooFewSessions(t *testing.T) {
 	// The <2 guard returns before any tmux call, so no server is required.
 	tm := NewTmuxManager("vftest-workbench-few")
-	if _, err := tm.ComposeWorkbench([]string{"only-one"}); err == nil {
+	if _, err := tm.ComposeWorkbench([]string{"only-one"}, nil); err == nil {
 		t.Fatal("expected an error when composing fewer than 2 sessions")
 	}
 }
@@ -483,9 +483,19 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 		before[fn] = pid
 	}
 
-	comp, err := tm.ComposeWorkbench(full)
+	// Give the first pane a persona/project/branch header and verify it lands on
+	// the composed pane's border title.
+	wantTitle := "titan · demo · main"
+	titles := map[string]string{full[0]: wantTitle}
+	comp, err := tm.ComposeWorkbench(full, titles)
 	if err != nil {
 		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+
+	if got, err := tm.run("display-message", "-p", "-t", before[full[0]], "#{pane_title}"); err != nil {
+		t.Errorf("read pane_title: %v", err)
+	} else if strings.TrimSpace(got) != wantTitle {
+		t.Errorf("pane_title = %q, want %q", strings.TrimSpace(got), wantTitle)
 	}
 
 	// join-pane MOVES panes, so the source sessions are consumed by the compose.
@@ -539,6 +549,28 @@ func TestWorkbenchPaneTitle(t *testing.T) {
 	}
 }
 
+func TestWorkbenchHeader(t *testing.T) {
+	tests := []struct {
+		name                     string
+		persona, project, branch string
+		want                     string
+	}{
+		{"all present", "principal_engineer", "vibeflow-cli", "main", "principal_engineer · vibeflow-cli · main"},
+		{"missing persona", "", "vibeflow-cli", "main", "vibeflow-cli · main"},
+		{"missing branch", "titan", "demo", "", "titan · demo"},
+		{"only project", "", "solo", "", "solo"},
+		{"all empty", "", "", "", ""},
+		{"whitespace trimmed", "  titan ", " demo ", " main ", "titan · demo · main"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := workbenchHeader(tt.persona, tt.project, tt.branch); got != tt.want {
+				t.Errorf("workbenchHeader(%q,%q,%q) = %q, want %q", tt.persona, tt.project, tt.branch, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestComposeProjectWorkbench_RoundTrip exercises the multi-window (Option A)
 // compose: two projects, each a window of two panes, then a non-destructive
 // restore. Skipped when tmux is absent.
@@ -578,7 +610,7 @@ func TestComposeProjectWorkbench_RoundTrip(t *testing.T) {
 		{Label: "alpha", Sessions: []string{a1, a2}},
 		{Label: "beta", Sessions: []string{b1, b2}},
 	}
-	comp, err := tm.ComposeProjectWorkbench(projects, "beta")
+	comp, err := tm.ComposeProjectWorkbench(projects, "beta", nil)
 	if err != nil {
 		t.Fatalf("ComposeProjectWorkbench: %v", err)
 	}

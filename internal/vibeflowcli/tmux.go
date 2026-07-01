@@ -536,7 +536,7 @@ func (tm *TmuxManager) applySessionStatus(fullName string, vals map[string]strin
 // join-pane MOVES a pane — the source session is consumed — so on any failure
 // the panes already moved are restored before the error is returned, leaving no
 // session stranded in the holder.
-func (tm *TmuxManager) ComposeWorkbench(names []string) (*WorkbenchComposition, error) {
+func (tm *TmuxManager) ComposeWorkbench(names []string, titles map[string]string) (*WorkbenchComposition, error) {
 	full := make([]string, 0, len(names))
 	for _, n := range names {
 		full = append(full, tm.ensurePrefix(n))
@@ -562,7 +562,7 @@ func (tm *TmuxManager) ComposeWorkbench(names []string) (*WorkbenchComposition, 
 	}
 
 	comp := &WorkbenchComposition{tm: tm, holder: holder}
-	if err := tm.composeInto(holder, full, comp); err != nil {
+	if err := tm.composeInto(holder, full, titles, comp); err != nil {
 		comp.Restore()
 		return nil, err
 	}
@@ -589,21 +589,39 @@ type WorkbenchProject struct {
 }
 
 // workbenchPaneTitle is the short label shown on a pane's border in the
-// workbench — the session name without the vibeflow_ prefix.
+// workbench — the session name without the vibeflow_ prefix. Used as the
+// fallback header when no persona/project/branch metadata is available.
 func workbenchPaneTitle(fullName string) string {
 	return strings.TrimPrefix(fullName, sessionPrefix)
+}
+
+// workbenchHeader builds the per-pane border label shown in the workbench:
+// "persona · project · branch", omitting any component that is empty so a
+// session missing (say) a persona still renders a clean "project · branch"
+// label. Returns "" when all three are empty, letting the caller fall back to
+// workbenchPaneTitle.
+func workbenchHeader(persona, project, branch string) string {
+	parts := make([]string, 0, 3)
+	for _, p := range []string{persona, project, branch} {
+		if s := strings.TrimSpace(p); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 // composeInto joins the active pane of each session into the target window (a
 // session or "session:window"/window-id spec), tiling after every join so the
 // next join has room — a small holder otherwise hits tmux's "create pane
 // failed: pane too small" after a few default 50/50 join-pane splits (issue
-// #3280). Each pane gets a titled top border (the "container rectangle with
-// borders"). Sources are appended to comp so Restore can return every pane to
-// its own session.
-func (tm *TmuxManager) composeInto(target string, sessions []string, comp *WorkbenchComposition) error {
-	_, _ = tm.run("set-option", "-t", target, "pane-border-status", "top")
-	_, _ = tm.run("set-option", "-t", target, "pane-border-format", " #{pane_title} ")
+// #3280). Each pane gets its own titled border: the dim/active border styles
+// visibly delineate every session window, and the top border carries the
+// header. titles maps a full tmux session name to its "persona · project ·
+// branch" header; a session absent from the map (or with an empty header)
+// falls back to workbenchPaneTitle. Sources are appended to comp so Restore
+// can return every pane to its own session.
+func (tm *TmuxManager) composeInto(target string, sessions []string, titles map[string]string, comp *WorkbenchComposition) error {
+	tm.configureWorkbenchBorders(target)
 	for _, name := range sessions {
 		full := tm.ensurePrefix(name)
 		pid, err := tm.paneID(full)
@@ -614,11 +632,30 @@ func (tm *TmuxManager) composeInto(target string, sessions []string, comp *Workb
 		if out, err := tm.run(joinPaneArgs(full, target)...); err != nil {
 			return fmt.Errorf("join %q into workbench: %w: %s", full, err, strings.TrimSpace(out))
 		}
-		_, _ = tm.run("select-pane", "-t", pid, "-T", workbenchPaneTitle(full))
+		title := workbenchPaneTitle(full)
+		if h := titles[full]; h != "" {
+			title = h
+		}
+		_, _ = tm.run("select-pane", "-t", pid, "-T", title)
 		comp.sources = append(comp.sources, workbenchSource{name: full, paneID: pid, status: status})
 		_, _ = tm.run(tiledLayoutArgs(target)...)
 	}
 	return nil
+}
+
+// configureWorkbenchBorders enables a labeled top border on every pane of the
+// target window and colors the borders so each session window is visibly its
+// own bordered box (dim for inactive panes, highlighted for the focused one).
+func (tm *TmuxManager) configureWorkbenchBorders(target string) {
+	for _, opt := range []struct{ key, val string }{
+		{"pane-border-status", "top"},
+		{"pane-border-format", " #{pane_title} "},
+		{"pane-border-lines", "single"},
+		{"pane-border-style", "fg=#3b4261"},
+		{"pane-active-border-style", "fg=#7aa2f7"},
+	} {
+		_, _ = tm.run("set-option", "-t", target, opt.key, opt.val)
+	}
 }
 
 // configureWorkbenchChrome sets a single-line status bar on the holder carrying
@@ -656,7 +693,7 @@ func (tm *TmuxManager) windowID(target string) (string, error) {
 // Restore returns every pane across every window to its own session. At least
 // two sessions total are required. On any failure the panes already composed
 // are restored before the error is returned.
-func (tm *TmuxManager) ComposeProjectWorkbench(projects []WorkbenchProject, selectLabel string) (*WorkbenchComposition, error) {
+func (tm *TmuxManager) ComposeProjectWorkbench(projects []WorkbenchProject, selectLabel string, titles map[string]string) (*WorkbenchComposition, error) {
 	total := 0
 	for _, p := range projects {
 		total += len(p.Sessions)
@@ -704,7 +741,7 @@ func (tm *TmuxManager) ComposeProjectWorkbench(projects []WorkbenchProject, sele
 			comp.Restore()
 			return nil, err
 		}
-		if err := tm.composeInto(win, p.Sessions, comp); err != nil {
+		if err := tm.composeInto(win, p.Sessions, titles, comp); err != nil {
 			comp.Restore()
 			return nil, err
 		}

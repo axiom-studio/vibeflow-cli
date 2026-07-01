@@ -193,6 +193,24 @@ func TestWorkbenchMetadataSurvivesPruneAndReapply(t *testing.T) {
 	}
 }
 
+func TestWorkbenchTitles(t *testing.T) {
+	m := Model{sessions: []SessionRow{
+		{Name: "vibeflow_claude-a", Persona: "principal_engineer", Project: "vibeflow-cli", Branch: "main"},
+		{Name: "vibeflow_codex-b", Persona: "", Project: "demo", Branch: "feat"},
+		{Name: "vibeflow_gemini-c"}, // no metadata → omitted (empty header)
+	}}
+	titles := m.workbenchTitles()
+	if got, want := titles["vibeflow_claude-a"], "principal_engineer · vibeflow-cli · main"; got != want {
+		t.Errorf("titles[a] = %q, want %q", got, want)
+	}
+	if got, want := titles["vibeflow_codex-b"], "demo · feat"; got != want {
+		t.Errorf("titles[b] = %q, want %q", got, want)
+	}
+	if _, ok := titles["vibeflow_gemini-c"]; ok {
+		t.Errorf("session with no persona/project/branch must be omitted, got %q", titles["vibeflow_gemini-c"])
+	}
+}
+
 func TestWorkbenchKey_MultiSession_SetsWorkbenchActive(t *testing.T) {
 	m := Model{tmux: NewTmuxManager("vftest"), sessions: []SessionRow{
 		{Name: "vibeflow_claude-a"},
