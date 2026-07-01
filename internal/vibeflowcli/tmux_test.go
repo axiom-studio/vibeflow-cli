@@ -505,6 +505,17 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 	} else if !strings.Contains(got, "@vfheader") {
 		t.Errorf("pane-border-format = %q, want it to reference @vfheader", got)
 	}
+	// #2721 Option A: heavy borders + active-pane backdrop tint distinguish panes.
+	if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "-v", "pane-border-lines"); err != nil {
+		t.Errorf("read pane-border-lines: %v", err)
+	} else if strings.TrimSpace(got) != "heavy" {
+		t.Errorf("pane-border-lines = %q, want heavy", strings.TrimSpace(got))
+	}
+	if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "-v", "window-active-style"); err != nil {
+		t.Errorf("read window-active-style: %v", err)
+	} else if !strings.Contains(got, oceanHexShallow) {
+		t.Errorf("window-active-style = %q, want it to tint bg with %s", got, oceanHexShallow)
+	}
 
 	// join-pane MOVES panes, so the source sessions are consumed by the compose.
 	for _, fn := range full {
@@ -816,5 +827,68 @@ func TestConfigureStatusBar_EscapesInjection(t *testing.T) {
 		if strings.Contains(strings.ReplaceAll(out, "##", ""), "#(") {
 			t.Errorf("%s has a live #( command-substitution: %q", opt, out)
 		}
+	}
+}
+
+// TestWorkbenchRestore_PartialFailureKeepsStrandedPane verifies the #3277 fix: a
+// per-source Restore failure must NOT let the trailing kill-session destroy the
+// stranded agent pane. It injects a real failure via a session-name collision.
+// Skipped when tmux is absent.
+func TestWorkbenchRestore_PartialFailureKeepsStrandedPane(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-restore-partial")
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+
+	dir := t.TempDir()
+	names := []string{"a", "b"}
+	full := make([]string, len(names))
+	for i, n := range names {
+		if err := tm.CreateSessionWithOpts(SessionOpts{
+			Name: n, Provider: "claude", WorkDir: dir, Command: "sleep 300",
+		}); err != nil {
+			t.Fatalf("create session %s: %v", n, err)
+		}
+		full[i] = tm.FullSessionName("claude", n)
+	}
+	strandedPane, err := tm.paneID(full[0])
+	if err != nil {
+		t.Fatalf("paneID(%s): %v", full[0], err)
+	}
+
+	comp, err := tm.ComposeWorkbench(full, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+
+	// Inject a Restore failure for source a: pre-create a session with a's name
+	// so Restore's `new-session -s <a>` collides and a's pane is left stranded.
+	if _, err := tm.run("new-session", "-d", "-s", full[0]); err != nil {
+		t.Fatalf("inject collision session: %v", err)
+	}
+
+	// Restore must report the partial failure but MUST NOT kill the holder.
+	if err := comp.Restore(); err == nil {
+		t.Fatal("Restore should return an error on partial failure")
+	}
+	if !tm.HasSession(comp.HolderName()) {
+		t.Fatal("holder was killed on partial failure — stranded agent pane destroyed (#3277 regression)")
+	}
+	// The stranded agent pane survives inside the un-killed holder.
+	out, err := tm.run("list-panes", "-s", "-t", comp.HolderName(), "-F", "#{pane_id}")
+	if err != nil {
+		t.Fatalf("list-panes holder: %v", err)
+	}
+	if !strings.Contains(out, strandedPane) {
+		t.Errorf("stranded pane %s not found in holder (destroyed?):\n%s", strandedPane, out)
+	}
+	// The other source still restored successfully.
+	if !tm.HasSession(full[1]) {
+		t.Errorf("source %s should have been restored despite the partial failure", full[1])
 	}
 }
