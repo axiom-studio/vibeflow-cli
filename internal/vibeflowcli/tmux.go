@@ -661,9 +661,16 @@ func (tm *TmuxManager) configureWorkbenchBorders(target string) {
 	for _, opt := range []struct{ key, val string }{
 		{"pane-border-status", "top"},
 		{"pane-border-format", " #{@vfheader} "},
-		{"pane-border-lines", "single"},
+		// Heavy border lines + a lighter backdrop on the active pane give each
+		// session window a distinct box. tmux has no true pane gap/margin, so
+		// this is the closest achievable to "spacing between panes" (#2721,
+		// user-chosen Option A). window-style styles inactive panes;
+		// window-active-style the focused one.
+		{"pane-border-lines", "heavy"},
 		{"pane-border-style", "fg=" + oceanHexMuted},
 		{"pane-active-border-style", "fg=" + oceanHexPrimary},
+		{"window-style", "bg=" + oceanHexBackground},
+		{"window-active-style", "bg=" + oceanHexShallow},
 	} {
 		_, _ = tm.run("set-option", "-t", target, opt.key, opt.val)
 	}
@@ -792,10 +799,11 @@ func (tm *TmuxManager) ComposeProjectWorkbench(projects []WorkbenchProject, sele
 
 // Restore dismantles the workbench: each joined pane is moved back into a fresh
 // session with its original name (reverse join-pane, which preserves the pane's
-// running process), its status bar is re-applied, and the holder is destroyed.
-// It is best-effort per pane — a failure on one session does not abort the rest,
-// so a partial failure strands at most one pane rather than losing every
-// session. The first error encountered is returned for logging.
+// running process), its status bar is re-applied, and the (now empty) holder is
+// destroyed. It is best-effort per pane — a failure on one session does not
+// abort the rest. If any pane cannot be moved out, the holder is NOT killed, so
+// the stranded pane and its running agent stay recoverable (#3277); the first
+// error encountered is returned for logging.
 func (c *WorkbenchComposition) Restore() error {
 	tm := c.tm
 	var firstErr error
@@ -824,10 +832,31 @@ func (c *WorkbenchComposition) Restore() error {
 		_, _ = tm.run("kill-pane", "-t", ph)
 		tm.applySessionStatus(s.name, s.status)
 	}
-	// The holder loses its last pane as the final source is restored and is
-	// destroyed automatically; kill it explicitly in case a restore failed.
-	_, _ = tm.run("kill-session", "-t", c.holder)
+	// The holder auto-destroys once its last pane is moved out. Only kill it
+	// explicitly when it is already empty: if a restore failed, the stranded
+	// agent pane is STILL inside the holder, and an unconditional kill-session
+	// would destroy that live agent (#3277). Leave a non-empty holder intact so
+	// its pane(s) stay recoverable (the user can `tmux attach -t <holder>`).
+	if n := tm.sessionPaneCount(c.holder); n > 0 {
+		if firstErr == nil {
+			firstErr = fmt.Errorf("workbench holder %q still holds %d pane(s) after restore; left intact so the agent session(s) are not killed", c.holder, n)
+		}
+	} else {
+		_, _ = tm.run("kill-session", "-t", c.holder)
+	}
 	return firstErr
+}
+
+// sessionPaneCount returns the total number of panes across all windows of a
+// session, or 0 when the session does not exist (tmux auto-destroys a session
+// once its last pane is moved out). Used by Restore to avoid killing a holder
+// that still holds a stranded agent pane (#3277).
+func (tm *TmuxManager) sessionPaneCount(session string) int {
+	out, err := tm.run("list-panes", "-s", "-t", session, "-F", "#{pane_id}")
+	if err != nil {
+		return 0
+	}
+	return len(strings.Fields(strings.TrimSpace(out)))
 }
 
 // BindSessionKeys sets up key bindings for a vibeflow tmux session.
