@@ -106,35 +106,36 @@ const (
 
 // Model is the Bubble Tea model for vibeflow-cli.
 type Model struct {
-	sessions      []SessionRow
-	cursor        int
-	client        *Client
-	tmux          *TmuxManager
-	worktrees     *WorktreeManager
-	store         *Store
-	registry      *ProviderRegistry
-	config        *Config
-	width         int
-	height        int
-	err           error
-	quitting      bool
-	projectID     int64
-	activeView    ViewState
-	wizard        WizardModel
-	conflictModal ConflictModal
-	worktreeList  WorktreeListModel
-	pendingWizard *WizardResult      // wizard result waiting for conflict resolution
-	switchMeta    *SessionMeta       // non-nil during quick branch switch flow
-	captureOutput string             // last captured pane output for selected session
-	captureName   string             // tmux session name for current capture
-	confirmDelete bool               // showing delete confirmation
-	confirmQuit   bool               // showing quit confirmation
-	confirmDetach bool               // showing detach confirmation
-	serverWarning string             // non-empty if server unreachable at startup
-	healthMonitor *HealthMonitor     // session error detection and auto-recovery
-	logger        *Logger            // file-based logger
-	cache         *SessionCache      // session cache for restart-without-intervention
-	restartSelect RestartSelectModel // dead-session restart multiselect
+	sessions        []SessionRow
+	cursor          int
+	client          *Client
+	tmux            *TmuxManager
+	worktrees       *WorktreeManager
+	store           *Store
+	registry        *ProviderRegistry
+	config          *Config
+	width           int
+	height          int
+	err             error
+	quitting        bool
+	projectID       int64
+	activeView      ViewState
+	wizard          WizardModel
+	conflictModal   ConflictModal
+	worktreeList    WorktreeListModel
+	pendingWizard   *WizardResult      // wizard result waiting for conflict resolution
+	switchMeta      *SessionMeta       // non-nil during quick branch switch flow
+	captureOutput   string             // last captured pane output for selected session
+	captureName     string             // tmux session name for current capture
+	confirmDelete   bool               // showing delete confirmation
+	confirmQuit     bool               // showing quit confirmation
+	confirmDetach   bool               // showing detach confirmation
+	workbenchActive bool               // true while a pane-join workbench is composing/attached/restoring (pauses store prune)
+	serverWarning   string             // non-empty if server unreachable at startup
+	healthMonitor   *HealthMonitor     // session error detection and auto-recovery
+	logger          *Logger            // file-based logger
+	cache           *SessionCache      // session cache for restart-without-intervention
+	restartSelect   RestartSelectModel // dead-session restart multiselect
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -176,13 +177,21 @@ type attachExitMsg struct{ err error }
 // The composition (or the error) is produced off the Update goroutine so the
 // tmux calls do not block the UI.
 type workbenchReadyMsg struct {
-	comp *WorkbenchComposition
-	err  error
+	comp  *WorkbenchComposition
+	err   error
+	metas []SessionMeta // store metadata of the composed sessions, re-applied on restore
 }
 
 // workbenchExitMsg is sent when the composed workbench attach process exits, so
 // the joined panes can be restored to their own sessions.
-type workbenchExitMsg struct{ comp *WorkbenchComposition }
+type workbenchExitMsg struct {
+	comp  *WorkbenchComposition
+	metas []SessionMeta
+}
+
+// workbenchRestoredMsg is sent after the workbench panes have been restored to
+// their own sessions and their store metadata re-applied.
+type workbenchRestoredMsg struct{}
 
 // tickMsg triggers periodic refresh.
 type tickMsg time.Time
@@ -291,14 +300,17 @@ func (m Model) refreshSessions() tea.Msg {
 	for i, ts := range tmuxSessions {
 		tmuxNames[i] = ts.Name
 	}
-	if m.store != nil {
+	// Skip store prune/rediscover while a workbench is composing/attached: its
+	// sessions are transiently moved into the holder (absent from tmux), and
+	// pruning would drop their non-reconstructable metadata (persona/project).
+	if m.store != nil && !m.workbenchActive {
 		_ = m.store.Sync(tmuxNames)
 	}
 
 	// Discover orphaned sessions (live in tmux but not in store) and
 	// reconstruct their metadata from tmux state.
 	recoveredNames := make(map[string]bool)
-	if m.store != nil {
+	if m.store != nil && !m.workbenchActive {
 		discovered := m.store.Discover(tmuxNames)
 		for _, tmuxName := range discovered {
 			provider := ParseSessionProvider(tmuxName)
@@ -520,23 +532,47 @@ func (m Model) projectGroups() []WorkbenchProject {
 	return out
 }
 
+// workbenchMetas returns the store SessionMeta for the given full tmux session
+// names, so the workbench can re-apply persona/project/etc. after restore (tmux
+// alone cannot hold those fields).
+func (m Model) workbenchMetas(fullNames []string) []SessionMeta {
+	if m.store == nil {
+		return nil
+	}
+	want := make(map[string]bool, len(fullNames))
+	for _, n := range fullNames {
+		want[n] = true
+	}
+	all, err := m.store.List()
+	if err != nil {
+		return nil
+	}
+	var out []SessionMeta
+	for _, meta := range all {
+		if want[meta.TmuxSession] {
+			out = append(out, meta)
+		}
+	}
+	return out
+}
+
 // composeWorkbenchCmd runs ComposeWorkbench off the Update goroutine (it issues
 // several tmux commands) and reports the result via workbenchReadyMsg.
-func (m Model) composeWorkbenchCmd(names []string) tea.Cmd {
+func (m Model) composeWorkbenchCmd(names []string, metas []SessionMeta) tea.Cmd {
 	tmux := m.tmux
 	return func() tea.Msg {
 		comp, err := tmux.ComposeWorkbench(names)
-		return workbenchReadyMsg{comp: comp, err: err}
+		return workbenchReadyMsg{comp: comp, err: err, metas: metas}
 	}
 }
 
 // composeProjectWorkbenchCmd runs ComposeProjectWorkbench off the Update
 // goroutine and reports the result via workbenchReadyMsg.
-func (m Model) composeProjectWorkbenchCmd(projects []WorkbenchProject, selectLabel string) tea.Cmd {
+func (m Model) composeProjectWorkbenchCmd(projects []WorkbenchProject, selectLabel string, metas []SessionMeta) tea.Cmd {
 	tmux := m.tmux
 	return func() tea.Msg {
 		comp, err := tmux.ComposeProjectWorkbench(projects, selectLabel)
-		return workbenchReadyMsg{comp: comp, err: err}
+		return workbenchReadyMsg{comp: comp, err: err, metas: metas}
 	}
 }
 
@@ -648,25 +684,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refreshSessions
 	case workbenchReadyMsg:
 		// Composition finished off-goroutine. On success, attach natively to the
-		// holder; on failure, surface the error and auto-clear it.
+		// holder; on failure, surface the error, auto-clear it, and end the
+		// workbench window so store sync resumes.
 		if msg.err != nil {
 			m.logger.Error("workbench compose: %v", msg.err)
 			m.err = msg.err
+			m.workbenchActive = false
 			return m, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return errClearMsg{} })
 		}
 		comp := msg.comp
+		metas := msg.metas
 		cmd := m.tmux.AttachSessionCmd(comp.HolderName())
 		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 			if err != nil {
 				m.logger.Error("workbench attach: %v", err)
 			}
-			return workbenchExitMsg{comp: comp}
+			return workbenchExitMsg{comp: comp, metas: metas}
 		})
 	case workbenchExitMsg:
 		// Workbench attach exited — restore every joined pane to its own session
-		// (off-goroutine, since it runs several tmux commands), then refresh.
+		// and re-apply its captured store metadata (off-goroutine). workbenchActive
+		// stays true until this completes so a racing refresh cannot prune the
+		// transiently-absent sessions.
 		comp := msg.comp
-		refresh := m.refreshSessions
+		metas := msg.metas
+		store := m.store
 		logger := m.logger
 		return m, func() tea.Msg {
 			if comp != nil {
@@ -674,8 +716,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					logger.Error("workbench restore: %v", err)
 				}
 			}
-			return refresh()
+			// Re-apply persona/project/etc. in case a refresh raced the compose
+			// and pruned it — Restore only recovers the tmux session, not the
+			// store fields that tmux cannot hold.
+			if store != nil {
+				for _, meta := range metas {
+					_ = store.Add(meta)
+				}
+			}
+			return workbenchRestoredMsg{}
 		}
+	case workbenchRestoredMsg:
+		// Restore complete — re-enable store sync and refresh the list.
+		m.workbenchActive = false
+		return m, m.refreshSessions
 	case autoAttachMsg:
 		// Auto-attach to a newly created session.
 		cmd := m.tmux.AttachSessionCmd(msg.name)
@@ -886,21 +940,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return attachExitMsg{err: err}
 				})
 			default:
-				return m, m.composeWorkbenchCmd(names)
+				m.workbenchActive = true
+				return m, m.composeWorkbenchCmd(names, m.workbenchMetas(names))
 			}
 		case "M":
 			// All-projects workbench: one tmux window per project, cycled with
 			// Ctrl-b n/p. Worth composing only with ≥2 sessions total.
 			projects := m.projectGroups()
-			total := 0
+			var allNames []string
 			for _, p := range projects {
-				total += len(p.Sessions)
+				allNames = append(allNames, p.Sessions...)
 			}
-			if total < 2 {
+			if len(allNames) < 2 {
 				return m, nil
 			}
 			selLabel, _ := m.selectedProjectSessions()
-			return m, m.composeProjectWorkbenchCmd(projects, selLabel)
+			m.workbenchActive = true
+			return m, m.composeProjectWorkbenchCmd(projects, selLabel, m.workbenchMetas(allNames))
 		case "w":
 			m.worktreeList = NewWorktreeListModel(m.worktrees, m.store)
 			m.activeView = ViewWorktrees
