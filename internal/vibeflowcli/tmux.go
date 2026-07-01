@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"unicode"
 )
 
 const sessionPrefix = "vibeflow_"
@@ -592,22 +593,48 @@ type WorkbenchProject struct {
 	Sessions []string // tmux session names in this project
 }
 
+// sanitizeWorkbenchTitle strips terminal-escape / control characters from a
+// workbench pane header before it is handed to tmux (#3286, defense-in-depth).
+// Persona/Project/Branch can originate from server session JSON, so a crafted
+// value could embed escape sequences; tmux filters control chars in border
+// titles today, but this closes the gap for any future path that renders them
+// raw. Keeps only printable runes (drops C0/C1 controls, ESC, OSC intro, DEL —
+// unicode.IsPrint covers all of these) and clamps the length. Space and the "·"
+// separator are printable and preserved.
+func sanitizeWorkbenchTitle(s string) string {
+	const maxRunes = 80
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n >= maxRunes {
+			break
+		}
+		if !unicode.IsPrint(r) {
+			continue
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
+
 // workbenchPaneTitle is the short label shown on a pane's border in the
 // workbench — the session name without the vibeflow_ prefix. Used as the
 // fallback header when no persona/project/branch metadata is available.
 func workbenchPaneTitle(fullName string) string {
-	return strings.TrimPrefix(fullName, sessionPrefix)
+	return sanitizeWorkbenchTitle(strings.TrimPrefix(fullName, sessionPrefix))
 }
 
 // workbenchHeader builds the per-pane border label shown in the workbench:
 // "persona · project · branch", omitting any component that is empty so a
 // session missing (say) a persona still renders a clean "project · branch"
 // label. Returns "" when all three are empty, letting the caller fall back to
-// workbenchPaneTitle.
+// workbenchPaneTitle. Each (server-influenced) component is sanitized of
+// terminal-escape/control characters before joining (#3286).
 func workbenchHeader(persona, project, branch string) string {
 	parts := make([]string, 0, 3)
 	for _, p := range []string{persona, project, branch} {
-		if s := strings.TrimSpace(p); s != "" {
+		if s := sanitizeWorkbenchTitle(strings.TrimSpace(p)); s != "" {
 			parts = append(parts, s)
 		}
 	}
