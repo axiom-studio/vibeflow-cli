@@ -106,35 +106,39 @@ const (
 
 // Model is the Bubble Tea model for vibeflow-cli.
 type Model struct {
-	sessions      []SessionRow
-	cursor        int
-	client        *Client
-	tmux          *TmuxManager
-	worktrees     *WorktreeManager
-	store         *Store
-	registry      *ProviderRegistry
-	config        *Config
-	width         int
-	height        int
-	err           error
-	quitting      bool
-	projectID     int64
-	activeView    ViewState
-	wizard        WizardModel
-	conflictModal ConflictModal
-	worktreeList  WorktreeListModel
-	pendingWizard *WizardResult      // wizard result waiting for conflict resolution
-	switchMeta    *SessionMeta       // non-nil during quick branch switch flow
-	captureOutput string             // last captured pane output for selected session
-	captureName   string             // tmux session name for current capture
-	confirmDelete bool               // showing delete confirmation
-	confirmQuit   bool               // showing quit confirmation
-	confirmDetach bool               // showing detach confirmation
-	serverWarning string             // non-empty if server unreachable at startup
-	healthMonitor *HealthMonitor     // session error detection and auto-recovery
-	logger        *Logger            // file-based logger
-	cache         *SessionCache      // session cache for restart-without-intervention
-	restartSelect RestartSelectModel // dead-session restart multiselect
+	sessions       []SessionRow
+	cursor         int
+	client         *Client
+	tmux           *TmuxManager
+	worktrees      *WorktreeManager
+	store          *Store
+	registry       *ProviderRegistry
+	config         *Config
+	width          int
+	height         int
+	err            error
+	quitting       bool
+	projectID      int64
+	activeView     ViewState
+	wizard         WizardModel
+	conflictModal  ConflictModal
+	worktreeList   WorktreeListModel
+	pendingWizard  *WizardResult      // wizard result waiting for conflict resolution
+	switchMeta     *SessionMeta       // non-nil during quick branch switch flow
+	captureOutput  string             // last captured pane output for selected session
+	captureName    string             // tmux session name for current capture
+	captureOutputs map[string]string  // tmux pane output by session name for matrix mode
+	confirmDelete  bool               // showing delete confirmation
+	confirmQuit    bool               // showing quit confirmation
+	confirmDetach  bool               // showing detach confirmation
+	terminalFocus  bool               // true when keyboard focus is conceptually on output
+	inspectorOpen  bool               // true when the metadata inspector drawer is visible
+	matrixMode     bool               // true when showing compact output for multiple sessions
+	serverWarning  string             // non-empty if server unreachable at startup
+	healthMonitor  *HealthMonitor     // session error detection and auto-recovery
+	logger         *Logger            // file-based logger
+	cache          *SessionCache      // session cache for restart-without-intervention
+	restartSelect  RestartSelectModel // dead-session restart multiselect
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -163,6 +167,7 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 		activeView:      ViewSessions,
 		logger:          logger,
 		healthMonitor:   healthMonitor,
+		captureOutputs:  make(map[string]string),
 		groupMode:       cfg.ViewMode == "grouped",
 		repoRootCache:   make(map[string]string),
 		collapsedGroups: make(map[string]bool),
@@ -196,6 +201,11 @@ type captureMsg struct {
 	output string
 }
 
+// captureBatchMsg carries captured pane output for matrix mode.
+type captureBatchMsg struct {
+	outputs map[string]string
+}
+
 func tickCmd(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -209,6 +219,23 @@ func captureTickCmd() tea.Cmd {
 }
 
 func (m Model) refreshCapture() tea.Msg {
+	if m.matrixMode {
+		outputs := make(map[string]string, len(m.sessions))
+		for _, s := range m.sessions {
+			output, err := m.tmux.CapturePaneOutput(s.Name, 12)
+			if err != nil {
+				outputs[s.Name] = "(no output)"
+				continue
+			}
+			if strings.TrimSpace(output) == "" {
+				outputs[s.Name] = "(no output yet)"
+				continue
+			}
+			outputs[s.Name] = stripANSI(output)
+		}
+		return captureBatchMsg{outputs: outputs}
+	}
+
 	idx := m.selectedSessionIdx()
 	if idx < 0 {
 		return captureMsg{}
@@ -520,6 +547,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case captureMsg:
 		m.captureOutput = msg.output
 		m.captureName = msg.name
+		if msg.name != "" {
+			if m.captureOutputs == nil {
+				m.captureOutputs = make(map[string]string)
+			}
+			m.captureOutputs[msg.name] = msg.output
+		}
 		// Health monitoring: scan capture output for error patterns.
 		if m.healthMonitor != nil && msg.name != "" && msg.output != "" {
 			provider := ""
@@ -533,6 +566,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if shouldRecover := m.healthMonitor.CheckOutput(msg.name, provider, msg.output, isAttached); shouldRecover {
 				_ = m.healthMonitor.AttemptRecovery(msg.name)
+			}
+		}
+		return m, nil
+	case captureBatchMsg:
+		m.captureOutputs = msg.outputs
+		if m.healthMonitor != nil {
+			for _, s := range m.sessions {
+				output := msg.outputs[s.Name]
+				if output == "" {
+					continue
+				}
+				if shouldRecover := m.healthMonitor.CheckOutput(s.Name, s.Provider, output, s.TmuxAttached); shouldRecover {
+					_ = m.healthMonitor.AttemptRecovery(s.Name)
+				}
 			}
 		}
 		return m, nil
@@ -694,18 +741,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.collapsedGroups[groupRoot] = !m.collapsedGroups[groupRoot]
 					return m, nil
 				}
-				if sessionIdx >= 0 && sessionIdx < len(m.sessions) {
-					cmd := m.tmux.AttachSessionCmd(m.sessions[sessionIdx].Name)
-					return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-						return attachExitMsg{err: err}
-					})
-				}
-			} else if m.cursor < len(m.sessions) {
-				cmd := m.tmux.AttachSessionCmd(m.sessions[m.cursor].Name)
+			}
+			if m.selectedSessionIdx() >= 0 {
+				m.terminalFocus = !m.terminalFocus
+			}
+		case "a":
+			idx := m.selectedSessionIdx()
+			if idx >= 0 && idx < len(m.sessions) {
+				cmd := m.tmux.AttachSessionCmd(m.sessions[idx].Name)
 				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 					return attachExitMsg{err: err}
 				})
 			}
+		case "i":
+			m.inspectorOpen = !m.inspectorOpen
+		case "s":
+			m.matrixMode = !m.matrixMode
+			m.terminalFocus = false
+			return m, m.refreshCapture
 		case "g":
 			m.groupMode = !m.groupMode
 			m.cursor = 0
@@ -1408,13 +1461,13 @@ func (m Model) View() string {
 	case m.confirmDetach:
 		helpBar = warnStyle.Render(fmt.Sprintf("Detach? %d session(s) will continue running in background. (y/n)", len(m.sessions)))
 	default:
-		enterHint := "attach"
+		enterHint := "focus"
 		if m.groupMode {
 			if _, groupRoot := m.groupedCursorToSession(); groupRoot != "" {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  a: attach  i: inspector  s: matrix  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -1429,13 +1482,30 @@ func (m Model) View() string {
 	}
 
 	// Column widths (in lipgloss v1, Width includes border + padding).
-	leftWidth := width * 35 / 100
-	rightWidth := width - leftWidth
+	leftWidth := width * 30 / 100
 	if leftWidth < 20 {
 		leftWidth = 20
 	}
-	if rightWidth < 20 {
-		rightWidth = 20
+	if leftWidth > 46 {
+		leftWidth = 46
+	}
+	workbenchWidth := width - leftWidth
+	if workbenchWidth < 20 {
+		workbenchWidth = 20
+	}
+	inspectorWidth := 0
+	if m.inspectorOpen && width >= 110 {
+		inspectorWidth = workbenchWidth * 34 / 100
+		if inspectorWidth < 30 {
+			inspectorWidth = 30
+		}
+		if inspectorWidth > 46 {
+			inspectorWidth = 46
+		}
+	}
+	terminalWidth := workbenchWidth - inspectorWidth
+	if terminalWidth < 20 {
+		terminalWidth = 20
 	}
 
 	// Available height for columns: total minus banner, copyright, gap, help.
@@ -1450,20 +1520,24 @@ func (m Model) View() string {
 
 	// Content area = total - border(2) - horizontal padding(2).
 	leftContentW := leftWidth - 4
-	rightContentW := rightWidth - 4
+	terminalContentW := terminalWidth - 4
+	inspectorContentW := inspectorWidth - 4
 	contentH := colHeight - 2
 	if leftContentW < 10 {
 		leftContentW = 10
 	}
-	if rightContentW < 10 {
-		rightContentW = 10
+	if terminalContentW < 10 {
+		terminalContentW = 10
+	}
+	if inspectorContentW < 10 {
+		inspectorContentW = 10
 	}
 	if contentH < 4 {
 		contentH = 4
 	}
 
 	leftContent := m.renderSessionList(leftContentW, contentH)
-	rightContent := m.renderDetailPanel(rightContentW, contentH)
+	terminalContent := m.renderWorkbenchTerminal(terminalContentW, contentH)
 
 	borderStyle := lipgloss.RoundedBorder()
 	leftStyle := lipgloss.NewStyle().
@@ -1472,17 +1546,28 @@ func (m Model) View() string {
 		Border(borderStyle).
 		BorderForeground(dimColor).
 		Padding(0, 1)
-	rightStyle := lipgloss.NewStyle().
-		Width(rightWidth).
+	terminalStyle := lipgloss.NewStyle().
+		Width(terminalWidth).
 		Height(colHeight).
 		Border(borderStyle).
 		BorderForeground(dimColor).
 		Padding(0, 1)
 
-	columns := lipgloss.JoinHorizontal(lipgloss.Top,
+	columnParts := []string{
 		leftStyle.Render(leftContent),
-		rightStyle.Render(rightContent),
-	)
+		terminalStyle.Render(terminalContent),
+	}
+	if inspectorWidth > 0 {
+		inspectorContent := m.renderInspectorDrawer(inspectorContentW, contentH)
+		inspectorStyle := lipgloss.NewStyle().
+			Width(inspectorWidth).
+			Height(colHeight).
+			Border(borderStyle).
+			BorderForeground(dimColor).
+			Padding(0, 1)
+		columnParts = append(columnParts, inspectorStyle.Render(inspectorContent))
+	}
+	columns := lipgloss.JoinHorizontal(lipgloss.Top, columnParts...)
 
 	// Assemble final view.
 	parts := []string{title}
@@ -1660,6 +1745,144 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	}
 }
 
+// renderWorkbenchTerminal renders the primary right-side workbench pane.
+func (m Model) renderWorkbenchTerminal(width, height int) string {
+	if m.matrixMode {
+		return m.renderMatrixPane(width, height)
+	}
+
+	var b strings.Builder
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	b.WriteString(headerStyle.Render("Terminal"))
+	if m.terminalFocus {
+		b.WriteString(" ")
+		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("(focused)"))
+	}
+	b.WriteString("\n")
+
+	idx := m.selectedSessionIdx()
+	if idx < 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("Select a session to view output."))
+		return b.String()
+	}
+
+	s := m.sessions[idx]
+	b.WriteString(m.renderSelectedSessionHeader(s, width))
+	b.WriteString("\n\n")
+	b.WriteString(m.renderTerminalPane(s, width, height-3))
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderSelectedSessionHeader renders compact state for the selected session.
+func (m Model) renderSelectedSessionHeader(s SessionRow, width int) string {
+	var parts []string
+	parts = append(parts, truncate(s.Name, width))
+	if s.Status != "" {
+		parts = append(parts, renderStatus(s.Status))
+	}
+	if s.Provider != "" {
+		parts = append(parts, renderProvider(s.Provider))
+	}
+	if s.Branch != "" {
+		parts = append(parts, renderBranch(s.Branch, s.WorktreePath))
+	}
+	if s.CurrentWork != "" {
+		remaining := width - 18
+		if remaining < 12 {
+			remaining = 12
+		}
+		parts = append(parts, truncate(s.CurrentWork, remaining))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// renderInspectorDrawer renders static metadata outside the primary output pane.
+func (m Model) renderInspectorDrawer(width, height int) string {
+	var b strings.Builder
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	b.WriteString(headerStyle.Render("Inspector"))
+	b.WriteString("\n")
+
+	idx := m.selectedSessionIdx()
+	if idx < 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("Select a session to inspect."))
+		return b.String()
+	}
+
+	out := m.renderSelectedSessionInspector(m.sessions[idx], width)
+	lines := strings.Split(out, "\n")
+	if len(lines) > height-1 {
+		lines = lines[:height-1]
+	}
+	for _, line := range lines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderMatrixPane renders compact live output for multiple sessions.
+func (m Model) renderMatrixPane(width, height int) string {
+	var b strings.Builder
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	b.WriteString(headerStyle.Render("Matrix"))
+	b.WriteString(" ")
+	b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("compact live panes"))
+	b.WriteString("\n")
+
+	if len(m.sessions) == 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("No active sessions."))
+		return b.String()
+	}
+
+	available := height - 1
+	if available < 3 {
+		available = 3
+	}
+	perSession := available / len(m.sessions)
+	if perSession < 3 {
+		perSession = 3
+	}
+	if perSession > 8 {
+		perSession = 8
+	}
+	sepStyle := lipgloss.NewStyle().Foreground(dimColor)
+	outputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa"))
+
+	for i, s := range m.sessions {
+		if i > 0 {
+			b.WriteString(sepStyle.Render(strings.Repeat("─", width)))
+			b.WriteString("\n")
+		}
+		title := m.renderSelectedSessionHeader(s, width)
+		if i == m.selectedSessionIdx() {
+			title = selectedStyle.Width(width).Render("> " + title)
+		}
+		b.WriteString(title)
+		b.WriteString("\n")
+
+		output := m.captureOutputs[s.Name]
+		if output == "" && m.captureName == s.Name {
+			output = m.captureOutput
+		}
+		if output == "" {
+			output = "(no output yet)"
+		}
+		lines := strings.Split(output, "\n")
+		maxLines := perSession - 1
+		if len(lines) > maxLines {
+			lines = lines[len(lines)-maxLines:]
+		}
+		for _, line := range lines {
+			b.WriteString(outputStyle.Render(truncate(line, width)))
+			b.WriteString("\n")
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // renderDetailPanel renders the right column with metadata for the selected session.
 func (m Model) renderDetailPanel(width, height int) string {
 	var b strings.Builder
@@ -1675,6 +1898,17 @@ func (m Model) renderDetailPanel(width, height int) string {
 	}
 
 	s := m.sessions[idx]
+
+	b.WriteString(m.renderSelectedSessionInspector(s, width))
+	b.WriteString("\n\n")
+	b.WriteString(m.renderTerminalPane(s, width, height))
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderSelectedSessionInspector renders static metadata for the selected session.
+func (m Model) renderSelectedSessionInspector(s SessionRow, width int) string {
+	var b strings.Builder
 
 	labelStyle := lipgloss.NewStyle().Foreground(dimColor).Width(14)
 	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff"))
@@ -1789,8 +2023,14 @@ func (m Model) renderDetailPanel(width, height int) string {
 		}
 	}
 
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderTerminalPane renders the selected session's captured tmux output.
+func (m Model) renderTerminalPane(s SessionRow, width, height int) string {
+	var b strings.Builder
+
 	// Separator and capture-pane output.
-	b.WriteString("\n")
 	sepStyle := lipgloss.NewStyle().Foreground(dimColor)
 	b.WriteString(sepStyle.Render(strings.Repeat("─", width)))
 	b.WriteString("\n")
