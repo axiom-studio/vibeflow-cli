@@ -576,12 +576,13 @@ func (tm *TmuxManager) ComposeWorkbench(names []string, titles map[string]string
 }
 
 // Keyboard-shortcut hints shown in the workbench status bar. Both advertise
-// "Ctrl-b o or arrows: switch session" so users can move between session panes
-// with the keyboard (not just the mouse); the multi-project hint additionally
-// advertises Ctrl-b n/p for cycling projects.
+// "Ctrl ←/→: switch session" — no-prefix Ctrl+Left/Right cycle between session
+// panes (bound by bindWorkbenchNavKeys; QA rework of #2719 replaced the
+// unreliable "Ctrl-b o", and Ctrl-o is used by coding agents). The multi-project
+// hint additionally advertises Ctrl-b n/p for cycling projects.
 const (
-	workbenchHintSingle = "  Ctrl-b o or arrows: switch session   |   Ctrl-q or Ctrl-b d: back to menu  "
-	workbenchHintMulti  = "  Ctrl-b o or arrows: switch session   |   Ctrl-b n / Ctrl-b p: next / prev project   |   Ctrl-q or Ctrl-b d: back to menu  "
+	workbenchHintSingle = "  Ctrl ←/→: switch session   |   Ctrl-q or Ctrl-b d: back to menu  "
+	workbenchHintMulti  = "  Ctrl ←/→: switch session   |   Ctrl-b n / Ctrl-b p: next / prev project   |   Ctrl-q or Ctrl-b d: back to menu  "
 )
 
 // WorkbenchProject is a named group of sessions (one project / working
@@ -680,6 +681,26 @@ func (tm *TmuxManager) configureWorkbenchChrome(holder, hint string) {
 		{"status-right", ""},
 	} {
 		_, _ = tm.run("set-option", "-t", holder, opt.key, opt.val)
+	}
+	tm.bindWorkbenchNavKeys()
+}
+
+// bindWorkbenchNavKeys binds no-prefix Ctrl+Left / Ctrl+Right to previous / next
+// pane so users can switch between session panes in a multi-pane workbench with
+// the keyboard (QA rework of #2719 — "Ctrl-b o" was unreliable and Ctrl-o is
+// used by coding agents). The if-shell guard scopes it to multi-pane windows:
+// when the current window has a single pane (a directly-attached agent, or a
+// one-session workbench) the key is passed through to the agent via send-keys so
+// it keeps its own word-navigation binding. Root-table bindings are global to
+// the tmux server (same table BindSessionKeys uses); re-binding is idempotent.
+func (tm *TmuxManager) bindWorkbenchNavKeys() {
+	for _, b := range []struct{ key, pane string }{
+		{"C-Left", ":.-"},  // previous pane
+		{"C-Right", ":.+"}, // next pane
+	} {
+		_, _ = tm.run("bind-key", "-T", "root", b.key,
+			"if-shell", "-F", "#{>:#{window_panes},1}",
+			"select-pane -t "+b.pane, "send-keys "+b.key)
 	}
 }
 
