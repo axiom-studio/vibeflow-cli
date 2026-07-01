@@ -556,22 +556,37 @@ func (m Model) workbenchMetas(fullNames []string) []SessionMeta {
 	return out
 }
 
+// workbenchTitles maps each session's full tmux name to its workbench pane
+// header ("persona · project · branch"), built from the currently listed rows
+// so the composed panes are self-labeled. Rows are what the user already sees
+// in the list, so they are the reliable header source even when the store meta
+// is absent.
+func (m Model) workbenchTitles() map[string]string {
+	titles := make(map[string]string, len(m.sessions))
+	for _, s := range m.sessions {
+		if h := workbenchHeader(s.Persona, s.Project, s.Branch); h != "" {
+			titles[s.Name] = h
+		}
+	}
+	return titles
+}
+
 // composeWorkbenchCmd runs ComposeWorkbench off the Update goroutine (it issues
 // several tmux commands) and reports the result via workbenchReadyMsg.
-func (m Model) composeWorkbenchCmd(names []string, metas []SessionMeta) tea.Cmd {
+func (m Model) composeWorkbenchCmd(names []string, metas []SessionMeta, titles map[string]string) tea.Cmd {
 	tmux := m.tmux
 	return func() tea.Msg {
-		comp, err := tmux.ComposeWorkbench(names)
+		comp, err := tmux.ComposeWorkbench(names, titles)
 		return workbenchReadyMsg{comp: comp, err: err, metas: metas}
 	}
 }
 
 // composeProjectWorkbenchCmd runs ComposeProjectWorkbench off the Update
 // goroutine and reports the result via workbenchReadyMsg.
-func (m Model) composeProjectWorkbenchCmd(projects []WorkbenchProject, selectLabel string, metas []SessionMeta) tea.Cmd {
+func (m Model) composeProjectWorkbenchCmd(projects []WorkbenchProject, selectLabel string, metas []SessionMeta, titles map[string]string) tea.Cmd {
 	tmux := m.tmux
 	return func() tea.Msg {
-		comp, err := tmux.ComposeProjectWorkbench(projects, selectLabel)
+		comp, err := tmux.ComposeProjectWorkbench(projects, selectLabel, titles)
 		return workbenchReadyMsg{comp: comp, err: err, metas: metas}
 	}
 }
@@ -941,7 +956,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			default:
 				m.workbenchActive = true
-				return m, m.composeWorkbenchCmd(names, m.workbenchMetas(names))
+				return m, m.composeWorkbenchCmd(names, m.workbenchMetas(names), m.workbenchTitles())
 			}
 		case "M":
 			// All-projects workbench: one tmux window per project, cycled with
@@ -956,7 +971,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			selLabel, _ := m.selectedProjectSessions()
 			m.workbenchActive = true
-			return m, m.composeProjectWorkbenchCmd(projects, selLabel, m.workbenchMetas(allNames))
+			return m, m.composeProjectWorkbenchCmd(projects, selLabel, m.workbenchMetas(allNames), m.workbenchTitles())
 		case "w":
 			m.worktreeList = NewWorktreeListModel(m.worktrees, m.store)
 			m.activeView = ViewWorktrees
