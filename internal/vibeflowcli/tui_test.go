@@ -19,6 +19,8 @@ package vibeflowcli
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // detailPanelModel builds a minimal Model with a single session row selected,
@@ -117,5 +119,117 @@ func TestRenderDetailPanel_GatewayDisabled_NoEnvSection(t *testing.T) {
 	}
 	if strings.Contains(out, "ANTHROPIC_BASE_URL") {
 		t.Errorf("detail panel must not show gateway env vars when gateway is disabled:\n%s", out)
+	}
+}
+
+func TestRenderTerminalPane_SelectedSessionShowsCapturedOutput(t *testing.T) {
+	m := Model{
+		captureName:   "s1",
+		captureOutput: "line one\nline two",
+	}
+
+	out := ansiRe.ReplaceAllString(m.renderTerminalPane(SessionRow{Name: "s1"}, 80, 20), "")
+
+	if !strings.Contains(out, "Output") {
+		t.Errorf("terminal pane missing output header:\n%s", out)
+	}
+	if !strings.Contains(out, "line one") || !strings.Contains(out, "line two") {
+		t.Errorf("terminal pane missing captured output:\n%s", out)
+	}
+}
+
+func TestRenderTerminalPane_IgnoresStaleCaptureForOtherSession(t *testing.T) {
+	m := Model{
+		captureName:   "s2",
+		captureOutput: "stale output",
+	}
+
+	out := ansiRe.ReplaceAllString(m.renderTerminalPane(SessionRow{Name: "s1"}, 80, 20), "")
+
+	if strings.Contains(out, "stale output") {
+		t.Errorf("terminal pane rendered capture from another session:\n%s", out)
+	}
+	if !strings.Contains(out, "(no output yet)") {
+		t.Errorf("terminal pane should show empty state for unmatched capture:\n%s", out)
+	}
+}
+
+func TestUpdate_WorkbenchToggles(t *testing.T) {
+	m := Model{
+		config:   &Config{},
+		sessions: []SessionRow{{Name: "s1", Status: "running"}},
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("enter should focus the embedded terminal, not attach to tmux")
+	}
+	m = updated.(Model)
+	if !m.terminalFocus {
+		t.Fatal("enter should toggle terminal focus")
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd != nil {
+		t.Fatal("inspector toggle should not run a command")
+	}
+	m = updated.(Model)
+	if !m.inspectorOpen {
+		t.Fatal("i should open the inspector drawer")
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	if !m.matrixMode {
+		t.Fatal("s should enable matrix mode")
+	}
+	if cmd == nil {
+		t.Fatal("matrix toggle should request a capture refresh")
+	}
+}
+
+func TestRenderWorkbenchTerminal_FocusModeShowsSelectedOutput(t *testing.T) {
+	m := Model{
+		sessions:      []SessionRow{{Name: "s1", Status: "running", Branch: "main"}},
+		captureName:   "s1",
+		captureOutput: "line one\nline two",
+	}
+
+	out := ansiRe.ReplaceAllString(m.renderWorkbenchTerminal(100, 20), "")
+
+	if !strings.Contains(out, "Terminal") {
+		t.Errorf("workbench missing terminal header:\n%s", out)
+	}
+	if !strings.Contains(out, "s1") || !strings.Contains(out, "main") {
+		t.Errorf("workbench missing selected session header:\n%s", out)
+	}
+	if !strings.Contains(out, "line two") {
+		t.Errorf("workbench missing captured output:\n%s", out)
+	}
+}
+
+func TestRenderMatrixPane_ShowsMultipleSessionOutputs(t *testing.T) {
+	m := Model{
+		matrixMode: true,
+		sessions: []SessionRow{
+			{Name: "s1", Status: "running", Branch: "main"},
+			{Name: "s2", Status: "attached", Branch: "feature"},
+		},
+		captureOutputs: map[string]string{
+			"s1": "one",
+			"s2": "two",
+		},
+	}
+
+	out := ansiRe.ReplaceAllString(m.renderWorkbenchTerminal(100, 20), "")
+
+	if !strings.Contains(out, "Matrix") {
+		t.Errorf("matrix mode missing header:\n%s", out)
+	}
+	if !strings.Contains(out, "s1") || !strings.Contains(out, "one") {
+		t.Errorf("matrix mode missing first session output:\n%s", out)
+	}
+	if !strings.Contains(out, "s2") || !strings.Contains(out, "two") {
+		t.Errorf("matrix mode missing second session output:\n%s", out)
 	}
 }
