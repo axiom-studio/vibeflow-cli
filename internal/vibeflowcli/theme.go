@@ -31,7 +31,7 @@ import "github.com/charmbracelet/lipgloss"
 const (
 	oceanHexBackground = "#0b1929" // deep ocean — app background
 	oceanHexForeground = "#c8d6e5" // soft blue-white — body text
-	oceanHexPrimary    = "#48dbfb" // sky blue — main accent
+	oceanHexPrimary    = "#00d4aa" // vibeflow teal — main accent
 	oceanHexSecondary  = "#0abde3" // deeper blue — supporting accent
 	oceanHexAccent     = "#55efc4" // sea foam green — data/values
 	oceanHexSuccess    = "#00d2d3" // teal — success

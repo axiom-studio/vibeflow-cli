@@ -919,7 +919,7 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 	// Build status-left: [vibeflow] provider | branch (Ocean palette, theme.go:
 	// deep-ocean bg, sky-blue accent, surface, storm-gray muted, soft fg).
 	statusLeft := fmt.Sprintf(
-		"#[fg=#0b1929,bg=#48dbfb,bold] vibeflow #[fg=#48dbfb,bg=#152d45,nobold] %s #[fg=#576574]|#[fg=#c8d6e5] %s ",
+		"#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] %s #[fg=#576574]|#[fg=#c8d6e5] %s ",
 		provider, branch,
 	)
 
@@ -929,7 +929,7 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 		project = "default"
 	}
 	statusRight := fmt.Sprintf(
-		"#[fg=#576574]Ctrl+q:#[fg=#c8d6e5]Menu #[fg=#576574]|#[fg=#576574] Ctrl+\\:#[fg=#c8d6e5]Menu #[fg=#576574]| #[fg=#48dbfb]%s ",
+		"#[fg=#576574]Ctrl+q:#[fg=#c8d6e5]Menu #[fg=#576574]|#[fg=#576574] Ctrl+\\:#[fg=#c8d6e5]Menu #[fg=#576574]| #[fg=#00d4aa]%s ",
 		project,
 	)
 
