@@ -172,6 +172,18 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 // attachExitMsg is sent when a tmux attach-session process exits.
 type attachExitMsg struct{ err error }
 
+// workbenchReadyMsg carries the result of composing the pane-join workbench.
+// The composition (or the error) is produced off the Update goroutine so the
+// tmux calls do not block the UI.
+type workbenchReadyMsg struct {
+	comp *WorkbenchComposition
+	err  error
+}
+
+// workbenchExitMsg is sent when the composed workbench attach process exits, so
+// the joined panes can be restored to their own sessions.
+type workbenchExitMsg struct{ comp *WorkbenchComposition }
+
 // tickMsg triggers periodic refresh.
 type tickMsg time.Time
 
@@ -463,6 +475,26 @@ func (m Model) selectedSessionIdx() int {
 	return m.cursor
 }
 
+// liveSessionNames returns the tmux names of every session, in list order, for
+// composing the pane-join workbench.
+func (m Model) liveSessionNames() []string {
+	names := make([]string, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		names = append(names, s.Name)
+	}
+	return names
+}
+
+// composeWorkbenchCmd runs ComposeWorkbench off the Update goroutine (it issues
+// several tmux commands) and reports the result via workbenchReadyMsg.
+func (m Model) composeWorkbenchCmd(names []string) tea.Cmd {
+	tmux := m.tmux
+	return func() tea.Msg {
+		comp, err := tmux.ComposeWorkbench(names)
+		return workbenchReadyMsg{comp: comp, err: err}
+	}
+}
+
 // cacheGCTickCmd returns a command that fires a GC tick every 1 minute.
 func cacheGCTickCmd() tea.Cmd {
 	return tea.Tick(1*time.Minute, func(t time.Time) tea.Msg {
@@ -569,6 +601,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// No ClearScreen needed: RestoreTerminal already re-enters alt screen
 		// which clears the screen and calls repaint() internally.
 		return m, m.refreshSessions
+	case workbenchReadyMsg:
+		// Composition finished off-goroutine. On success, attach natively to the
+		// holder; on failure, surface the error and auto-clear it.
+		if msg.err != nil {
+			m.logger.Error("workbench compose: %v", msg.err)
+			m.err = msg.err
+			return m, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return errClearMsg{} })
+		}
+		comp := msg.comp
+		cmd := m.tmux.AttachSessionCmd(comp.HolderName())
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			if err != nil {
+				m.logger.Error("workbench attach: %v", err)
+			}
+			return workbenchExitMsg{comp: comp}
+		})
+	case workbenchExitMsg:
+		// Workbench attach exited — restore every joined pane to its own session
+		// (off-goroutine, since it runs several tmux commands), then refresh.
+		comp := msg.comp
+		refresh := m.refreshSessions
+		logger := m.logger
+		return m, func() tea.Msg {
+			if comp != nil {
+				if err := comp.Restore(); err != nil {
+					logger.Error("workbench restore: %v", err)
+				}
+			}
+			return refresh()
+		}
 	case autoAttachMsg:
 		// Auto-attach to a newly created session.
 		cmd := m.tmux.AttachSessionCmd(msg.name)
@@ -765,6 +827,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, m.refreshSessions
+		case "m":
+			// Workbench: compose every live session into one natively
+			// interactive tmux window (pane-join) and attach. With a single
+			// session there is nothing to compose — attach it directly; with
+			// none, do nothing.
+			live := m.liveSessionNames()
+			switch len(live) {
+			case 0:
+				return m, nil
+			case 1:
+				cmd := m.tmux.AttachSessionCmd(live[0])
+				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+					return attachExitMsg{err: err}
+				})
+			default:
+				return m, m.composeWorkbenchCmd(live)
+			}
 		case "w":
 			m.worktreeList = NewWorktreeListModel(m.worktrees, m.store)
 			m.activeView = ViewWorktrees
@@ -1414,7 +1493,7 @@ func (m Model) View() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  m: workbench  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -1842,6 +1921,7 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString("\n")
 	b.WriteString(keyStyle.Render("  j / k") + descStyle.Render("Move down / up") + "\n")
 	b.WriteString(keyStyle.Render("  enter") + descStyle.Render("Attach to session") + "\n")
+	b.WriteString(keyStyle.Render("  m") + descStyle.Render("Workbench: all sessions in one native view") + "\n")
 	b.WriteString(keyStyle.Render("  g") + descStyle.Render("Toggle flat / grouped view") + "\n")
 	b.WriteString("\n")
 

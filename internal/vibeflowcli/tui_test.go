@@ -17,8 +17,11 @@
 package vibeflowcli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // detailPanelModel builds a minimal Model with a single session row selected,
@@ -100,6 +103,76 @@ func TestRenderDetailPanel_GatewayEnv_GeminiUsesGeminiVars(t *testing.T) {
 	}
 	if strings.Contains(out, "secret-jwt-token") {
 		t.Errorf("detail panel leaked the API token:\n%s", out)
+	}
+}
+
+func TestLiveSessionNames_OrderPreserved(t *testing.T) {
+	m := Model{sessions: []SessionRow{
+		{Name: "vibeflow_claude-a"},
+		{Name: "vibeflow_codex-b"},
+		{Name: "vibeflow_gemini-c"},
+	}}
+	got := m.liveSessionNames()
+	want := []string{"vibeflow_claude-a", "vibeflow_codex-b", "vibeflow_gemini-c"}
+	if len(got) != len(want) {
+		t.Fatalf("liveSessionNames len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("liveSessionNames[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// pressM sends the workbench key to a model and returns the resulting model and
+// command WITHOUT executing the command (executing would issue real tmux calls;
+// compose/restore behavior is covered by the real-tmux round-trip test).
+func pressM(m Model) (Model, tea.Cmd) {
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	return nm.(Model), cmd
+}
+
+func TestWorkbenchKey_ZeroSessions_Noop(t *testing.T) {
+	m := Model{tmux: NewTmuxManager("vftest")}
+	nm, cmd := pressM(m)
+	if cmd != nil {
+		t.Fatalf("workbench with 0 sessions must be a no-op (nil cmd)")
+	}
+	if nm.activeView != ViewSessions {
+		t.Errorf("workbench must not change the active view, got %v", nm.activeView)
+	}
+}
+
+func TestWorkbenchKey_SingleSession_ReturnsAttachCmd(t *testing.T) {
+	m := Model{tmux: NewTmuxManager("vftest"), sessions: []SessionRow{{Name: "vibeflow_claude-a"}}}
+	_, cmd := pressM(m)
+	if cmd == nil {
+		t.Fatalf("single-session workbench must attach directly (non-nil cmd)")
+	}
+}
+
+func TestWorkbenchKey_MultiSession_ReturnsComposeCmd(t *testing.T) {
+	m := Model{tmux: NewTmuxManager("vftest"), sessions: []SessionRow{
+		{Name: "vibeflow_claude-a"},
+		{Name: "vibeflow_codex-b"},
+	}}
+	nm, cmd := pressM(m)
+	if cmd == nil {
+		t.Fatalf("multi-session workbench must return a compose command")
+	}
+	if nm.activeView != ViewSessions {
+		t.Errorf("workbench must not change the active view, got %v", nm.activeView)
+	}
+}
+
+func TestUpdate_WorkbenchReadyMsg_Error_SurfacesError(t *testing.T) {
+	m := Model{logger: NewLogger(), tmux: NewTmuxManager("vftest")}
+	nm, cmd := m.Update(workbenchReadyMsg{err: fmt.Errorf("compose failed")})
+	if nm.(Model).err == nil {
+		t.Fatalf("expected compose error to be surfaced on the model")
+	}
+	if cmd == nil {
+		t.Fatalf("expected an error-clear tick command after a compose failure")
 	}
 }
 
