@@ -154,22 +154,30 @@ func TestRenderTerminalPane_IgnoresStaleCaptureForOtherSession(t *testing.T) {
 	}
 }
 
+func TestUpdate_EnterAttachesSelectedSession(t *testing.T) {
+	m := Model{
+		config:   &Config{},
+		tmux:     &TmuxManager{socketName: "test"},
+		sessions: []SessionRow{{Name: "s1", Status: "running"}},
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter should attach to the selected tmux session")
+	}
+	m = updated.(Model)
+	if m.terminalFocus {
+		t.Fatal("enter should not toggle terminal focus")
+	}
+}
+
 func TestUpdate_WorkbenchToggles(t *testing.T) {
 	m := Model{
 		config:   &Config{},
 		sessions: []SessionRow{{Name: "s1", Status: "running"}},
 	}
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil {
-		t.Fatal("enter should focus the embedded terminal, not attach to tmux")
-	}
-	m = updated.(Model)
-	if !m.terminalFocus {
-		t.Fatal("enter should toggle terminal focus")
-	}
-
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
 	if cmd != nil {
 		t.Fatal("inspector toggle should not run a command")
 	}
