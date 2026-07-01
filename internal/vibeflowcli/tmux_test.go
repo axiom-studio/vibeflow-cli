@@ -459,7 +459,10 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	names := []string{"a", "b", "c"}
+	// Six sessions: this is the count from the issue #3280 report and exceeds
+	// the ~3-pane point where the old "tile once at the end" code hit tmux's
+	// "create pane failed: pane too small".
+	names := []string{"a", "b", "c", "d", "e", "f"}
 	full := make([]string, len(names))
 	for i, n := range names {
 		if err := tm.CreateSessionWithOpts(SessionOpts{
