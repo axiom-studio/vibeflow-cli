@@ -172,7 +172,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 	}
 	defer model.logger.Close()
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		model.logger.Error("TUI fatal: %v", err)
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)

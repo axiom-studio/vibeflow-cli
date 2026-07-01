@@ -171,28 +171,42 @@ func TestUpdate_EnterAttachesSelectedSession(t *testing.T) {
 	}
 }
 
-func TestUpdate_WorkbenchToggles(t *testing.T) {
+func TestUpdate_MatrixToggle(t *testing.T) {
 	m := Model{
 		config:   &Config{},
 		sessions: []SessionRow{{Name: "s1", Status: "running"}},
 	}
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-	if cmd != nil {
-		t.Fatal("inspector toggle should not run a command")
-	}
-	m = updated.(Model)
-	if !m.inspectorOpen {
-		t.Fatal("i should open the inspector drawer")
-	}
-
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	m = updated.(Model)
 	if !m.matrixMode {
 		t.Fatal("s should enable matrix mode")
 	}
 	if cmd == nil {
 		t.Fatal("matrix toggle should request a capture refresh")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+	if m.matrixMode {
+		t.Fatal("second s should disable matrix mode")
+	}
+}
+
+// TestUpdate_InspectorKeyIsNoOp guards that the removed inspector toggle ('i')
+// no longer mutates state or crashes now that the drawer is gone.
+func TestUpdate_InspectorKeyIsNoOp(t *testing.T) {
+	m := Model{
+		config:   &Config{},
+		sessions: []SessionRow{{Name: "s1", Status: "running"}},
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd != nil {
+		t.Fatal("removed inspector key should not run a command")
+	}
+	m = updated.(Model)
+	if m.matrixMode {
+		t.Fatal("'i' must not enable matrix mode")
 	}
 }
 
@@ -239,5 +253,161 @@ func TestRenderMatrixPane_ShowsMultipleSessionOutputs(t *testing.T) {
 	}
 	if !strings.Contains(out, "s2") || !strings.Contains(out, "two") {
 		t.Errorf("matrix mode missing second session output:\n%s", out)
+	}
+	// The 2x2 grid header reports the visible window over the total.
+	if !strings.Contains(out, "of 2") {
+		t.Errorf("matrix header should report the window position:\n%s", out)
+	}
+}
+
+func sixSessions() []SessionRow {
+	return []SessionRow{
+		{Name: "s0", Status: "running"},
+		{Name: "s1", Status: "running"},
+		{Name: "s2", Status: "running"},
+		{Name: "s3", Status: "running"},
+		{Name: "s4", Status: "running"},
+		{Name: "s5", Status: "running"},
+	}
+}
+
+func TestRenderMatrixPane_ScrollWindowShowsLaterSessions(t *testing.T) {
+	m := Model{matrixMode: true, width: 120, height: 40, sessions: sixSessions()}
+
+	// Default window shows the first four sessions.
+	out := ansiRe.ReplaceAllString(m.renderWorkbenchTerminal(80, 28), "")
+	if !strings.Contains(out, "s0") || !strings.Contains(out, "s3") {
+		t.Errorf("default matrix window should show s0..s3:\n%s", out)
+	}
+	if strings.Contains(out, "s5") {
+		t.Errorf("default matrix window should not show s5:\n%s", out)
+	}
+
+	// Scrolling the window forward reveals the later sessions.
+	m.matrixOffset = 2
+	out = ansiRe.ReplaceAllString(m.renderWorkbenchTerminal(80, 28), "")
+	if !strings.Contains(out, "s5") || !strings.Contains(out, "s2") {
+		t.Errorf("scrolled matrix window should show s2..s5:\n%s", out)
+	}
+}
+
+func TestListLineToCursor_FlatMixedSubtitles(t *testing.T) {
+	m := Model{sessions: []SessionRow{
+		{Name: "s0", Branch: "main"}, // has subtitle -> 2 lines
+		{Name: "s1"},                 // no subtitle -> 1 line
+		{Name: "s2", Project: "p"},   // has subtitle -> 2 lines
+	}}
+	got := m.listLineToCursor()
+	want := []int{0, 0, 1, 2, 2}
+	if len(got) != len(want) {
+		t.Fatalf("line map length: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("line map[%d]: got %d want %d (full %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestHitTestMatrix_MapsCellsToSessions(t *testing.T) {
+	m := Model{matrixMode: true, width: 120, height: 40, sessions: sixSessions()}
+
+	width, height := m.normalizedDims()
+	leftWidth, workbench := m.columnWidths(width)
+	tcw := workbench - 4
+	contentH := m.workbenchContentDims(height)
+	lcw, _, cellH := matrixGridDims(tcw, contentH)
+	x0 := leftWidth + 2
+	gridTop := m.headerOffset() + 2
+
+	cases := []struct {
+		name    string
+		x, y    int
+		wantIdx int
+		wantOK  bool
+	}{
+		{"top-left", x0, gridTop, 0, true},
+		{"top-left-inner", x0 + lcw - 1, gridTop + cellH - 1, 0, true},
+		{"top-right", x0 + lcw + 1, gridTop, 1, true},
+		{"bottom-left", x0, gridTop + cellH + 1, 2, true},
+		{"bottom-right", x0 + lcw + 1, gridTop + cellH + 1, 3, true},
+		{"gutter-column", x0 + lcw, gridTop, 0, false},
+		{"row-separator", x0, gridTop + cellH, 0, false},
+		{"left-of-grid", x0 - 1, gridTop, 0, false},
+	}
+	for _, tc := range cases {
+		idx, ok := m.hitTestMatrix(tc.x, tc.y)
+		if ok != tc.wantOK || (ok && idx != tc.wantIdx) {
+			t.Errorf("%s: hitTestMatrix(%d,%d) = (%d,%v), want (%d,%v)",
+				tc.name, tc.x, tc.y, idx, ok, tc.wantIdx, tc.wantOK)
+		}
+	}
+
+	// A scrolled window shifts the mapping by the offset.
+	m.matrixOffset = 2
+	if idx, ok := m.hitTestMatrix(x0, gridTop); !ok || idx != 2 {
+		t.Errorf("scrolled top-left: got (%d,%v), want (2,true)", idx, ok)
+	}
+}
+
+func TestUpdate_MouseClickFocusesListRow(t *testing.T) {
+	m := Model{
+		width:    120,
+		height:   40,
+		sessions: []SessionRow{{Name: "s0", Branch: "a"}, {Name: "s1", Branch: "b"}, {Name: "s2", Branch: "c"}},
+	}
+	// Each session renders name+subtitle (2 lines); s1's name line is the third.
+	y := m.headerOffset() + 2 + 2
+	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 3, Y: y})
+	m = updated.(Model)
+	if m.cursor != 1 {
+		t.Fatalf("click on s1 row should focus cursor 1, got %d", m.cursor)
+	}
+}
+
+func TestUpdate_MouseClickFocusesMatrixPane(t *testing.T) {
+	m := Model{matrixMode: true, width: 120, height: 40, sessions: sixSessions()}
+
+	width, height := m.normalizedDims()
+	leftWidth, workbench := m.columnWidths(width)
+	tcw := workbench - 4
+	contentH := m.workbenchContentDims(height)
+	lcw, _, cellH := matrixGridDims(tcw, contentH)
+	// Bottom-right cell → session index 3.
+	x := leftWidth + 2 + lcw + 1
+	y := m.headerOffset() + 2 + cellH + 1
+
+	updated, cmd := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y})
+	m = updated.(Model)
+	if m.cursor != 3 {
+		t.Fatalf("click on bottom-right matrix cell should focus session 3, got %d", m.cursor)
+	}
+	if cmd == nil {
+		t.Fatal("focusing a matrix pane should request a capture refresh")
+	}
+}
+
+func TestUpdate_MouseWheelScrollsMatrix(t *testing.T) {
+	m := Model{matrixMode: true, width: 120, height: 40, sessions: sixSessions()}
+
+	updated, _ := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	m = updated.(Model)
+	if m.matrixOffset != 1 {
+		t.Fatalf("wheel down should scroll matrix to offset 1, got %d", m.matrixOffset)
+	}
+
+	// Offset clamps at total-4 (6-4=2).
+	for i := 0; i < 5; i++ {
+		updated, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+		m = updated.(Model)
+	}
+	if m.matrixOffset != 2 {
+		t.Fatalf("wheel down should clamp matrix offset at 2, got %d", m.matrixOffset)
+	}
+
+	updated, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	m = updated.(Model)
+	if m.matrixOffset != 1 {
+		t.Fatalf("wheel up should scroll matrix back to offset 1, got %d", m.matrixOffset)
 	}
 }
