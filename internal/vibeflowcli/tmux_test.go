@@ -530,6 +530,103 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestWorkbenchPaneTitle(t *testing.T) {
+	if got := workbenchPaneTitle("vibeflow_claude-a"); got != "claude-a" {
+		t.Errorf("workbenchPaneTitle = %q, want claude-a", got)
+	}
+	if got := workbenchPaneTitle("plain"); got != "plain" {
+		t.Errorf("workbenchPaneTitle(unprefixed) = %q, want plain", got)
+	}
+}
+
+// TestComposeProjectWorkbench_RoundTrip exercises the multi-window (Option A)
+// compose: two projects, each a window of two panes, then a non-destructive
+// restore. Skipped when tmux is absent.
+func TestComposeProjectWorkbench_RoundTrip(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-projwb-roundtrip")
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+
+	dir := t.TempDir()
+	mk := func(n string) string {
+		if err := tm.CreateSessionWithOpts(SessionOpts{
+			Name: n, Provider: "claude", WorkDir: dir, Command: "sleep 300",
+		}); err != nil {
+			t.Fatalf("create session %s: %v", n, err)
+		}
+		return tm.FullSessionName("claude", n)
+	}
+	a1, a2, b1, b2 := mk("a1"), mk("a2"), mk("b1"), mk("b2")
+	all := []string{a1, a2, b1, b2}
+
+	before := make(map[string]string, len(all))
+	for _, s := range all {
+		pid, err := tm.paneID(s)
+		if err != nil {
+			t.Fatalf("paneID(%s): %v", s, err)
+		}
+		before[s] = pid
+	}
+
+	projects := []WorkbenchProject{
+		{Label: "alpha", Sessions: []string{a1, a2}},
+		{Label: "beta", Sessions: []string{b1, b2}},
+	}
+	comp, err := tm.ComposeProjectWorkbench(projects, "beta")
+	if err != nil {
+		t.Fatalf("ComposeProjectWorkbench: %v", err)
+	}
+
+	for _, s := range all {
+		if tm.HasSession(s) {
+			t.Errorf("source session %s should be consumed by compose", s)
+		}
+	}
+	wins, err := tm.run("list-windows", "-t", comp.HolderName(), "-F", "#{window_name}")
+	if err != nil {
+		t.Fatalf("list-windows: %v", err)
+	}
+	if got := len(strings.Fields(wins)); got != 2 {
+		t.Errorf("holder windows = %d, want 2:\n%s", got, wins)
+	}
+	for _, w := range []string{"alpha", "beta"} {
+		out, err := tm.run("list-panes", "-t", comp.HolderName()+":"+w, "-F", "#{pane_id}")
+		if err != nil {
+			t.Fatalf("list-panes %s: %v", w, err)
+		}
+		if got := len(strings.Fields(out)); got != 2 {
+			t.Errorf("window %s panes = %d, want 2:\n%s", w, got, out)
+		}
+	}
+
+	if err := comp.Restore(); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if tm.HasSession(comp.HolderName()) {
+		t.Errorf("holder %s should be destroyed after restore", comp.HolderName())
+	}
+	for _, s := range all {
+		if !tm.HasSession(s) {
+			t.Errorf("session %s was not restored", s)
+			continue
+		}
+		pid, err := tm.paneID(s)
+		if err != nil {
+			t.Errorf("paneID(%s) after restore: %v", s, err)
+			continue
+		}
+		if pid != before[s] {
+			t.Errorf("session %s pane id changed %s -> %s (process not preserved)", s, before[s], pid)
+		}
+	}
+}
+
 func TestIsSecretEnvKey(t *testing.T) {
 	tests := []struct {
 		key  string

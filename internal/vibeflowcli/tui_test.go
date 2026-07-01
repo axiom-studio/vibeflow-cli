@@ -106,21 +106,59 @@ func TestRenderDetailPanel_GatewayEnv_GeminiUsesGeminiVars(t *testing.T) {
 	}
 }
 
-func TestLiveSessionNames_OrderPreserved(t *testing.T) {
-	m := Model{sessions: []SessionRow{
-		{Name: "vibeflow_claude-a"},
-		{Name: "vibeflow_codex-b"},
-		{Name: "vibeflow_gemini-c"},
-	}}
-	got := m.liveSessionNames()
-	want := []string{"vibeflow_claude-a", "vibeflow_codex-b", "vibeflow_gemini-c"}
-	if len(got) != len(want) {
-		t.Fatalf("liveSessionNames len = %d, want %d (%v)", len(got), len(want), got)
+func TestProjectGrouping(t *testing.T) {
+	// Pre-populate the repo-root cache so getRepoRoot never shells out to git.
+	m := Model{
+		repoRootCache: map[string]string{
+			"/work/alpha":     "/work/alpha",
+			"/work/alpha/sub": "/work/alpha",
+			"/work/beta":      "/work/beta",
+		},
+		sessions: []SessionRow{
+			{Name: "vibeflow_claude-a1", WorkingDir: "/work/alpha"},
+			{Name: "vibeflow_codex-b1", WorkingDir: "/work/beta"},
+			{Name: "vibeflow_gemini-a2", WorkingDir: "/work/alpha/sub"},
+		},
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("liveSessionNames[%d] = %q, want %q", i, got[i], want[i])
-		}
+
+	groups := m.projectGroups()
+	if len(groups) != 2 {
+		t.Fatalf("projectGroups len = %d, want 2 (%+v)", len(groups), groups)
+	}
+	if groups[0].Label != "alpha" || len(groups[0].Sessions) != 2 {
+		t.Errorf("group[0] = %+v, want label alpha with 2 sessions", groups[0])
+	}
+	if groups[1].Label != "beta" || len(groups[1].Sessions) != 1 {
+		t.Errorf("group[1] = %+v, want label beta with 1 session", groups[1])
+	}
+
+	m.cursor = 1 // the beta session
+	label, names := m.selectedProjectSessions()
+	if label != "beta" || len(names) != 1 || names[0] != "vibeflow_codex-b1" {
+		t.Errorf("selectedProjectSessions@beta = %q %v, want beta [vibeflow_codex-b1]", label, names)
+	}
+	m.cursor = 0 // an alpha session
+	label, names = m.selectedProjectSessions()
+	if label != "alpha" || len(names) != 2 {
+		t.Errorf("selectedProjectSessions@alpha = %q %v, want alpha with 2 sessions", label, names)
+	}
+}
+
+func TestWorkbenchKey_M_MultiProject_ReturnsCmd(t *testing.T) {
+	m := Model{
+		tmux:          NewTmuxManager("vftest"),
+		repoRootCache: map[string]string{"/work/a": "/work/a", "/work/b": "/work/b"},
+		sessions: []SessionRow{
+			{Name: "vibeflow_claude-a", WorkingDir: "/work/a"},
+			{Name: "vibeflow_codex-b", WorkingDir: "/work/b"},
+		},
+	}
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("M")})
+	if cmd == nil {
+		t.Fatalf("M with 2 sessions across projects must return a compose command")
+	}
+	if nm.(Model).activeView != ViewSessions {
+		t.Errorf("workbench must not change the active view")
 	}
 }
 

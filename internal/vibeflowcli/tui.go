@@ -475,14 +475,49 @@ func (m Model) selectedSessionIdx() int {
 	return m.cursor
 }
 
-// liveSessionNames returns the tmux names of every session, in list order, for
-// composing the pane-join workbench.
-func (m Model) liveSessionNames() []string {
-	names := make([]string, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		names = append(names, s.Name)
+// projectLabel returns a short display label for a repo root (its basename), or
+// "(unknown)" when the root is unknown.
+func projectLabel(root string) string {
+	if root == "" || root == "(unknown)" {
+		return "(unknown)"
 	}
-	return names
+	return filepath.Base(root)
+}
+
+// selectedProjectSessions returns the label and tmux names of the sessions that
+// share the selected session's project (repo root), in list order. Used by the
+// `m` (single-project) workbench.
+func (m Model) selectedProjectSessions() (label string, names []string) {
+	idx := m.selectedSessionIdx()
+	if idx < 0 {
+		return "", nil
+	}
+	selRoot := m.getRepoRoot(m.sessions[idx].WorkingDir)
+	for _, s := range m.sessions {
+		if m.getRepoRoot(s.WorkingDir) == selRoot {
+			names = append(names, s.Name)
+		}
+	}
+	return projectLabel(selRoot), names
+}
+
+// projectGroups returns every project (repo-root group) with its session names,
+// in first-seen order. Used by the `M` (all-projects) workbench.
+func (m Model) projectGroups() []WorkbenchProject {
+	var order []string
+	byRoot := map[string][]string{}
+	for _, s := range m.sessions {
+		root := m.getRepoRoot(s.WorkingDir)
+		if _, ok := byRoot[root]; !ok {
+			order = append(order, root)
+		}
+		byRoot[root] = append(byRoot[root], s.Name)
+	}
+	out := make([]WorkbenchProject, 0, len(order))
+	for _, root := range order {
+		out = append(out, WorkbenchProject{Label: projectLabel(root), Sessions: byRoot[root]})
+	}
+	return out
 }
 
 // composeWorkbenchCmd runs ComposeWorkbench off the Update goroutine (it issues
@@ -491,6 +526,16 @@ func (m Model) composeWorkbenchCmd(names []string) tea.Cmd {
 	tmux := m.tmux
 	return func() tea.Msg {
 		comp, err := tmux.ComposeWorkbench(names)
+		return workbenchReadyMsg{comp: comp, err: err}
+	}
+}
+
+// composeProjectWorkbenchCmd runs ComposeProjectWorkbench off the Update
+// goroutine and reports the result via workbenchReadyMsg.
+func (m Model) composeProjectWorkbenchCmd(projects []WorkbenchProject, selectLabel string) tea.Cmd {
+	tmux := m.tmux
+	return func() tea.Msg {
+		comp, err := tmux.ComposeProjectWorkbench(projects, selectLabel)
 		return workbenchReadyMsg{comp: comp, err: err}
 	}
 }
@@ -828,22 +873,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.refreshSessions
 		case "m":
-			// Workbench: compose every live session into one natively
-			// interactive tmux window (pane-join) and attach. With a single
-			// session there is nothing to compose — attach it directly; with
-			// none, do nothing.
-			live := m.liveSessionNames()
-			switch len(live) {
+			// Project workbench: compose the selected session's project (its
+			// repo-root group) into one natively interactive tmux view. One
+			// session → attach it directly; none → no-op.
+			_, names := m.selectedProjectSessions()
+			switch len(names) {
 			case 0:
 				return m, nil
 			case 1:
-				cmd := m.tmux.AttachSessionCmd(live[0])
+				cmd := m.tmux.AttachSessionCmd(names[0])
 				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 					return attachExitMsg{err: err}
 				})
 			default:
-				return m, m.composeWorkbenchCmd(live)
+				return m, m.composeWorkbenchCmd(names)
 			}
+		case "M":
+			// All-projects workbench: one tmux window per project, cycled with
+			// Ctrl-b n/p. Worth composing only with ≥2 sessions total.
+			projects := m.projectGroups()
+			total := 0
+			for _, p := range projects {
+				total += len(p.Sessions)
+			}
+			if total < 2 {
+				return m, nil
+			}
+			selLabel, _ := m.selectedProjectSessions()
+			return m, m.composeProjectWorkbenchCmd(projects, selLabel)
 		case "w":
 			m.worktreeList = NewWorktreeListModel(m.worktrees, m.store)
 			m.activeView = ViewWorktrees
@@ -1493,7 +1550,7 @@ func (m Model) View() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  m: workbench  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  m: project wb  M: all wb  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -1921,7 +1978,8 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString("\n")
 	b.WriteString(keyStyle.Render("  j / k") + descStyle.Render("Move down / up") + "\n")
 	b.WriteString(keyStyle.Render("  enter") + descStyle.Render("Attach to session") + "\n")
-	b.WriteString(keyStyle.Render("  m") + descStyle.Render("Workbench: all sessions in one native view") + "\n")
+	b.WriteString(keyStyle.Render("  m") + descStyle.Render("Workbench: this project's sessions, native view") + "\n")
+	b.WriteString(keyStyle.Render("  M") + descStyle.Render("Workbench: all projects (Ctrl-b n/p to switch)") + "\n")
 	b.WriteString(keyStyle.Render("  g") + descStyle.Render("Toggle flat / grouped view") + "\n")
 	b.WriteString("\n")
 

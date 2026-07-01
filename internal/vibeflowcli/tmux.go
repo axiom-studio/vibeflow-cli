@@ -562,28 +562,163 @@ func (tm *TmuxManager) ComposeWorkbench(names []string) (*WorkbenchComposition, 
 	}
 
 	comp := &WorkbenchComposition{tm: tm, holder: holder}
-	for _, name := range full {
-		pid, err := tm.paneID(name)
+	if err := tm.composeInto(holder, full, comp); err != nil {
+		comp.Restore()
+		return nil, err
+	}
+
+	// Drop the holder's original shell pane so only agent panes remain, then
+	// tile them into a grid and add the bordered chrome + shortcut hint.
+	_, _ = tm.run("kill-pane", "-t", placeholder)
+	_, _ = tm.run(tiledLayoutArgs(holder)...)
+	tm.configureWorkbenchChrome(holder, workbenchHintSingle)
+	return comp, nil
+}
+
+// Keyboard-shortcut hints shown in the workbench status bar.
+const (
+	workbenchHintSingle = "  Ctrl-q or Ctrl-b d: back to menu  "
+	workbenchHintMulti  = "  Ctrl-b n / Ctrl-b p: next / prev project   |   Ctrl-q or Ctrl-b d: back to menu  "
+)
+
+// WorkbenchProject is a named group of sessions (one project / working
+// directory) composed into a single workbench window by ComposeProjectWorkbench.
+type WorkbenchProject struct {
+	Label    string   // short project label for the window name / border
+	Sessions []string // tmux session names in this project
+}
+
+// workbenchPaneTitle is the short label shown on a pane's border in the
+// workbench — the session name without the vibeflow_ prefix.
+func workbenchPaneTitle(fullName string) string {
+	return strings.TrimPrefix(fullName, sessionPrefix)
+}
+
+// composeInto joins the active pane of each session into the target window (a
+// session or "session:window"/window-id spec), tiling after every join so the
+// next join has room — a small holder otherwise hits tmux's "create pane
+// failed: pane too small" after a few default 50/50 join-pane splits (issue
+// #3280). Each pane gets a titled top border (the "container rectangle with
+// borders"). Sources are appended to comp so Restore can return every pane to
+// its own session.
+func (tm *TmuxManager) composeInto(target string, sessions []string, comp *WorkbenchComposition) error {
+	_, _ = tm.run("set-option", "-t", target, "pane-border-status", "top")
+	_, _ = tm.run("set-option", "-t", target, "pane-border-format", " #{pane_title} ")
+	for _, name := range sessions {
+		full := tm.ensurePrefix(name)
+		pid, err := tm.paneID(full)
+		if err != nil {
+			return err
+		}
+		status := tm.captureSessionStatus(full)
+		if out, err := tm.run(joinPaneArgs(full, target)...); err != nil {
+			return fmt.Errorf("join %q into workbench: %w: %s", full, err, strings.TrimSpace(out))
+		}
+		_, _ = tm.run("select-pane", "-t", pid, "-T", workbenchPaneTitle(full))
+		comp.sources = append(comp.sources, workbenchSource{name: full, paneID: pid, status: status})
+		_, _ = tm.run(tiledLayoutArgs(target)...)
+	}
+	return nil
+}
+
+// configureWorkbenchChrome sets a single-line status bar on the holder carrying
+// the given keyboard-shortcut hint, so the workbench shows its controls. The
+// per-project window tabs remain visible in the status bar's window list.
+func (tm *TmuxManager) configureWorkbenchChrome(holder, hint string) {
+	for _, opt := range []struct{ key, val string }{
+		{"status", "on"},
+		{"status-style", "fg=#a9b1d6,bg=#1a1b26"},
+		{"status-left-length", "220"},
+		{"status-left", hint},
+		{"status-right", ""},
+	} {
+		_, _ = tm.run("set-option", "-t", holder, opt.key, opt.val)
+	}
+}
+
+// windowID returns the tmux window id (e.g. "@3") for a window target.
+func (tm *TmuxManager) windowID(target string) (string, error) {
+	out, err := tm.run("display-message", "-t", target, "-p", "#{window_id}")
+	if err != nil {
+		return "", fmt.Errorf("window id for %q: %w", target, err)
+	}
+	id := strings.TrimSpace(out)
+	if id == "" {
+		return "", fmt.Errorf("window id for %q: empty", target)
+	}
+	return id, nil
+}
+
+// ComposeProjectWorkbench builds a multi-project workbench: one holder window
+// per project (window name = project label; panes = that project's sessions,
+// tiled + bordered), then selects the window whose label == selectLabel. The
+// caller attaches to HolderName; Ctrl-b n/p cycles projects natively, and
+// Restore returns every pane across every window to its own session. At least
+// two sessions total are required. On any failure the panes already composed
+// are restored before the error is returned.
+func (tm *TmuxManager) ComposeProjectWorkbench(projects []WorkbenchProject, selectLabel string) (*WorkbenchComposition, error) {
+	total := 0
+	for _, p := range projects {
+		total += len(p.Sessions)
+	}
+	if total < 2 {
+		return nil, fmt.Errorf("workbench needs at least 2 sessions, got %d", total)
+	}
+
+	holder := workbenchHolderName
+	if tm.HasSession(holder) {
+		_, _ = tm.run("kill-session", "-t", holder)
+	}
+	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
+		return nil, fmt.Errorf("create workbench holder: %w", err)
+	}
+
+	comp := &WorkbenchComposition{tm: tm, holder: holder}
+	selectTarget := ""
+	first := true
+	for _, p := range projects {
+		if len(p.Sessions) == 0 {
+			continue
+		}
+		var win string
+		if first {
+			// Reuse the holder's initial window for the first project.
+			id, err := tm.windowID(holder + ":0")
+			if err != nil {
+				comp.Restore()
+				return nil, err
+			}
+			win = id
+			_, _ = tm.run("rename-window", "-t", win, p.Label)
+			first = false
+		} else {
+			out, err := tm.run("new-window", "-d", "-P", "-F", "#{window_id}", "-t", holder, "-n", p.Label)
+			if err != nil {
+				comp.Restore()
+				return nil, fmt.Errorf("new workbench window %q: %w: %s", p.Label, err, strings.TrimSpace(out))
+			}
+			win = strings.TrimSpace(out)
+		}
+		placeholder, err := tm.paneID(win)
 		if err != nil {
 			comp.Restore()
 			return nil, err
 		}
-		status := tm.captureSessionStatus(name)
-		if out, err := tm.run(joinPaneArgs(name, holder)...); err != nil {
+		if err := tm.composeInto(win, p.Sessions, comp); err != nil {
 			comp.Restore()
-			return nil, fmt.Errorf("join %q into workbench: %w: %s", name, err, strings.TrimSpace(out))
+			return nil, err
 		}
-		comp.sources = append(comp.sources, workbenchSource{name: name, paneID: pid, status: status})
-		// Re-tile after every join so the next join has room. Without this a
-		// small holder hits tmux's "create pane failed: pane too small" after a
-		// few default 50/50 join-pane splits (issue #3280).
-		_, _ = tm.run(tiledLayoutArgs(holder)...)
+		_, _ = tm.run("kill-pane", "-t", placeholder)
+		_, _ = tm.run(tiledLayoutArgs(win)...)
+		if p.Label == selectLabel {
+			selectTarget = win
+		}
 	}
 
-	// Drop the holder's original shell pane so only agent panes remain, then
-	// tile them into a grid.
-	_, _ = tm.run("kill-pane", "-t", placeholder)
-	_, _ = tm.run(tiledLayoutArgs(holder)...)
+	tm.configureWorkbenchChrome(holder, workbenchHintMulti)
+	if selectTarget != "" {
+		_, _ = tm.run("select-window", "-t", selectTarget)
+	}
 	return comp, nil
 }
 
