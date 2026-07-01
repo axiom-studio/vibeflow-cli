@@ -676,6 +676,20 @@ func TestConfigureWorkbenchChrome_StatusPositionTop(t *testing.T) {
 	}
 }
 
+// TestIsWorkbenchHolder guards #3300: the internal workbench holder session is
+// recognized (and thus excluded from the TUI session list) while real agent
+// sessions are not.
+func TestIsWorkbenchHolder(t *testing.T) {
+	if !isWorkbenchHolder(workbenchHolderName) {
+		t.Errorf("workbench holder %q must be recognized", workbenchHolderName)
+	}
+	for _, name := range []string{"vibeflow_claude-a", "vibeflow_codex-b", "vibeflow_workbench-x", "vibeflow_myworkbench"} {
+		if isWorkbenchHolder(name) {
+			t.Errorf("%q must not be treated as the workbench holder", name)
+		}
+	}
+}
+
 // TestComposeProjectWorkbench_RoundTrip exercises the multi-window (Option A)
 // compose: two projects, each a window of two panes, then a non-destructive
 // restore. Skipped when tmux is absent.
