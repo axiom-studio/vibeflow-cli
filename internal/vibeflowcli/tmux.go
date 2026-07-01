@@ -710,6 +710,12 @@ func (tm *TmuxManager) configureWorkbenchBorders(target string) {
 func (tm *TmuxManager) configureWorkbenchChrome(holder, hint string) {
 	for _, opt := range []struct{ key, val string }{
 		{"status", "on"},
+		// Status line at the TOP so it occupies row 0 and the pane grid starts on
+		// row 1. With pane-border-status=top the top-row panes' header would
+		// otherwise sit on the window's very first row, which VS Code's terminal
+		// clips — pushing everything down one row makes those headers visible
+		// (#3299); lower panes are unaffected.
+		{"status-position", "top"},
 		{"status-style", "fg=" + oceanHexForeground + ",bg=" + oceanHexBackground},
 		{"status-left-length", "220"},
 		{"status-left", hint},

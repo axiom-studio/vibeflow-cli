@@ -649,6 +649,33 @@ func TestBindWorkbenchNavKeys(t *testing.T) {
 	}
 }
 
+// TestConfigureWorkbenchChrome_StatusPositionTop guards #3299: the workbench
+// status line is placed at the top so the pane grid starts on row 1 and the
+// top-row panes' headers aren't clipped by VS Code's terminal. Skipped when
+// tmux is absent.
+func TestConfigureWorkbenchChrome_StatusPositionTop(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-chrome")
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	if _, err := tm.run("new-session", "-d", "-s", "chrome-holder"); err != nil {
+		t.Skipf("cannot create tmux session: %v", err)
+	}
+	tm.configureWorkbenchChrome("chrome-holder", workbenchHintSingle)
+	out, err := tm.run("show-options", "-t", "chrome-holder", "-v", "status-position")
+	if err != nil {
+		t.Fatalf("show status-position: %v", err)
+	}
+	if strings.TrimSpace(out) != "top" {
+		t.Errorf("status-position = %q, want \"top\" (#3299)", strings.TrimSpace(out))
+	}
+}
+
 // TestComposeProjectWorkbench_RoundTrip exercises the multi-window (Option A)
 // compose: two projects, each a window of two panes, then a non-destructive
 // restore. Skipped when tmux is absent.
