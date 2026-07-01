@@ -577,13 +577,14 @@ func (tm *TmuxManager) ComposeWorkbench(names []string, titles map[string]string
 }
 
 // Keyboard-shortcut hints shown in the workbench status bar. Both advertise
-// "Ctrl ←/→: switch session" — no-prefix Ctrl+Left/Right cycle between session
-// panes (bound by bindWorkbenchNavKeys; QA rework of #2719 replaced the
-// unreliable "Ctrl-b o", and Ctrl-o is used by coding agents). The multi-project
-// hint additionally advertises Ctrl-b n/p for cycling projects.
+// "Ctrl-t: switch session" — Ctrl-t cycles between session panes (bound by
+// bindWorkbenchNavKeys). A plain control key is emitted by every terminal,
+// unlike Ctrl+arrow which many terminals don't send (#3293); earlier "Ctrl-b o"
+// was unreliable and Ctrl-o is used by coding agents. The multi-project hint
+// additionally advertises Ctrl-b n/p for cycling projects.
 const (
-	workbenchHintSingle = "  Ctrl ←/→: switch session   |   Ctrl-q or Ctrl-b d: back to menu  "
-	workbenchHintMulti  = "  Ctrl ←/→: switch session   |   Ctrl-b n / Ctrl-b p: next / prev project   |   Ctrl-q or Ctrl-b d: back to menu  "
+	workbenchHintSingle = "  Ctrl-t: switch session   |   Ctrl-q or Ctrl-b d: back to menu  "
+	workbenchHintMulti  = "  Ctrl-t: switch session   |   Ctrl-b n / Ctrl-b p: next / prev project   |   Ctrl-q or Ctrl-b d: back to menu  "
 )
 
 // WorkbenchProject is a named group of sessions (one project / working
@@ -728,22 +729,16 @@ func (tm *TmuxManager) configureWorkbenchChrome(holder, hint string) {
 // it keeps its own word-navigation binding. Root-table bindings are global to
 // the tmux server (same table BindSessionKeys uses); re-binding is idempotent.
 func (tm *TmuxManager) bindWorkbenchNavKeys() {
-	// Recognize modified keys (Ctrl+Left/Right) so the bindings below actually
-	// fire. On a custom socket the user's tmux.conf is not loaded, so without
-	// this tmux may not parse the terminal's Ctrl+arrow sequences as C-Left/
-	// C-Right (#3293). Set here — at workbench-compose time — rather than in
-	// EnsureServer, because the holder session guarantees the tmux server is
-	// live so this server option persists.
-	_, _ = tm.run("set", "-s", "extended-keys", "on")
-	_, _ = tm.run("set", "-as", "terminal-features", "*:extkeys")
-	for _, b := range []struct{ key, pane string }{
-		{"C-Left", ":.-"},  // previous pane
-		{"C-Right", ":.+"}, // next pane
-	} {
-		_, _ = tm.run("bind-key", "-T", "root", b.key,
-			"if-shell", "-F", "#{>:#{window_panes},1}",
-			"select-pane -t "+b.pane, "send-keys "+b.key)
-	}
+	// Ctrl-t cycles to the next session pane in a multi-pane workbench window. A
+	// plain control key is emitted reliably by every terminal, unlike Ctrl+arrow
+	// which many terminals (notably on macOS) don't send at all — so no tmux-side
+	// config could make the arrow bindings fire (#3293, user-chosen). The
+	// if-shell guard scopes it to multi-pane windows: a single-pane window (a
+	// directly-attached agent) passes Ctrl-t through to the agent via send-keys
+	// instead of capturing it.
+	_, _ = tm.run("bind-key", "-T", "root", "C-t",
+		"if-shell", "-F", "#{>:#{window_panes},1}",
+		"select-pane -t :.+", "send-keys C-t")
 }
 
 // windowID returns the tmux window id (e.g. "@3") for a window target.

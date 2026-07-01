@@ -596,8 +596,8 @@ func TestWorkbenchHeader(t *testing.T) {
 // panes, and that they stay within the status-left-length budget (220).
 func TestWorkbenchHints_AdvertiseSessionNavigation(t *testing.T) {
 	for name, hint := range map[string]string{"single": workbenchHintSingle, "multi": workbenchHintMulti} {
-		if !strings.Contains(hint, "Ctrl ←/→") || !strings.Contains(hint, "switch session") {
-			t.Errorf("%s hint must advertise Ctrl ←/→ session navigation, got %q", name, hint)
+		if !strings.Contains(hint, "Ctrl-t") || !strings.Contains(hint, "switch session") {
+			t.Errorf("%s hint must advertise Ctrl-t session navigation, got %q", name, hint)
 		}
 		if strings.Contains(hint, "Ctrl-b o") {
 			t.Errorf("%s hint must not advertise the removed (non-working) Ctrl-b o, got %q", name, hint)
@@ -611,8 +611,8 @@ func TestWorkbenchHints_AdvertiseSessionNavigation(t *testing.T) {
 	}
 }
 
-// TestBindWorkbenchNavKeys installs the Ctrl+arrow pane-navigation bindings and
-// verifies they land in the tmux root key table, guarded so single-pane windows
+// TestBindWorkbenchNavKeys installs the Ctrl-t pane-navigation binding and
+// verifies it lands in the tmux root key table, guarded so single-pane windows
 // pass the key through to the agent. Skipped when tmux is absent.
 func TestBindWorkbenchNavKeys(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -636,25 +636,16 @@ func TestBindWorkbenchNavKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list-keys: %v", err)
 	}
-	for _, key := range []string{"C-Left", "C-Right"} {
-		if !strings.Contains(out, key) {
-			t.Errorf("root key table missing %s binding:\n%s", key, out)
-		}
+	if !strings.Contains(out, "C-t") {
+		t.Errorf("root key table missing C-t binding:\n%s", out)
 	}
 	// The guard scopes pane-switching to multi-pane windows; single-pane windows
-	// (a directly-attached agent) pass the key through so word-nav still works.
+	// (a directly-attached agent) pass the key through so the agent keeps Ctrl-t.
 	if !strings.Contains(out, "window_panes") {
-		t.Errorf("nav bindings must be guarded by window_panes>1:\n%s", out)
+		t.Errorf("nav binding must be guarded by window_panes>1:\n%s", out)
 	}
 	if !strings.Contains(out, "send-keys") {
-		t.Errorf("nav bindings must pass the key through on single-pane windows:\n%s", out)
-	}
-	// Extended-key reporting must be enabled so tmux recognizes the terminal's
-	// Ctrl+arrow sequences and the bindings above actually fire (#3293).
-	if ek, err := tm.run("show-options", "-s", "-v", "extended-keys"); err != nil {
-		t.Errorf("show extended-keys: %v", err)
-	} else if strings.TrimSpace(ek) != "on" {
-		t.Errorf("extended-keys = %q, want \"on\"", strings.TrimSpace(ek))
+		t.Errorf("nav binding must pass the key through on single-pane windows:\n%s", out)
 	}
 }
 
