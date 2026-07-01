@@ -431,3 +431,105 @@ func TestUpdate_MouseWheelScrollsMatrix(t *testing.T) {
 		t.Fatalf("wheel up should scroll matrix back to offset 1, got %d", m.matrixOffset)
 	}
 }
+
+func TestKeyMsgToTmuxToken(t *testing.T) {
+	cases := []struct {
+		name    string
+		msg     tea.KeyMsg
+		token   string
+		literal bool
+		ok      bool
+	}{
+		{"rune", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}, "a", true, true},
+		{"runes", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h', 'i'}}, "hi", true, true},
+		{"space", tea.KeyMsg{Type: tea.KeySpace}, " ", true, true},
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}, "Enter", false, true},
+		{"escape", tea.KeyMsg{Type: tea.KeyEscape}, "Escape", false, true},
+		{"backspace", tea.KeyMsg{Type: tea.KeyBackspace}, "BSpace", false, true},
+		{"up", tea.KeyMsg{Type: tea.KeyUp}, "Up", false, true},
+		{"pgdn", tea.KeyMsg{Type: tea.KeyPgDown}, "NPage", false, true},
+		{"ctrl-c", tea.KeyMsg{Type: tea.KeyCtrlC}, "C-c", false, true},
+		{"ctrl-a", tea.KeyMsg{Type: tea.KeyCtrlA}, "C-a", false, true},
+		{"empty-runes", tea.KeyMsg{Type: tea.KeyRunes}, "", false, false},
+	}
+	for _, tc := range cases {
+		token, literal, ok := keyMsgToTmuxToken(tc.msg)
+		if token != tc.token || literal != tc.literal || ok != tc.ok {
+			t.Errorf("%s: got (%q,%v,%v), want (%q,%v,%v)", tc.name, token, literal, ok, tc.token, tc.literal, tc.ok)
+		}
+	}
+}
+
+func TestUpdate_TabTogglesTerminalFocus(t *testing.T) {
+	m := Model{
+		config:   &Config{},
+		sessions: []SessionRow{{Name: "s1", Status: "running"}},
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if !m.terminalFocus {
+		t.Fatal("Tab should give the terminal pane input focus")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if m.terminalFocus {
+		t.Fatal("Tab again should return focus to the list")
+	}
+}
+
+func TestUpdate_TerminalFocusForwardsKeystrokes(t *testing.T) {
+	m := Model{
+		config:        &Config{},
+		terminalFocus: true,
+		sessions:      []SessionRow{{Name: "s1", Status: "running"}},
+	}
+	// A printable key is forwarded (non-nil command) without navigating or quitting.
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("focused printable key should be forwarded (non-nil command)")
+	}
+	if m.cursor != 0 || !m.terminalFocus {
+		t.Fatalf("forwarding must not navigate or drop focus (cursor=%d focus=%v)", m.cursor, m.terminalFocus)
+	}
+	// 'q' must forward to the session, not quit the TUI.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = updated.(Model)
+	if m.quitting {
+		t.Fatal("'q' while the terminal is focused must forward to the session, not quit")
+	}
+	// Tab returns focus to the list.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if m.terminalFocus {
+		t.Fatal("Tab should return focus to the list")
+	}
+}
+
+func TestUpdate_MouseFocusRoutingBetweenColumns(t *testing.T) {
+	m := Model{
+		width:    120,
+		height:   40,
+		sessions: []SessionRow{{Name: "s0", Branch: "a"}, {Name: "s1", Branch: "b"}},
+	}
+	width, _ := m.normalizedDims()
+	leftWidth, _ := m.columnWidths(width)
+
+	// Click in the right (terminal) column focuses it for interaction.
+	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: leftWidth + 5, Y: 15})
+	m = updated.(Model)
+	if !m.terminalFocus {
+		t.Fatal("clicking the right column should focus the terminal")
+	}
+
+	// Clicking a list row returns focus to the list and selects that row.
+	y := m.headerOffset() + 2 + 2 // s1's name line (each row = name + subtitle)
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 3, Y: y})
+	m = updated.(Model)
+	if m.terminalFocus {
+		t.Fatal("clicking the list should drop terminal focus")
+	}
+	if m.cursor != 1 {
+		t.Fatalf("clicking s1's row should select cursor 1, got %d", m.cursor)
+	}
+}

@@ -206,6 +206,10 @@ type captureBatchMsg struct {
 	outputs map[string]string
 }
 
+// forwardedKeyMsg is emitted after a keystroke has been forwarded to a focused
+// session (interactive workbench, #2707) so the pane is re-captured to echo it.
+type forwardedKeyMsg struct{}
+
 func tickCmd(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -216,6 +220,79 @@ func captureTickCmd() tea.Cmd {
 	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 		return captureTickMsg(t)
 	})
+}
+
+// captureTick returns the ongoing capture-refresh tick. It refreshes faster
+// while the terminal pane has input focus (#2707) so typed input echoes quickly.
+func (m Model) captureTick() tea.Cmd {
+	d := 3 * time.Second
+	if m.terminalFocus {
+		d = 600 * time.Millisecond
+	}
+	return tea.Tick(d, func(t time.Time) tea.Msg {
+		return captureTickMsg(t)
+	})
+}
+
+// keyMsgToTmuxToken translates a Bubble Tea key event into a tmux send-keys
+// token for interactive forwarding. Printable runes and space return literal
+// text (literal=true); named keys return a tmux key name (literal=false). ok is
+// false for keys that should not be forwarded. Tab is handled by the caller
+// (focus toggle) and never reaches here.
+func keyMsgToTmuxToken(msg tea.KeyMsg) (token string, literal bool, ok bool) {
+	switch msg.Type {
+	case tea.KeyRunes:
+		if len(msg.Runes) == 0 {
+			return "", false, false
+		}
+		return string(msg.Runes), true, true
+	case tea.KeySpace:
+		return " ", true, true
+	case tea.KeyEnter:
+		return "Enter", false, true
+	case tea.KeyEscape:
+		return "Escape", false, true
+	case tea.KeyBackspace:
+		return "BSpace", false, true
+	case tea.KeyDelete:
+		return "DC", false, true
+	case tea.KeyUp:
+		return "Up", false, true
+	case tea.KeyDown:
+		return "Down", false, true
+	case tea.KeyLeft:
+		return "Left", false, true
+	case tea.KeyRight:
+		return "Right", false, true
+	case tea.KeyHome:
+		return "Home", false, true
+	case tea.KeyEnd:
+		return "End", false, true
+	case tea.KeyPgUp:
+		return "PPage", false, true
+	case tea.KeyPgDown:
+		return "NPage", false, true
+	}
+	// Ctrl+<letter> combos map to tmux "C-<letter>" (KeyCtrlA..KeyCtrlZ are the
+	// contiguous ASCII control codes 1..26). Named keys that share a code
+	// (Tab=C-i, Enter=C-m) are already handled above and never fall through.
+	if msg.Type >= tea.KeyCtrlA && msg.Type <= tea.KeyCtrlZ {
+		return fmt.Sprintf("C-%c", 'a'+rune(msg.Type-tea.KeyCtrlA)), false, true
+	}
+	return "", false, false
+}
+
+// forwardKeysCmd forwards a translated key token to a session as a tea.Cmd, so
+// the tmux exec stays off the Update goroutine (and out of unit tests, which do
+// not execute returned commands). It then triggers a re-capture to echo input.
+func (m Model) forwardKeysCmd(session, token string, literal bool) tea.Cmd {
+	tmux := m.tmux
+	return func() tea.Msg {
+		if tmux != nil {
+			_ = tmux.SendKeyToken(session, token, literal)
+		}
+		return forwardedKeyMsg{}
+	}
 }
 
 func (m Model) refreshCapture() tea.Msg {
@@ -543,7 +620,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, nil
 	case captureTickMsg:
-		return m, tea.Batch(m.refreshCapture, captureTickCmd())
+		return m, tea.Batch(m.refreshCapture, m.captureTick())
+	case forwardedKeyMsg:
+		// A keystroke was forwarded to the focused session; re-capture to echo it.
+		return m, m.refreshCapture
 	case captureMsg:
 		m.captureOutput = msg.output
 		m.captureName = msg.name
@@ -706,6 +786,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			default:
 				m.confirmDetach = false
+			}
+			return m, nil
+		}
+
+		// Tab toggles input focus between the session list and the terminal pane
+		// (single-terminal mode only). #2707 Approach B — interactive workbench.
+		if msg.Type == tea.KeyTab && m.activeView == ViewSessions && !m.matrixMode {
+			if m.selectedSessionIdx() >= 0 {
+				m.terminalFocus = !m.terminalFocus
+				return m, m.refreshCapture
+			}
+		}
+
+		// While the terminal pane has input focus, forward keystrokes to the
+		// selected session instead of interpreting them as TUI shortcuts. Tab
+		// (handled above) returns focus to the list.
+		if m.terminalFocus && m.activeView == ViewSessions && !m.matrixMode {
+			idx := m.selectedSessionIdx()
+			if idx < 0 {
+				m.terminalFocus = false
+				return m, nil
+			}
+			if token, literal, ok := keyMsgToTmuxToken(msg); ok {
+				return m, m.forwardKeysCmd(m.sessions[idx].Name, token, literal)
 			}
 			return m, nil
 		}
@@ -882,9 +986,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Action != tea.MouseActionPress {
 				return m, nil
 			}
-			// Left column click → select that session row.
+			// Left column click → select that session row (and return input
+			// focus to the list).
 			if cur, ok := m.hitTestList(msg.X, msg.Y); ok {
 				m.cursor = cur
+				m.terminalFocus = false
 				if m.matrixMode {
 					m.followMatrixSelection()
 				}
@@ -894,6 +1000,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx, ok := m.hitTestMatrix(msg.X, msg.Y); ok {
 				m.cursor = m.cursorForSession(idx)
 				return m, m.refreshCapture
+			}
+			// Click in the single-terminal right column gives it input focus
+			// (#2707) so keystrokes forward to the selected session.
+			if !m.matrixMode && m.selectedSessionIdx() >= 0 {
+				width, _ := m.normalizedDims()
+				leftWidth, _ := m.columnWidths(width)
+				if msg.X >= leftWidth {
+					m.terminalFocus = true
+					return m, m.refreshCapture
+				}
 			}
 			return m, nil
 		}
@@ -1530,7 +1646,7 @@ func (m Model) View() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  a: attach  s: matrix  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  a: attach  tab: interact  s: matrix  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -1779,9 +1895,11 @@ func (m Model) renderWorkbenchTerminal(width, height int) string {
 	var b strings.Builder
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	b.WriteString(headerStyle.Render("Terminal"))
+	b.WriteString(" ")
 	if m.terminalFocus {
-		b.WriteString(" ")
-		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("(focused)"))
+		b.WriteString(lipgloss.NewStyle().Foreground(accentColor).Render("(interactive — Tab to return to list)"))
+	} else if m.selectedSessionIdx() >= 0 {
+		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("(Tab or click to interact · enter = full screen)"))
 	}
 	b.WriteString("\n")
 
@@ -2407,7 +2525,8 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString(catStyle.Render("Navigation"))
 	b.WriteString("\n")
 	b.WriteString(keyStyle.Render("  j / k") + descStyle.Render("Move down / up") + "\n")
-	b.WriteString(keyStyle.Render("  enter") + descStyle.Render("Attach to session") + "\n")
+	b.WriteString(keyStyle.Render("  enter") + descStyle.Render("Attach full screen (ctrl+q returns)") + "\n")
+	b.WriteString(keyStyle.Render("  tab") + descStyle.Render("Interact with terminal / back to list") + "\n")
 	b.WriteString(keyStyle.Render("  s") + descStyle.Render("Toggle matrix (2x2 grid)") + "\n")
 	b.WriteString(keyStyle.Render("  g") + descStyle.Render("Toggle flat / grouped view") + "\n")
 	b.WriteString(keyStyle.Render("  mouse") + descStyle.Render("Click to focus · scroll to move") + "\n")
