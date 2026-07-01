@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 func TestRenderLaunchCommand(t *testing.T) {
@@ -890,5 +891,44 @@ func TestWorkbenchRestore_PartialFailureKeepsStrandedPane(t *testing.T) {
 	// The other source still restored successfully.
 	if !tm.HasSession(full[1]) {
 		t.Errorf("source %s should have been restored despite the partial failure", full[1])
+	}
+}
+
+// TestSanitizeWorkbenchTitle verifies the #3286 remediation: control/escape
+// characters are stripped from server-influenced workbench pane titles.
+func TestSanitizeWorkbenchTitle(t *testing.T) {
+	in := "red\x1b[31mtext\x1b\n\r\ttab\x7fdel\x1b]0;osc\x07end"
+	got := sanitizeWorkbenchTitle(in)
+	if strings.ContainsAny(got, "\x1b\n\r\t\x07\x7f") {
+		t.Errorf("control/escape chars not stripped: %q", got)
+	}
+	for _, r := range got {
+		if !unicode.IsPrint(r) {
+			t.Errorf("non-printable rune %U survived in %q", r, got)
+		}
+	}
+	// Plain text, spaces and the "·" separator are preserved unchanged.
+	if got := sanitizeWorkbenchTitle("titan · demo · main"); got != "titan · demo · main" {
+		t.Errorf("plain title changed: %q", got)
+	}
+	// Length is clamped.
+	if got := sanitizeWorkbenchTitle(strings.Repeat("x", 200)); len(got) != 80 {
+		t.Errorf("clamp: got len %d, want 80", len(got))
+	}
+}
+
+// TestWorkbenchHeader_StripsControlChars proves both the metadata path
+// (workbenchHeader) and the fallback path (workbenchPaneTitle) neutralize
+// escape sequences from server-influenced components (#3286).
+func TestWorkbenchHeader_StripsControlChars(t *testing.T) {
+	got := workbenchHeader("tit\x1b[31man", "de\nmo", "ma\rin")
+	if strings.ContainsAny(got, "\x1b\n\r") {
+		t.Errorf("workbenchHeader leaked control chars: %q", got)
+	}
+	if clean := workbenchHeader("titan", "demo", "main"); clean != "titan · demo · main" {
+		t.Errorf("clean header = %q, want \"titan · demo · main\"", clean)
+	}
+	if got := workbenchPaneTitle("vibeflow_claude-a\x1b[2Jb"); strings.ContainsAny(got, "\x1b") {
+		t.Errorf("workbenchPaneTitle leaked ESC: %q", got)
 	}
 }
