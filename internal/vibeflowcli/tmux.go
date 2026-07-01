@@ -550,7 +550,9 @@ func (tm *TmuxManager) ComposeWorkbench(names []string) (*WorkbenchComposition, 
 	if tm.HasSession(holder) {
 		_, _ = tm.run("kill-session", "-t", holder)
 	}
-	if _, err := tm.run("new-session", "-d", "-s", holder); err != nil {
+	// Size the holder generously so early joins have room to split; tmux
+	// resizes the window to the client on attach.
+	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
 		return nil, fmt.Errorf("create workbench holder: %w", err)
 	}
 	placeholder, err := tm.paneID(holder)
@@ -567,11 +569,15 @@ func (tm *TmuxManager) ComposeWorkbench(names []string) (*WorkbenchComposition, 
 			return nil, err
 		}
 		status := tm.captureSessionStatus(name)
-		if _, err := tm.run(joinPaneArgs(name, holder)...); err != nil {
+		if out, err := tm.run(joinPaneArgs(name, holder)...); err != nil {
 			comp.Restore()
-			return nil, fmt.Errorf("join %q into workbench: %w", name, err)
+			return nil, fmt.Errorf("join %q into workbench: %w: %s", name, err, strings.TrimSpace(out))
 		}
 		comp.sources = append(comp.sources, workbenchSource{name: name, paneID: pid, status: status})
+		// Re-tile after every join so the next join has room. Without this a
+		// small holder hits tmux's "create pane failed: pane too small" after a
+		// few default 50/50 join-pane splits (issue #3280).
+		_, _ = tm.run(tiledLayoutArgs(holder)...)
 	}
 
 	// Drop the holder's original shell pane so only agent panes remain, then
