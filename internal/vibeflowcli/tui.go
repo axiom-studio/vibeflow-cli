@@ -741,9 +741,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.collapsedGroups[groupRoot] = !m.collapsedGroups[groupRoot]
 					return m, nil
 				}
-			}
-			if m.selectedSessionIdx() >= 0 {
-				m.terminalFocus = !m.terminalFocus
+				if sessionIdx >= 0 && sessionIdx < len(m.sessions) {
+					cmd := m.tmux.AttachSessionCmd(m.sessions[sessionIdx].Name)
+					return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+						return attachExitMsg{err: err}
+					})
+				}
+			} else if m.cursor < len(m.sessions) {
+				cmd := m.tmux.AttachSessionCmd(m.sessions[m.cursor].Name)
+				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+					return attachExitMsg{err: err}
+				})
 			}
 		case "a":
 			idx := m.selectedSessionIdx()
@@ -1461,7 +1469,7 @@ func (m Model) View() string {
 	case m.confirmDetach:
 		helpBar = warnStyle.Render(fmt.Sprintf("Detach? %d session(s) will continue running in background. (y/n)", len(m.sessions)))
 	default:
-		enterHint := "focus"
+		enterHint := "attach"
 		if m.groupMode {
 			if _, groupRoot := m.groupedCursorToSession(); groupRoot != "" {
 				enterHint = "expand/collapse"
