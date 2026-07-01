@@ -438,30 +438,6 @@ func (tm *TmuxManager) SendKeys(name, keys string) error {
 	return nil
 }
 
-// SendKeyToken forwards a single key event to a session's pane via tmux
-// send-keys, WITHOUT the auto-appended Enter that SendKeys adds (SendKeys is for
-// recovery nudges that submit a line). literal=true sends the token as raw text
-// (via -l); literal=false lets tmux interpret it as a key name (Enter, Escape,
-// C-c, Up, BSpace, ...). This is the per-keystroke path for the interactive
-// workbench (#2707); HasSession is intentionally skipped to avoid a second tmux
-// exec on the hot path — send-keys fails harmlessly if the session is gone.
-func (tm *TmuxManager) SendKeyToken(name, token string, literal bool) error {
-	if token == "" {
-		return nil
-	}
-	fullName := tm.ensurePrefix(name)
-	args := []string{"send-keys", "-t", fullName}
-	if literal {
-		args = append(args, "-l", token)
-	} else {
-		args = append(args, token)
-	}
-	if _, err := tm.run(args...); err != nil {
-		return fmt.Errorf("send-keys token %q to %q: %w", token, fullName, err)
-	}
-	return nil
-}
-
 // BindSessionKeys sets up key bindings for a vibeflow tmux session.
 // Binds Ctrl+Q (and Ctrl+\ as backup) to toggle between the agent session
 // and the vibeflow TUI. Uses tmux if-shell to conditionally detach (when

@@ -106,39 +106,35 @@ const (
 
 // Model is the Bubble Tea model for vibeflow-cli.
 type Model struct {
-	sessions       []SessionRow
-	cursor         int
-	client         *Client
-	tmux           *TmuxManager
-	worktrees      *WorktreeManager
-	store          *Store
-	registry       *ProviderRegistry
-	config         *Config
-	width          int
-	height         int
-	err            error
-	quitting       bool
-	projectID      int64
-	activeView     ViewState
-	wizard         WizardModel
-	conflictModal  ConflictModal
-	worktreeList   WorktreeListModel
-	pendingWizard  *WizardResult      // wizard result waiting for conflict resolution
-	switchMeta     *SessionMeta       // non-nil during quick branch switch flow
-	captureOutput  string             // last captured pane output for selected session
-	captureName    string             // tmux session name for current capture
-	captureOutputs map[string]string  // tmux pane output by session name for matrix mode
-	confirmDelete  bool               // showing delete confirmation
-	confirmQuit    bool               // showing quit confirmation
-	confirmDetach  bool               // showing detach confirmation
-	terminalFocus  bool               // true when keyboard focus is conceptually on output
-	matrixMode     bool               // true when the right column shows the 2x2 session grid
-	matrixOffset   int                // index of the first session shown in the matrix grid
-	serverWarning  string             // non-empty if server unreachable at startup
-	healthMonitor  *HealthMonitor     // session error detection and auto-recovery
-	logger         *Logger            // file-based logger
-	cache          *SessionCache      // session cache for restart-without-intervention
-	restartSelect  RestartSelectModel // dead-session restart multiselect
+	sessions      []SessionRow
+	cursor        int
+	client        *Client
+	tmux          *TmuxManager
+	worktrees     *WorktreeManager
+	store         *Store
+	registry      *ProviderRegistry
+	config        *Config
+	width         int
+	height        int
+	err           error
+	quitting      bool
+	projectID     int64
+	activeView    ViewState
+	wizard        WizardModel
+	conflictModal ConflictModal
+	worktreeList  WorktreeListModel
+	pendingWizard *WizardResult      // wizard result waiting for conflict resolution
+	switchMeta    *SessionMeta       // non-nil during quick branch switch flow
+	captureOutput string             // last captured pane output for selected session
+	captureName   string             // tmux session name for current capture
+	confirmDelete bool               // showing delete confirmation
+	confirmQuit   bool               // showing quit confirmation
+	confirmDetach bool               // showing detach confirmation
+	serverWarning string             // non-empty if server unreachable at startup
+	healthMonitor *HealthMonitor     // session error detection and auto-recovery
+	logger        *Logger            // file-based logger
+	cache         *SessionCache      // session cache for restart-without-intervention
+	restartSelect RestartSelectModel // dead-session restart multiselect
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -167,7 +163,6 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 		activeView:      ViewSessions,
 		logger:          logger,
 		healthMonitor:   healthMonitor,
-		captureOutputs:  make(map[string]string),
 		groupMode:       cfg.ViewMode == "grouped",
 		repoRootCache:   make(map[string]string),
 		collapsedGroups: make(map[string]bool),
@@ -201,15 +196,6 @@ type captureMsg struct {
 	output string
 }
 
-// captureBatchMsg carries captured pane output for matrix mode.
-type captureBatchMsg struct {
-	outputs map[string]string
-}
-
-// forwardedKeyMsg is emitted after a keystroke has been forwarded to a focused
-// session (interactive workbench, #2707) so the pane is re-captured to echo it.
-type forwardedKeyMsg struct{}
-
 func tickCmd(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -222,97 +208,7 @@ func captureTickCmd() tea.Cmd {
 	})
 }
 
-// captureTick returns the ongoing capture-refresh tick. It refreshes faster
-// while the terminal pane has input focus (#2707) so typed input echoes quickly.
-func (m Model) captureTick() tea.Cmd {
-	d := 3 * time.Second
-	if m.terminalFocus {
-		d = 600 * time.Millisecond
-	}
-	return tea.Tick(d, func(t time.Time) tea.Msg {
-		return captureTickMsg(t)
-	})
-}
-
-// keyMsgToTmuxToken translates a Bubble Tea key event into a tmux send-keys
-// token for interactive forwarding. Printable runes and space return literal
-// text (literal=true); named keys return a tmux key name (literal=false). ok is
-// false for keys that should not be forwarded. Tab is handled by the caller
-// (focus toggle) and never reaches here.
-func keyMsgToTmuxToken(msg tea.KeyMsg) (token string, literal bool, ok bool) {
-	switch msg.Type {
-	case tea.KeyRunes:
-		if len(msg.Runes) == 0 {
-			return "", false, false
-		}
-		return string(msg.Runes), true, true
-	case tea.KeySpace:
-		return " ", true, true
-	case tea.KeyEnter:
-		return "Enter", false, true
-	case tea.KeyEscape:
-		return "Escape", false, true
-	case tea.KeyBackspace:
-		return "BSpace", false, true
-	case tea.KeyDelete:
-		return "DC", false, true
-	case tea.KeyUp:
-		return "Up", false, true
-	case tea.KeyDown:
-		return "Down", false, true
-	case tea.KeyLeft:
-		return "Left", false, true
-	case tea.KeyRight:
-		return "Right", false, true
-	case tea.KeyHome:
-		return "Home", false, true
-	case tea.KeyEnd:
-		return "End", false, true
-	case tea.KeyPgUp:
-		return "PPage", false, true
-	case tea.KeyPgDown:
-		return "NPage", false, true
-	}
-	// Ctrl+<letter> combos map to tmux "C-<letter>" (KeyCtrlA..KeyCtrlZ are the
-	// contiguous ASCII control codes 1..26). Named keys that share a code
-	// (Tab=C-i, Enter=C-m) are already handled above and never fall through.
-	if msg.Type >= tea.KeyCtrlA && msg.Type <= tea.KeyCtrlZ {
-		return fmt.Sprintf("C-%c", 'a'+rune(msg.Type-tea.KeyCtrlA)), false, true
-	}
-	return "", false, false
-}
-
-// forwardKeysCmd forwards a translated key token to a session as a tea.Cmd, so
-// the tmux exec stays off the Update goroutine (and out of unit tests, which do
-// not execute returned commands). It then triggers a re-capture to echo input.
-func (m Model) forwardKeysCmd(session, token string, literal bool) tea.Cmd {
-	tmux := m.tmux
-	return func() tea.Msg {
-		if tmux != nil {
-			_ = tmux.SendKeyToken(session, token, literal)
-		}
-		return forwardedKeyMsg{}
-	}
-}
-
 func (m Model) refreshCapture() tea.Msg {
-	if m.matrixMode {
-		outputs := make(map[string]string, len(m.sessions))
-		for _, s := range m.sessions {
-			output, err := m.tmux.CapturePaneOutput(s.Name, 12)
-			if err != nil {
-				outputs[s.Name] = "(no output)"
-				continue
-			}
-			if strings.TrimSpace(output) == "" {
-				outputs[s.Name] = "(no output yet)"
-				continue
-			}
-			outputs[s.Name] = stripANSI(output)
-		}
-		return captureBatchMsg{outputs: outputs}
-	}
-
 	idx := m.selectedSessionIdx()
 	if idx < 0 {
 		return captureMsg{}
@@ -620,19 +516,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, nil
 	case captureTickMsg:
-		return m, tea.Batch(m.refreshCapture, m.captureTick())
-	case forwardedKeyMsg:
-		// A keystroke was forwarded to the focused session; re-capture to echo it.
-		return m, m.refreshCapture
+		return m, tea.Batch(m.refreshCapture, captureTickCmd())
 	case captureMsg:
 		m.captureOutput = msg.output
 		m.captureName = msg.name
-		if msg.name != "" {
-			if m.captureOutputs == nil {
-				m.captureOutputs = make(map[string]string)
-			}
-			m.captureOutputs[msg.name] = msg.output
-		}
 		// Health monitoring: scan capture output for error patterns.
 		if m.healthMonitor != nil && msg.name != "" && msg.output != "" {
 			provider := ""
@@ -646,20 +533,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if shouldRecover := m.healthMonitor.CheckOutput(msg.name, provider, msg.output, isAttached); shouldRecover {
 				_ = m.healthMonitor.AttemptRecovery(msg.name)
-			}
-		}
-		return m, nil
-	case captureBatchMsg:
-		m.captureOutputs = msg.outputs
-		if m.healthMonitor != nil {
-			for _, s := range m.sessions {
-				output := msg.outputs[s.Name]
-				if output == "" {
-					continue
-				}
-				if shouldRecover := m.healthMonitor.CheckOutput(s.Name, s.Provider, output, s.TmuxAttached); shouldRecover {
-					_ = m.healthMonitor.AttemptRecovery(s.Name)
-				}
 			}
 		}
 		return m, nil
@@ -790,30 +663,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Tab toggles input focus between the session list and the terminal pane
-		// (single-terminal mode only). #2707 Approach B — interactive workbench.
-		if msg.Type == tea.KeyTab && m.activeView == ViewSessions && !m.matrixMode {
-			if m.selectedSessionIdx() >= 0 {
-				m.terminalFocus = !m.terminalFocus
-				return m, m.refreshCapture
-			}
-		}
-
-		// While the terminal pane has input focus, forward keystrokes to the
-		// selected session instead of interpreting them as TUI shortcuts. Tab
-		// (handled above) returns focus to the list.
-		if m.terminalFocus && m.activeView == ViewSessions && !m.matrixMode {
-			idx := m.selectedSessionIdx()
-			if idx < 0 {
-				m.terminalFocus = false
-				return m, nil
-			}
-			if token, literal, ok := keyMsgToTmuxToken(msg); ok {
-				return m, m.forwardKeysCmd(m.sessions[idx].Name, token, literal)
-			}
-			return m, nil
-		}
-
 		switch msg.String() {
 		case "ctrl+c":
 			m.quitting = true
@@ -829,9 +678,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor > 0 {
 				m.cursor--
 			}
-			if m.matrixMode {
-				m.followMatrixSelection()
-			}
 		case "down", "j":
 			maxIdx := len(m.sessions) - 1
 			if m.groupMode {
@@ -839,9 +685,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.cursor < maxIdx {
 				m.cursor++
-			}
-			if m.matrixMode {
-				m.followMatrixSelection()
 			}
 		case "enter":
 			if m.groupMode {
@@ -863,21 +706,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return attachExitMsg{err: err}
 				})
 			}
-		case "a":
-			idx := m.selectedSessionIdx()
-			if idx >= 0 && idx < len(m.sessions) {
-				cmd := m.tmux.AttachSessionCmd(m.sessions[idx].Name)
-				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-					return attachExitMsg{err: err}
-				})
-			}
-		case "s":
-			m.matrixMode = !m.matrixMode
-			m.terminalFocus = false
-			if m.matrixMode {
-				m.matrixOffset = m.matrixOffsetForSelection()
-			}
-			return m, m.refreshCapture
 		case "g":
 			m.groupMode = !m.groupMode
 			m.cursor = 0
@@ -954,66 +782,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-
-	case tea.MouseMsg:
-		// Mouse is only interactive on the main sessions view, and never while a
-		// confirmation prompt is up.
-		if m.activeView != ViewSessions || m.confirmDelete || m.confirmQuit || m.confirmDetach {
-			return m, nil
-		}
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			if m.matrixMode {
-				m.matrixOffset = m.clampMatrixOffset(m.matrixOffset - 1)
-			} else if m.cursor > 0 {
-				m.cursor--
-			}
-			return m, nil
-		case tea.MouseButtonWheelDown:
-			if m.matrixMode {
-				m.matrixOffset = m.clampMatrixOffset(m.matrixOffset + 1)
-			} else {
-				maxIdx := len(m.sessions) - 1
-				if m.groupMode {
-					maxIdx = m.groupedListLen() - 1
-				}
-				if m.cursor < maxIdx {
-					m.cursor++
-				}
-			}
-			return m, nil
-		case tea.MouseButtonLeft:
-			if msg.Action != tea.MouseActionPress {
-				return m, nil
-			}
-			// Left column click → select that session row (and return input
-			// focus to the list).
-			if cur, ok := m.hitTestList(msg.X, msg.Y); ok {
-				m.cursor = cur
-				m.terminalFocus = false
-				if m.matrixMode {
-					m.followMatrixSelection()
-				}
-				return m, m.refreshCapture
-			}
-			// Right column matrix click → focus that pane's session.
-			if idx, ok := m.hitTestMatrix(msg.X, msg.Y); ok {
-				m.cursor = m.cursorForSession(idx)
-				return m, m.refreshCapture
-			}
-			// Click in the single-terminal right column gives it input focus
-			// (#2707) so keystrokes forward to the selected session.
-			if !m.matrixMode && m.selectedSessionIdx() >= 0 {
-				width, _ := m.normalizedDims()
-				leftWidth, _ := m.columnWidths(width)
-				if msg.X >= leftWidth {
-					m.terminalFocus = true
-					return m, m.refreshCapture
-				}
-			}
-			return m, nil
-		}
-		return m, nil
 
 	case conflictDetectedMsg:
 		result := msg.wizardResult
@@ -1646,7 +1414,7 @@ func (m Model) View() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  a: attach  tab: interact  s: matrix  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -1661,8 +1429,14 @@ func (m Model) View() string {
 	}
 
 	// Column widths (in lipgloss v1, Width includes border + padding).
-	// Two columns only: session list (left) + workbench terminal (right).
-	leftWidth, terminalWidth := m.columnWidths(width)
+	leftWidth := width * 35 / 100
+	rightWidth := width - leftWidth
+	if leftWidth < 20 {
+		leftWidth = 20
+	}
+	if rightWidth < 20 {
+		rightWidth = 20
+	}
 
 	// Available height for columns: total minus banner, copyright, gap, help.
 	usedLines := 10 // banner(7) + copyright(1) + gap(1) + help(1)
@@ -1676,20 +1450,20 @@ func (m Model) View() string {
 
 	// Content area = total - border(2) - horizontal padding(2).
 	leftContentW := leftWidth - 4
-	terminalContentW := terminalWidth - 4
+	rightContentW := rightWidth - 4
 	contentH := colHeight - 2
 	if leftContentW < 10 {
 		leftContentW = 10
 	}
-	if terminalContentW < 10 {
-		terminalContentW = 10
+	if rightContentW < 10 {
+		rightContentW = 10
 	}
 	if contentH < 4 {
 		contentH = 4
 	}
 
 	leftContent := m.renderSessionList(leftContentW, contentH)
-	terminalContent := m.renderWorkbenchTerminal(terminalContentW, contentH)
+	rightContent := m.renderDetailPanel(rightContentW, contentH)
 
 	borderStyle := lipgloss.RoundedBorder()
 	leftStyle := lipgloss.NewStyle().
@@ -1698,8 +1472,8 @@ func (m Model) View() string {
 		Border(borderStyle).
 		BorderForeground(dimColor).
 		Padding(0, 1)
-	terminalStyle := lipgloss.NewStyle().
-		Width(terminalWidth).
+	rightStyle := lipgloss.NewStyle().
+		Width(rightWidth).
 		Height(colHeight).
 		Border(borderStyle).
 		BorderForeground(dimColor).
@@ -1707,7 +1481,7 @@ func (m Model) View() string {
 
 	columns := lipgloss.JoinHorizontal(lipgloss.Top,
 		leftStyle.Render(leftContent),
-		terminalStyle.Render(terminalContent),
+		rightStyle.Render(rightContent),
 	)
 
 	// Assemble final view.
@@ -1886,269 +1660,6 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	}
 }
 
-// renderWorkbenchTerminal renders the primary right-side workbench pane.
-func (m Model) renderWorkbenchTerminal(width, height int) string {
-	if m.matrixMode {
-		return m.renderMatrixPane(width, height)
-	}
-
-	var b strings.Builder
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	b.WriteString(headerStyle.Render("Terminal"))
-	b.WriteString(" ")
-	if m.terminalFocus {
-		b.WriteString(lipgloss.NewStyle().Foreground(accentColor).Render("(interactive — Tab to return to list)"))
-	} else if m.selectedSessionIdx() >= 0 {
-		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("(Tab or click to interact · enter = full screen)"))
-	}
-	b.WriteString("\n")
-
-	idx := m.selectedSessionIdx()
-	if idx < 0 {
-		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("Select a session to view output."))
-		return b.String()
-	}
-
-	s := m.sessions[idx]
-	b.WriteString(m.renderSelectedSessionHeader(s, width))
-	b.WriteString("\n\n")
-	b.WriteString(m.renderTerminalPane(s, width, height-3))
-
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// renderSelectedSessionHeader renders compact state for the selected session.
-func (m Model) renderSelectedSessionHeader(s SessionRow, width int) string {
-	var parts []string
-	parts = append(parts, truncate(s.Name, width))
-	if s.Status != "" {
-		parts = append(parts, renderStatus(s.Status))
-	}
-	if s.Provider != "" {
-		parts = append(parts, renderProvider(s.Provider))
-	}
-	if s.Branch != "" {
-		parts = append(parts, renderBranch(s.Branch, s.WorktreePath))
-	}
-	if s.CurrentWork != "" {
-		remaining := width - 18
-		if remaining < 12 {
-			remaining = 12
-		}
-		parts = append(parts, truncate(s.CurrentWork, remaining))
-	}
-	return strings.Join(parts, "  ")
-}
-
-// renderMatrixPane renders the right column as a scrollable 2x2 grid of session
-// panes. Sessions beyond the four visible cells are reached by scrolling the
-// window (matrixOffset). The focused session's cell is highlighted; clicking a
-// cell focuses that session (see hitTestMatrix).
-func (m Model) renderMatrixPane(width, height int) string {
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	dim := lipgloss.NewStyle().Foreground(dimColor)
-
-	total := len(m.sessions)
-	if total == 0 {
-		return headerStyle.Render("Matrix") + "\n" + dim.Render("No active sessions.")
-	}
-
-	offset := m.clampMatrixOffset(m.matrixOffset)
-	end := offset + matrixCells
-	if end > total {
-		end = total
-	}
-
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Matrix"))
-	b.WriteString(" ")
-	b.WriteString(dim.Render(fmt.Sprintf("%d-%d of %d · click a pane to focus · scroll to page", offset+1, end, total)))
-	b.WriteString("\n")
-
-	leftCellW, rightCellW, cellH := matrixGridDims(width, height)
-	cellWidths := [2]int{leftCellW, rightCellW}
-	focus := m.selectedSessionIdx()
-
-	renderRow := func(rowBase int) string {
-		c0 := m.renderMatrixCell(offset+rowBase, focus, cellWidths[0], cellH)
-		c1 := m.renderMatrixCell(offset+rowBase+1, focus, cellWidths[1], cellH)
-		return lipgloss.JoinHorizontal(lipgloss.Top, c0, " ", c1)
-	}
-
-	b.WriteString(renderRow(0))
-	b.WriteString("\n")
-	b.WriteString(renderRow(2))
-
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// matrixCells is the number of panes shown at once in the 2x2 matrix grid.
-const matrixCells = 4
-
-// matrixGridDims derives the per-cell OUTER dimensions (border-inclusive) of the
-// 2x2 grid for a given content area. Single source of truth shared by
-// renderMatrixPane (rendering) and hitTestMatrix (click mapping). Layout:
-// 1 header line, then two rows of bordered cells (each cellH tall) stacked
-// directly — the rounded cell borders provide the row separation, so there is
-// no separator line — with a 1-column gutter between the left and right cells.
-func matrixGridDims(width, height int) (leftCellW, rightCellW, cellH int) {
-	if width < 2 {
-		width = 2
-	}
-	const gutter = 1
-	leftCellW = (width - gutter) / 2
-	if leftCellW < 3 { // rounded border eats 2 cols; keep >=1 content col
-		leftCellW = 3
-	}
-	rightCellW = width - gutter - leftCellW
-	if rightCellW < 3 {
-		rightCellW = 3
-	}
-	gridH := height - 1 // header(1); cell borders separate the two rows
-	if gridH < 6 {      // 2 rows x min cellH 3 (2 border + 1 content)
-		gridH = 6
-	}
-	cellH = gridH / 2
-	if cellH < 3 { // border(2) + >=1 content row
-		cellH = 3
-	}
-	return leftCellW, rightCellW, cellH
-}
-
-// renderMatrixCell renders one grid cell as a bordered box of exactly cellW x
-// cellH OUTER cells (rounded border — dim by default, accent when focused) so
-// the grid geometry stays predictable for hit-testing. Content is clipped to the
-// inner area (cellW-2 x cellH-2). An out-of-range index renders an empty box.
-func (m Model) renderMatrixCell(idx, focus, cellW, cellH int) string {
-	innerW := cellW - 2
-	if innerW < 1 {
-		innerW = 1
-	}
-	innerH := cellH - 2
-	if innerH < 1 {
-		innerH = 1
-	}
-
-	// The rounded border adds 1 cell on each side, so the style is sized to the
-	// INNER area; the rendered box is cellW x cellH OUTER (matches matrixGridDims
-	// and hitTestMatrix).
-	box := lipgloss.NewStyle().
-		Width(innerW).
-		Height(innerH).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(dimColor)
-
-	if idx < 0 || idx >= len(m.sessions) {
-		return box.Render("")
-	}
-	if idx == focus {
-		box = box.BorderForeground(accentColor)
-	}
-
-	s := m.sessions[idx]
-	var lines []string
-
-	headerTxt := s.Name
-	if s.Status != "" {
-		headerTxt += " · " + s.Status
-	}
-	hStyle := lipgloss.NewStyle().Width(innerW).MaxWidth(innerW).Bold(true)
-	if idx == focus {
-		hStyle = hStyle.Foreground(lipgloss.Color("#ffffff"))
-		headerTxt = "▸ " + headerTxt
-	}
-	lines = append(lines, hStyle.Render(truncate(headerTxt, innerW)))
-
-	output := m.captureOutputs[s.Name]
-	if output == "" && m.captureName == s.Name {
-		output = m.captureOutput
-	}
-	if output == "" {
-		output = "(no output yet)"
-	}
-	outLines := strings.Split(output, "\n")
-	room := innerH - 1
-	if room < 0 {
-		room = 0
-	}
-	if len(outLines) > room {
-		outLines = outLines[len(outLines)-room:]
-	}
-	outStyle := lipgloss.NewStyle().Width(innerW).MaxWidth(innerW).Foreground(lipgloss.Color("#aaaaaa"))
-	for _, ln := range outLines {
-		lines = append(lines, outStyle.Render(truncate(ln, innerW)))
-	}
-	if len(lines) > innerH {
-		lines = lines[:innerH]
-	}
-	return box.Render(strings.Join(lines, "\n"))
-}
-
-// clampMatrixOffset keeps the matrix window start within [0, max(0, total-4)]
-// so the grid is always filled from the top-left.
-func (m Model) clampMatrixOffset(off int) int {
-	maxOff := len(m.sessions) - matrixCells
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	if off < 0 {
-		off = 0
-	}
-	if off > maxOff {
-		off = maxOff
-	}
-	return off
-}
-
-// matrixOffsetForSelection returns a window start that keeps the currently
-// selected session visible within the 4-cell grid.
-func (m Model) matrixOffsetForSelection() int {
-	sel := m.selectedSessionIdx()
-	if sel < 0 {
-		return m.clampMatrixOffset(m.matrixOffset)
-	}
-	off := m.matrixOffset
-	if sel < off {
-		off = sel
-	}
-	if sel >= off+matrixCells {
-		off = sel - (matrixCells - 1)
-	}
-	return m.clampMatrixOffset(off)
-}
-
-// followMatrixSelection scrolls the matrix window so the selected session stays
-// visible after a cursor move.
-func (m *Model) followMatrixSelection() {
-	m.matrixOffset = m.matrixOffsetForSelection()
-}
-
-// cursorForSession returns the list-cursor position that selects the given flat
-// session index, accounting for grouped mode. Used to focus a session picked by
-// a matrix-cell click. Returns the current cursor unchanged if not resolvable.
-func (m Model) cursorForSession(sessionIdx int) int {
-	if sessionIdx < 0 || sessionIdx >= len(m.sessions) {
-		return m.cursor
-	}
-	if !m.groupMode {
-		return sessionIdx
-	}
-	pos := 0
-	for _, root := range m.groupOrder {
-		pos++ // group header
-		if m.collapsedGroups[root] {
-			continue
-		}
-		for _, idx := range m.groupedSessions[root] {
-			if idx == sessionIdx {
-				return pos
-			}
-			pos++
-		}
-	}
-	return m.cursor
-}
-
 // renderDetailPanel renders the right column with metadata for the selected session.
 func (m Model) renderDetailPanel(width, height int) string {
 	var b strings.Builder
@@ -2164,17 +1675,6 @@ func (m Model) renderDetailPanel(width, height int) string {
 	}
 
 	s := m.sessions[idx]
-
-	b.WriteString(m.renderSelectedSessionInspector(s, width))
-	b.WriteString("\n\n")
-	b.WriteString(m.renderTerminalPane(s, width, height))
-
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// renderSelectedSessionInspector renders static metadata for the selected session.
-func (m Model) renderSelectedSessionInspector(s SessionRow, width int) string {
-	var b strings.Builder
 
 	labelStyle := lipgloss.NewStyle().Foreground(dimColor).Width(14)
 	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff"))
@@ -2289,14 +1789,8 @@ func (m Model) renderSelectedSessionInspector(s SessionRow, width int) string {
 		}
 	}
 
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// renderTerminalPane renders the selected session's captured tmux output.
-func (m Model) renderTerminalPane(s SessionRow, width, height int) string {
-	var b strings.Builder
-
 	// Separator and capture-pane output.
+	b.WriteString("\n")
 	sepStyle := lipgloss.NewStyle().Foreground(dimColor)
 	b.WriteString(sepStyle.Render(strings.Repeat("─", width)))
 	b.WriteString("\n")
@@ -2327,184 +1821,6 @@ func (m Model) renderTerminalPane(s SessionRow, width, height int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// --- Mouse interaction & layout geometry -------------------------------------
-//
-// View() renders a two-column layout (session list | workbench terminal). The
-// helpers below recompute the same geometry so tea.MouseMsg coordinates can be
-// mapped back to a session. They are the single source of truth for the widths
-// and vertical offsets used by both View() and the hit-testers.
-
-// normalizedDims returns the width/height View() actually renders at, applying
-// the same minimum-size clamps.
-func (m Model) normalizedDims() (width, height int) {
-	width = m.width
-	if width < 40 {
-		width = 80
-	}
-	height = m.height
-	if height < 10 {
-		height = 24
-	}
-	return width, height
-}
-
-// columnWidths returns the rendered widths of the left session-list column and
-// the right workbench column for a normalized total width.
-func (m Model) columnWidths(width int) (leftWidth, workbenchWidth int) {
-	leftWidth = width * 30 / 100
-	if leftWidth < 20 {
-		leftWidth = 20
-	}
-	if leftWidth > 46 {
-		leftWidth = 46
-	}
-	workbenchWidth = width - leftWidth
-	if workbenchWidth < 20 {
-		workbenchWidth = 20
-	}
-	return leftWidth, workbenchWidth
-}
-
-// headerOffset returns the screen row of the columns box's top border: the
-// height of the banner + copyright, plus any error/warning line above it.
-func (m Model) headerOffset() int {
-	off := lipgloss.Height(bannerText) + 1 // banner + copyright line
-	if m.err != nil {
-		off += 2 // "Error: ..." + log-hint line
-	} else if m.serverWarning != "" {
-		off += 1
-	}
-	return off
-}
-
-// workbenchContentDims mirrors View()'s content-height math so the matrix grid
-// hit-test uses the same cell sizes as the renderer.
-func (m Model) workbenchContentDims(height int) int {
-	usedLines := 10
-	if m.err != nil || m.serverWarning != "" {
-		usedLines++
-	}
-	colHeight := height - usedLines
-	if colHeight < 6 {
-		colHeight = 6
-	}
-	contentH := colHeight - 2
-	if contentH < 4 {
-		contentH = 4
-	}
-	return contentH
-}
-
-// sessionHasSubtitle reports whether renderSessionRow emits a second (subtitle)
-// line for the session — must mirror the parts logic in renderSessionRow.
-func sessionHasSubtitle(s SessionRow) bool {
-	return s.Branch != "" || s.Persona != "" || s.Project != ""
-}
-
-// listLineToCursor maps each rendered line of the left column (starting at the
-// first session row, below the "Sessions" header) to the list-cursor position
-// it selects. It replays the exact line-emission order of renderSessionList /
-// renderGroupedList / renderSessionRow so a click lands on the right session.
-func (m Model) listLineToCursor() []int {
-	var lm []int
-	if len(m.sessions) == 0 {
-		return lm
-	}
-	if !m.groupMode {
-		for i, s := range m.sessions {
-			lm = append(lm, i) // name line
-			if sessionHasSubtitle(s) {
-				lm = append(lm, i) // subtitle line
-			}
-		}
-		return lm
-	}
-	pos := 0
-	for _, root := range m.groupOrder {
-		lm = append(lm, pos) // group header line
-		pos++
-		if m.collapsedGroups[root] {
-			continue
-		}
-		for _, idx := range m.groupedSessions[root] {
-			s := m.sessions[idx]
-			lm = append(lm, pos) // name line
-			if sessionHasSubtitle(s) {
-				lm = append(lm, pos) // subtitle line
-			}
-			pos++
-		}
-	}
-	return lm
-}
-
-// hitTestList maps a click at (x, y) inside the left column to the list-cursor
-// position it selects. ok is false when the click is outside the session rows.
-func (m Model) hitTestList(x, y int) (cursor int, ok bool) {
-	width, _ := m.normalizedDims()
-	leftWidth, _ := m.columnWidths(width)
-	if x < 0 || x >= leftWidth {
-		return 0, false
-	}
-	listTop := m.headerOffset() + 2 // top border + "Sessions" header
-	line := y - listTop
-	if line < 0 {
-		return 0, false
-	}
-	lm := m.listLineToCursor()
-	if line >= len(lm) {
-		return 0, false
-	}
-	return lm[line], true
-}
-
-// hitTestMatrix maps a click at (x, y) inside the right column's 2x2 matrix grid
-// to the flat session index of the cell. ok is false outside a populated cell.
-func (m Model) hitTestMatrix(x, y int) (sessionIdx int, ok bool) {
-	if !m.matrixMode || len(m.sessions) == 0 {
-		return 0, false
-	}
-	width, height := m.normalizedDims()
-	leftWidth, workbenchWidth := m.columnWidths(width)
-	terminalContentW := workbenchWidth - 4
-	if terminalContentW < 10 {
-		terminalContentW = 10
-	}
-	contentH := m.workbenchContentDims(height)
-	leftCellW, rightCellW, cellH := matrixGridDims(terminalContentW, contentH)
-
-	x0 := leftWidth + 2             // right box: border(1) + padding(1)
-	gridTop := m.headerOffset() + 2 // top border + matrix header
-
-	col := -1
-	switch {
-	case x >= x0 && x < x0+leftCellW:
-		col = 0
-	case x >= x0+leftCellW+1 && x < x0+leftCellW+1+rightCellW:
-		col = 1
-	}
-	if col < 0 {
-		return 0, false
-	}
-
-	row := -1
-	switch {
-	case y >= gridTop && y < gridTop+cellH:
-		row = 0
-	case y >= gridTop+cellH && y < gridTop+2*cellH:
-		row = 1
-	}
-	if row < 0 {
-		return 0, false
-	}
-
-	idx := m.clampMatrixOffset(m.matrixOffset) + row*2 + col
-	if idx < 0 || idx >= len(m.sessions) {
-		return 0, false
-	}
-	return idx, true
-}
-
 // renderHelpPopup renders a centered help overlay with categorized keyboard shortcuts.
 func (m Model) renderHelpPopup() string {
 	width := m.width
@@ -2525,11 +1841,8 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString(catStyle.Render("Navigation"))
 	b.WriteString("\n")
 	b.WriteString(keyStyle.Render("  j / k") + descStyle.Render("Move down / up") + "\n")
-	b.WriteString(keyStyle.Render("  enter") + descStyle.Render("Attach full screen (ctrl+q returns)") + "\n")
-	b.WriteString(keyStyle.Render("  tab") + descStyle.Render("Interact with terminal / back to list") + "\n")
-	b.WriteString(keyStyle.Render("  s") + descStyle.Render("Toggle matrix (2x2 grid)") + "\n")
+	b.WriteString(keyStyle.Render("  enter") + descStyle.Render("Attach to session") + "\n")
 	b.WriteString(keyStyle.Render("  g") + descStyle.Render("Toggle flat / grouped view") + "\n")
-	b.WriteString(keyStyle.Render("  mouse") + descStyle.Render("Click to focus · scroll to move") + "\n")
 	b.WriteString("\n")
 
 	b.WriteString(catStyle.Render("Session Management"))
