@@ -649,6 +649,13 @@ func TestBindWorkbenchNavKeys(t *testing.T) {
 	if !strings.Contains(out, "send-keys") {
 		t.Errorf("nav bindings must pass the key through on single-pane windows:\n%s", out)
 	}
+	// Extended-key reporting must be enabled so tmux recognizes the terminal's
+	// Ctrl+arrow sequences and the bindings above actually fire (#3293).
+	if ek, err := tm.run("show-options", "-s", "-v", "extended-keys"); err != nil {
+		t.Errorf("show extended-keys: %v", err)
+	} else if strings.TrimSpace(ek) != "on" {
+		t.Errorf("extended-keys = %q, want \"on\"", strings.TrimSpace(ek))
+	}
 }
 
 // TestComposeProjectWorkbench_RoundTrip exercises the multi-window (Option A)

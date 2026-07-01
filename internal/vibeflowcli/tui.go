@@ -502,12 +502,31 @@ func projectLabel(root string) string {
 // selectedProjectSessions returns the label and tmux names of the sessions that
 // share the selected session's project (repo root), in list order. Used by the
 // `m` (single-project) workbench.
-func (m Model) selectedProjectSessions() (label string, names []string) {
+// selectedRepoRoot resolves the current cursor to a project's repo root. In
+// grouped mode groupedCursorToSession returns the group's root even when the
+// cursor is on a project HEADER (not a session), so the m/M workbench shortcuts
+// work with a project root selected (#3293) — previously selectedSessionIdx
+// returned -1 on a header and the shortcuts no-op'd.
+func (m Model) selectedRepoRoot() (root string, ok bool) {
+	if m.groupMode {
+		idx, groupRoot := m.groupedCursorToSession()
+		if idx < 0 && groupRoot == "" {
+			return "", false // cursor maps to no group
+		}
+		return groupRoot, true // group root for both a header and a session
+	}
 	idx := m.selectedSessionIdx()
-	if idx < 0 {
+	if idx < 0 || idx >= len(m.sessions) {
+		return "", false
+	}
+	return m.getRepoRoot(m.sessions[idx].WorkingDir), true
+}
+
+func (m Model) selectedProjectSessions() (label string, names []string) {
+	selRoot, ok := m.selectedRepoRoot()
+	if !ok {
 		return "", nil
 	}
-	selRoot := m.getRepoRoot(m.sessions[idx].WorkingDir)
 	for _, s := range m.sessions {
 		if m.getRepoRoot(s.WorkingDir) == selRoot {
 			names = append(names, s.Name)

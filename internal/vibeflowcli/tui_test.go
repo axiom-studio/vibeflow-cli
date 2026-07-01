@@ -145,6 +145,38 @@ func TestProjectGrouping(t *testing.T) {
 	}
 }
 
+// TestSelectedProjectSessions_GroupHeaderResolvesToGroup guards #3293 Bug B:
+// with the cursor on a project/group HEADER in grouped mode, m/M must still
+// resolve to that project's sessions (previously selectedSessionIdx returned -1
+// on a header so the shortcuts no-op'd).
+func TestSelectedProjectSessions_GroupHeaderResolvesToGroup(t *testing.T) {
+	m := Model{
+		groupMode: true,
+		repoRootCache: map[string]string{
+			"/work/alpha": "/work/alpha",
+			"/work/beta":  "/work/beta",
+		},
+		collapsedGroups: map[string]bool{},
+		sessions: []SessionRow{
+			{Name: "claude-a1", WorkingDir: "/work/alpha"},
+			{Name: "codex-a2", WorkingDir: "/work/alpha"},
+			{Name: "gemini-b1", WorkingDir: "/work/beta"},
+		},
+	}
+	m.buildGroups()
+	m.cursor = 0 // the first group header (a project root)
+	if idx, root := m.groupedCursorToSession(); idx != -1 || root == "" {
+		t.Fatalf("cursor 0 should be a group header, got idx=%d root=%q", idx, root)
+	}
+	label, names := m.selectedProjectSessions()
+	if len(names) != 2 {
+		t.Fatalf("a project-root selection must yield that group's sessions, got %d: %v", len(names), names)
+	}
+	if label == "" {
+		t.Error("expected a non-empty project label")
+	}
+}
+
 func TestWorkbenchMetas(t *testing.T) {
 	st := &Store{path: filepath.Join(t.TempDir(), "sessions.json")}
 	_ = st.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_claude-a", Persona: "dev", Project: "p1"})

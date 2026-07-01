@@ -728,6 +728,14 @@ func (tm *TmuxManager) configureWorkbenchChrome(holder, hint string) {
 // it keeps its own word-navigation binding. Root-table bindings are global to
 // the tmux server (same table BindSessionKeys uses); re-binding is idempotent.
 func (tm *TmuxManager) bindWorkbenchNavKeys() {
+	// Recognize modified keys (Ctrl+Left/Right) so the bindings below actually
+	// fire. On a custom socket the user's tmux.conf is not loaded, so without
+	// this tmux may not parse the terminal's Ctrl+arrow sequences as C-Left/
+	// C-Right (#3293). Set here — at workbench-compose time — rather than in
+	// EnsureServer, because the holder session guarantees the tmux server is
+	// live so this server option persists.
+	_, _ = tm.run("set", "-s", "extended-keys", "on")
+	_, _ = tm.run("set", "-as", "terminal-features", "*:extkeys")
 	for _, b := range []struct{ key, pane string }{
 		{"C-Left", ":.-"},  // previous pane
 		{"C-Right", ":.+"}, // next pane
