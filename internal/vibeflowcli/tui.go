@@ -343,6 +343,12 @@ func (m Model) refreshSessions() tea.Msg {
 	}
 
 	for _, ts := range tmuxSessions {
+		// The workbench holder is an internal composition session, not a user
+		// agent — never list it, or it shows as "workbench" and (while a
+		// workbench is composed/orphaned) masks the agents joined into it (#3300).
+		if isWorkbenchHolder(ts.Name) {
+			continue
+		}
 		shortName := strings.TrimPrefix(ts.Name, sessionPrefix)
 		row := SessionRow{
 			Name:         shortName,

@@ -447,6 +447,15 @@ func (tm *TmuxManager) SendKeys(name, keys string) error {
 // never collides with an agent session ("vibeflow_<provider>-<name>").
 const workbenchHolderName = sessionPrefix + "workbench"
 
+// isWorkbenchHolder reports whether a full tmux session name is the internal
+// workbench composition holder rather than a user agent session. The holder is
+// excluded from the TUI session list (#3300): otherwise it appears as
+// "workbench" and, while a workbench is composed or orphaned, hides the agent
+// sessions whose panes are joined into it.
+func isWorkbenchHolder(fullName string) bool {
+	return fullName == workbenchHolderName
+}
+
 // workbenchStatusKeys are the per-session status-bar options ConfigureStatusBar
 // sets. They are captured before a session's pane is joined into the workbench
 // and re-applied when the pane is restored, so the vibeflow-themed status bar
