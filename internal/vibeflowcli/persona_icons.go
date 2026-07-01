@@ -24,7 +24,7 @@ func PersonaColor(key string) lipgloss.Color {
 	if c, ok := personaColors[key]; ok {
 		return c
 	}
-	return lipgloss.Color("#888888")
+	return oceanMuted
 }
 
 // PersonaLargeIcon returns the multi-line pixel art icon for the given persona.
@@ -39,18 +39,21 @@ func PersonaCompactIcon(key string) string {
 	return personaCompactIcons[key]
 }
 
-// personaColors maps persona keys to their theme colors.
-// Palette chosen for distinctness on dark backgrounds and harmony with providerColors.
+// personaColors maps persona keys to their theme colors — 9 distinct
+// Ocean-harmonized hues (theme.go / doc #401): five are exact Ocean tokens,
+// four are soft ocean-dusk tints for the roles Ocean has no token for. Each
+// persona also has a distinct glyph (personaCompactIcons), which carries the
+// primary identity; color is secondary.
 var personaColors = map[string]lipgloss.Color{
-	"principal_engineer": lipgloss.Color("#ffd700"), // gold — royalty/mastery
-	"developer":          lipgloss.Color("#61afef"), // soft blue — code/tech
-	"architect":          lipgloss.Color("#c678dd"), // purple — design/wisdom
-	"ux_designer":        lipgloss.Color("#e88fd2"), // pink — design/creativity
-	"qa_lead":            lipgloss.Color("#98c379"), // green — verification
-	"security_lead":      lipgloss.Color("#e06c75"), // red — security/alerts
-	"product_manager":    lipgloss.Color("#e5c07b"), // gold — innovation
-	"project_manager":    lipgloss.Color("#d19a66"), // orange — organization
-	"customer":           lipgloss.Color("#56b6c2"), // teal — communication
+	"principal_engineer": oceanWarning,              // sandy gold — mastery
+	"developer":          oceanPrimary,              // sky — code/tech
+	"architect":          lipgloss.Color("#a29bfe"), // ocean-dusk periwinkle — wisdom
+	"ux_designer":        lipgloss.Color("#f78fb3"), // ocean-sunset rose — creativity
+	"qa_lead":            oceanAccent,               // seafoam — verification
+	"security_lead":      oceanError,                // coral — security/alerts
+	"product_manager":    lipgloss.Color("#ffd98e"), // soft sand — innovation
+	"project_manager":    oceanSecondary,            // deep blue — organization
+	"customer":           lipgloss.Color("#7bed9f"), // ocean mint — communication
 }
 
 // personaCompactIcons maps persona keys to small Unicode glyphs for inline display.

@@ -294,8 +294,8 @@ func (m SetupModel) View() string {
 	}
 
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa"))
-	inputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Bold(true)
+	labelStyle := lipgloss.NewStyle().Foreground(oceanMuted)
+	inputStyle := lipgloss.NewStyle().Foreground(oceanForeground).Bold(true)
 	errStyle := lipgloss.NewStyle().Foreground(errorColor)
 	dimStyle := lipgloss.NewStyle().Foreground(dimColor)
 
@@ -369,7 +369,7 @@ func (m SetupModel) View() string {
 	popupWidth := 56
 	popupStyle := lipgloss.NewStyle().
 		Width(popupWidth).
-		Border(lipgloss.RoundedBorder()).
+		Border(oceanBorder()).
 		BorderForeground(accentColor).
 		Padding(1, 2)
 
