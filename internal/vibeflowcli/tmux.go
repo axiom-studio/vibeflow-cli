@@ -654,8 +654,8 @@ func (tm *TmuxManager) configureWorkbenchBorders(target string) {
 		{"pane-border-status", "top"},
 		{"pane-border-format", " #{pane_title} "},
 		{"pane-border-lines", "single"},
-		{"pane-border-style", "fg=#3b4261"},
-		{"pane-active-border-style", "fg=#7aa2f7"},
+		{"pane-border-style", "fg=" + oceanHexMuted},
+		{"pane-active-border-style", "fg=" + oceanHexPrimary},
 	} {
 		_, _ = tm.run("set-option", "-t", target, opt.key, opt.val)
 	}
@@ -667,7 +667,7 @@ func (tm *TmuxManager) configureWorkbenchBorders(target string) {
 func (tm *TmuxManager) configureWorkbenchChrome(holder, hint string) {
 	for _, opt := range []struct{ key, val string }{
 		{"status", "on"},
-		{"status-style", "fg=#a9b1d6,bg=#1a1b26"},
+		{"status-style", "fg=" + oceanHexForeground + ",bg=" + oceanHexBackground},
 		{"status-left-length", "220"},
 		{"status-left", hint},
 		{"status-right", ""},
@@ -888,9 +888,10 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 		branch = "main"
 	}
 
-	// Build status-left: [vibeflow] provider | branch
+	// Build status-left: [vibeflow] provider | branch (Ocean palette, theme.go:
+	// deep-ocean bg, sky-blue accent, surface, storm-gray muted, soft fg).
 	statusLeft := fmt.Sprintf(
-		"#[fg=#1a1b26,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#2a2e3f,nobold] %s #[fg=#555555]|#[fg=#a9b1d6] %s ",
+		"#[fg=#0b1929,bg=#48dbfb,bold] vibeflow #[fg=#48dbfb,bg=#152d45,nobold] %s #[fg=#576574]|#[fg=#c8d6e5] %s ",
 		provider, branch,
 	)
 
@@ -900,13 +901,13 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 		project = "default"
 	}
 	statusRight := fmt.Sprintf(
-		"#[fg=#555555]Ctrl+q:#[fg=#a9b1d6]Menu #[fg=#555555]|#[fg=#555555] Ctrl+\\:#[fg=#a9b1d6]Menu #[fg=#555555]| #[fg=#00d4aa]%s ",
+		"#[fg=#576574]Ctrl+q:#[fg=#c8d6e5]Menu #[fg=#576574]|#[fg=#576574] Ctrl+\\:#[fg=#c8d6e5]Menu #[fg=#576574]| #[fg=#48dbfb]%s ",
 		project,
 	)
 
 	settings := map[string]string{
 		"status":              "on",
-		"status-style":        "fg=#a9b1d6,bg=#1a1b26",
+		"status-style":        "fg=#c8d6e5,bg=#0b1929",
 		"status-left":         statusLeft,
 		"status-right":        statusRight,
 		"status-left-length":  "60",

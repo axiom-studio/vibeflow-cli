@@ -33,24 +33,27 @@ import (
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
-// Colors for the vibeflow theme.
+// Colors for the vibeflow theme — semantic aliases onto the Ocean design
+// system palette (see theme.go / design_system doc #401). Downstream render
+// code references these names; the concrete values live in theme.go.
 var (
-	accentColor  = lipgloss.Color("#00d4aa")
-	dimColor     = lipgloss.Color("#555555")
-	errorColor   = lipgloss.Color("#ff5555")
-	warningColor = lipgloss.Color("#ffaa00")
+	accentColor  = oceanPrimary
+	dimColor     = oceanMuted
+	errorColor   = oceanError
+	warningColor = oceanWarning
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(accentColor).
 			MarginBottom(1)
 
+	// Selected: dark text on a sky-blue bar (Ocean primary).
 	selectedStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#ffffff")).
-			Background(lipgloss.Color("#333333"))
+			Foreground(oceanBackground).
+			Background(oceanPrimary)
 
-	statusRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00"))
+	statusRunning = lipgloss.NewStyle().Foreground(oceanSuccess)
 	statusIdle    = lipgloss.NewStyle().Foreground(dimColor)
 	statusWaiting = lipgloss.NewStyle().Foreground(warningColor)
 	statusError   = lipgloss.NewStyle().Foreground(errorColor)
@@ -1672,7 +1675,7 @@ func (m Model) View() string {
 	leftContent := m.renderSessionList(leftContentW, contentH)
 	rightContent := m.renderDetailPanel(rightContentW, contentH)
 
-	borderStyle := lipgloss.RoundedBorder()
+	borderStyle := oceanBorder()
 	leftStyle := lipgloss.NewStyle().
 		Width(leftWidth).
 		Height(colHeight).
@@ -1734,7 +1737,7 @@ func (m Model) renderSessionList(width, height int) string {
 // renderGroupedList renders the session list grouped by repo root.
 func (m Model) renderGroupedList(width int, b *strings.Builder) string {
 	pos := 0
-	groupHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#888888"))
+	groupHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(oceanMuted)
 
 	for _, root := range m.groupOrder {
 		indices := m.groupedSessions[root]
@@ -1753,7 +1756,7 @@ func (m Model) renderGroupedList(width int, b *strings.Builder) string {
 		header := fmt.Sprintf("%s %s (%d)", arrow, displayRoot, len(indices))
 
 		if pos == m.cursor {
-			b.WriteString(selectedStyle.Width(width).Render("> " + header))
+			b.WriteString(selectedStyle.Width(width).Render(iconActive + " " + header))
 		} else {
 			b.WriteString("  " + groupHeaderStyle.Render(header))
 		}
@@ -1832,7 +1835,7 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	line := fmt.Sprintf("%s %s%s%s%s", indStyle.Render(indicator), provDot, name, recoveredBadge, healthBadge)
 
 	if pos == cursor {
-		b.WriteString(selectedStyle.Width(width).Render("> " + indent + line))
+		b.WriteString(selectedStyle.Width(width).Render(iconActive + " " + indent + line))
 	} else {
 		b.WriteString("  " + indent + line)
 	}
@@ -1884,7 +1887,7 @@ func (m Model) renderDetailPanel(width, height int) string {
 	s := m.sessions[idx]
 
 	labelStyle := lipgloss.NewStyle().Foreground(dimColor).Width(14)
-	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff"))
+	valueStyle := lipgloss.NewStyle().Foreground(oceanForeground)
 
 	row := func(label, value string) {
 		b.WriteString(labelStyle.Render(label))
@@ -2015,7 +2018,7 @@ func (m Model) renderDetailPanel(width, height int) string {
 		if len(lines) > maxLines {
 			lines = lines[len(lines)-maxLines:]
 		}
-		outputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa"))
+		outputStyle := lipgloss.NewStyle().Foreground(oceanForeground)
 		for _, line := range lines {
 			b.WriteString(outputStyle.Render(truncate(line, width)))
 			b.WriteString("\n")
@@ -2040,8 +2043,8 @@ func (m Model) renderHelpPopup() string {
 	}
 
 	catStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Width(16)
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa"))
+	keyStyle := lipgloss.NewStyle().Foreground(oceanPrimary).Width(16)
+	descStyle := lipgloss.NewStyle().Foreground(oceanMuted)
 	dimStyle := lipgloss.NewStyle().Foreground(dimColor)
 
 	var b strings.Builder
@@ -2096,7 +2099,7 @@ func (m Model) renderHelpPopup() string {
 	popupWidth := 52
 	popupStyle := lipgloss.NewStyle().
 		Width(popupWidth).
-		Border(lipgloss.RoundedBorder()).
+		Border(oceanBorder()).
 		BorderForeground(accentColor).
 		Padding(1, 2)
 
@@ -2104,12 +2107,13 @@ func (m Model) renderHelpPopup() string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, popup)
 }
 
-// Provider color-coded dots.
+// Provider color-coded dots — distinct hues drawn from the Ocean palette
+// (theme.go). The provider glyph plus these keep providers distinguishable.
 var providerColors = map[string]lipgloss.Color{
-	"claude": lipgloss.Color("#cc785c"), // warm amber
-	"codex":  lipgloss.Color("#10a37f"), // OpenAI green
-	"cursor": lipgloss.Color("#a8b4ff"), // Cursor accent
-	"gemini": lipgloss.Color("#4285f4"), // Google blue
+	"claude": oceanWarning,   // sandy
+	"codex":  oceanAccent,    // seafoam
+	"cursor": oceanPrimary,   // sky
+	"gemini": oceanSecondary, // deep blue
 }
 
 func renderProvider(provider string) string {

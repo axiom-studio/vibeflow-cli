@@ -165,7 +165,7 @@ func (wl WorktreeListModel) View() string {
 
 			statusStyle := lipgloss.NewStyle().Foreground(dimColor)
 			if row.Status == "active" {
-				statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00"))
+				statusStyle = lipgloss.NewStyle().Foreground(oceanSuccess)
 			} else {
 				statusStyle = lipgloss.NewStyle().Foreground(warningColor)
 			}
