@@ -647,6 +647,29 @@ func TestBindWorkbenchNavKeys(t *testing.T) {
 	if !strings.Contains(out, "send-keys") {
 		t.Errorf("nav binding must pass the key through on single-pane windows:\n%s", out)
 	}
+
+	// #3321: a single left click in a multi-pane workbench must focus the pane
+	// under the pointer WITHOUT tmux's default `send -M` pass-through, so one
+	// click reliably focuses it; single-pane windows keep the pass-through.
+	var mouseLine string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "MouseDown1Pane") {
+			mouseLine = l
+			break
+		}
+	}
+	if mouseLine == "" {
+		t.Fatalf("root key table missing MouseDown1Pane binding:\n%s", out)
+	}
+	if !strings.Contains(mouseLine, "window_panes") {
+		t.Errorf("MouseDown1Pane must be guarded by window_panes>1: %q", mouseLine)
+	}
+	if !strings.Contains(mouseLine, "select-pane") {
+		t.Errorf("MouseDown1Pane must select the pane under the pointer: %q", mouseLine)
+	}
+	if !strings.Contains(mouseLine, "send-keys -M") {
+		t.Errorf("MouseDown1Pane single-pane branch must pass the mouse through: %q", mouseLine)
+	}
 }
 
 // TestConfigureWorkbenchChrome_StatusPositionTop guards #3299: the workbench

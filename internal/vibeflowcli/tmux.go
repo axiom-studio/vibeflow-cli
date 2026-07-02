@@ -735,14 +735,12 @@ func (tm *TmuxManager) configureWorkbenchChrome(holder, hint string) {
 	tm.bindWorkbenchNavKeys()
 }
 
-// bindWorkbenchNavKeys binds no-prefix Ctrl+Left / Ctrl+Right to previous / next
-// pane so users can switch between session panes in a multi-pane workbench with
-// the keyboard (QA rework of #2719 — "Ctrl-b o" was unreliable and Ctrl-o is
-// used by coding agents). The if-shell guard scopes it to multi-pane windows:
-// when the current window has a single pane (a directly-attached agent, or a
-// one-session workbench) the key is passed through to the agent via send-keys so
-// it keeps its own word-navigation binding. Root-table bindings are global to
-// the tmux server (same table BindSessionKeys uses); re-binding is idempotent.
+// bindWorkbenchNavKeys installs the workbench's root-table mouse/keyboard
+// ergonomics: Ctrl-t to switch panes, and a MouseDown1Pane override so a single
+// click focuses the pane under the pointer. Both are guarded by pane count so
+// single-pane windows (a directly-attached agent) keep tmux's default
+// pass-through behavior. Root-table bindings are global to the tmux server (same
+// table BindSessionKeys uses); re-binding is idempotent.
 func (tm *TmuxManager) bindWorkbenchNavKeys() {
 	// Ctrl-t cycles to the next session pane in a multi-pane workbench window. A
 	// plain control key is emitted reliably by every terminal, unlike Ctrl+arrow
@@ -754,6 +752,18 @@ func (tm *TmuxManager) bindWorkbenchNavKeys() {
 	_, _ = tm.run("bind-key", "-T", "root", "C-t",
 		"if-shell", "-F", "#{>:#{window_panes},1}",
 		"select-pane -t :.+", "send-keys C-t")
+
+	// MouseDown1Pane: in a multi-pane workbench, a single left click just SELECTS
+	// the pane under the pointer — it deliberately drops tmux's default `send -M`
+	// pass-through, which forwards the click to the agent app and is what made
+	// focus feel like it took several clicks (#3321, user-chosen: click-to-focus
+	// is the priority and copy/paste is not). tmux's default MouseDown1Pane is
+	// `select-pane -t= ; send -M`. Single-pane windows keep the pass-through
+	// (`send-keys -M`) so a directly-attached agent still receives the mouse.
+	// Drag-to-copy (MouseDrag1Pane) is a separate binding and is unaffected.
+	_, _ = tm.run("bind-key", "-T", "root", "MouseDown1Pane",
+		"if-shell", "-F", "#{>:#{window_panes},1}",
+		"select-pane -t=", "send-keys -M")
 }
 
 // windowID returns the tmux window id (e.g. "@3") for a window target.
