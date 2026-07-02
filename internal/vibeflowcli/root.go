@@ -172,7 +172,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 	}
 	defer model.logger.Close()
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
+	// WithMouseCellMotion enables mouse reporting so the main list responds to
+	// clicks and the scroll wheel. Plain drag-to-select falls back to
+	// Shift/Option-drag in most terminals (the k9s/lazygit convention).
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		model.logger.Error("TUI fatal: %v", err)
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)

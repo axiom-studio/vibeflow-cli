@@ -146,6 +146,47 @@ type Model struct {
 	collapsedGroups map[string]bool   // repo root → collapsed state
 	groupOrder      []string          // ordered list of repo roots
 	groupedSessions map[string][]int  // repo root → indices into m.sessions
+
+	// hitmap maps rendered rows of the session list to selectable cursor
+	// positions so mouse clicks resolve to the row under the pointer. It is
+	// populated by renderSessionList during View and read by Update on a
+	// tea.MouseMsg. All its methods are nil-safe so a zero-value Model (used in
+	// tests) never panics.
+	hitmap *listHitmap
+}
+
+// listRowSpan records the vertical extent of one selectable row in the session
+// list, in lines relative to the list's first content line.
+type listRowSpan struct {
+	startY int // content-relative line of the row's first line (Sessions header = 0)
+	height int // number of terminal lines the row occupies (1 or 2)
+	pos    int // grouped-cursor position this row maps to (matches m.cursor)
+}
+
+// listHitmap holds the geometry needed to turn a mouse (x, y) into a list row.
+type listHitmap struct {
+	contentTop int           // absolute terminal row of the list's first content line
+	leftWidth  int           // width of the left column; x >= leftWidth is outside the list
+	spans      []listRowSpan // one entry per selectable row, in render order
+}
+
+func (h *listHitmap) resetSpans() {
+	if h != nil {
+		h.spans = h.spans[:0]
+	}
+}
+
+func (h *listHitmap) addSpan(startY, height, pos int) {
+	if h != nil {
+		h.spans = append(h.spans, listRowSpan{startY: startY, height: height, pos: pos})
+	}
+}
+
+func (h *listHitmap) setViewport(contentTop, leftWidth int) {
+	if h != nil {
+		h.contentTop = contentTop
+		h.leftWidth = leftWidth
+	}
 }
 
 // NewModel creates a new TUI model.
@@ -170,6 +211,7 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 		groupMode:       cfg.ViewMode == "grouped",
 		repoRootCache:   make(map[string]string),
 		collapsedGroups: make(map[string]bool),
+		hitmap:          &listHitmap{},
 	}
 }
 
@@ -810,6 +852,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		// Handle confirmation dialogs first.
 		if m.confirmDelete {
@@ -903,16 +947,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if sessionIdx >= 0 && sessionIdx < len(m.sessions) {
-					cmd := m.tmux.AttachSessionCmd(m.sessions[sessionIdx].Name)
-					return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-						return attachExitMsg{err: err}
-					})
+					return m, m.attachSessionCmd(m.sessions[sessionIdx].Name)
 				}
 			} else if m.cursor < len(m.sessions) {
-				cmd := m.tmux.AttachSessionCmd(m.sessions[m.cursor].Name)
-				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-					return attachExitMsg{err: err}
-				})
+				return m, m.attachSessionCmd(m.sessions[m.cursor].Name)
 			}
 		case "g":
 			m.groupMode = !m.groupMode
@@ -1577,6 +1615,82 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	return m.refreshSessions()
 }
 
+// attachSessionCmd builds the command that attaches to (or, inside tmux,
+// switches to) the named session. Shared by the Enter key and mouse clicks so
+// both activate a session identically.
+func (m Model) attachSessionCmd(name string) tea.Cmd {
+	cmd := m.tmux.AttachSessionCmd(name)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return attachExitMsg{err: err}
+	})
+}
+
+// handleMouse routes mouse events for the main session list: the wheel moves
+// the selection and a left click resolves to the row under the pointer. Mouse
+// input is ignored outside the session list (sub-views, confirmation dialogs).
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.activeView != ViewSessions || m.confirmDelete || m.confirmQuit || m.confirmDetach {
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if msg.Action == tea.MouseActionPress && m.cursor > 0 {
+			m.cursor--
+		}
+	case tea.MouseButtonWheelDown:
+		if msg.Action == tea.MouseActionPress {
+			maxIdx := len(m.sessions) - 1
+			if m.groupMode {
+				maxIdx = m.groupedListLen() - 1
+			}
+			if m.cursor < maxIdx {
+				m.cursor++
+			}
+		}
+	case tea.MouseButtonLeft:
+		if msg.Action == tea.MouseActionPress {
+			return m.handleListClick(msg.X, msg.Y)
+		}
+	}
+	return m, nil
+}
+
+// handleListClick resolves a left click to a session-list row via the hitmap
+// populated during the last render. The first click on a row moves the
+// selection there; clicking the already-selected session attaches to it, and
+// clicking a group header toggles its collapsed state. Clicks outside the list
+// (the detail panel, borders, header/help rows) are ignored.
+func (m Model) handleListClick(x, y int) (tea.Model, tea.Cmd) {
+	h := m.hitmap
+	if h == nil || x < 0 || x >= h.leftWidth {
+		return m, nil
+	}
+	contentY := y - h.contentTop
+	for _, span := range h.spans {
+		if contentY < span.startY || contentY >= span.startY+span.height {
+			continue
+		}
+		alreadySelected := m.cursor == span.pos
+		m.cursor = span.pos
+		if m.groupMode {
+			sessionIdx, groupRoot := m.groupedCursorToSession()
+			if sessionIdx == -1 && groupRoot != "" {
+				m.collapsedGroups[groupRoot] = !m.collapsedGroups[groupRoot]
+				return m, nil
+			}
+			if alreadySelected && sessionIdx >= 0 && sessionIdx < len(m.sessions) {
+				return m, m.attachSessionCmd(m.sessions[sessionIdx].Name)
+			}
+			return m, nil
+		}
+		if alreadySelected && span.pos < len(m.sessions) {
+			return m, m.attachSessionCmd(m.sessions[span.pos].Name)
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
 // View renders the TUI with a two-column layout: session list (left) and detail panel (right).
 func (m Model) View() string {
 	if m.quitting {
@@ -1701,6 +1815,16 @@ func (m Model) View() string {
 		contentH = 4
 	}
 
+	// Record the list viewport for mouse hit-testing. The list's first content
+	// line sits below the title, the optional error/warning line, and the left
+	// column's top border. Deriving the offset from the rendered heights keeps
+	// it correct even if the banner changes size.
+	errHeight := 0
+	if errLine != "" {
+		errHeight = lipgloss.Height(errLine)
+	}
+	m.hitmap.setViewport(lipgloss.Height(title)+errHeight+1, leftWidth)
+
 	leftContent := m.renderSessionList(leftContentW, contentH)
 	rightContent := m.renderDetailPanel(rightContentW, contentH)
 
@@ -1737,6 +1861,10 @@ func (m Model) View() string {
 func (m Model) renderSessionList(width, height int) string {
 	var b strings.Builder
 
+	// Rebuild the click hitmap for this render. Line 0 is the "Sessions" header
+	// written just below; selectable rows start at line 1.
+	m.hitmap.resetSpans()
+
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	modeLabel := "flat"
 	if m.groupMode {
@@ -1756,16 +1884,32 @@ func (m Model) renderSessionList(width, height int) string {
 		return m.renderGroupedList(width, &b)
 	}
 
+	line := 1 // line 0 is the "Sessions" header above
 	for i, s := range m.sessions {
+		h := sessionRowHeight(s)
+		m.hitmap.addSpan(line, h, i)
 		m.renderSessionRow(&b, s, i, m.cursor, width, "")
+		line += h
 	}
 
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// sessionRowHeight reports how many terminal lines renderSessionRow emits for a
+// row: one for the name, plus one for the subtitle when any of branch, persona,
+// or project is set. It MUST stay in sync with renderSessionRow's subtitle
+// condition so the click hitmap matches what is drawn.
+func sessionRowHeight(s SessionRow) int {
+	if s.Branch != "" || s.Persona != "" || s.Project != "" {
+		return 2
+	}
+	return 1
+}
+
 // renderGroupedList renders the session list grouped by repo root.
 func (m Model) renderGroupedList(width int, b *strings.Builder) string {
 	pos := 0
+	line := 1 // line 0 is the "Sessions" header written by the caller
 	groupHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(oceanMuted)
 
 	for _, root := range m.groupOrder {
@@ -1784,6 +1928,7 @@ func (m Model) renderGroupedList(width int, b *strings.Builder) string {
 		}
 		header := fmt.Sprintf("%s %s (%d)", arrow, displayRoot, len(indices))
 
+		m.hitmap.addSpan(line, 1, pos) // group header occupies one line
 		if pos == m.cursor {
 			b.WriteString(selectedStyle.Width(width).Render(iconActive + " " + header))
 		} else {
@@ -1791,11 +1936,15 @@ func (m Model) renderGroupedList(width int, b *strings.Builder) string {
 		}
 		b.WriteString("\n")
 		pos++
+		line++
 
 		if !collapsed {
 			for _, idx := range indices {
+				h := sessionRowHeight(m.sessions[idx])
+				m.hitmap.addSpan(line, h, pos)
 				m.renderSessionRow(b, m.sessions[idx], pos, m.cursor, width, "  ")
 				pos++
+				line += h
 			}
 		}
 	}
