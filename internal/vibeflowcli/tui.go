@@ -1735,9 +1735,13 @@ func (m Model) viewContent() string {
 		height = 24
 	}
 
-	// ASCII banner.
+	// ASCII banner. The raw-string const starts with a newline that must not
+	// reach the renderer: the layout below budgets the view to exactly the
+	// terminal height, and Bubble Tea v2 crops overflow at the BOTTOM (v1
+	// cropped at the top), so one stray leading line pushes the help bar
+	// off-screen.
 	bannerStyle := lipgloss.NewStyle().Foreground(asciiBanner).Bold(true)
-	title := bannerStyle.Render(bannerText) + "\n" + copyrightStyle.Render("  "+copyrightText)
+	title := bannerStyle.Render(strings.TrimPrefix(bannerText, "\n")) + "\n" + copyrightStyle.Render("  "+copyrightText)
 
 	// Error/warning line (optional).
 	var errLine string
@@ -1806,8 +1810,11 @@ func (m Model) viewContent() string {
 		rightWidth = 20
 	}
 
-	// Available height for columns: total minus banner, copyright, gap, help.
-	usedLines := 10 // banner(7) + copyright(1) + gap(1) + help(1)
+	// Available height for columns: total minus banner+copyright title (7),
+	// help bar (1), and the columns' own top/bottom border (2). The sum of all
+	// rendered lines must equal the terminal height exactly — v2 crops any
+	// overflow at the bottom, where the help bar lives.
+	usedLines := 10 // title(7) + help(1) + column borders(2)
 	if errLine != "" {
 		usedLines++
 	}
