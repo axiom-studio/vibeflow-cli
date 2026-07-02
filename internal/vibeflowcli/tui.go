@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 
 	"vibeflow-cli/sessionid"
@@ -841,7 +841,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateWorktreeList(msg)
 	case ViewHelp:
 		// Any keypress closes the help popup.
-		if _, ok := msg.(tea.KeyMsg); ok {
+		if _, ok := msg.(tea.KeyPressMsg); ok {
 			m.activeView = ViewSessions
 			return m, nil
 		}
@@ -854,7 +854,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Handle confirmation dialogs first.
 		if m.confirmDelete {
 			switch msg.String() {
@@ -1074,7 +1074,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // updateWizard delegates to the wizard sub-model and handles completion.
 func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Allow global quit even in wizard.
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "ctrl+c" {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -1158,7 +1158,7 @@ func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateConflict delegates to the conflict modal and handles the result.
 func (m Model) updateConflict(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "ctrl+c" {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -1214,7 +1214,7 @@ func (m Model) updateConflict(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateWorktreeList delegates to the worktree list sub-model.
 func (m Model) updateWorktreeList(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "ctrl+c" {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -1632,13 +1632,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.activeView != ViewSessions || m.confirmDelete || m.confirmQuit || m.confirmDetach {
 		return m, nil
 	}
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		if msg.Action == tea.MouseActionPress && m.cursor > 0 {
-			m.cursor--
-		}
-	case tea.MouseButtonWheelDown:
-		if msg.Action == tea.MouseActionPress {
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case tea.MouseWheelDown:
 			maxIdx := len(m.sessions) - 1
 			if m.groupMode {
 				maxIdx = m.groupedListLen() - 1
@@ -1647,8 +1648,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 		}
-	case tea.MouseButtonLeft:
-		if msg.Action == tea.MouseActionPress {
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
 			return m.handleListClick(msg.X, msg.Y)
 		}
 	}
@@ -1692,7 +1693,21 @@ func (m Model) handleListClick(x, y int) (tea.Model, tea.Cmd) {
 }
 
 // View renders the TUI with a two-column layout: session list (left) and detail panel (right).
-func (m Model) View() string {
+// Alt-screen, focus reporting, and mouse mode are set here — in Bubble Tea v2
+// these are View fields rather than program options. MouseModeCellMotion
+// enables mouse reporting so the main list responds to clicks and the scroll
+// wheel; plain drag-to-select falls back to Shift/Option-drag in most
+// terminals (the k9s/lazygit convention).
+func (m Model) View() tea.View {
+	v := tea.NewView(m.viewContent())
+	v.AltScreen = true
+	v.ReportFocus = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+// viewContent renders the full screen content as a styled string.
+func (m Model) viewContent() string {
 	if m.quitting {
 		return ""
 	}

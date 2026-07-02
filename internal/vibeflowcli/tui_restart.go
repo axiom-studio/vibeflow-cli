@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -54,7 +54,7 @@ type restartSkipMsg struct{}
 // Update handles input for the restart selector.
 func (r RestartSelectModel) Update(msg tea.Msg) (RestartSelectModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k":
 			if r.cursor > 0 {
@@ -64,7 +64,7 @@ func (r RestartSelectModel) Update(msg tea.Msg) (RestartSelectModel, tea.Cmd) {
 			if r.cursor < len(r.sessions)-1 {
 				r.cursor++
 			}
-		case " ":
+		case "space":
 			r.selected[r.cursor] = !r.selected[r.cursor]
 		case "a":
 			// Select all.

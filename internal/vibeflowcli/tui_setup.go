@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -79,6 +79,11 @@ func (m SetupModel) Init() tea.Cmd {
 
 // Update handles messages for the setup wizard.
 func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Bubble Tea v2 delivers bracketed paste as its own message type; route it
+	// through the key path so text inputs receive pasted characters (v1 parity).
+	if p, ok := msg.(tea.PasteMsg); ok {
+		msg = tea.KeyPressMsg{Text: p.Content}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -128,7 +133,7 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.done = true
 		return m, tea.Quit
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.validating {
 			return m, nil
 		}
@@ -144,7 +149,7 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m SetupModel) updateURL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m SetupModel) updateURL(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		if m.urlInput == "" {
@@ -166,8 +171,8 @@ func (m SetupModel) updateURL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		// Only accept actual rune input (typed or pasted); ignore special keys
 		// like arrows whose String() would be "left", "right", etc.
-		if msg.Type == tea.KeyRunes {
-			for _, r := range msg.Runes {
+		if msg.Text != "" {
+			for _, r := range msg.Text {
 				if r >= ' ' && r <= '~' {
 					m.urlInput += string(r)
 				}
@@ -177,7 +182,7 @@ func (m SetupModel) updateURL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m SetupModel) updateToken(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m SetupModel) updateToken(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		m.cfg.APIToken = strings.Trim(m.tokenInput, "[]\"' \t\n\r")
@@ -195,8 +200,8 @@ func (m SetupModel) updateToken(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	default:
-		if msg.Type == tea.KeyRunes {
-			for _, r := range msg.Runes {
+		if msg.Text != "" {
+			for _, r := range msg.Text {
 				if r >= ' ' && r <= '~' {
 					m.tokenInput += string(r)
 				}
@@ -206,7 +211,7 @@ func (m SetupModel) updateToken(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m SetupModel) updateProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m SetupModel) updateProject(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.creatingProject {
 		return m.updateCreateProject(msg)
 	}
@@ -238,7 +243,7 @@ func (m SetupModel) updateProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m SetupModel) updateCreateProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m SetupModel) updateCreateProject(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		name := strings.TrimSpace(m.newProjectInput)
@@ -264,8 +269,8 @@ func (m SetupModel) updateCreateProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	default:
-		if msg.Type == tea.KeyRunes {
-			for _, r := range msg.Runes {
+		if msg.Text != "" {
+			for _, r := range msg.Text {
 				if r >= ' ' && r <= '~' {
 					m.newProjectInput += string(r)
 				}
@@ -282,8 +287,14 @@ func (m SetupModel) saveConfig() tea.Msg {
 	return setupSavedMsg{}
 }
 
-// View renders the setup wizard.
-func (m SetupModel) View() string {
+// View renders the setup wizard. Alt-screen is a View field in Bubble Tea v2.
+func (m SetupModel) View() tea.View {
+	v := tea.NewView(m.viewContent())
+	v.AltScreen = true
+	return v
+}
+
+func (m SetupModel) viewContent() string {
 	width := m.width
 	if width < 40 {
 		width = 80

@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"os"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 )
 
@@ -105,7 +105,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// First-run setup wizard if config file doesn't exist yet.
 	if !ConfigFileExists(cfgPath) {
 		setup := NewSetupModel(cfg, cfgPath)
-		p := tea.NewProgram(setup, tea.WithAltScreen())
+		p := tea.NewProgram(setup)
 		result, err := p.Run()
 		if err != nil {
 			return fmt.Errorf("setup wizard: %w", err)
@@ -172,10 +172,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 	}
 	defer model.logger.Close()
-	// WithMouseCellMotion enables mouse reporting so the main list responds to
-	// clicks and the scroll wheel. Plain drag-to-select falls back to
-	// Shift/Option-drag in most terminals (the k9s/lazygit convention).
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion())
+	// Alt-screen, focus reporting, and mouse mode are set on the View in
+	// Bubble Tea v2 (see Model.View) rather than as program options here.
+	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		model.logger.Error("TUI fatal: %v", err)
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)

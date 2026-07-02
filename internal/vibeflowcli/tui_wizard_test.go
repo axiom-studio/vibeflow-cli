@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -1032,7 +1032,7 @@ func TestWizardUpdate_QwenLaunchConfig_NavigationAutofillsUntilEdited(t *testing
 		t.Fatalf("init model = %q, want %q", wm.qwenModelInput, presets[0].model)
 	}
 	// Simulate j (down) to vendor row 1 — should auto-fill from preset[1].
-	w2, _ := wm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	w2, _ := wm.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if w2.qwenModelInput != presets[1].model {
 		t.Errorf("after j to vendor 1: model = %q, want %q (autofill)", w2.qwenModelInput, presets[1].model)
 	}
@@ -1043,7 +1043,7 @@ func TestWizardUpdate_QwenLaunchConfig_NavigationAutofillsUntilEdited(t *testing
 	// Mark user-edited and navigate again — auto-fill should NOT happen.
 	w2.qwenUserEdited = true
 	w2.qwenModelInput = "user-typed"
-	w3, _ := w2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	w3, _ := w2.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if w3.qwenModelInput != "user-typed" {
 		t.Errorf("vendor change after edit must preserve user input, got %q", w3.qwenModelInput)
 	}
@@ -1055,7 +1055,7 @@ func TestWizardUpdate_QwenLaunchConfig_ResetKeyClearsEdits(t *testing.T) {
 	wm.qwenModelInput = "user-typed"
 	wm.qwenBaseURLInput = "user-url"
 
-	w2, _ := wm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	w2, _ := wm.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 
 	presets := qwenLaunchPresets()
 	if w2.qwenModelInput != presets[0].model {

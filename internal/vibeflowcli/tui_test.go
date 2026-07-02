@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // detailPanelModel builds a minimal Model with a single session row selected,
@@ -256,7 +256,7 @@ func TestWorkbenchKey_MultiSession_SetsWorkbenchActive(t *testing.T) {
 		{Name: "vibeflow_claude-a"},
 		{Name: "vibeflow_codex-b"},
 	}}
-	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	nm, cmd := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
 	if cmd == nil {
 		t.Fatal("expected a compose command")
 	}
@@ -274,7 +274,7 @@ func TestWorkbenchKey_M_MultiProject_ReturnsCmd(t *testing.T) {
 			{Name: "vibeflow_codex-b", WorkingDir: "/work/b"},
 		},
 	}
-	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("M")})
+	nm, cmd := m.Update(tea.KeyPressMsg{Code: 'M', Text: "M"})
 	if cmd == nil {
 		t.Fatalf("M with 2 sessions across projects must return a compose command")
 	}
@@ -287,7 +287,7 @@ func TestWorkbenchKey_M_MultiProject_ReturnsCmd(t *testing.T) {
 // command WITHOUT executing the command (executing would issue real tmux calls;
 // compose/restore behavior is covered by the real-tmux round-trip test).
 func pressM(m Model) (Model, tea.Cmd) {
-	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	nm, cmd := m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
 	return nm.(Model), cmd
 }
 
