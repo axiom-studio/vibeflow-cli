@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"vibeflow-cli/sessionid"
@@ -1012,7 +1012,7 @@ func configCmd() *cobra.Command {
 				return fmt.Errorf("load config: %w", err)
 			}
 			setup := NewSetupModel(cfg, cfgPath)
-			p := tea.NewProgram(setup, tea.WithAltScreen())
+			p := tea.NewProgram(setup)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("setup wizard: %w", err)
 			}

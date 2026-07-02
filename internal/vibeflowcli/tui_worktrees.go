@@ -21,7 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -107,7 +107,7 @@ func (wl WorktreeListModel) DeletedPath() string { return wl.deletedWt }
 // Update handles input for the worktree list.
 func (wl WorktreeListModel) Update(msg tea.Msg) (WorktreeListModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k":
 			if wl.cursor > 0 {

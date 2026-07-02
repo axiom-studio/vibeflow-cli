@@ -20,7 +20,7 @@ import (
 	"reflect"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // TestSessionRowHeight verifies the row-height helper stays in lockstep with
@@ -228,8 +228,8 @@ func TestHandleListClick_GroupHeaderTogglesCollapse(t *testing.T) {
 // TestHandleMouse_WheelMovesCursor: wheel down/up move the selection and clamp
 // at the list bounds.
 func TestHandleMouse_WheelMovesCursor(t *testing.T) {
-	press := func(btn tea.MouseButton) tea.MouseMsg {
-		return tea.MouseMsg{Button: btn, Action: tea.MouseActionPress}
+	wheel := func(btn tea.MouseButton) tea.MouseMsg {
+		return tea.MouseWheelMsg{Button: btn}
 	}
 	m := Model{
 		activeView: ViewSessions,
@@ -239,25 +239,25 @@ func TestHandleMouse_WheelMovesCursor(t *testing.T) {
 	}
 
 	// Wheel up at the top is a no-op.
-	if got, _ := m.handleMouse(press(tea.MouseButtonWheelUp)); got.(Model).cursor != 0 {
+	if got, _ := m.handleMouse(wheel(tea.MouseWheelUp)); got.(Model).cursor != 0 {
 		t.Fatalf("wheel up at top: cursor = %d, want 0", got.(Model).cursor)
 	}
 	// Wheel down advances.
-	step, _ := m.handleMouse(press(tea.MouseButtonWheelDown))
+	step, _ := m.handleMouse(wheel(tea.MouseWheelDown))
 	m = step.(Model)
 	if m.cursor != 1 {
 		t.Fatalf("wheel down: cursor = %d, want 1", m.cursor)
 	}
 	// Advance to the last row and confirm it clamps.
-	m2, _ := m.handleMouse(press(tea.MouseButtonWheelDown))
+	m2, _ := m.handleMouse(wheel(tea.MouseWheelDown))
 	m = m2.(Model)
-	m3, _ := m.handleMouse(press(tea.MouseButtonWheelDown)) // already at max (2)
+	m3, _ := m.handleMouse(wheel(tea.MouseWheelDown)) // already at max (2)
 	m = m3.(Model)
 	if m.cursor != 2 {
 		t.Fatalf("wheel down clamp: cursor = %d, want 2", m.cursor)
 	}
 	// Wheel up steps back.
-	m4, _ := m.handleMouse(press(tea.MouseButtonWheelUp))
+	m4, _ := m.handleMouse(wheel(tea.MouseWheelUp))
 	if m4.(Model).cursor != 1 {
 		t.Fatalf("wheel up: cursor = %d, want 1", m4.(Model).cursor)
 	}
@@ -266,7 +266,7 @@ func TestHandleMouse_WheelMovesCursor(t *testing.T) {
 // TestHandleMouse_IgnoredOutsideSessionsView: mouse events are dropped when a
 // sub-view or confirmation dialog is active.
 func TestHandleMouse_IgnoredOutsideSessionsView(t *testing.T) {
-	press := tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress}
+	press := tea.MouseWheelMsg{Button: tea.MouseWheelDown}
 
 	help := Model{activeView: ViewHelp, cursor: 0, sessions: []SessionRow{{Name: "a"}, {Name: "b"}}, hitmap: &listHitmap{}}
 	if got, _ := help.handleMouse(press); got.(Model).cursor != 0 {

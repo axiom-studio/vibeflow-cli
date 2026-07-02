@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -497,8 +497,13 @@ func (w WizardModel) Result() WizardResult { return w.result }
 
 // Update handles input for the wizard.
 func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
+	// Bubble Tea v2 delivers bracketed paste as its own message type; route it
+	// through the key path so text inputs receive pasted characters (v1 parity).
+	if p, ok := msg.(tea.PasteMsg); ok {
+		msg = tea.KeyPressMsg{Text: p.Content}
+	}
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Text input mode for working directory path.
 		if w.editingWorkDir {
 			switch msg.String() {
@@ -543,8 +548,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.workDirErr = ""
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidPathChar(byte(r)) {
 							w.workDirInput += string(r)
 						}
@@ -576,8 +581,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.newBranchName = w.newBranchName[:len(w.newBranchName)-1]
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidBranchChar(byte(r)) {
 							w.newBranchName += string(r)
 						}
@@ -606,8 +611,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.newBranchBase = w.newBranchBase[:len(w.newBranchBase)-1]
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidBranchChar(byte(r)) {
 							w.newBranchBase += string(r)
 						}
@@ -649,8 +654,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.binaryPathErr = ""
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidPathChar(byte(r)) {
 							w.binaryPath += string(r)
 						}
@@ -693,8 +698,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.cursor = min(w.cursor+1, len(w.filteredProjects)-1)
 				return w, nil
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if r >= ' ' && r <= '~' {
 							w.projectFilter += string(r)
 						}
@@ -725,8 +730,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.worktreeName = w.worktreeName[:len(w.worktreeName)-1]
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidNameChar(byte(r)) {
 							w.worktreeName += string(r)
 						}
@@ -777,8 +782,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.customDirErr = ""
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidPathChar(byte(r)) {
 							w.customBaseDir += string(r)
 						}
@@ -831,8 +836,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.specifiedWorkDirErr = ""
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidPathChar(byte(r)) {
 							w.specifiedWorkDir += string(r)
 						}
@@ -894,8 +899,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.envTokenValue = w.envTokenValue[:len(w.envTokenValue)-1]
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if r >= ' ' && r <= '~' {
 							w.envTokenValue += string(r)
 						}
@@ -937,8 +942,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.cursor = min(w.cursor+1, len(w.filteredBranches)-1)
 				return w, nil
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if r >= ' ' && r <= '~' {
 							w.branchFilter += string(r)
 						}
@@ -1003,8 +1008,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				return w, nil
 			default:
-				if isInputRow && msg.Type == tea.KeyRunes {
-					for _, ch := range msg.Runes {
+				if isInputRow && msg.Text != "" {
+					for _, ch := range msg.Text {
 						if ch >= ' ' && ch <= '~' {
 							if isModelRow {
 								w.qwenModelInput += string(ch)
@@ -1054,7 +1059,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.personaProviderIdx[order[rowIdx]] = -1
 				}
 			}
-		case " ":
+		case "space":
 			// Space toggles persona selection in team step.
 			if w.step == StepTeam && w.cursor >= 0 && w.cursor < len(w.personas) {
 				key := w.personas[w.cursor].key
