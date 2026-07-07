@@ -128,6 +128,7 @@ type Model struct {
 	worktreeList    WorktreeListModel
 	pendingWizard   *WizardResult      // wizard result waiting for conflict resolution
 	switchMeta      *SessionMeta       // non-nil during quick branch switch flow
+	groupEditRunning []SessionMeta     // non-nil during group edit flow: the running group being reshaped
 	captureOutput   string             // last captured pane output for selected session
 	captureName     string             // tmux session name for current capture
 	confirmDelete   bool               // showing delete confirmation
@@ -866,26 +867,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					delIdx, _ = m.groupedCursorToSession()
 				}
 				if delIdx >= 0 && delIdx < len(m.sessions) {
-					row := m.sessions[delIdx]
-					if err := m.tmux.KillSession(row.Name); err != nil {
-						m.logger.Error("kill session %s: %v", row.Name, err)
-					} else {
-						m.logger.Info("session killed: %s", row.Name)
-					}
-					if m.store != nil {
-						if meta, found, _ := m.store.Get(row.Name); found {
-							// Session file is intentionally kept so the session
-							// ID can be reused on next launch. Stale conflict
-							// detection handles cleanup and ID preservation.
-							if m.config.Worktree.CleanupOnKill == "always" {
-								m.safeRemoveWorktree(meta.WorktreePath, meta.Name)
-							}
-						}
-						_ = m.store.Remove(row.Name)
-					}
-					if m.cache != nil {
-						_ = m.cache.Remove(row.Name)
-					}
+					m.killSessionByName(m.sessions[delIdx].Name)
 					return m, m.refreshSessions
 				}
 			default:
@@ -1000,6 +982,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.switchMeta = &meta
 			m.activeView = ViewWizard
 			return m, nil
+		case "e":
+			// Edit the running group of the selected session: add/remove personas
+			// (with per-persona provider) reusing the group's shared repo+branch.
+			idx := m.selectedSessionIdx()
+			if idx < 0 || idx >= len(m.sessions) || m.store == nil {
+				return m, nil
+			}
+			anchor, found, _ := m.store.Get(m.sessions[idx].Name)
+			if !found {
+				return m, nil
+			}
+			all, err := m.store.List()
+			if err != nil {
+				return m, nil
+			}
+			group := groupSessionsFor(anchor, all, m.getRepoRoot)
+			repoRoot := anchor.WorkingDir
+			if anchor.WorktreePath != "" && m.worktrees != nil {
+				repoRoot = m.worktrees.RepoRoot()
+			}
+			m.groupEditRunning = group
+			m.wizard = NewGroupEditWizard(group, anchor, m.registry, repoRoot, m.worktrees, m.config)
+			m.activeView = ViewWizard
+			return m, nil
 		case "r":
 			// Manual recovery retry for failed sessions, otherwise refresh.
 			idx := m.selectedSessionIdx()
@@ -1084,6 +1090,7 @@ func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.wizard.Cancelled() {
 		m.switchMeta = nil
+		m.groupEditRunning = nil
 		m.activeView = ViewSessions
 		return m, nil
 	}
@@ -1102,6 +1109,14 @@ func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.activeView = ViewSessions
+
+		// Group edit: diff the desired persona set against the running group,
+		// then spawn the additions and stop the removals.
+		if m.groupEditRunning != nil {
+			running := m.groupEditRunning
+			m.groupEditRunning = nil
+			return m, func() tea.Msg { return m.applyGroupEdit(running, result) }
+		}
 
 		// Quick branch switch: kill old session, then launch new one.
 		if m.switchMeta != nil {
@@ -1235,6 +1250,77 @@ func (m Model) updateWorktreeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+// killSessionByName stops a tmux session and removes it from the store and cache,
+// applying the configured worktree cleanup. The session file is intentionally
+// kept so the session ID can be reused on next launch (stale-conflict detection
+// handles cleanup and ID preservation). Shared by the `d` delete confirmation and
+// the group-edit remove path.
+func (m Model) killSessionByName(name string) {
+	if err := m.tmux.KillSession(name); err != nil {
+		m.logger.Error("kill session %s: %v", name, err)
+	} else {
+		m.logger.Info("session killed: %s", name)
+	}
+	if m.store != nil {
+		if meta, found, _ := m.store.Get(name); found {
+			if m.config.Worktree.CleanupOnKill == "always" {
+				m.safeRemoveWorktree(meta.WorktreePath, meta.Name)
+			}
+		}
+		_ = m.store.Remove(name)
+	}
+	if m.cache != nil {
+		_ = m.cache.Remove(name)
+	}
+}
+
+// groupSessionsFor returns the sessions that belong to the same group as anchor:
+// those sharing the anchor's repo root AND branch (the anchor itself included).
+// repoRoot normalizes a working directory to its git repo root. Pure (repoRoot is
+// injected) so group membership is unit-testable without a live TUI.
+func groupSessionsFor(anchor SessionMeta, all []SessionMeta, repoRoot func(string) string) []SessionMeta {
+	anchorRoot := repoRoot(anchor.WorkingDir)
+	var out []SessionMeta
+	for _, meta := range all {
+		if repoRoot(meta.WorkingDir) == anchorRoot && meta.Branch == anchor.Branch {
+			out = append(out, meta)
+		}
+	}
+	return out
+}
+
+// applyGroupEdit reconciles a running group with the desired persona set from a
+// group-edit wizard: it stops the sessions of removed personas and spawns the
+// added ones (with per-persona provider) on the group's shared repo+branch via
+// the existing multi-spawn launch path.
+func (m Model) applyGroupEdit(running []SessionMeta, result WizardResult) tea.Msg {
+	runningByPersona := make(map[string]SessionMeta, len(running))
+	runningKeys := make([]string, 0, len(running))
+	for _, meta := range running {
+		if _, seen := runningByPersona[meta.Persona]; seen {
+			continue
+		}
+		runningByPersona[meta.Persona] = meta
+		runningKeys = append(runningKeys, meta.Persona)
+	}
+
+	toAdd, toRemove := diffGroupPersonas(runningKeys, result.Personas)
+
+	for _, persona := range toRemove {
+		if meta, ok := runningByPersona[persona]; ok {
+			m.killSessionByName(meta.Name)
+		}
+	}
+
+	if len(toAdd) == 0 {
+		return m.refreshSessions()
+	}
+	r := result
+	r.Personas = toAdd
+	r.Persona = toAdd[0]
+	return m.launchFromWizard(r)
 }
 
 // launchFromWizard checks for conflicts and either launches or shows the conflict modal.
@@ -1786,7 +1872,7 @@ func (m Model) viewContent() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  m: project wb  M: all wb  d: delete  b: switch  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  m: project wb  M: all wb  d: delete  b: switch  e: edit grp  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -2262,6 +2348,7 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString(keyStyle.Render("  n") + descStyle.Render("New session (wizard)") + "\n")
 	b.WriteString(keyStyle.Render("  d") + descStyle.Render("Delete session") + "\n")
 	b.WriteString(keyStyle.Render("  b") + descStyle.Render("Switch branch") + "\n")
+	b.WriteString(keyStyle.Render("  e") + descStyle.Render("Edit group (add/remove personas)") + "\n")
 	b.WriteString(keyStyle.Render("  D") + descStyle.Render("Detach (quit, sessions persist)") + "\n")
 	b.WriteString(keyStyle.Render("  w") + descStyle.Render("Manage worktrees") + "\n")
 	b.WriteString(keyStyle.Render("  r") + descStyle.Render("Retry recovery / refresh") + "\n")
