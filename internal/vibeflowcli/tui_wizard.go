@@ -184,6 +184,14 @@ type WizardModel struct {
 	quickSwitch  bool         // True when wizard is running as a 2-step branch switch.
 	switchSource *SessionMeta // Original session metadata for quick switch.
 
+	// Group edit mode (hotkey `e`): reshape a running group's persona lineup.
+	// Runs a reduced StepTeam → StepProvider → StepConfirm flow that inherits
+	// repo/branch/workdir/provider from the anchor session; only the persona set
+	// and per-persona providers are editable.
+	groupEdit    bool         // True when the wizard runs as a group edit.
+	groupAnchor  *SessionMeta // Anchor session whose repo+branch+settings the group shares.
+	groupRunning []string     // Persona keys already running in the group (for the confirm diff).
+
 	result WizardResult
 }
 
@@ -484,6 +492,266 @@ func (w WizardModel) buildQuickSwitchResult() (WizardModel, tea.Cmd) {
 	}
 	w.done = true
 	return w, nil
+}
+
+// NewGroupEditWizard creates a wizard pre-filled from a running group, starting
+// at StepTeam. Used by the 'e' keybinding to add/remove personas in a group
+// without re-entering the shared repo/branch/provider. `group` is the set of
+// running sessions that share the anchor's repo root and branch; `anchor` is the
+// selected session those settings are inherited from. The flow is
+// StepTeam → StepProvider → StepConfirm — every other step is inherited.
+func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, cfg *Config) WizardModel {
+	// Provider list from the registry (same shape as the other constructors).
+	entries := make([]providerEntry, 0)
+	for _, key := range providerKeys(registry) {
+		p, _ := registry.Get(key)
+		entries = append(entries, providerEntry{
+			key:       key,
+			provider:  p,
+			available: registry.IsAvailable(key),
+		})
+	}
+	providerIdxByKey := make(map[string]int, len(entries))
+	selectedProvider := 0
+	for i, pe := range entries {
+		providerIdxByKey[pe.key] = i
+		if pe.key == anchor.Provider {
+			selectedProvider = i
+		}
+	}
+
+	personas := defaultPersonas()
+	personaIdxByKey := make(map[string]int, len(personas))
+	for i, p := range personas {
+		personaIdxByKey[p.key] = i
+	}
+
+	selectedPersonas := make(map[int]bool)
+	personaProviderIdx := make([]int, len(personas))
+	for i := range personaProviderIdx {
+		personaProviderIdx[i] = -1 // -1 = inherit the team-default provider.
+	}
+
+	// Pre-check every persona currently running in the group and seed its
+	// per-persona provider override when it differs from the team default.
+	var running []string
+	for _, meta := range group {
+		pi, ok := personaIdxByKey[meta.Persona]
+		if !ok {
+			continue
+		}
+		if selectedPersonas[pi] {
+			continue // already recorded (defensive against duplicate metas)
+		}
+		selectedPersonas[pi] = true
+		running = append(running, meta.Persona)
+		if meta.Provider != "" && meta.Provider != anchor.Provider {
+			if idx, ok := providerIdxByKey[meta.Provider]; ok {
+				personaProviderIdx[pi] = idx
+			}
+		}
+	}
+	// Fallback: always have at least the anchor persona checked.
+	if len(selectedPersonas) == 0 {
+		if pi, ok := personaIdxByKey[anchor.Persona]; ok {
+			selectedPersonas[pi] = true
+			running = append(running, anchor.Persona)
+		}
+	}
+
+	sessionType := 0
+	if anchor.SessionType == "vibeflow" {
+		sessionType = 1
+	}
+	permission := 1 // Keep permissions (interactive).
+	if anchor.SkipPermissions {
+		permission = 0 // Skip permissions (autonomous).
+	}
+
+	a := anchor
+	w := WizardModel{
+		step:                StepTeam,
+		personas:            personas,
+		selectedPersonas:    selectedPersonas,
+		personaProviderIdx:  personaProviderIdx,
+		providers:           entries,
+		selectedProvider:    selectedProvider,
+		selectedSessionType: sessionType,
+		selectedPermission:  permission,
+		// Group edit reuses the anchor's directory — the worktree step is
+		// skipped, but a single "Current directory" option keeps any lookup by
+		// selectedWorktree well-defined.
+		worktreeOpts:      []string{"Current directory"},
+		selectedWorktree:  0,
+		permissionOpts:    []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
+		branches:          []string{anchor.Branch},
+		filteredBranches:  []int{0},
+		repoRoot:          repoRoot,
+		registry:          registry,
+		config:            cfg,
+		currentBranch:     anchor.Branch,
+		defaultBranch:     anchor.Branch,
+		selectedWorkDir:   anchor.WorkingDir,
+		llmGatewayEnabled: anchor.LLMGatewayEnabled,
+		groupEdit:         true,
+		groupAnchor:       &a,
+		groupRunning:      running,
+	}
+	return w
+}
+
+// buildGroupEditResult constructs a WizardResult for group edit, inheriting the
+// shared settings (repo/branch/workdir/session type/permissions/gateway) from the
+// anchor and carrying the desired persona set plus per-persona provider overrides.
+// The TUI diffs result.Personas against the running group to decide what to spawn
+// and what to kill.
+func (w WizardModel) buildGroupEditResult() (WizardModel, tea.Cmd) {
+	pe := w.providers[w.selectedProvider]
+
+	var persona string
+	var personas []string
+	for i := 0; i < len(w.personas); i++ {
+		if w.selectedPersonas[i] {
+			personas = append(personas, w.personas[i].key)
+		}
+	}
+	if len(personas) > 0 {
+		persona = personas[0]
+	}
+
+	// Per-persona provider overrides (same shape as team mode).
+	var personaProviders map[string]string
+	for _, personaIdx := range w.selectedPersonaIndices() {
+		idx := w.personaProviderIdx[personaIdx]
+		if idx < 0 || idx >= len(w.providers) {
+			continue
+		}
+		if w.providers[idx].key == pe.key {
+			continue // matches team default — no override needed.
+		}
+		if personaProviders == nil {
+			personaProviders = make(map[string]string)
+		}
+		personaProviders[w.personas[personaIdx].key] = w.providers[idx].key
+	}
+
+	env, _ := ResolveProviderEnvVars(w.config, pe.key)
+	a := w.groupAnchor
+	w.result = WizardResult{
+		SessionType:       a.SessionType,
+		ProjectName:       a.Project,
+		Persona:           persona,
+		Personas:          personas,
+		Provider:          pe.provider,
+		ProviderKey:       pe.key,
+		PersonaProviders:  personaProviders,
+		Branch:            a.Branch,
+		NewBranch:         false,
+		WorktreeChoice:    WorktreeCurrent,
+		SkipPermissions:   a.SkipPermissions,
+		WorkDir:           a.WorkingDir,
+		EnvVars:           env,
+		LLMGatewayEnabled: a.LLMGatewayEnabled,
+	}
+	w.done = true
+	return w, nil
+}
+
+// diffGroupPersonas computes which personas must be spawned (in desired but not
+// running) and which must be stopped (running but no longer desired). Adds keep
+// desired order; removes keep running order. Pure — unit tested directly.
+func diffGroupPersonas(running, desired []string) (toAdd, toRemove []string) {
+	runningSet := make(map[string]bool, len(running))
+	for _, p := range running {
+		runningSet[p] = true
+	}
+	desiredSet := make(map[string]bool, len(desired))
+	for _, p := range desired {
+		desiredSet[p] = true
+	}
+	for _, p := range desired {
+		if !runningSet[p] {
+			toAdd = append(toAdd, p)
+		}
+	}
+	for _, p := range running {
+		if !desiredSet[p] {
+			toRemove = append(toRemove, p)
+		}
+	}
+	return toAdd, toRemove
+}
+
+// groupEditConfirmView renders the group-edit confirmation: the shared repo/branch
+// header plus a keep/add/remove breakdown of the persona lineup with each
+// persona's resolved provider. It reuses diffGroupPersonas so the preview matches
+// exactly what the TUI will spawn and kill on confirm.
+func (w WizardModel) groupEditConfirmView() string {
+	var b strings.Builder
+	b.WriteString("Confirm group edit:\n\n")
+
+	if a := w.groupAnchor; a != nil {
+		repo := filepath.Base(a.WorkingDir)
+		if repo == "" || repo == "." || repo == "/" {
+			repo = a.Project
+		}
+		b.WriteString(fmt.Sprintf("  Repo/Branch:  %s @ %s\n", repo, a.Branch))
+	}
+	b.WriteString(fmt.Sprintf("  Provider:     %s\n\n", w.providers[w.selectedProvider].provider.Name))
+
+	// Desired set in persona display order.
+	var desired []string
+	for i := 0; i < len(w.personas); i++ {
+		if w.selectedPersonas[i] {
+			desired = append(desired, w.personas[i].key)
+		}
+	}
+	toAdd, toRemove := diffGroupPersonas(w.groupRunning, desired)
+	addSet := make(map[string]bool, len(toAdd))
+	for _, p := range toAdd {
+		addSet[p] = true
+	}
+
+	addStyle := lipgloss.NewStyle().Foreground(oceanSuccess)
+	removeStyle := lipgloss.NewStyle().Foreground(errorColor)
+	dim := lipgloss.NewStyle().Foreground(dimColor)
+
+	b.WriteString("  Personas:\n")
+	for i := 0; i < len(w.personas); i++ {
+		if !w.selectedPersonas[i] {
+			continue
+		}
+		name := w.personas[i].displayName
+		prov := w.providers[w.resolvedProviderForPersona(i)].provider.Name
+		if addSet[w.personas[i].key] {
+			b.WriteString(addStyle.Render(fmt.Sprintf("    + %-18s %s", name, prov)))
+			b.WriteString(dim.Render("  (new)") + "\n")
+		} else {
+			b.WriteString(fmt.Sprintf("      %-18s %s\n", name, prov))
+		}
+	}
+	for _, p := range toRemove {
+		b.WriteString(removeStyle.Render(fmt.Sprintf("    - %-18s", w.personaDisplayName(p))))
+		b.WriteString(dim.Render("  (stop)") + "\n")
+	}
+	if len(toAdd) == 0 && len(toRemove) == 0 {
+		b.WriteString(dim.Render("    (no changes)\n"))
+	}
+
+	b.WriteString("\n")
+	b.WriteString(helpStyle.Render("enter: apply  esc: back"))
+	return b.String()
+}
+
+// personaDisplayName maps a persona key to its display name, falling back to the
+// key when unknown (e.g. a persona no longer in defaultPersonas()).
+func (w WizardModel) personaDisplayName(key string) string {
+	for _, p := range w.personas {
+		if p.key == key {
+			return p.displayName
+		}
+	}
+	return key
 }
 
 // Done returns true when the wizard has completed.
@@ -1613,6 +1881,9 @@ func (w WizardModel) View() string {
 		}
 
 	case StepConfirm:
+		if w.groupEdit {
+			return w.groupEditConfirmView()
+		}
 		b.WriteString("Confirm session:\n\n")
 		if w.selectedWorkDir != "" {
 			b.WriteString(fmt.Sprintf("  Directory:     %s\n", w.selectedWorkDir))
@@ -1845,6 +2116,15 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			return w, nil
 		}
 		w.envVars = env
+		// Group edit inherits branch/worktree/permissions/gateway from the
+		// anchor — jump straight to confirm after the (per-persona) provider
+		// selection. The anchor's provider is already configured, so the
+		// missing-token branch above is unreachable here.
+		if w.groupEdit {
+			w.step = StepConfirm
+			w.cursor = 0
+			return w, nil
+		}
 		// Gateway-eligible vibeflow sessions get the gateway step; otherwise
 		// advance to the qwen launch config (qwen-only) or directly to branch.
 		if w.shouldShowGatewayStep() {
@@ -1968,6 +2248,9 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		w.step = StepConfirm
 		w.cursor = 0
 	case StepConfirm:
+		if w.groupEdit {
+			return w.buildGroupEditResult()
+		}
 		pe := w.providers[w.selectedProvider]
 		// Determine worktree choice from selected option text.
 		wtChoice := WorktreeCurrent
@@ -2161,6 +2444,11 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.step = StepSessionType
 		w.cursor = w.selectedSessionType
 	case StepTeam:
+		if w.groupEdit {
+			// StepTeam is the first group-edit step — esc cancels.
+			w.cancelled = true
+			return w, nil
+		}
 		w.step = StepProject
 		w.cursor = 0
 		w.projectFilterActive = true
@@ -2218,6 +2506,12 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.step = StepWorktree
 		w.cursor = w.selectedWorktree
 	case StepConfirm:
+		if w.groupEdit {
+			// Group edit skips the permissions step — go back to provider.
+			w.step = StepProvider
+			w.cursor = 0
+			return w, nil
+		}
 		w.step = StepPermissions
 		w.cursor = w.selectedPermission
 	}
