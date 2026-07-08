@@ -30,6 +30,7 @@ var (
 	flagServerURL   string
 	flagProject     string
 	flagMCPToolName string
+	flagTmuxSocket  string
 
 	buildVersion = "dev"
 	buildCommit  = "none"
@@ -69,6 +70,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagRootDir, "root", "", "Root directory for config, sessions, and logs (default: ~/.vibeflow-cli)")
 	rootCmd.PersistentFlags().StringVar(&flagConfigPath, "config", "", "Path to config file (default: <root>/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&flagMCPToolName, "mcp", "", "MCP server tool name used in the agent init prompt (default: vibeflow)")
+	rootCmd.PersistentFlags().StringVar(&flagTmuxSocket, "tmux-socket", "", "tmux socket name for sessions (default: 'vibeflow', or 'vibeflow-<hash>' for a custom --root)")
 	rootCmd.Flags().StringVar(&flagServerURL, "server-url", "", "VibeFlow server URL (overrides config)")
 	rootCmd.Flags().StringVar(&flagProject, "project", "", "Default project name")
 
@@ -125,8 +127,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if flagMCPToolName != "" {
 		cfg.MCPToolName = flagMCPToolName
 	}
-	// Derive tmux socket from root directory for session isolation.
-	cfg.TmuxSocket = TmuxSocketName()
+	// Resolve tmux socket: explicit flag > config tmux_socket > per-root derived.
+	cfg.TmuxSocket = ResolveTmuxSocket(flagTmuxSocket, cfg.TmuxSocket)
 
 	// Initialize components
 	client := NewClient(cfg.ServerURL, cfg.APIToken)

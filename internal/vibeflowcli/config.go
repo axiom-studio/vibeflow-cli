@@ -64,6 +64,22 @@ func TmuxSocketName() string {
 	return "vibeflow-" + hex.EncodeToString(h[:4])
 }
 
+// ResolveTmuxSocket picks the tmux socket name to use, with precedence:
+// explicit --tmux-socket flag > config `tmux_socket` > per-root derived default
+// (TmuxSocketName). This lets a socket travel with a relocated/copied config
+// (or be pinned explicitly) instead of being silently re-derived from the root
+// path — the root cause of sessions being invisible after a --root change.
+// An empty cfgVal means "not set in the config file" (see LoadConfig).
+func ResolveTmuxSocket(flagVal, cfgVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if cfgVal != "" {
+		return cfgVal
+	}
+	return TmuxSocketName()
+}
+
 // WorktreeConfig holds settings for git worktree management.
 type WorktreeConfig struct {
 	BaseDir       string `yaml:"base_dir"`
@@ -257,6 +273,14 @@ func ConfigPath() string {
 // LoadConfig reads config from file, falling back to defaults.
 func LoadConfig(path string) (*Config, error) {
 	cfg := DefaultConfig()
+
+	// The tmux socket is resolved separately via ResolveTmuxSocket (flag >
+	// config > derived). Clear the DefaultConfig placeholder so cfg.TmuxSocket
+	// reflects ONLY what the file declares — empty means "not set", which lets
+	// the resolver fall through to the per-root derived default. Without this,
+	// a fresh custom root would inherit the "vibeflow" placeholder and lose its
+	// isolated socket.
+	cfg.TmuxSocket = ""
 
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -145,6 +145,29 @@ func (s *Store) Sync(activeTmux []string) error {
 	return err
 }
 
+// Orphans returns the stored sessions whose TmuxSession is NOT in activeTmux.
+// Unlike Sync, it does not modify the store — it only reports which entries
+// look dead. Callers decide whether to purge (e.g. after user confirmation),
+// so a transient or empty tmux list (a socket whose server isn't running)
+// can never silently destroy session metadata.
+func (s *Store) Orphans(activeTmux []string) ([]SessionMeta, error) {
+	active := make(map[string]bool, len(activeTmux))
+	for _, name := range activeTmux {
+		active[name] = true
+	}
+	sessions, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var orphans []SessionMeta
+	for _, m := range sessions {
+		if !active[m.TmuxSession] {
+			orphans = append(orphans, m)
+		}
+	}
+	return orphans, nil
+}
+
 // Discover cross-references live tmux session names against the store and
 // returns sessions that are live but have no store entry (orphaned/recovered).
 // For each discovered session, it creates a minimal SessionMeta from

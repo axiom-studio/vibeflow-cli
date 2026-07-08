@@ -467,3 +467,53 @@ func TestStore_SessionMetaFields(t *testing.T) {
 		t.Errorf("VibeFlowSessionID = %q", got.VibeFlowSessionID)
 	}
 }
+
+func TestStore_Orphans(t *testing.T) {
+	s := testStore(t)
+	if err := s.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only "vibeflow_a" is live → "b" is the sole orphan.
+	orphans, err := s.Orphans([]string{"vibeflow_a"})
+	if err != nil {
+		t.Fatalf("Orphans failed: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0].TmuxSession != "vibeflow_b" {
+		t.Fatalf("Orphans = %+v, want only vibeflow_b", orphans)
+	}
+}
+
+// TestStore_OrphansNonDestructive is the core safety guarantee: an empty live
+// list (a socket whose server isn't running) reports every entry as an orphan
+// but MUST NOT modify sessions.json. This is what prevents a socket mismatch
+// from silently wiping the store.
+func TestStore_OrphansNonDestructive(t *testing.T) {
+	s := testStore(t)
+	if err := s.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	orphans, err := s.Orphans(nil)
+	if err != nil {
+		t.Fatalf("Orphans failed: %v", err)
+	}
+	if len(orphans) != 2 {
+		t.Fatalf("expected 2 orphans for empty live list, got %d", len(orphans))
+	}
+
+	// The store on disk must be untouched — Orphans only reports, never prunes.
+	sessions, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Errorf("Orphans must not modify the store: got %d sessions, want 2", len(sessions))
+	}
+}
