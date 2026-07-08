@@ -389,7 +389,14 @@ func TestRedactSpawnArg(t *testing.T) {
 		},
 		{"anthropic auth token env", "ANTHROPIC_AUTH_TOKEN=tok", "ANTHROPIC_AUTH_TOKEN=<redacted>"},
 		{"anthropic api key env", "ANTHROPIC_API_KEY=sk-ant", "ANTHROPIC_API_KEY=<redacted>"},
-		{"non-secret env passes through", "OPENAI_MODEL=glm-4.6", "OPENAI_MODEL=glm-4.6"},
+		// Deny-by-default (issue #2714): even a non-secret env assignment has its
+		// value masked. The NAME survives so support can still see which vars were
+		// set; only the value is hidden.
+		{"non-secret env value still masked, name survives", "OPENAI_MODEL=glm-4.6", "OPENAI_MODEL=<redacted>"},
+		// Regression (issue #2714): a Codex bearer token injected under an arbitrary
+		// user-defined name (bearer_token_env_var from ~/.codex/config.toml) cannot
+		// be listed in any static allowlist, but deny-by-default masks its value.
+		{"codex custom bearer-token env name", "CUSTOM_NAME=tok-abc123", "CUSTOM_NAME=<redacted>"},
 		{"plain arg passes through", "-e", "-e"},
 		{
 			name: "command arg gets key-flag redaction",

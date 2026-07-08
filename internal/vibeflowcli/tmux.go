@@ -261,11 +261,21 @@ func isSecretEnvKey(key string) bool {
 	return false
 }
 
-// redactSpawnArg redacts a single tmux spawn argument for logging: values of
-// secret env assignments become "<redacted>", and any embedded key flags in
-// the command argument are masked via redactCommandSecrets.
+// envAssignKeyRE matches a POSIX environment variable name — the "KEY" half of a
+// "KEY=value" tmux -e assignment. The command-string arg and flags carry spaces,
+// dashes, or quotes before their first '=', so they do NOT match and fall through
+// to redactCommandSecrets rather than being treated as env assignments.
+var envAssignKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// redactSpawnArg redacts a single tmux spawn argument for logging. Deny-by-default:
+// the value of ANY env assignment ("KEY=value" with KEY a valid env var name) is
+// masked, so a provider token injected under a user-defined name — e.g. a Codex
+// bearer_token_env_var, which no static allowlist can anticipate — can never leak
+// to the debug log (issue #2714). The key name is preserved so support can still
+// see which vars were set. Non-env args pass through redactCommandSecrets so any
+// embedded key flags in the command argument are still masked.
 func redactSpawnArg(a string) string {
-	if key, _, ok := strings.Cut(a, "="); ok && isSecretEnvKey(key) {
+	if key, _, ok := strings.Cut(a, "="); ok && envAssignKeyRE.MatchString(key) {
 		return key + "=<redacted>"
 	}
 	return redactCommandSecrets(a)
