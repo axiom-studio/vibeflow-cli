@@ -17,8 +17,11 @@
 package vibeflowcli
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // personaIndex returns the index of a persona key within defaultPersonas(),
@@ -306,5 +309,55 @@ func TestBuildGroupEditResult_InheritsSharedSettingsAndDesiredPersonas(t *testin
 	}
 	if _, ok := r.PersonaProviders["principal_engineer"]; ok {
 		t.Error("principal_engineer matches team default — should have no per-persona override")
+	}
+}
+
+// --- Regression: issue #3438 (e/b did nothing for freshly-launched sessions) ---
+
+// storeMetaForRow must resolve a row by its full tmux name, not by SessionMeta.Name,
+// so it works for BOTH launched sessions (Name = base, e.g. "a") and tmux-discovered
+// sessions (Name = short/provider-prefixed). A Name-based store.Get missed the former.
+func TestStoreMetaForRow_MatchesByTmuxName(t *testing.T) {
+	st := &Store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	_ = st.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_claude-a", Provider: "claude", Branch: "main"})     // launched: Name=base
+	_ = st.Add(SessionMeta{Name: "codex-b", TmuxSession: "vibeflow_codex-b", Provider: "codex", Branch: "main"}) // discovered: Name=short
+	m := Model{store: st}
+
+	// Launched session: Name-based Get("claude-a") would miss; TmuxSession match resolves it.
+	if meta, ok := m.storeMetaForRow(SessionRow{Name: "claude-a"}); !ok || meta.Name != "a" {
+		t.Errorf("launched row not resolved: meta=%+v ok=%v", meta, ok)
+	}
+	// Discovered session resolves too.
+	if meta, ok := m.storeMetaForRow(SessionRow{Name: "codex-b"}); !ok || meta.TmuxSession != "vibeflow_codex-b" {
+		t.Errorf("discovered row not resolved: meta=%+v ok=%v", meta, ok)
+	}
+	// Unknown row → not found.
+	if _, ok := m.storeMetaForRow(SessionRow{Name: "gemini-z"}); ok {
+		t.Error("unknown row should not resolve")
+	}
+	// Nil store → not found (no panic).
+	if _, ok := (Model{}).storeMetaForRow(SessionRow{Name: "claude-a"}); ok {
+		t.Error("nil store should resolve to not-found")
+	}
+}
+
+// Pressing `e` on a freshly-launched session (SessionMeta.Name = base name) must
+// open the group-edit wizard. Before #3438 the anchor lookup used store.Get(row.Name)
+// and silently no-oped because the row name is provider-prefixed.
+func TestUpdate_EKeyOpensGroupEditForLaunchedSession(t *testing.T) {
+	st := &Store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	_ = st.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_claude-a", Provider: "claude", Persona: "developer", Project: "p", Branch: "main", WorkingDir: "/work/a"})
+	cfg := DefaultConfig()
+	m := Model{
+		store:         st,
+		registry:      NewProviderRegistry(cfg),
+		config:        cfg,
+		repoRootCache: map[string]string{"/work/a": "/work/a"},
+		sessions:      []SessionRow{{Name: "claude-a", WorkingDir: "/work/a", Branch: "main"}},
+	}
+
+	nm, _ := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	if got := nm.(Model).activeView; got != ViewWizard {
+		t.Fatalf("pressing e on a launched session did not open the group-edit wizard: activeView=%d, want ViewWizard(%d)", got, ViewWizard)
 	}
 }
