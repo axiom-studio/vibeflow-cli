@@ -1299,6 +1299,33 @@ func (m Model) killSessionByName(name string) {
 	}
 }
 
+// killSessionMeta stops the tmux session described by meta and removes it from
+// the store and cache, applying the configured worktree cleanup. Unlike
+// killSessionByName — which takes a row's short tmux name and keys every step off
+// that one string — this keys the tmux kill off meta.TmuxSession and the
+// store/cache removal off meta.Name. That distinction matters for freshly
+// launched sessions, whose store Name is the base name (e.g. "a") while their
+// tmux session is provider-prefixed (e.g. "vibeflow_claude-a"): killing by Name
+// would target the wrong session and leave the real one running (issue #3438).
+// The on-disk session file is intentionally kept for ID reuse, matching
+// killSessionByName. Mirrors the quick-branch-switch teardown.
+func (m Model) killSessionMeta(meta SessionMeta) {
+	if err := m.tmux.KillSession(meta.TmuxSession); err != nil {
+		m.logger.Error("kill session %s: %v", meta.TmuxSession, err)
+	} else {
+		m.logger.Info("session killed: %s", meta.TmuxSession)
+	}
+	if m.store != nil {
+		if m.config.Worktree.CleanupOnKill == "always" {
+			m.safeRemoveWorktree(meta.WorktreePath, meta.Name)
+		}
+		_ = m.store.Remove(meta.Name)
+	}
+	if m.cache != nil {
+		_ = m.cache.Remove(meta.Name)
+	}
+}
+
 // groupSessionsFor returns the sessions that belong to the same group as anchor:
 // those sharing the anchor's repo root AND branch (the anchor itself included).
 // repoRoot normalizes a working directory to its git repo root. Pure (repoRoot is
@@ -1333,7 +1360,7 @@ func (m Model) applyGroupEdit(running []SessionMeta, result WizardResult) tea.Ms
 
 	for _, persona := range toRemove {
 		if meta, ok := runningByPersona[persona]; ok {
-			m.killSessionByName(meta.Name)
+			m.killSessionMeta(meta)
 		}
 	}
 
