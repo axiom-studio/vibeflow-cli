@@ -109,37 +109,37 @@ const (
 
 // Model is the Bubble Tea model for vibeflow-cli.
 type Model struct {
-	sessions        []SessionRow
-	cursor          int
-	client          *Client
-	tmux            *TmuxManager
-	worktrees       *WorktreeManager
-	store           *Store
-	registry        *ProviderRegistry
-	config          *Config
-	width           int
-	height          int
-	err             error
-	quitting        bool
-	projectID       int64
-	activeView      ViewState
-	wizard          WizardModel
-	conflictModal   ConflictModal
-	worktreeList    WorktreeListModel
-	pendingWizard   *WizardResult      // wizard result waiting for conflict resolution
-	switchMeta      *SessionMeta       // non-nil during quick branch switch flow
-	groupEditRunning []SessionMeta     // non-nil during group edit flow: the running group being reshaped
-	captureOutput   string             // last captured pane output for selected session
-	captureName     string             // tmux session name for current capture
-	confirmDelete   bool               // showing delete confirmation
-	confirmQuit     bool               // showing quit confirmation
-	confirmDetach   bool               // showing detach confirmation
-	workbenchActive bool               // true while a pane-join workbench is composing/attached/restoring (pauses store prune)
-	serverWarning   string             // non-empty if server unreachable at startup
-	healthMonitor   *HealthMonitor     // session error detection and auto-recovery
-	logger          *Logger            // file-based logger
-	cache           *SessionCache      // session cache for restart-without-intervention
-	restartSelect   RestartSelectModel // dead-session restart multiselect
+	sessions         []SessionRow
+	cursor           int
+	client           *Client
+	tmux             *TmuxManager
+	worktrees        *WorktreeManager
+	store            *Store
+	registry         *ProviderRegistry
+	config           *Config
+	width            int
+	height           int
+	err              error
+	quitting         bool
+	projectID        int64
+	activeView       ViewState
+	wizard           WizardModel
+	conflictModal    ConflictModal
+	worktreeList     WorktreeListModel
+	pendingWizard    *WizardResult      // wizard result waiting for conflict resolution
+	switchMeta       *SessionMeta       // non-nil during quick branch switch flow
+	groupEditRunning []SessionMeta      // non-nil during group edit flow: the running group being reshaped
+	captureOutput    string             // last captured pane output for selected session
+	captureName      string             // tmux session name for current capture
+	confirmDelete    bool               // showing delete confirmation
+	confirmQuit      bool               // showing quit confirmation
+	confirmDetach    bool               // showing detach confirmation
+	workbenchActive  bool               // true while a pane-join workbench is composing/attached/restoring (pauses store prune)
+	serverWarning    string             // non-empty if server unreachable at startup
+	healthMonitor    *HealthMonitor     // session error detection and auto-recovery
+	logger           *Logger            // file-based logger
+	cache            *SessionCache      // session cache for restart-without-intervention
+	restartSelect    RestartSelectModel // dead-session restart multiselect
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -537,6 +537,29 @@ func (m Model) selectedSessionIdx() int {
 		return -1
 	}
 	return m.cursor
+}
+
+// storeMetaForRow resolves the SessionMeta backing a session-list row. It matches
+// on the full tmux session name (sessionPrefix + row.Name) — the same reliable
+// join key refreshSessions uses to enrich rows — because SessionMeta.Name may be
+// the base name (e.g. "a") while SessionRow.Name is provider-prefixed ("claude-a"),
+// so a Name-based store.Get misses freshly-launched sessions. Returns false when
+// the store is unset, unreadable, or has no session for the row.
+func (m Model) storeMetaForRow(row SessionRow) (SessionMeta, bool) {
+	if m.store == nil {
+		return SessionMeta{}, false
+	}
+	tmuxName := sessionPrefix + row.Name
+	metas, err := m.store.List()
+	if err != nil {
+		return SessionMeta{}, false
+	}
+	for _, meta := range metas {
+		if meta.TmuxSession == tmuxName {
+			return meta, true
+		}
+	}
+	return SessionMeta{}, false
 }
 
 // projectLabel returns a short display label for a repo root (its basename), or
@@ -969,8 +992,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx < 0 || idx >= len(m.sessions) || m.store == nil {
 				return m, nil
 			}
-			row := m.sessions[idx]
-			meta, found, _ := m.store.Get(row.Name)
+			meta, found := m.storeMetaForRow(m.sessions[idx])
 			if !found {
 				return m, nil
 			}
@@ -989,7 +1011,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx < 0 || idx >= len(m.sessions) || m.store == nil {
 				return m, nil
 			}
-			anchor, found, _ := m.store.Get(m.sessions[idx].Name)
+			anchor, found := m.storeMetaForRow(m.sessions[idx])
 			if !found {
 				return m, nil
 			}
