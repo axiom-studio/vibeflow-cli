@@ -172,10 +172,16 @@ func launchCmd() *cobra.Command {
 				}
 			}
 
-			// If LLM gateway is enabled (flag or saved config), inject gateway env vars.
-			// Otherwise, explicitly clear gateway-related vars to prevent inheritance
-			// from the parent shell environment.
-			if llmGateway || cfg.LLMGatewayEnabled {
+			// If LLM gateway is enabled (flag or saved config) AND the provider
+			// supports gateway routing, inject gateway env vars. Otherwise clear
+			// gateway-related vars to prevent inheritance from the parent shell.
+			// Providers that connect directly (qwen, cursor) never route through
+			// the gateway; warn if the user explicitly asked via --llm-gateway.
+			gatewayEnabled, warnGatewayIgnored := GatewayEnabledForProvider(llmGateway, cfg.LLMGatewayEnabled, provider)
+			if warnGatewayIgnored {
+				fmt.Fprintf(os.Stderr, "warning: --llm-gateway ignored for provider %q — it connects directly to the provider\n", provider)
+			}
+			if gatewayEnabled {
 				if baseEnv == nil {
 					baseEnv = make(map[string]string)
 				}
@@ -324,7 +330,7 @@ func launchCmd() *cobra.Command {
 					CloudDispatch:     cloudDispatch,
 					SkipPermissions:   skipPermissions,
 					Model:             sessionModel,
-					LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
+					LLMGatewayEnabled: gatewayEnabled,
 					OpenShell:         openShellMeta(openShellCfg),
 					CreatedAt:         time.Now(),
 				}

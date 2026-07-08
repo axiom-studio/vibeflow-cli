@@ -871,6 +871,45 @@ func TestQwenCustomAPIKeyEnvName(t *testing.T) {
 	}
 }
 
+func TestGatewayEnabledForProvider(t *testing.T) {
+	tests := []struct {
+		name        string
+		flag        bool
+		cfgEnabled  bool
+		provider    string
+		wantEnabled bool
+		wantWarn    bool
+	}{
+		// Gateway-capable providers: routing turns on when requested by flag or config.
+		{"claude_flag", true, false, "claude", true, false},
+		{"claude_config", false, true, "claude", true, false},
+		{"codex_flag", true, false, "codex", true, false},
+		{"gemini_config", false, true, "gemini", true, false},
+		// Not requested at all → disabled, never warns.
+		{"claude_none", false, false, "claude", false, false},
+		{"cursor_none", false, false, "cursor", false, false},
+		// Direct-only providers: never enabled even when requested. Warn ONLY when
+		// the user explicitly passed the flag; a config-only preference stays silent.
+		{"cursor_flag_warns", true, false, "cursor", false, true},
+		{"qwen_flag_warns", true, false, "qwen", false, true},
+		{"cursor_config_silent", false, true, "cursor", false, false},
+		{"qwen_config_silent", false, true, "qwen", false, false},
+		// Flag set AND config set for a direct-only provider still warns (flag is explicit).
+		{"cursor_flag_and_config", true, true, "cursor", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotEnabled, gotWarn := GatewayEnabledForProvider(tt.flag, tt.cfgEnabled, tt.provider)
+			if gotEnabled != tt.wantEnabled {
+				t.Errorf("enabled = %v, want %v", gotEnabled, tt.wantEnabled)
+			}
+			if gotWarn != tt.wantWarn {
+				t.Errorf("warnIgnored = %v, want %v", gotWarn, tt.wantWarn)
+			}
+		})
+	}
+}
+
 func TestBuildLLMGatewayEnv_QwenEmpty(t *testing.T) {
 	t.Run("empty token", func(t *testing.T) {
 		env := BuildLLMGatewayEnv("qwen", "https://server.example.com", "")

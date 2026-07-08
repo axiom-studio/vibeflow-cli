@@ -463,6 +463,29 @@ func ClearLLMGatewayEnv(providerKey string) map[string]string {
 	return env
 }
 
+// GatewayEnabledForProvider resolves whether LLM-gateway routing should be
+// active for a launch, given the explicit --llm-gateway flag, the saved config
+// setting, and the selected provider. Providers that connect directly to their
+// backend (see providerSupportsGateway — currently qwen and cursor) never route
+// through the gateway, even when routing is requested.
+//
+// It mirrors the TUI wizard's gate (shouldShowGatewayStep), which never even
+// offers the gateway step for such providers, so the CLI flag path and the
+// wizard reach the same decision instead of the flag silently no-opping.
+//
+// warnIgnored is true only when the user EXPLICITLY passed --llm-gateway for a
+// provider that cannot use it, so the caller can surface a one-line notice. A
+// gateway preference coming solely from saved config stays silent.
+func GatewayEnabledForProvider(llmGatewayFlag, cfgEnabled bool, providerKey string) (enabled, warnIgnored bool) {
+	if !llmGatewayFlag && !cfgEnabled {
+		return false, false
+	}
+	if !providerSupportsGateway(providerKey) {
+		return false, llmGatewayFlag
+	}
+	return true, false
+}
+
 // WithMCPTokenEnv returns env with MCP_TOKEN populated from the resolved
 // VibeFlow API token. The loaded config already honors VIBEFLOW_TOKEN, so the
 // parent MCP_TOKEN is only a fallback for callers without a saved api_token.
