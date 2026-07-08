@@ -540,6 +540,29 @@ func (m Model) selectedSessionIdx() int {
 	return m.cursor
 }
 
+// rowForGroupEdit resolves the session-list row that the `e` group-edit hotkey
+// should anchor on. When the cursor is on an individual session, that row is
+// returned. When it is on a group HEADER (grouped mode), the group's first
+// session is returned so `e` edits the whole group rather than no-opping (#2846)
+// — mirroring how selectedRepoRoot lets m/M act on a header (#3293). Group
+// members share repo-root+branch (the group invariant), so any member is a valid
+// anchor. Returns false when no session/group resolves.
+func (m Model) rowForGroupEdit() (SessionRow, bool) {
+	if idx := m.selectedSessionIdx(); idx >= 0 && idx < len(m.sessions) {
+		return m.sessions[idx], true
+	}
+	if m.groupMode {
+		if _, root := m.groupedCursorToSession(); root != "" {
+			if indices := m.groupedSessions[root]; len(indices) > 0 {
+				if first := indices[0]; first >= 0 && first < len(m.sessions) {
+					return m.sessions[first], true
+				}
+			}
+		}
+	}
+	return SessionRow{}, false
+}
+
 // storeMetaForRow resolves the SessionMeta backing a session-list row. It matches
 // on the full tmux session name (sessionPrefix + row.Name) — the same reliable
 // join key refreshSessions uses to enrich rows — because SessionMeta.Name may be
@@ -1006,13 +1029,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeView = ViewWizard
 			return m, nil
 		case "e":
-			// Edit the running group of the selected session: add/remove personas
-			// (with per-persona provider) reusing the group's shared repo+branch.
-			idx := m.selectedSessionIdx()
-			if idx < 0 || idx >= len(m.sessions) || m.store == nil {
+			// Edit the running group of the selected session — or, when a group
+			// header is selected, the whole group under it (#2846). Add/remove
+			// personas (with per-persona provider) reusing the group's shared
+			// repo+branch.
+			if m.store == nil {
 				return m, nil
 			}
-			anchor, found := m.storeMetaForRow(m.sessions[idx])
+			anchorRow, ok := m.rowForGroupEdit()
+			if !ok {
+				return m, nil
+			}
+			anchor, found := m.storeMetaForRow(anchorRow)
 			if !found {
 				return m, nil
 			}
