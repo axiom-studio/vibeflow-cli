@@ -1088,6 +1088,62 @@ func TestTmuxSocketName_CustomRoot(t *testing.T) {
 	})
 }
 
+func TestResolveTmuxSocket(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+	SetRootDir("")
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+
+	t.Run("flag wins over config and derived", func(t *testing.T) {
+		if got := ResolveTmuxSocket("flagsock", "cfgsock"); got != "flagsock" {
+			t.Errorf("ResolveTmuxSocket = %q, want flagsock", got)
+		}
+	})
+
+	t.Run("config wins over derived when no flag", func(t *testing.T) {
+		if got := ResolveTmuxSocket("", "cfgsock"); got != "cfgsock" {
+			t.Errorf("ResolveTmuxSocket = %q, want cfgsock", got)
+		}
+	})
+
+	t.Run("derived default when neither set (default root)", func(t *testing.T) {
+		SetRootDir("")
+		if got := ResolveTmuxSocket("", ""); got != "vibeflow" {
+			t.Errorf("ResolveTmuxSocket = %q, want vibeflow", got)
+		}
+	})
+
+	t.Run("derived hash when neither set (custom root)", func(t *testing.T) {
+		SetRootDir("/sandbox/state/.vibeflow-cli")
+		got := ResolveTmuxSocket("", "")
+		if !strings.HasPrefix(got, "vibeflow-") || got == "vibeflow" {
+			t.Errorf("ResolveTmuxSocket = %q, want isolated vibeflow-<hash>", got)
+		}
+		SetRootDir("")
+	})
+}
+
+// TestLoadConfig_OmitsSocket verifies that a config file WITHOUT a tmux_socket
+// key yields an empty cfg.TmuxSocket (not the DefaultConfig "vibeflow"
+// placeholder), so ResolveTmuxSocket can fall through to the per-root derived
+// default and a fresh custom root keeps its isolated socket.
+func TestLoadConfig_OmitsSocket(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yaml := "server_url: https://my.server.com\napi_token: tok\n"
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TmuxSocket != "" {
+		t.Errorf("TmuxSocket = %q, want empty (not set in file)", cfg.TmuxSocket)
+	}
+}
+
 func TestNoHardcodedPaths(t *testing.T) {
 	goFiles, err := filepath.Glob(filepath.Join(".", "*.go"))
 	if err != nil {

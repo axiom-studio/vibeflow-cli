@@ -58,7 +58,10 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("load config: %w", err)
 	}
-	cfg.TmuxSocket = TmuxSocketName()
+	// Resolve tmux socket: explicit flag > config tmux_socket > per-root derived.
+	// Uses the same precedence as the TUI so headless subcommands target the
+	// same socket the user's sessions actually live on.
+	cfg.TmuxSocket = ResolveTmuxSocket(flagTmuxSocket, cfg.TmuxSocket)
 	tmux := NewTmuxManager(cfg.TmuxSocket)
 	tmux.SetLogger(NewLogger())
 	store := NewStore()
