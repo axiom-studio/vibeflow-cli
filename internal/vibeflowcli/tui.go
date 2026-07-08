@@ -169,6 +169,7 @@ type listHitmap struct {
 	contentTop int           // absolute terminal row of the list's first content line
 	leftWidth  int           // width of the left column; x >= leftWidth is outside the list
 	spans      []listRowSpan // one entry per selectable row, in render order
+	top        int           // scroll offset: body line at the top of the visible window
 }
 
 func (h *listHitmap) resetSpans() {
@@ -1987,7 +1988,18 @@ func (m Model) viewContent() string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// renderSessionList renders the left column with session entries.
+// listRow is one pre-rendered, selectable entry in the session list. Building
+// the full ordered set first lets windowRows scroll and hit-test uniformly for
+// both flat and grouped modes.
+type listRow struct {
+	text   string // rendered content, `height` lines joined by "\n" (no trailing "\n")
+	height int    // terminal lines occupied (1 or 2)
+	pos    int    // grouped-cursor position this row maps to (matches m.cursor)
+}
+
+// renderSessionList renders the left column with session entries. The "Sessions"
+// header is a fixed first line; the selectable rows below it scroll within a
+// viewport of `height` lines so a list longer than the box stays reachable.
 func (m Model) renderSessionList(width, height int) string {
 	var b strings.Builder
 
@@ -2004,25 +2016,118 @@ func (m Model) renderSessionList(width, height int) string {
 	b.WriteString("\n")
 
 	if len(m.sessions) == 0 {
+		if m.hitmap != nil {
+			m.hitmap.top = 0
+		}
 		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("No active sessions."))
 		b.WriteString("\n")
 		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("Press 'n' to create one."))
 		return b.String()
 	}
 
+	var rows []listRow
 	if m.groupMode {
-		return m.renderGroupedList(width, &b)
+		rows = m.buildGroupedRows(width)
+	} else {
+		rows = m.buildFlatRows(width)
 	}
 
-	line := 1 // line 0 is the "Sessions" header above
-	for i, s := range m.sessions {
-		h := sessionRowHeight(s)
-		m.hitmap.addSpan(line, h, i)
-		m.renderSessionRow(&b, s, i, m.cursor, width, "")
-		line += h
+	// avail = body lines below the fixed "Sessions" header.
+	avail := height - 1
+	if avail < 1 {
+		avail = 1
 	}
+	b.WriteString(m.windowRows(rows, avail))
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// buildFlatRows pre-renders every session as a listRow in flat (ungrouped) mode.
+func (m Model) buildFlatRows(width int) []listRow {
+	rows := make([]listRow, 0, len(m.sessions))
+	for i, s := range m.sessions {
+		var rb strings.Builder
+		m.renderSessionRow(&rb, s, i, m.cursor, width, "")
+		rows = append(rows, listRow{
+			text:   strings.TrimRight(rb.String(), "\n"),
+			height: sessionRowHeight(s),
+			pos:    i,
+		})
+	}
+	return rows
+}
+
+// windowRows renders the visible slice of `rows` into a viewport `avail` lines
+// tall, scrolling so the cursor row stays visible, and records a hitmap span for
+// the visible portion of each on-screen row. Because navigation is entirely
+// cursor-driven (j/k and the wheel both move m.cursor), keeping the cursor in
+// view is sufficient to reach every row. The scroll offset persists in the
+// hitmap (a pointer shared across value-receiver View renders), so it survives
+// between frames and stays in lockstep with what handleListClick tests against.
+func (m Model) windowRows(rows []listRow, avail int) string {
+	// Body-line start of each row, plus the cursor row's extent.
+	starts := make([]int, len(rows))
+	total := 0
+	cursorStart, cursorHeight := -1, 0
+	for i, r := range rows {
+		starts[i] = total
+		if r.pos == m.cursor {
+			cursorStart, cursorHeight = total, r.height
+		}
+		total += r.height
+	}
+
+	// Resolve the scroll offset: start from the persisted value, clamp to the
+	// content, then scroll the minimum needed to keep the cursor row visible.
+	top := 0
+	if m.hitmap != nil {
+		top = m.hitmap.top
+	}
+	if maxTop := total - avail; top > maxTop {
+		top = maxTop
+	}
+	if top < 0 {
+		top = 0
+	}
+	if cursorStart >= 0 {
+		if cursorStart < top {
+			top = cursorStart // cursor above the window → scroll up to it
+		} else if cursorStart+cursorHeight > top+avail {
+			top = cursorStart + cursorHeight - avail // cursor below → scroll down
+		}
+	}
+	if m.hitmap != nil {
+		m.hitmap.top = top
+	}
+
+	var b strings.Builder
+	for i, r := range rows {
+		rowStart := starts[i]
+		visStart, visEnd := rowStart, rowStart+r.height
+		if visStart < top {
+			visStart = top
+		}
+		if visEnd > top+avail {
+			visEnd = top + avail
+		}
+		if visStart >= visEnd {
+			continue // fully outside the window
+		}
+		// Span is content-relative: the "Sessions" header is line 0, so the first
+		// body line sits at 1. Clip to the visible portion so click geometry is exact.
+		m.hitmap.addSpan(1+(visStart-top), visEnd-visStart, r.pos)
+
+		lines := strings.Split(r.text, "\n")
+		from, to := visStart-rowStart, visEnd-rowStart
+		if to > len(lines) {
+			to = len(lines)
+		}
+		for _, ln := range lines[from:to] {
+			b.WriteString(ln)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 // sessionRowHeight reports how many terminal lines renderSessionRow emits for a
@@ -2036,10 +2141,12 @@ func sessionRowHeight(s SessionRow) int {
 	return 1
 }
 
-// renderGroupedList renders the session list grouped by repo root.
-func (m Model) renderGroupedList(width int, b *strings.Builder) string {
+// buildGroupedRows pre-renders the session list grouped by repo root: one
+// listRow per group header followed by its (expanded) sessions. Positions
+// advance across headers and rows so they match m.cursor exactly.
+func (m Model) buildGroupedRows(width int) []listRow {
+	var rows []listRow
 	pos := 0
-	line := 1 // line 0 is the "Sessions" header written by the caller
 	groupHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(oceanMuted)
 
 	for _, root := range m.groupOrder {
@@ -2058,28 +2165,30 @@ func (m Model) renderGroupedList(width int, b *strings.Builder) string {
 		}
 		header := fmt.Sprintf("%s %s (%d)", arrow, displayRoot, len(indices))
 
-		m.hitmap.addSpan(line, 1, pos) // group header occupies one line
+		var hb strings.Builder
 		if pos == m.cursor {
-			b.WriteString(selectedStyle.Width(width).Render(iconActive + " " + header))
+			hb.WriteString(selectedStyle.Width(width).Render(iconActive + " " + header))
 		} else {
-			b.WriteString("  " + groupHeaderStyle.Render(header))
+			hb.WriteString("  " + groupHeaderStyle.Render(header))
 		}
-		b.WriteString("\n")
+		rows = append(rows, listRow{text: hb.String(), height: 1, pos: pos})
 		pos++
-		line++
 
 		if !collapsed {
 			for _, idx := range indices {
-				h := sessionRowHeight(m.sessions[idx])
-				m.hitmap.addSpan(line, h, pos)
-				m.renderSessionRow(b, m.sessions[idx], pos, m.cursor, width, "  ")
+				var rb strings.Builder
+				m.renderSessionRow(&rb, m.sessions[idx], pos, m.cursor, width, "  ")
+				rows = append(rows, listRow{
+					text:   strings.TrimRight(rb.String(), "\n"),
+					height: sessionRowHeight(m.sessions[idx]),
+					pos:    pos,
+				})
 				pos++
-				line += h
 			}
 		}
 	}
 
-	return strings.TrimRight(b.String(), "\n")
+	return rows
 }
 
 // renderSessionRow renders a single session row into the builder.
