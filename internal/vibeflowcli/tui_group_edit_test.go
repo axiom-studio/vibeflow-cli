@@ -361,3 +361,43 @@ func TestUpdate_EKeyOpensGroupEditForLaunchedSession(t *testing.T) {
 		t.Fatalf("pressing e on a launched session did not open the group-edit wizard: activeView=%d, want ViewWizard(%d)", got, ViewWizard)
 	}
 }
+
+// TestUpdate_EKeyOpensGroupEditOnGroupHeader proves `e` acts on the whole group
+// when a group HEADER is selected (grouped cursor pos 0), not just when an
+// individual session is selected (#2846). Drives the real Update path.
+func TestUpdate_EKeyOpensGroupEditOnGroupHeader(t *testing.T) {
+	st := &Store{path: filepath.Join(t.TempDir(), "sessions.json")}
+	_ = st.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_claude-a", Provider: "claude", Persona: "developer", Project: "p", Branch: "main", WorkingDir: "/work/a"})
+	_ = st.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_claude-b", Provider: "claude", Persona: "architect", Project: "p", Branch: "main", WorkingDir: "/work/a"})
+	cfg := DefaultConfig()
+	m := Model{
+		store:           st,
+		registry:        NewProviderRegistry(cfg),
+		config:          cfg,
+		repoRootCache:   map[string]string{"/work/a": "/work/a"},
+		groupMode:       true,
+		groupOrder:      []string{"/work/a"},
+		groupedSessions: map[string][]int{"/work/a": {0, 1}},
+		collapsedGroups: map[string]bool{},
+		sessions: []SessionRow{
+			{Name: "claude-a", WorkingDir: "/work/a", Branch: "main"},
+			{Name: "claude-b", WorkingDir: "/work/a", Branch: "main"},
+		},
+		cursor: 0, // grouped pos 0 = the group header, not a session
+	}
+
+	// Precondition: on a header no individual session is selected, so the old
+	// selectedSessionIdx-based guard would have no-op'd.
+	if idx := m.selectedSessionIdx(); idx != -1 {
+		t.Fatalf("setup: cursor should be on the group header (selectedSessionIdx=-1), got %d", idx)
+	}
+
+	nm, _ := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	got := nm.(Model)
+	if got.activeView != ViewWizard {
+		t.Fatalf("pressing e on a group header did not open the group-edit wizard: activeView=%d, want ViewWizard(%d)", got.activeView, ViewWizard)
+	}
+	if len(got.groupEditRunning) != 2 {
+		t.Fatalf("group-edit from a header should target the whole group (2 sessions), got %d", len(got.groupEditRunning))
+	}
+}
