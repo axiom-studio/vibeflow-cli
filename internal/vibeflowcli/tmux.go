@@ -173,9 +173,37 @@ func (tm *TmuxManager) EnsureServer() error {
 	return nil
 }
 
+// tmuxListDelim separates the fields ListSessions requests from tmux via the
+// list-sessions -F format string. It MUST be a printable delimiter, never a
+// control character: tmux sanitizes control characters (including TAB, 0x09)
+// to '_' in list-sessions -F output whenever $TMUX is empty/unset — i.e. when
+// vibeflow runs from a plain shell instead of inside a tmux client. A TAB
+// delimiter therefore collapsed every row into a single field outside tmux, so
+// ListSessions returned nothing and the CLI reported "No active sessions" (and
+// the first-run wizard gate misfired) even with live sessions (issues #3490 /
+// #3486).
+//
+// ":::" is collision-proof for the split-critical session_name field because
+// tmux disallows ':' in session names, and no other emitted field — session_id
+// ("$N"), the integer counts, or the created-time string's single ':' — ever
+// contains three consecutive colons.
+const tmuxListDelim = ":::"
+
+// listSessionsFormat is the -F template for ListSessions, its fields joined by
+// tmuxListDelim so the delimiter has a single source of truth shared by the
+// request and the parser (parseTmuxSessionLines) — the two cannot drift apart.
+var listSessionsFormat = strings.Join([]string{
+	"#{session_name}",
+	"#{session_id}",
+	"#{session_windows}",
+	"#{session_attached}",
+	"#{session_created_string}",
+	"#{pane_dead}",
+}, tmuxListDelim)
+
 // ListSessions returns all vibeflow-prefixed tmux sessions.
 func (tm *TmuxManager) ListSessions() ([]TmuxSession, error) {
-	out, err := tm.run("list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_windows}\t#{session_attached}\t#{session_created_string}\t#{pane_dead}")
+	out, err := tm.run("list-sessions", "-F", listSessionsFormat)
 	if err != nil {
 		// tmux writes error messages to combined output; err.Error() is just "exit status 1".
 		combined := out + " " + err.Error()
@@ -184,13 +212,20 @@ func (tm *TmuxManager) ListSessions() ([]TmuxSession, error) {
 		}
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
+	return parseTmuxSessionLines(out), nil
+}
 
+// parseTmuxSessionLines parses the tmuxListDelim-delimited output of
+// list-sessions -F into TmuxSession values, keeping only vibeflow-prefixed
+// sessions. It is a standalone function so the split-critical parsing is unit
+// testable without a running tmux server.
+func parseTmuxSessionLines(out string) []TmuxSession {
 	var sessions []TmuxSession
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 6)
+		parts := strings.SplitN(line, tmuxListDelim, 6)
 		if len(parts) < 5 {
 			continue
 		}
@@ -208,7 +243,7 @@ func (tm *TmuxManager) ListSessions() ([]TmuxSession, error) {
 			CreatedAt: parts[4],
 		})
 	}
-	return sessions, nil
+	return sessions
 }
 
 // CreateSession creates a new tmux session running the given command.
