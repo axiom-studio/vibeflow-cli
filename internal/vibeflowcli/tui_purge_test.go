@@ -17,88 +17,123 @@
 package vibeflowcli
 
 import (
+	"os/exec"
+	"path/filepath"
 	"testing"
-
-	tea "charm.land/bubbletea/v2"
 )
 
-// TestSessionsMsg_PendingPurgeRaisesConfirmation verifies that dead stored
-// sessions are surfaced for confirmation rather than being purged silently.
-// This is the guard against the socket-mismatch wipe: a refresh that finds
-// stored sessions absent from tmux leaves sessions.json untouched and asks.
-func TestSessionsMsg_PendingPurgeRaisesConfirmation(t *testing.T) {
-	st := testStore(t)
-	_ = st.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_a"})
-	_ = st.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_b"})
-
-	m := Model{store: st, purgeDeclined: make(map[string]bool)}
-	nm, _ := m.Update(sessionsMsg{pendingPurge: []SessionMeta{
-		{Name: "a", TmuxSession: "vibeflow_a"},
-		{Name: "b", TmuxSession: "vibeflow_b"},
-	}})
-	mm := nm.(Model)
-
-	if !mm.confirmPurge {
-		t.Fatal("expected confirmPurge to be raised for pending purge")
+// TestRefreshSessions_RetainsDeadStoredSessions is the core guarantee after the
+// orphan-purge (y/n) prompt was removed (issue #3495): a refresh that finds
+// stored sessions absent from tmux MUST leave sessions.json fully intact. Dead
+// entries are retained (still listed and restartable) and are never silently
+// pruned — this is also the #3470 regression guard, since an empty live list
+// must not wipe the store.
+func TestRefreshSessions_RetainsDeadStoredSessions(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
 	}
-	if len(mm.purgeCandidates) != 2 {
-		t.Fatalf("purgeCandidates = %d, want 2", len(mm.purgeCandidates))
+	tm := NewTmuxManager("vftest-3495-retain")
+	_, _ = tm.run("kill-server")
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
 	}
-	// Nothing removed yet — the store must be intact until the user confirms.
-	if sessions, _ := st.List(); len(sessions) != 2 {
-		t.Errorf("store must be untouched before confirmation: got %d, want 2", len(sessions))
+
+	dir := t.TempDir()
+	store := NewStoreWithPath(filepath.Join(dir, "sessions.json"))
+	// Two stored sessions whose tmux sessions are NOT live on the socket.
+	if err := store.Add(SessionMeta{Name: "dead1", TmuxSession: "vibeflow_dead1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(SessionMeta{Name: "dead2", TmuxSession: "vibeflow_dead2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := Model{
+		tmux:   tm,
+		store:  store,
+		cache:  NewSessionCacheWithPath(filepath.Join(dir, "cache.json")),
+		logger: NewLogger(),
+		config: &Config{},
+	}
+	msg := m.refreshSessions()
+	sm, ok := msg.(sessionsMsg)
+	if !ok {
+		t.Fatalf("refreshSessions returned %T, want sessionsMsg", msg)
+	}
+	if sm.err != nil {
+		t.Fatalf("refreshSessions err: %v", sm.err)
+	}
+
+	// Both dead entries must survive the refresh — never purged, no prompt.
+	sessions, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("dead stored sessions must be retained across a refresh: got %d, want 2", len(sessions))
 	}
 }
 
-// TestConfirmPurge_YesRemovesCandidates verifies that confirming the prompt
-// removes exactly the candidate sessions and leaves others alone.
-func TestConfirmPurge_YesRemovesCandidates(t *testing.T) {
-	st := testStore(t)
-	_ = st.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_a"})
-	_ = st.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_b"})
+// TestRefreshSessions_DeadRetainedAlongsideLive proves a live session is listed
+// as a row while a dead stored session is retained (not purged) in the same
+// refresh: exactly the live session renders, and the dead entry stays in the
+// store for a later restart.
+func TestRefreshSessions_DeadRetainedAlongsideLive(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-3495-mixed")
+	_, _ = tm.run("kill-server")
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+
+	dir := t.TempDir()
+	store := NewStoreWithPath(filepath.Join(dir, "sessions.json"))
+
+	// One real live session, recorded in the store.
+	if err := tm.CreateSessionWithOpts(SessionOpts{
+		Name: "live", Provider: "claude", WorkDir: dir, Command: "sleep 300",
+	}); err != nil {
+		t.Fatalf("create live session: %v", err)
+	}
+	if err := store.Add(SessionMeta{
+		Name: "live", TmuxSession: tm.FullSessionName("claude", "live"), Provider: "claude", WorkingDir: dir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// One dead stored session with no live tmux counterpart.
+	if err := store.Add(SessionMeta{Name: "dead", TmuxSession: "vibeflow_dead"}); err != nil {
+		t.Fatal(err)
+	}
 
 	m := Model{
-		store:           st,
-		purgeDeclined:   make(map[string]bool),
-		confirmPurge:    true,
-		purgeCandidates: []SessionMeta{{Name: "b", TmuxSession: "vibeflow_b"}},
+		tmux:   tm,
+		store:  store,
+		cache:  NewSessionCacheWithPath(filepath.Join(dir, "cache.json")),
+		logger: NewLogger(),
+		config: &Config{},
 	}
-	nm, _ := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
-	mm := nm.(Model)
+	msg := m.refreshSessions()
+	sm, ok := msg.(sessionsMsg)
+	if !ok {
+		t.Fatalf("refreshSessions returned %T, want sessionsMsg", msg)
+	}
+	if sm.err != nil {
+		t.Fatalf("refreshSessions err: %v", sm.err)
+	}
 
-	if mm.confirmPurge {
-		t.Error("confirmPurge should be cleared after y")
+	// Only the live session renders as a row — dead sessions are not listed as
+	// rows (they live in the store, not in tmux), but they are NOT purged.
+	if len(sm.sessions) != 1 {
+		t.Fatalf("expected exactly the 1 live session as a row, got %d: %+v", len(sm.sessions), sm.sessions)
 	}
-	if _, ok, _ := st.Get("b"); ok {
-		t.Error("confirmed candidate 'b' should have been removed")
+	if _, ok, _ := store.Get("dead"); !ok {
+		t.Error("dead stored session must be retained after refresh, but it was purged")
 	}
-	if _, ok, _ := st.Get("a"); !ok {
-		t.Error("non-candidate 'a' must be preserved")
-	}
-}
-
-// TestConfirmPurge_NoKeepsAndSuppresses verifies that declining keeps the
-// sessions and records the decision so the user is not re-prompted.
-func TestConfirmPurge_NoKeepsAndSuppresses(t *testing.T) {
-	st := testStore(t)
-	_ = st.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_b"})
-
-	m := Model{
-		store:           st,
-		purgeDeclined:   make(map[string]bool),
-		confirmPurge:    true,
-		purgeCandidates: []SessionMeta{{Name: "b", TmuxSession: "vibeflow_b"}},
-	}
-	nm, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
-	mm := nm.(Model)
-
-	if mm.confirmPurge {
-		t.Error("confirmPurge should be cleared after n")
-	}
-	if !mm.purgeDeclined["vibeflow_b"] {
-		t.Error("declined session should be recorded to suppress re-prompt")
-	}
-	if _, ok, _ := st.Get("b"); !ok {
-		t.Error("declined session must be kept in the store")
+	if _, ok, _ := store.Get("live"); !ok {
+		t.Error("live stored session must remain in the store after refresh")
 	}
 }
