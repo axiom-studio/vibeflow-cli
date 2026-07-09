@@ -316,6 +316,42 @@ func redactSpawnArg(a string) string {
 	return redactCommandSecrets(a)
 }
 
+// claudeHardeningEnv are Claude Code environment variables vibeflow sets on
+// every launched `claude` session so autonomous / tmux-captured sessions stay
+// quiet and stable: no mid-session auto-update, no telemetry / error reporting,
+// no feedback survey, no non-essential model calls, and no alternate-screen
+// buffer (which would break tmux capture and scrollback). Requested by the user
+// (issue #3493). These are Claude-Code-specific and are applied only to the
+// claude provider.
+var claudeHardeningEnv = map[string]string{
+	"DISABLE_AUTOUPDATER":                  "1", // no update checks/restarts mid-session
+	"DISABLE_UPDATES":                      "1", // blocks all update paths incl. manual
+	"DISABLE_TELEMETRY":                    "1", // Statsig opt-out
+	"DISABLE_ERROR_REPORTING":              "1", // Sentry opt-out
+	"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":  "1", // no "How is Claude doing?" prompt
+	"DISABLE_NON_ESSENTIAL_MODEL_CALLS":    "1", // skip non-critical API calls
+	"CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1", // keep output in main scrollback
+}
+
+// withClaudeHardeningEnv returns the environment to apply to a session. For the
+// claude provider it overlays claudeHardeningEnv as DEFAULTS onto env — a value
+// already present in env for the same key is preserved, so explicit
+// user / wizard / config values win. For every other provider env is returned
+// unchanged. The input map is never mutated.
+func withClaudeHardeningEnv(provider string, env map[string]string) map[string]string {
+	if provider != "claude" {
+		return env
+	}
+	merged := make(map[string]string, len(env)+len(claudeHardeningEnv))
+	for k, v := range claudeHardeningEnv {
+		merged[k] = v
+	}
+	for k, v := range env { // explicit caller values override the hardening defaults
+		merged[k] = v
+	}
+	return merged
+}
+
 // CreateSessionWithOpts creates a tmux session with provider-specific
 // options including environment variables and provider-prefixed naming.
 func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
@@ -329,8 +365,9 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 
 	args := []string{"new-session", "-d", "-s", fullName, "-c", opts.WorkDir}
 
-	// Set environment variables via tmux -e flags.
-	for k, v := range opts.Env {
+	// Set environment variables via tmux -e flags. For the claude provider this
+	// also injects the claude hardening defaults (issue #3493).
+	for k, v := range withClaudeHardeningEnv(opts.Provider, opts.Env) {
 		// Expand ${VAR} references in values against the current environment.
 		expanded := os.Expand(v, os.Getenv)
 		args = append(args, "-e", fmt.Sprintf("%s=%s", k, expanded))
