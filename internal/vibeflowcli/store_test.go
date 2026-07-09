@@ -54,6 +54,38 @@ func TestStore_ListEmpty(t *testing.T) {
 	}
 }
 
+func TestStore_HasSessions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	s := NewStoreWithPath(path)
+
+	// Fresh root: no file yet → HasSessions is false, and the probe must NOT
+	// create sessions.json as a side effect (List rewrites on read; HasSessions
+	// must not, or an empty root would gain state and stop showing the wizard).
+	has, err := s.HasSessions()
+	if err != nil {
+		t.Fatalf("HasSessions on empty root: %v", err)
+	}
+	if has {
+		t.Fatal("expected HasSessions=false for a fresh root")
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("HasSessions must not create sessions.json; stat err=%v", statErr)
+	}
+
+	// After adding a session, HasSessions reports true.
+	if err := s.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_claude-a", Provider: "claude"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	has, err = s.HasSessions()
+	if err != nil {
+		t.Fatalf("HasSessions after Add: %v", err)
+	}
+	if !has {
+		t.Fatal("expected HasSessions=true after Add")
+	}
+}
+
 func TestStore_AddAndList(t *testing.T) {
 	s := testStore(t)
 
