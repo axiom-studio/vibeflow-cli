@@ -134,9 +134,6 @@ type Model struct {
 	confirmDelete    bool               // showing delete confirmation
 	confirmQuit      bool               // showing quit confirmation
 	confirmDetach    bool               // showing detach confirmation
-	confirmPurge     bool               // showing orphan-session purge confirmation
-	purgeCandidates  []SessionMeta      // stored sessions pending purge confirmation
-	purgeDeclined    map[string]bool    // TmuxSession names the user chose to keep (suppresses re-prompt)
 	workbenchActive  bool               // true while a pane-join workbench is composing/attached/restoring (pauses store prune)
 	serverWarning    string             // non-empty if server unreachable at startup
 	healthMonitor    *HealthMonitor     // session error detection and auto-recovery
@@ -216,7 +213,6 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 		groupMode:       cfg.ViewMode == "grouped",
 		repoRootCache:   make(map[string]string),
 		collapsedGroups: make(map[string]bool),
-		purgeDeclined:   make(map[string]bool),
 		hitmap:          &listHitmap{},
 	}
 }
@@ -250,12 +246,7 @@ type tickMsg time.Time
 // sessionsMsg carries refreshed session data.
 type sessionsMsg struct {
 	sessions []SessionRow
-	// pendingPurge lists stored sessions that are no longer live in tmux and
-	// would previously have been silently pruned. They are surfaced for user
-	// confirmation instead of being dropped, so a socket mismatch (empty live
-	// list) can never wipe sessions.json.
-	pendingPurge []SessionMeta
-	err          error
+	err      error
 }
 
 // errClearMsg clears the displayed error after a delay.
@@ -352,31 +343,22 @@ func (m Model) refreshSessions() tea.Msg {
 	m.tmux.BindAllSessionKeys()
 
 	// Cross-reference stored sessions against live tmux. Sessions that are no
-	// longer live are NOT pruned here — pruning silently wiped sessions.json
-	// whenever the queried socket had no server (e.g. after a --root/socket
-	// change). Instead they are surfaced as purge candidates for the user to
-	// confirm (see the confirmPurge flow). Already-declined entries are omitted
-	// so the user isn't re-prompted every refresh.
+	// longer live in tmux are NEVER pruned here — they are retained in
+	// sessions.json so they stay listed (and restartable) until the user
+	// explicitly removes one with 'd'. Silently pruning them would wipe the
+	// store whenever the queried socket had no server (e.g. after a
+	// --root/socket change, or with the tmux server down); any stale-entry
+	// cleanup is deferred to a later CLI restart.
 	tmuxNames := make([]string, len(tmuxSessions))
 	for i, ts := range tmuxSessions {
 		tmuxNames[i] = ts.Name
 	}
-	var pendingPurge []SessionMeta
-	// Skip prune/rediscover while a workbench is composing/attached: its
-	// sessions are transiently moved into the holder (absent from tmux), and
-	// treating them as orphans would drop non-reconstructable metadata.
-	if m.store != nil && !m.workbenchActive {
-		if orphans, err := m.store.Orphans(tmuxNames); err == nil {
-			for _, o := range orphans {
-				if !m.purgeDeclined[o.TmuxSession] {
-					pendingPurge = append(pendingPurge, o)
-				}
-			}
-		}
-	}
 
 	// Discover orphaned sessions (live in tmux but not in store) and
-	// reconstruct their metadata from tmux state.
+	// reconstruct their metadata from tmux state. Skipped while a workbench is
+	// composing/attached: its sessions are transiently moved into the holder
+	// (absent from tmux), and treating them as orphans would drop
+	// non-reconstructable metadata.
 	recoveredNames := make(map[string]bool)
 	if m.store != nil && !m.workbenchActive {
 		discovered := m.store.Discover(tmuxNames)
@@ -461,7 +443,7 @@ func (m Model) refreshSessions() tea.Msg {
 		}
 	}
 
-	return sessionsMsg{sessions: rows, pendingPurge: pendingPurge}
+	return sessionsMsg{sessions: rows}
 }
 
 func sessionStatus(attached, paneDead bool) string {
@@ -782,14 +764,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor > maxIdx && maxIdx >= 0 {
 			m.cursor = maxIdx
 		}
-		// Surface dead stored sessions for confirmation instead of purging them
-		// silently. Only prompt when idle (no other confirmation open, on the
-		// session list) so we never stack modals.
-		if len(msg.pendingPurge) > 0 && !m.confirmPurge && !m.confirmDelete &&
-			!m.confirmQuit && !m.confirmDetach && m.activeView == ViewSessions {
-			m.confirmPurge = true
-			m.purgeCandidates = msg.pendingPurge
-		}
 		return m, nil
 	case errClearMsg:
 		m.err = nil
@@ -969,28 +943,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			default:
 				m.confirmDetach = false
-			}
-			return m, nil
-		}
-		if m.confirmPurge {
-			switch msg.String() {
-			case "y":
-				m.confirmPurge = false
-				for _, c := range m.purgeCandidates {
-					if err := m.store.Remove(c.Name); err != nil {
-						m.logger.Error("purge session %s: %v", c.Name, err)
-					}
-				}
-				m.purgeCandidates = nil
-				return m, m.refreshSessions
-			default:
-				// Keep the sessions and remember the decision so the user is not
-				// re-prompted for the same entries on every refresh.
-				m.confirmPurge = false
-				for _, c := range m.purgeCandidates {
-					m.purgeDeclined[c.TmuxSession] = true
-				}
-				m.purgeCandidates = nil
 			}
 			return m, nil
 		}
@@ -1844,7 +1796,7 @@ func (m Model) attachSessionCmd(name string) tea.Cmd {
 // the selection and a left click resolves to the row under the pointer. Mouse
 // input is ignored outside the session list (sub-views, confirmation dialogs).
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.activeView != ViewSessions || m.confirmDelete || m.confirmQuit || m.confirmDetach || m.confirmPurge {
+	if m.activeView != ViewSessions || m.confirmDelete || m.confirmQuit || m.confirmDetach {
 		return m, nil
 	}
 	switch msg := msg.(type) {
@@ -1994,12 +1946,6 @@ func (m Model) viewContent() string {
 		helpBar = warnStyle.Render(fmt.Sprintf("%d session(s) still running (will continue in background). Quit? (y/n)", len(m.sessions)))
 	case m.confirmDetach:
 		helpBar = warnStyle.Render(fmt.Sprintf("Detach? %d session(s) will continue running in background. (y/n)", len(m.sessions)))
-	case m.confirmPurge:
-		socket := m.config.TmuxSocket
-		if socket == "" {
-			socket = "vibeflow"
-		}
-		helpBar = warnStyle.Render(fmt.Sprintf("%d session(s) not live on tmux socket '%s'. Remove from list? (y/n)", len(m.purgeCandidates), socket))
 	default:
 		enterHint := "attach"
 		if m.groupMode {
