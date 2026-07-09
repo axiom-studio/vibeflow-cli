@@ -80,6 +80,20 @@ func (s *Store) List() ([]SessionMeta, error) {
 	return sessions, nil
 }
 
+// HasSessions reports whether the store currently holds at least one session
+// entry. Unlike List, it does not rewrite the file on read (List goes through
+// withLock, which always writes the result back) — so probing an empty root
+// never creates sessions.json as a side effect. A missing file counts as no
+// sessions. Safe to call lockless at startup: the TUI holds the singleton PID
+// lock by this point.
+func (s *Store) HasSessions() (bool, error) {
+	sessions, err := s.readFile()
+	if err != nil {
+		return false, err
+	}
+	return len(sessions) > 0, nil
+}
+
 // Get returns the session metadata for the given name and whether it was found.
 func (s *Store) Get(name string) (SessionMeta, bool, error) {
 	sessions, err := s.List()

@@ -104,8 +104,22 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// First-run setup wizard if config file doesn't exist yet.
-	if !ConfigFileExists(cfgPath) {
+	// Resolve the tmux socket up front — it is independent of the setup wizard
+	// (which never sets TmuxSocket): explicit --tmux-socket flag > config
+	// tmux_socket > per-root derived. Creating the tmux manager and store here
+	// (rather than lower down) lets the wizard gate below see existing state.
+	cfg.TmuxSocket = ResolveTmuxSocket(flagTmuxSocket, cfg.TmuxSocket)
+	tmux := NewTmuxManager(cfg.TmuxSocket)
+	_ = tmux.EnsureServer() // Start tmux server on the vibeflow socket if not running.
+	store := NewStore()
+
+	// First-run setup wizard only when the root is genuinely uninitialized:
+	// no config.yaml AND no existing session state. The headless spawn/dispatch
+	// path never writes config.yaml, and a relocated/copied root likewise has a
+	// sessions.json (and/or live tmux sessions) but no config — showing the
+	// fresh-install wizard there would hide the user's running sessions behind a
+	// setup screen instead of attaching. See issue #3484.
+	if !ConfigFileExists(cfgPath) && !hasExistingSessionState(store, tmux) {
 		setup := NewSetupModel(cfg, cfgPath)
 		p := tea.NewProgram(setup)
 		result, err := p.Run()
@@ -127,14 +141,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if flagMCPToolName != "" {
 		cfg.MCPToolName = flagMCPToolName
 	}
-	// Resolve tmux socket: explicit flag > config tmux_socket > per-root derived.
-	cfg.TmuxSocket = ResolveTmuxSocket(flagTmuxSocket, cfg.TmuxSocket)
 
 	// Initialize components
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
-	tmux := NewTmuxManager(cfg.TmuxSocket)
-	_ = tmux.EnsureServer() // Start tmux server on the vibeflow socket if not running.
-	store := NewStore()
 	registry := NewProviderRegistry(cfg)
 
 	// Initialize worktree manager (best-effort — non-fatal if not in a git repo).
@@ -189,4 +198,25 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// hasExistingSessionState reports whether the current root already holds
+// vibeflow session state — either a sessions.json with at least one entry or a
+// live tmux session on the resolved socket. It gates the first-run setup wizard
+// so a root created by the headless spawn/dispatch path (which never writes
+// config.yaml) or a relocated/copied state dir attaches to its sessions instead
+// of being greeted by the fresh-install screen. Lookup errors are treated as
+// "no state" so a genuinely uninitialized root still reaches the wizard.
+func hasExistingSessionState(store *Store, tmux *TmuxManager) bool {
+	if store != nil {
+		if has, err := store.HasSessions(); err == nil && has {
+			return true
+		}
+	}
+	if tmux != nil {
+		if names, err := tmux.ListSessionNames(); err == nil && len(names) > 0 {
+			return true
+		}
+	}
+	return false
 }
