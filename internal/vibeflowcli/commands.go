@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -78,7 +79,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 func launchCmd() *cobra.Command {
 	var provider, branch, worktreeName, persona, personasRaw, project, sessionType, model, modelsRaw string
 	var openshellSandbox, openshellFrom, openshellPolicy, openshellProvidersRaw string
-	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders, cloudDispatch bool
+	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders, cloudDispatch, replace, reuse bool
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -150,6 +151,15 @@ func launchCmd() *cobra.Command {
 			}
 			if effectiveSessionType != "vanilla" && effectiveSessionType != "vibeflow" {
 				return fmt.Errorf("invalid session-type %q — must be 'vanilla' or 'vibeflow'", effectiveSessionType)
+			}
+			if replace && (effectiveSessionType != "vibeflow" || sessionPersona == "") {
+				return fmt.Errorf("--replace requires a vibeflow launch with --persona or --personas")
+			}
+			if reuse && (effectiveSessionType != "vibeflow" || sessionPersona == "") {
+				return fmt.Errorf("--reuse requires a vibeflow launch with --persona or --personas")
+			}
+			if replace && reuse {
+				return fmt.Errorf("--replace and --reuse are mutually exclusive")
 			}
 			if cloudDispatch {
 				if effectiveSessionType != "vibeflow" {
@@ -235,6 +245,13 @@ func launchCmd() *cobra.Command {
 			if err := validatePersonaModels(personaModels, personasToLaunch); err != nil {
 				return err
 			}
+			var reuseSessionIDs map[string]string
+			if replace || reuse {
+				reuseSessionIDs, err = preparePersonaSessions(tmux, store, NewSessionCache(), workDir, sessionProject, personasToLaunch, reuse)
+				if err != nil {
+					return err
+				}
+			}
 
 			// Ensure all agent-specific markdown docs exist in the working directory.
 			if effectiveSessionType == "vibeflow" {
@@ -252,6 +269,9 @@ func launchCmd() *cobra.Command {
 
 			for _, p := range personasToLaunch {
 				sessionName := sessionid.GenerateSessionID(workDir)
+				if reusedID := reuseSessionIDs[p]; reusedID != "" {
+					sessionName = reusedID
+				}
 				sessionModel := modelForPersona(model, personaModels, p)
 				sessionEnv := cloneStringMap(baseEnv)
 				if provider == "qwen" && sessionModel != "" {
@@ -383,7 +403,80 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&project, "project", "", "Project name (overrides config default)")
 	cmd.Flags().StringVar(&sessionType, "session-type", "", "Session type: vanilla or vibeflow (default: inferred from persona)")
 	cmd.Flags().BoolVar(&cloudDispatch, "cloud-dispatch", false, "Let vibeflow-cli wait for AxiomCloud work and inject dispatch handoffs into the session")
+	cmd.Flags().BoolVar(&replace, "replace", false, "Stop and replace existing sessions for the selected personas")
+	cmd.Flags().BoolVar(&reuse, "reuse", false, "Relaunch selected personas using their existing session IDs")
 	return cmd
+}
+
+func preparePersonaSessions(tmux *TmuxManager, store *Store, cache *SessionCache, workDir, project string, personas []string, reuse bool) (map[string]string, error) {
+	sessions, err := store.List()
+	if err != nil {
+		return nil, fmt.Errorf("list sessions to reconcile: %w", err)
+	}
+	selected := make(map[string]struct{}, len(personas))
+	for _, persona := range personas {
+		selected[persona] = struct{}{}
+	}
+	keep := make(map[string]SessionMeta, len(personas))
+	if reuse {
+		for _, meta := range sessions {
+			if !matchesPersonaReplacement(meta, workDir, project, selected) {
+				continue
+			}
+			current, ok := keep[meta.Persona]
+			if !ok || meta.CreatedAt.After(current.CreatedAt) {
+				keep[meta.Persona] = meta
+			}
+		}
+	}
+	reusedIDs := make(map[string]string, len(keep))
+	for _, meta := range sessions {
+		if !matchesPersonaReplacement(meta, workDir, project, selected) {
+			continue
+		}
+		if tmux.HasSession(meta.TmuxSession) {
+			if err := tmux.KillSession(meta.TmuxSession); err != nil {
+				return nil, fmt.Errorf("stop existing session %q for persona %q: %w", meta.Name, meta.Persona, err)
+			}
+		}
+		retained := reuse && keep[meta.Persona].Name == meta.Name
+		if retained {
+			reusedIDs[meta.Persona] = meta.VibeFlowSessionID
+			if reusedIDs[meta.Persona] == "" {
+				reusedIDs[meta.Persona] = meta.Name
+			}
+			continue
+		}
+		if err := store.Remove(meta.Name); err != nil {
+			return nil, fmt.Errorf("remove existing session %q: %w", meta.Name, err)
+		}
+		if err := cache.Remove(meta.Name); err != nil {
+			return nil, fmt.Errorf("remove existing session %q from restart cache: %w", meta.Name, err)
+		}
+	}
+	for persona := range selected {
+		RemoveSessionFile(workDir, persona)
+	}
+	return reusedIDs, nil
+}
+
+func matchesPersonaReplacement(meta SessionMeta, workDir, project string, personas map[string]struct{}) bool {
+	if meta.SessionType != "vibeflow" || meta.Project != project {
+		return false
+	}
+	if _, ok := personas[meta.Persona]; !ok {
+		return false
+	}
+	return sameWorkingDirectory(meta.WorkingDir, workDir)
+}
+
+func sameWorkingDirectory(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		return filepath.Clean(absA) == filepath.Clean(absB)
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 func mapCloudDispatchMode(enabled bool) string {
