@@ -296,6 +296,16 @@ func launchCmd() *cobra.Command {
 					return err
 				}
 
+				// Publish the new session ID before starting the provider. Reconcile
+				// flows may relaunch in a directory whose persona file still points at
+				// the session that just exited; writing after CreateSessionWithOpts
+				// lets the new agent race ahead and resume that stale API session.
+				if prov.SessionFile != "" {
+					if err := WriteSessionFileIfNeeded(workDir, p, sessionName); err != nil {
+						return fmt.Errorf("write session file for persona %q: %w", p, err)
+					}
+				}
+
 				if err := tmux.CreateSessionWithOpts(SessionOpts{
 					Name:     sessionName,
 					Provider: provider,
@@ -313,10 +323,6 @@ func launchCmd() *cobra.Command {
 
 				// Bind Ctrl+Q to open vibeflow TUI popup inside the session.
 				_ = tmux.BindSessionKeys(tmuxName)
-
-				if prov.SessionFile != "" {
-					_ = WriteSessionFileIfNeeded(workDir, p, sessionName)
-				}
 
 				sessionMeta := SessionMeta{
 					Name:              sessionName,

@@ -123,6 +123,22 @@ func TestWriteSessionFileIfNeeded_Idempotent(t *testing.T) {
 	}
 }
 
+func TestWriteSessionFileIfNeeded_ReplacesStaleSession(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteSessionFile(dir, "developer", "session-old"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteSessionFileIfNeeded(dir, "developer", "session-new"); err != nil {
+		t.Fatal(err)
+	}
+
+	sid, _, _ := readSessionFileID(dir, "developer")
+	if sid != "session-new" {
+		t.Fatalf("session file ID = %q, want session-new", sid)
+	}
+}
+
 func TestRemoveSessionFile_WithPersona(t *testing.T) {
 	dir := t.TempDir()
 
