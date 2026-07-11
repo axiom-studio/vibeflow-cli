@@ -17,7 +17,9 @@
 package vibeflowcli
 
 import (
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestRestartCmd_SkipPermissionsFlag verifies that `vibeflow restart`
@@ -116,6 +118,71 @@ func TestValidatePersonaModels(t *testing.T) {
 
 	if err := validatePersonaModels(models, []string{""}); err == nil {
 		t.Fatal("expected --models without personas to fail")
+	}
+}
+
+func TestMatchesPersonaReplacement(t *testing.T) {
+	workDir := t.TempDir()
+	selected := map[string]struct{}{"developer": {}, "architect": {}}
+	base := SessionMeta{
+		SessionType: "vibeflow",
+		Project:     "nimbus",
+		Persona:     "developer",
+		WorkingDir:  workDir,
+	}
+
+	if !matchesPersonaReplacement(base, filepath.Join(workDir, "."), "nimbus", selected) {
+		t.Fatal("expected matching persona session to be reconciled")
+	}
+
+	tests := []struct {
+		name string
+		edit func(*SessionMeta)
+	}{
+		{"different project", func(m *SessionMeta) { m.Project = "other" }},
+		{"unselected persona", func(m *SessionMeta) { m.Persona = "qa_lead" }},
+		{"different directory", func(m *SessionMeta) { m.WorkingDir = t.TempDir() }},
+		{"vanilla session", func(m *SessionMeta) { m.SessionType = "vanilla" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := base
+			tc.edit(&meta)
+			if matchesPersonaReplacement(meta, workDir, "nimbus", selected) {
+				t.Fatal("session outside reconciliation scope matched")
+			}
+		})
+	}
+}
+
+func TestPreparePersonaSessionsReuseKeepsNewestAndRemovesDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStoreWithPath(filepath.Join(dir, "sessions.json"))
+	cache := NewSessionCacheWithPath(filepath.Join(dir, "cache.json"))
+	tmux := NewTmuxManager("reuse-test-" + filepath.Base(dir))
+	old := SessionMeta{Name: "session-old", VibeFlowSessionID: "session-old", TmuxSession: "missing-old", SessionType: "vibeflow", Project: "nimbus", Persona: "developer", WorkingDir: dir, CreatedAt: time.Unix(1, 0)}
+	newest := SessionMeta{Name: "session-newest", VibeFlowSessionID: "session-newest", TmuxSession: "missing-newest", SessionType: "vibeflow", Project: "nimbus", Persona: "developer", WorkingDir: dir, CreatedAt: time.Unix(2, 0)}
+	for _, meta := range []SessionMeta{old, newest} {
+		if err := store.Add(meta); err != nil {
+			t.Fatal(err)
+		}
+		if err := cache.Add(meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ids, err := preparePersonaSessions(tmux, store, cache, dir, "nimbus", []string{"developer"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids["developer"] != "session-newest" {
+		t.Fatalf("reused ID = %q, want session-newest", ids["developer"])
+	}
+	if _, ok, err := store.Get(old.Name); err != nil || ok {
+		t.Fatalf("duplicate session still stored: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := store.Get(newest.Name); err != nil || !ok {
+		t.Fatalf("newest session was not retained: ok=%v err=%v", ok, err)
 	}
 }
 
