@@ -32,9 +32,10 @@ const sessionPrefix = "vibeflow_"
 
 // TmuxManager handles tmux session lifecycle.
 type TmuxManager struct {
-	socketName    string
-	supportsPopup bool // true if tmux >= 3.2 (display-popup support)
-	logger        *Logger
+	socketName         string
+	supportsPopup      bool // true if tmux >= 3.2 (display-popup support)
+	safeMousePaneFocus bool // true if tmux >= 3.4 (exiting-pane focus crash fixed)
+	logger             *Logger
 }
 
 // SetLogger attaches a logger to the TmuxManager for debug output.
@@ -48,24 +49,30 @@ func NewTmuxManager(socketName string) *TmuxManager {
 		socketName = "vibeflow"
 	}
 	tm := &TmuxManager{socketName: socketName}
-	tm.supportsPopup = tm.detectPopupSupport()
+	major, minor, ok := detectTmuxVersion()
+	tm.supportsPopup = ok && (major > 3 || (major == 3 && minor >= 2))
+	tm.safeMousePaneFocus = ok && (major > 3 || (major == 3 && minor >= 4))
 	return tm
 }
 
-// detectPopupSupport checks if the installed tmux version supports
-// display-popup (available since tmux 3.2).
-func (tm *TmuxManager) detectPopupSupport() bool {
+// detectTmuxVersion returns the installed tmux major and minor version.
+func detectTmuxVersion() (int, int, bool) {
 	out, err := exec.Command("tmux", "-V").CombinedOutput()
 	if err != nil {
-		return false
+		return 0, 0, false
 	}
+	return parseTmuxVersion(string(out))
+}
+
+// parseTmuxVersion parses output such as "tmux 3.4" or "tmux next-3.5".
+func parseTmuxVersion(output string) (int, int, bool) {
 	// Output format: "tmux 3.4" or "tmux next-3.5"
-	version := strings.TrimSpace(string(out))
+	version := strings.TrimSpace(output)
 	version = strings.TrimPrefix(version, "tmux ")
 	version = strings.TrimPrefix(version, "next-")
 	parts := strings.SplitN(version, ".", 2)
 	if len(parts) < 2 {
-		return false
+		return 0, 0, false
 	}
 	major, err1 := strconv.Atoi(parts[0])
 	// Minor may contain suffixes like "2a", so just parse the leading digits.
@@ -79,9 +86,9 @@ func (tm *TmuxManager) detectPopupSupport() bool {
 	}
 	minor, err2 := strconv.Atoi(minorStr)
 	if err1 != nil || err2 != nil {
-		return false
+		return 0, 0, false
 	}
-	return major > 3 || (major == 3 && minor >= 2)
+	return major, minor, true
 }
 
 // TmuxSession represents a running tmux session.
@@ -843,8 +850,17 @@ func (tm *TmuxManager) bindWorkbenchNavKeys() {
 	// `select-pane -t= ; send -M`. Single-pane windows keep the pass-through
 	// (`send-keys -M`) so a directly-attached agent still receives the mouse.
 	// Drag-to-copy (MouseDrag1Pane) is a separate binding and is unaffected.
+	mouseFocusGuard := "#{>:#{window_panes},1}"
+	if !tm.safeMousePaneFocus {
+		// tmux 3.2 and 3.3 can crash their server when focus moves to an
+		// exiting pane (fixed upstream in 3.4). VibeFlow supports tmux 3.2+,
+		// so target the mouse pane while evaluating pane_dead and only focus a
+		// live pane. The false branch preserves normal single-pane mouse input
+		// and safely drops through tmux's send-keys handling for dead panes.
+		mouseFocusGuard = "#{&&:#{>:#{window_panes},1},#{==:#{pane_dead},0}}"
+	}
 	_, _ = tm.run("bind-key", "-T", "root", "MouseDown1Pane",
-		"if-shell", "-F", "#{>:#{window_panes},1}",
+		"if-shell", "-F", "-t", "=", mouseFocusGuard,
 		"select-pane -t=", "send-keys -M")
 }
 
