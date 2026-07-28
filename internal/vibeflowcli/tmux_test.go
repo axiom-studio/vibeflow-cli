@@ -260,6 +260,34 @@ func TestAtoi(t *testing.T) {
 	}
 }
 
+func TestParseTmuxVersion(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		wantMajor  int
+		wantMinor  int
+		wantParsed bool
+	}{
+		{name: "minimum supported", output: "tmux 3.2", wantMajor: 3, wantMinor: 2, wantParsed: true},
+		{name: "patch suffix", output: "tmux 3.3a", wantMajor: 3, wantMinor: 3, wantParsed: true},
+		{name: "fixed release", output: "tmux 3.4", wantMajor: 3, wantMinor: 4, wantParsed: true},
+		{name: "next release", output: "tmux next-3.5", wantMajor: 3, wantMinor: 5, wantParsed: true},
+		{name: "multi digit minor", output: "tmux 3.14", wantMajor: 3, wantMinor: 14, wantParsed: true},
+		{name: "missing minor", output: "tmux 3", wantParsed: false},
+		{name: "invalid", output: "not tmux", wantParsed: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			major, minor, parsed := parseTmuxVersion(tc.output)
+			if major != tc.wantMajor || minor != tc.wantMinor || parsed != tc.wantParsed {
+				t.Fatalf("parseTmuxVersion(%q) = (%d, %d, %t), want (%d, %d, %t)",
+					tc.output, major, minor, parsed, tc.wantMajor, tc.wantMinor, tc.wantParsed)
+			}
+		})
+	}
+}
+
 func TestLaunchTemplateVars_Fields(t *testing.T) {
 	vars := LaunchTemplateVars{
 		WorkDir:         "/work",
@@ -626,6 +654,7 @@ func TestBindWorkbenchNavKeys(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := NewTmuxManager("vftest-wbnavkeys")
+	tm.safeMousePaneFocus = true
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
 	if err := tm.EnsureServer(); err != nil {
@@ -676,6 +705,50 @@ func TestBindWorkbenchNavKeys(t *testing.T) {
 	}
 	if !strings.Contains(mouseLine, "send-keys -M") {
 		t.Errorf("MouseDown1Pane single-pane branch must pass the mouse through: %q", mouseLine)
+	}
+	if strings.Contains(mouseLine, "pane_dead") {
+		t.Errorf("tmux >=3.4 binding must not carry the legacy pane_dead guard: %q", mouseLine)
+	}
+}
+
+// TestBindWorkbenchNavKeys_OldTmuxGuardsExitingPane protects tmux 3.2/3.3,
+// whose server can crash when a mouse click focuses a pane while it is exiting.
+func TestBindWorkbenchNavKeys_OldTmuxGuardsExitingPane(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-wbnavkeys-old")
+	tm.safeMousePaneFocus = false
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	if _, err := tm.run("new-session", "-d", "-s", "navkeys-holder"); err != nil {
+		t.Skipf("cannot create tmux session: %v", err)
+	}
+
+	tm.bindWorkbenchNavKeys()
+
+	out, err := tm.run("list-keys", "-T", "root")
+	if err != nil {
+		t.Fatalf("list-keys: %v", err)
+	}
+	var mouseLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "MouseDown1Pane") {
+			mouseLine = line
+			break
+		}
+	}
+	if mouseLine == "" {
+		t.Fatalf("root key table missing MouseDown1Pane binding:\n%s", out)
+	}
+	if !strings.Contains(mouseLine, "pane_dead") {
+		t.Errorf("tmux 3.2/3.3 binding must guard against focusing an exiting pane: %q", mouseLine)
+	}
+	if !strings.Contains(mouseLine, "-t =") {
+		t.Errorf("pane_dead guard must evaluate against the pane under the mouse: %q", mouseLine)
 	}
 }
 
