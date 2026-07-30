@@ -75,6 +75,7 @@ func bootstrapAgents() []bootstrapAgent {
 		{key: "cursor", label: "Cursor", path: cursorConfigPath, entry: jsonHTTPEntry("streamable-http", true)},
 		{key: "claude-cli", label: "Claude CLI", path: claudeCLIConfigPath, entry: jsonHTTPEntry("http", false)},
 		{key: "claude-desktop", label: "Claude Desktop", path: claudeDesktopConfigPath, entry: claudeDesktopEntry},
+		{key: "kiro", label: "Kiro CLI", path: kiroConfigPath, entry: jsonHTTPEntry("http", true)},
 	}
 }
 
@@ -89,6 +90,7 @@ var agentAliases = map[string]string{
 	"claudedesktop":  "claude-desktop",
 	"claude_desktop": "claude-desktop",
 	"desktop":        "claude-desktop",
+	"kiro-cli":       "kiro",
 }
 
 func normalizeAgentKey(key string) string {
@@ -160,6 +162,21 @@ func geminiConfigPath() (string, error) {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
 	return filepath.Join(home, ".gemini", "settings.json"), nil
+}
+
+// kiroConfigPath returns Kiro CLI's user-level MCP config path
+// (~/.kiro/settings/mcp.json), matching claudeCLIConfigPath's scope. Kiro
+// also supports a workspace-level `<project-root>/.kiro/settings/mcp.json`
+// per kiro.dev/docs/cli/mcp/, but vibeflow bootstrap writes user-level
+// config for every other CLI agent (claude-cli, cursor, gemini) so a single
+// bootstrap run covers all of the user's projects — workspace-level is left
+// as a follow-up if per-project Kiro config is ever needed.
+func kiroConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".kiro", "settings", "mcp.json"), nil
 }
 
 func cursorConfigPath() (string, error) {
