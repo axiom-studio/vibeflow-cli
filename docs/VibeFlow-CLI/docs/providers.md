@@ -11,22 +11,56 @@ A **provider** is a configured AI agent CLI: display name, binary name, launch t
 | `gemini` | Google Gemini CLI | `gemini` | `--yolo` |
 | `cursor` | Cursor Agent | `agent` | `--yolo --approve-mcps` |
 | `qwen` | Qwen Code | `qwen` | `--yolo` |
+| `kiro` | Kiro CLI | `kiro-cli` | `--trust-all-tools` |
 
 The **Cursor** provider uses the official Cursor CLI binary name **`agent`**, not `cursor`. Install the CLI from Cursor’s documentation if `agent` is not on your `PATH`.
 
 **Qwen Code** is Alibaba's open-source coding agent, based on Google Gemini CLI with parser-level adaptations for Qwen-Coder models. Install with `npm install -g @qwen-code/qwen-code@latest`. The `--yolo` flag selects Qwen's `yolo` approval mode (full autonomous); the other modes (`default`, `plan`, `auto_edit`) are not exposed via the wizard in v1 — edit `~/.qwen/settings.json` or define a custom launch template if you need a middle-ground mode.
 
+**Kiro CLI** ([kiro.dev/docs/cli](https://kiro.dev/docs/cli/)) is AWS's terminal agent, a companion CLI to the Kiro VS Code-based IDE. The `--trust-all-tools` flag pre-authorizes all tool calls — required for autonomous sessions since Kiro's non-interactive mode has no human to approve tool use. There is no documented `--model` flag for `kiro-cli chat`, so vibeflow-cli does not expose model selection for Kiro (unlike Claude/Codex/Cursor). See [Kiro CLI caveats](#kiro-cli-caveats) below for open questions and feature gaps versus other providers.
+
 ## VibeFlow-integrated providers
 
-**Claude** and **Cursor** are marked VibeFlow-integrated in the default config (session file templates align with autonomous flows). **Codex**, **Gemini**, and **Qwen** remain available with their own launch templates; gateway and env behavior may differ by product.
+**Claude** and **Cursor** are marked VibeFlow-integrated in the default config (session file templates align with autonomous flows). **Codex**, **Gemini**, **Qwen**, and **Kiro** remain available with their own launch templates; gateway and env behavior may differ by product.
 
 ## Prompt passing
 
 VibeFlow init prompts are passed in the argument shape each CLI expects so the agent process stays running for the autonomous polling loop. The wizard and launch path pick this automatically:
 
-- **Claude / Codex / Cursor** — positional argument (`claude '<prompt>'`). These CLIs treat a positional prompt as the initial input and stay interactive.
+- **Claude / Codex / Cursor / Kiro** — positional argument (`claude '<prompt>'`). These CLIs treat a positional prompt as the initial input and stay interactive. Kiro's shape is verified — see [Kiro CLI caveats](#kiro-cli-caveats).
 - **Gemini** — `-p '<prompt>'` (non-interactive headless mode).
 - **Qwen** — `-i '<prompt>'` (`--prompt-interactive`: execute the prompt and continue in interactive mode). Qwen's positional argument is **one-shot mode** (process the prompt, then exit) — wrong for vibeflow autonomous sessions, which need the agent to remain running.
+
+## Kiro CLI caveats
+
+Kiro CLI was originally added without access to a real `kiro-cli` binary to test against, so several things were flagged rather than guessed. The interactive-mode assumption below has since been verified against a real binary; the rest remain open:
+
+- **Interactive-mode assumption — verified.** vibeflow-cli assumes `kiro-cli chat '<prompt>'` (no extra flags) behaves like Claude/Codex/Cursor: takes the prompt as initial input and stays running. Confirmed against `kiro-cli` v2.15.2: a scripted session sent the initial prompt, received an answer, then sent a second distinct follow-up prompt in the same process and received a second answer — the CLI returns to its interactive composer after each turn rather than exiting. Also cross-checked against live vibeflow-launched Kiro sessions using this exact launch shape. `--no-interactive` remains a separate, confirmed **one-shot** mode (process the prompt, print a result, exit) — incompatible with vibeflow's persistent tmux session model, so it is deliberately **not** used in Kiro's launch template or prompt-passing shape.
+- **No model-selection flag.** No `--model` (or similar) flag is documented for `kiro-cli chat`, so vibeflow-cli's wizard does not offer a Kiro model picker, unlike Claude/Codex/Cursor.
+- **No LLM Gateway routing.** Kiro authenticates via its own `KIRO_API_KEY` env var (Pro-tier+ only, per its docs) with no documented OpenAI-compatible or custom-endpoint mechanism vibeflow's LLM Gateway could target — Kiro is intentionally left out of `BuildLLMGatewayEnv`/`ClearLLMGatewayEnv`.
+- **MCP config scope.** `vibeflow bootstrap` writes to Kiro's **user-level** `~/.kiro/settings/mcp.json`. Kiro also supports a **workspace-level** `.kiro/settings/mcp.json` per project (`kiro-cli mcp add --scope workspace`), which vibeflow-cli does not write — not implemented in this pass.
+- **Unattended-launch gotcha: `--trust-all-tools` shows a one-time interactive confirmation banner.** The first time `--trust-all-tools` is used, Kiro prints a warning ("Kiro is running in trust all tools mode...") and blocks on an interactive menu (`No, exit` / `Yes, I accept` / `Yes, and don't ask again`) before proceeding. This is Kiro's own safety gate, independent of vibeflow. Because vibeflow-cli launches Kiro inside tmux with no TTY interaction, a VibeFlow-mode Kiro session on a machine that has never answered this prompt will **hang indefinitely** — no timeout, no error, just stuck on an unanswerable menu. Workaround (verified): Kiro persists the "don't ask again" choice as its own setting, which can be set ahead of time —
+  ```
+  kiro-cli settings chat.disableTrustAllConfirmation true
+  ```
+  `vibeflow bootstrap --agent kiro` does **not** set this automatically today; it is currently a manual one-time prerequisite per machine, not something vibeflow-cli's bootstrap wires up.
+- **Not currently used by vibeflow-cli** (informational, no behavior implied): `KIRO_HOME` (env var overriding `~/.kiro` — could matter for future per-session/per-persona state isolation, similar to the Rooms feature's per-participant `CLAUDE_CONFIG_DIR` pattern) and `--effort <low|medium|high|xhigh|max>` (a `kiro-cli chat` reasoning-effort flag, not wired into Kiro's `LaunchTemplate`).
+
+### What Kiro CLI can't do that Claude Code / Codex CLI can
+
+These are gaps in Kiro CLI itself (not vibeflow-cli integration gaps), based on kiro.dev's docs:
+
+- **No *documented* persistent interactive session seeded by a positional prompt** — Claude Code, Codex CLI, and Cursor Agent all document this shape explicitly; Kiro's own docs only document one-shot `--no-interactive`. vibeflow-cli has since verified `kiro-cli chat '<prompt>'` behaves this way in practice (see [Kiro CLI caveats](#kiro-cli-caveats)), so this is a documentation gap in Kiro's own docs, not an open question for vibeflow-cli's integration.
+- **No mid-session prompt injection in `--no-interactive` mode.** That one-shot mode takes one prompt upfront and cannot receive further input during the run — Claude Code and Codex CLI both support ongoing interactive input when run without a one-shot flag. (Not relevant to vibeflow-cli's launch shape, since `--no-interactive` is deliberately never used — see above.)
+- **No scoped/tag-based tool trust in v1 vibeflow wiring.** Kiro documents a `--trust-tools=<categories>` flag for granular pre-authorization (e.g. `read`, `grep`); vibeflow-cli's `SkipPermissions` toggle only maps to the blanket `--trust-all-tools`, same coarseness as Claude's `--dangerously-skip-permissions` and Codex's `--yolo` — not a Kiro-specific gap, but worth knowing the finer-grained flag exists if you hand-edit a custom launch template.
+- **No MCP server hosting.** Kiro CLI is MCP **client-only** (connects out to MCP servers, including vibeflow's). Neither Claude Code nor Codex CLI expose themselves as MCP servers either, so this is not a relative gap — noted only because Kiro's own IDE product does more (see below).
+
+### What's IDE-only (Kiro's VS Code product) vs CLI
+
+Kiro's primary product is a VS Code-based IDE; the CLI is a companion, and some capabilities described in Kiro's docs appear to be authored through the IDE's GUI rather than the CLI:
+
+- **Specs** (`requirements.md` / `design.md` / `tasks.md` structured planning artifacts) are documented as created via a `+` button in the IDE's Kiro pane. Kiro's docs describe specs as available in both IDE and CLI conceptually, but do not document a CLI-driven spec creation/review workflow — none of this matters for vibeflow-cli's integration (vibeflow only launches the CLI process), but it means Kiro users accustomed to spec-driven planning in the IDE won't get that workflow through a vibeflow-launched Kiro session.
+- **Visual multi-file diff review, autonomy-mode toggles, and chat history UI** are IDE-native concepts in Kiro's docs with no CLI equivalent described — a vibeflow-launched Kiro CLI session is a plain terminal chat, same tradeoff as every other provider here (none of Claude Code, Codex CLI, Cursor, Gemini CLI, or Qwen Code expose a GUI through vibeflow's tmux launch either, so this is not Kiro-specific, just worth naming since Kiro is unusual in having a full IDE sibling product).
 
 ## LLM Gateway
 

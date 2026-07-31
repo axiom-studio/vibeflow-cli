@@ -124,6 +124,11 @@ func TestAppendVibeflowInitPrompt(t *testing.T) {
 			want:        `qwen --dangerously-skip-permissions -i 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,
 		},
 		{
+			name:        "kiro — positional argument (verified interactive, see doc comment)",
+			providerKey: "kiro",
+			want:        `kiro --dangerously-skip-permissions 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,
+		},
+		{
 			name:        "unknown provider — defaults to positional",
 			providerKey: "rogue-provider",
 			want:        `rogue-provider --dangerously-skip-permissions 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,

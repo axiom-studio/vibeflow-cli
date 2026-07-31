@@ -481,6 +481,23 @@ func TestListLen_StepProviderSoloMode(t *testing.T) {
 	}
 }
 
+func TestProviderKeys_IncludesEveryRegistryKey(t *testing.T) {
+	cfg := DefaultConfig()
+	reg := NewProviderRegistry(cfg)
+
+	got := providerKeys(reg)
+	want := reg.Keys()
+
+	if len(got) != len(want) {
+		t.Fatalf("providerKeys() returned %d keys, registry has %d: got=%v want=%v", len(got), len(want), got, want)
+	}
+	for i, key := range want {
+		if got[i] != key {
+			t.Errorf("providerKeys()[%d] = %q, want %q (got=%v want=%v)", i, got[i], key, got, want)
+		}
+	}
+}
+
 func TestNextAvailableProviderIdx_SkipsUninstalled(t *testing.T) {
 	wm := teamModeFixture(t)
 	cursorIdx := providerIdxByKey(t, wm, "cursor")
