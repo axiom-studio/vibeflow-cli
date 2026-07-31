@@ -24,7 +24,7 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | **Google Gemini CLI** | `gemini` | `--yolo` | `-p` flag |
 | **Cursor Agent** | `agent` | `--yolo --approve-mcps` | Positional argument |
 | **Qwen Code** | `qwen` | `--yolo` | `-i` flag (interactive after prompt) |
-| **Kiro CLI** | `kiro-cli` | `--trust-all-tools` | Positional argument (unverified — see [Providers — Kiro CLI caveats](docs/VibeFlow-CLI/docs/providers.md#kiro-cli-caveats)) |
+| **Kiro CLI** | `kiro-cli` | `--trust-all-tools` | Positional argument (verified — see [Providers — Kiro CLI caveats](docs/VibeFlow-CLI/docs/providers.md#kiro-cli-caveats)) |
 
 All six agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
 
