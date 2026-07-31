@@ -261,6 +261,24 @@ func DefaultConfig() *Config {
 				SessionFile:        "",
 				Default:            false,
 			},
+			"kiro": {
+				Name:   "Kiro CLI",
+				Binary: "kiro-cli",
+				// Kiro CLI: https://kiro.dev/docs/cli/ — binary is `kiro-cli`, chat
+				// subcommand is `chat`. --trust-all-tools is Kiro's blanket tool
+				// pre-authorization flag (headless/non-interactive mode has no
+				// human available to approve individual tool calls, matching
+				// --dangerously-skip-permissions/--yolo elsewhere in this map).
+				// No documented model-select flag was found for `kiro-cli chat`,
+				// so unlike claude/codex/cursor no `--model` clause is included
+				// here — add one if Kiro ships that flag later.
+				LaunchTemplate:     "{{.Binary}} chat{{ if .SkipPermissions }} --trust-all-tools{{ end }}",
+				PromptTemplate:     "",
+				Env:                map[string]string{},
+				VibeFlowIntegrated: false,
+				SessionFile:        "",
+				Default:            false,
+			},
 		},
 	}
 }

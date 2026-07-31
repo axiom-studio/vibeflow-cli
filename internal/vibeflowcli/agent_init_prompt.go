@@ -70,6 +70,19 @@ func BuildVibeflowCloudDispatchInitPrompt(mcpName, projectName, persona, session
 //     exits, which is wrong for autonomous sessions. The `-i` /
 //     `--prompt-interactive` flag is the documented way to seed an
 //     interactive run with an initial prompt.
+//   - kiro → falls through to default (positional argument). VERIFIED
+//     against the real `kiro-cli` binary (v2.15.2): `kiro-cli chat
+//     'prompt'` (no extra flags) processes the prompt, then returns to its
+//     interactive composer awaiting further input — the same shape as
+//     claude/codex/cursor. Confirmed via a scripted multi-turn session
+//     (first prompt answered, second distinct follow-up prompt answered in
+//     the same process) and cross-checked against live vibeflow-launched
+//     Kiro sessions using this exact command shape. `kiro-cli`'s documented
+//     `--no-interactive` flag is a separate ONE-SHOT mode (process prompt,
+//     print result, exit) — it is intentionally NOT added to the
+//     LaunchTemplate or to this switch, since a one-shot process can't back
+//     vibeflow's persistent tmux session that stays alive polling
+//     wait_for_work.
 func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	escaped := strings.ReplaceAll(prompt, "'", `'\''`)
 	switch providerKey {

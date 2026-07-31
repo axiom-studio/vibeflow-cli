@@ -2665,32 +2665,7 @@ func isGitRepo(dir string) bool {
 
 // providerKeys returns sorted provider keys from the registry.
 func providerKeys(r *ProviderRegistry) []string {
-	list := r.List()
-	keys := make([]string, 0, len(list))
-	// List() returns sorted by name; we need keys.
-	// Re-derive by matching names — or just iterate the map via a method.
-	// Since ProviderRegistry doesn't expose keys directly, we check known keys.
-	// Better approach: iterate all and collect.
-	seen := make(map[string]bool)
-	for _, p := range list {
-		for _, candidate := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
-			if got, ok := r.Get(candidate); ok && got.Name == p.Name && !seen[candidate] {
-				keys = append(keys, candidate)
-				seen[candidate] = true
-				break
-			}
-		}
-		// Fallback for custom providers — use name as key.
-		if !seen[p.Name] {
-			// Try lowercase name.
-			lower := strings.ToLower(p.Name)
-			if _, ok := r.Get(lower); ok && !seen[lower] {
-				keys = append(keys, lower)
-				seen[lower] = true
-			}
-		}
-	}
-	return keys
+	return r.Keys()
 }
 
 // listGitBranches returns local and unique remote branch names via git CLI.

@@ -572,7 +572,7 @@ func TestParseAgentSelection(t *testing.T) {
 
 func TestBootstrapAgents_OrderAndKeys(t *testing.T) {
 	got := agentKeys(bootstrapAgents())
-	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop"}
+	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("agent order = %v, want %v", got, want)
 	}
@@ -630,6 +630,7 @@ func TestBootstrapAndUninstall_EndToEnd(t *testing.T) {
 		"gemini":         geminiConfigPath,
 		"cursor":         cursorConfigPath,
 		"claude-desktop": claudeDesktopConfigPath,
+		"kiro":           kiroConfigPath,
 	}
 	for name, resolve := range jsonAgents {
 		p, _ := resolve()
