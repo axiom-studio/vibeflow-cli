@@ -58,6 +58,19 @@ All six agents support both **Vanilla** (standalone) and **VibeFlow** (server-co
 
 ## Installation
 
+### Quick setup (recommended)
+
+One command downloads vibeflow-cli, installs tmux, and configures the VibeFlow
+MCP server for all your agents:
+
+```bash
+npx @axiom-studio/vibeflow-setup --api-key <API_KEY>
+```
+
+See [`npx/`](npx/README.md) for details and options.
+
+### Manual
+
 ```bash
 go install vibeflow-cli/cmd/vibeflow@latest
 ```
