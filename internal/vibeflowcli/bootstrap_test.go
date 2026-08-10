@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -390,6 +391,73 @@ func TestClaudeDesktopEntry_RawTokenNeverInArgv(t *testing.T) {
 	}
 }
 
+// TestClaudeDesktopEntry_CommandIsAbsoluteOrBareNpx guards issue #4336: a GUI
+// app gets the launchd PATH, not the shell's, so a bare "npx" often cannot be
+// spawned. The entry must carry either an absolute path or exactly "npx" (the
+// documented fallback) — never something half-resolved.
+func TestClaudeDesktopEntry_CommandIsAbsoluteOrBareNpx(t *testing.T) {
+	cmd, _ := claudeDesktopEntry("https://u", "k")["command"].(string)
+	if cmd != "npx" && !filepath.IsAbs(cmd) {
+		t.Errorf("command = %q, want an absolute path or exactly \"npx\"", cmd)
+	}
+	if cmd == "npx" {
+		if p, err := exec.LookPath("npx"); err == nil {
+			t.Errorf("npx resolved to %q but the entry kept the bare name", p)
+		}
+	}
+}
+
+// TestSetupInitialConfig_IdenticalRerunIsUnchanged guards issue #4342: an
+// identical re-run used to report "updated" and write another 0600 backup of the
+// API token, unlike the agent-config writers which correctly report "unchanged".
+func TestSetupInitialConfig_IdenticalRerunIsUnchanged(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("VIBEFLOW_ROOT", root)
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	action, _, err := setupInitialConfig(cfgPath, "https://cloud.example", "sk-same", "vibeflow")
+	if err != nil || action != "created" {
+		t.Fatalf("first run: action=%q err=%v, want created", action, err)
+	}
+
+	action, backup, err := setupInitialConfig(cfgPath, "https://cloud.example", "sk-same", "vibeflow")
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if action != "unchanged" {
+		t.Errorf("identical re-run action = %q, want unchanged", action)
+	}
+	if backup != "" {
+		t.Errorf("identical re-run wrote a backup at %q; it should write none", backup)
+	}
+	// No backup file should exist at all — each one is another at-rest copy of
+	// the token.
+	if entries, err := os.ReadDir(filepath.Join(root, ".backup")); err == nil && len(entries) > 0 {
+		t.Errorf(".backup gained %d entries on a no-op re-run", len(entries))
+	}
+
+	// A real change must still be detected and still back up.
+	action, backup, err = setupInitialConfig(cfgPath, "https://cloud.example", "sk-DIFFERENT", "vibeflow")
+	if err != nil || action != "updated" {
+		t.Fatalf("changed run: action=%q err=%v, want updated", action, err)
+	}
+	if backup == "" {
+		t.Error("changed run wrote no backup; the prior config must be preserved")
+	}
+}
+
+// TestAgentsFlagUsage_ListsEverySupportedAgent guards issue #4334: the help text
+// omitted kiro, so it was undiscoverable from the CLI. Deriving it from the
+// registry means adding a 7th agent cannot silently skip the docs.
+func TestAgentsFlagUsage_ListsEverySupportedAgent(t *testing.T) {
+	usage := agentsFlagUsage("configure")
+	for _, a := range bootstrapAgents() {
+		if !strings.Contains(usage, a.key) {
+			t.Errorf("--agents usage omits %q: %s", a.key, usage)
+		}
+	}
+}
+
 func TestJSONHTTPEntry_TransportAndTimeout(t *testing.T) {
 	cli := jsonHTTPEntry("http", false)("https://u", "")
 	if cli["type"] != "http" {
@@ -544,8 +612,12 @@ func TestSetupInitialConfig_StoresValuesAndHonorsName(t *testing.T) {
 		t.Errorf("MCPToolName = %q, want custommcp", cfg.MCPToolName)
 	}
 
-	// Re-running updates rather than re-creating, and backs up the prior file.
-	action2, backup2, _ := setupInitialConfig(cfgPath, "https://cloud.example", "the-key", "custommcp")
+	// Re-running with a CHANGED value updates rather than re-creating, and backs
+	// up the prior file. The value must actually differ: a byte-identical re-run
+	// is "unchanged" and deliberately writes no backup, since each backup is
+	// another at-rest copy of the API token (issue #4342, covered by
+	// TestSetupInitialConfig_IdenticalRerunIsUnchanged).
+	action2, backup2, _ := setupInitialConfig(cfgPath, "https://cloud.example", "a-rotated-key", "custommcp")
 	if action2 != "updated" {
 		t.Errorf("second run action = %q, want updated", action2)
 	}
