@@ -13,7 +13,22 @@ const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
 
-const { systemRootBin, parseChecksums, parseArgs, psLiteral } = require('./index.js');
+const { systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor } = require('./index.js');
+
+// --- tarFlagFor: the #4338 regression guard ---
+
+test('tarFlagFor asks for gunzip explicitly on the POSIX tar.gz branch', () => {
+  // busybox only auto-detects gzip when built with FEATURE_SEAMLESS_GZ, so `-xf`
+  // on a .tar.gz dies with "invalid tar magic" — and the POSIX branch has no
+  // second extractor. Never drop the z here.
+  assert.strictEqual(tarFlagFor(false), '-xzf');
+});
+
+test('tarFlagFor does not pass -z on the Windows zip branch', () => {
+  // That archive is a zip; -z would be wrong. bsdtar reads it, and
+  // Expand-Archive is the fallback.
+  assert.strictEqual(tarFlagFor(true), '-xf');
+});
 
 // --- systemRootBin: the #4337 / finding #399 regression guard ---
 

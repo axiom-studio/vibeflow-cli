@@ -297,9 +297,16 @@ function systemRootBin(exe) {
 //   * zip -> `-xf`. `-z` would be wrong; only bsdtar reads zip at all, so
 //     Expand-Archive is a load-bearing fallback here, not a pre-1803 shim
 //     (GNU tar 1.35 was verified to fail on our release zip).
+// tarFlagFor picks the extraction flag from the archive format. Extracted so the
+// mapping is unit-testable and cannot silently revert — dropping the `z` on the
+// POSIX branch is what caused issue #4338.
+function tarFlagFor(isWindows) {
+  return isWindows ? '-xf' : '-xzf';
+}
+
 function extractArchive(archivePath, destDir, isWindows) {
   const asset = path.basename(archivePath);
-  const tarFlag = isWindows ? '-xf' : '-xzf';
+  const tarFlag = tarFlagFor(isWindows);
   const tarBin = isWindows ? systemRootBin('tar.exe') : 'tar';
 
   let tar = { error: new Error('tar.exe not found under %SystemRoot%\\System32') };
@@ -410,4 +417,4 @@ if (require.main === module) {
 
 // Exported for tests only. package.json `files` ships index.js alone, so the
 // test file is not published.
-module.exports = { systemRootBin, parseChecksums, parseArgs, psLiteral };
+module.exports = { systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor };
