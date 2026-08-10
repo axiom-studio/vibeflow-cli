@@ -145,8 +145,11 @@ async function downloadTo(url, dest) {
 
 // ---------------------------------------------------------------- tmux
 function haveCmd(cmd) {
-  // cmd.exe has no `command` builtin; `where` is the Windows equivalent.
-  const probe = process.platform === 'win32' ? `where ${cmd}` : `command -v ${cmd}`;
+  // cmd.exe has no `command` builtin; `where` is the Windows equivalent. Invoke
+  // it by absolute path — see systemRootBin() for why a bare name is unsafe here.
+  const probe = process.platform === 'win32'
+    ? `"${systemRootBin('where.exe')}" ${cmd}`
+    : `command -v ${cmd}`;
   try { execSync(probe, { stdio: 'ignore' }); return true; } catch { return false; }
 }
 
@@ -249,26 +252,61 @@ function psLiteral(s) {
   return `'${s.replace(/'/g, "''")}'`;
 }
 
+// systemRootBin resolves a Windows system binary to an absolute path.
+//
+// Windows must never be handed a bare program name: libuv spawns via
+// CreateProcess, which searches the CURRENT WORKING DIRECTORY before %PATH%.
+// A `tar.exe` / `powershell.exe` / `where.exe` planted in whatever directory the
+// user happened to run `npx` from would therefore execute instead of the system
+// one — and it would run while a live API key is on its way to
+// `vibeflow bootstrap`. POSIX is immune because execvp consults PATH only, which
+// is why this asymmetry is easy to miss. (CWE-426; finding #399, issue #4337.)
+//
+// `shell: true` is deliberately NOT the fix — it widens the surface instead.
+function systemRootBin(exe) {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const candidates = exe === 'powershell.exe'
+    ? [path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')]
+    : [path.join(root, 'System32', exe)];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 // extractArchive unpacks a release archive. goreleaser ships tar.gz for
 // linux/darwin and zip for windows.
 //
-// `tar -xf` reads tar.gz everywhere. For zip it depends on the flavor: the
-// tar.exe bundled with Windows 10 1803+ is bsdtar, which reads zip, but GNU tar
-// (e.g. a Git Bash tar earlier on PATH) does not — verified: GNU tar 1.35 fails
-// on our release zip. So on Windows the Expand-Archive fallback is load-bearing,
-// not just a shim for pre-1803 builds.
+// Compression flags are NOT interchangeable, so each branch is explicit:
+//   * tar.gz -> `-xzf`. `-xf` alone relies on the local tar auto-detecting gzip.
+//     GNU tar, bsdtar and alpine's busybox do; a busybox built WITHOUT
+//     FEATURE_SEAMLESS_GZ (e.g. Debian/Ubuntu busybox-static 1.36.1) does not —
+//     it fails with `invalid tar magic`, and the POSIX branch has no second
+//     extractor, so the install dies. (issue #4338.)
+//   * zip -> `-xf`. `-z` would be wrong; only bsdtar reads zip at all, so
+//     Expand-Archive is a load-bearing fallback here, not a pre-1803 shim
+//     (GNU tar 1.35 was verified to fail on our release zip).
 function extractArchive(archivePath, destDir, isWindows) {
   const asset = path.basename(archivePath);
-  const tar = spawnSync('tar', ['-xf', archivePath, '-C', destDir], { stdio: 'ignore' });
-  if (!tar.error && tar.status === 0) return;
+  const tarFlag = isWindows ? '-xf' : '-xzf';
+  const tarBin = isWindows ? systemRootBin('tar.exe') : 'tar';
+
+  let tar = { error: new Error('tar.exe not found under %SystemRoot%\\System32') };
+  if (tarBin) {
+    tar = spawnSync(tarBin, [tarFlag, archivePath, '-C', destDir], { stdio: 'ignore' });
+    if (!tar.error && tar.status === 0) return;
+  }
 
   if (isWindows) {
-    const ps = spawnSync('powershell', [
-      '-NoProfile', '-NonInteractive', '-Command',
-      `Expand-Archive -LiteralPath ${psLiteral(archivePath)} -DestinationPath ${psLiteral(destDir)} -Force`,
-    ], { stdio: 'ignore' });
-    if (!ps.error && ps.status === 0) return;
-    fail(`could not extract ${asset} with either tar or Expand-Archive`);
+    const psBin = systemRootBin('powershell.exe');
+    if (psBin) {
+      const ps = spawnSync(psBin, [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Expand-Archive -LiteralPath ${psLiteral(archivePath)} -DestinationPath ${psLiteral(destDir)} -Force`,
+      ], { stdio: 'ignore' });
+      if (!ps.error && ps.status === 0) return;
+    }
+    fail(`could not extract ${asset} with either tar.exe or Expand-Archive under %SystemRoot%\\System32`);
   }
   fail(`could not extract ${asset}: ${tar.error ? tar.error.message : `tar exited ${tar.status}`}`);
 }
