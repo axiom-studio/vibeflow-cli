@@ -10,8 +10,17 @@ It will:
 
 1. Download the matching `vibeflow-cli` release binary for your OS/arch into
    `~/.vibeflow/bin`, after verifying its SHA-256 against the release's published
-   `checksums.txt`. A mismatch deletes the download and aborts — the binary is
-   executed in step 3, so an unverified artifact is never run.
+   `checksums.txt`. A mismatch deletes the download and aborts before the binary
+   is executed in step 3.
+
+   **Scope of that check:** `checksums.txt` is fetched from the same origin, over
+   the same channel, as the archive it describes. So it detects **corruption and
+   tampering with the artifact alone** — it does **not** authenticate the
+   publisher. Anyone able to replace the archive in transit (for example a
+   TLS-intercepting corporate proxy whose CA your machine already trusts) or to
+   overwrite the release assets could replace both files together. Signature
+   verification against a pinned public key is tracked separately and is not in
+   place yet.
 2. Install **tmux** if it is missing (apt / dnf / yum / apk / brew). Skipped on
    Windows. If tmux is still missing afterwards the installer says so explicitly,
    because `vibeflow launch` cannot work without it.
