@@ -73,3 +73,81 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+  # Real-Windows smoke test for the npx installer (issue #4339). Everything else
+  # about the Windows path was only ever verified by simulating
+  # process.platform='win32' on Linux, which cannot exercise the final
+  # `vibeflow.exe bootstrap` spawn, %APPDATA% resolution, or the genuine
+  # Expand-Archive fallback. This job closes that gap.
+  #
+  # No secrets: `bootstrap` only writes config files and never contacts the
+  # server, so a placeholder key is sufficient and nothing sensitive enters CI.
+  #
+  # Action-free per the org Actions policy. Node is preinstalled on the
+  # windows-latest image; the job asserts that rather than assuming it. bash is
+  # available via Git for Windows.
+  windows-installer-smoke:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c http.extraHeader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" \
+            fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q --detach FETCH_HEAD
+
+      - name: Check prerequisites
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::node is not on PATH on windows-latest; the smoke test needs it" >&2
+            exit 1
+          }
+          node --version
+          # Confirm the System32 helpers the installer resolves absolutely
+          # (see systemRootBin in npx/index.js) actually exist on this image.
+          for exe in "System32/tar.exe" "System32/where.exe" \
+                     "System32/WindowsPowerShell/v1.0/powershell.exe"; do
+            p="${SYSTEMROOT:-C:/Windows}/$exe"
+            if [ ! -f "$p" ]; then echo "note: missing $p (installer has a fallback)"; fi
+          done
+
+      - name: Run the installer end-to-end
+        run: |
+          # Resolves the latest release via the unauthenticated GitHub API (60
+          # req/hr per IP). If this ever flakes on a shared runner IP, pin the
+          # tag with --version <tag>, which skips the API call entirely.
+          node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli
+
+      - name: Assert the installed binary runs on Windows
+        run: |
+          bin="$USERPROFILE/.vibeflow/bin/vibeflow.exe"
+          [ -f "$bin" ] || { echo "::error::$bin was not installed" >&2; exit 1; }
+          # This is the step no simulation could cover: actually executing the
+          # PE binary.
+          "$bin" version
+
+      - name: Assert the Claude Desktop config landed under %APPDATA%
+        run: |
+          cfg="$APPDATA/Claude/claude_desktop_config.json"
+          [ -f "$cfg" ] || { echo "::error::$cfg was not written" >&2; exit 1; }
+          cat "$cfg"
+          # The token belongs in the env block and must never reach argv.
+          grep -q 'mcp-remote' "$cfg" || { echo "::error::mcp-remote bridge missing" >&2; exit 1; }
+          grep -q 'MCP_TOKEN' "$cfg" || { echo "::error::MCP_TOKEN reference missing" >&2; exit 1; }
+          if grep -q '"args"' "$cfg" && grep -A6 '"args"' "$cfg" | grep -q 'smoke-test-not-a-real-key'; then
+            echo "::error::raw token leaked into argv" >&2; exit 1
+          fi
+
+      - name: Assert re-running is idempotent
+        run: |
+          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli)"
+          echo "$out"
+          echo "$out" | grep -q 'unchanged' || {
+            echo "::error::a second identical run should report unchanged" >&2; exit 1
+          }
