@@ -219,9 +219,21 @@ function parseChecksums(text) {
 // The release workflow already holds itself to this bar, verifying the Go
 // toolchain tarball against go.dev's published SHA256 before extracting it
 // (.github/workflows/release.yml). This is the client-side counterpart.
+//
+// SCOPE — integrity, not authenticity (finding #403, issue #4349). checksums.txt
+// comes from the same origin and channel as the archive, so an adversary able to
+// alter one can alter the other: a TLS-intercepting proxy trusted by the user's
+// own store, or a release-asset compromise, defeats this. What it does close is
+// corruption and tampering with the archive alone. Closing the rest needs a
+// signature over checksums.txt verified against a key PINNED here — never
+// fetched, since a fetched key inherits the same weakness.
 async function verifyChecksum(archivePath, asset, tag, skip) {
   if (skip) {
-    warn(`skipping checksum verification for ${asset} (--skip-checksum)`);
+    // This flag disables the only integrity control standing between a network
+    // download and `chmod 0755` + execution, so state the consequence rather
+    // than just naming the flag.
+    warn(`--skip-checksum: NOT verifying ${asset}.`);
+    warn('The downloaded binary will be executed without any integrity check.');
     return;
   }
   step('Verifying checksum');
