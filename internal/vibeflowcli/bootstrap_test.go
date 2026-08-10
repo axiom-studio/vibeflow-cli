@@ -357,6 +357,39 @@ func TestClaudeDesktopEntry_TokenInEnvBlockReferencedByName(t *testing.T) {
 	}
 }
 
+// TestClaudeDesktopEntry_RawTokenNeverInArgv locks the division of labor that
+// makes the ${MCP_TOKEN} indirection work for Claude Desktop: the raw token
+// lives ONLY in the entry's env block, and argv carries the placeholder.
+//
+// mcp-remote resolves the placeholder itself — it env-expands every --header
+// value before use (dist/chunk-65X3S4HB.js in 0.1.38, present since 0.1.0):
+//
+//	headers[key] = value.replace(/\$\{([^}]+)}/g, (m, name) => process.env[name] ?? "")
+//
+// Verified on the wire against a local server that echoes Authorization, with
+// npx spawned exactly as Claude Desktop spawns it (direct spawn, no shell, env
+// block merged): every request carried the real key, never the placeholder.
+//
+// Inlining the token into argv instead would be a security regression — argv is
+// readable by any local process via `ps`, whereas a child's environment is not.
+func TestClaudeDesktopEntry_RawTokenNeverInArgv(t *testing.T) {
+	const token = "sk-super-secret-token"
+	entry := claudeDesktopEntry("https://cloud.example/rest/v1/vibeflow/mcp", token)
+
+	args, _ := entry["args"].([]any)
+	for _, a := range args {
+		if s, _ := a.(string); strings.Contains(s, token) {
+			t.Errorf("raw token leaked into argv (readable via ps): %q", s)
+		}
+	}
+
+	// The env block is the only place the real token belongs.
+	env, _ := entry["env"].(map[string]any)
+	if env[mcpTokenEnvVar] != token {
+		t.Errorf("env.%s = %v, want the raw token", mcpTokenEnvVar, env[mcpTokenEnvVar])
+	}
+}
+
 func TestJSONHTTPEntry_TransportAndTimeout(t *testing.T) {
 	cli := jsonHTTPEntry("http", false)("https://u", "")
 	if cli["type"] != "http" {
