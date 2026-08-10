@@ -153,6 +153,10 @@ function haveCmd(cmd) {
   try { execSync(probe, { stdio: 'ignore' }); return true; } catch { return false; }
 }
 
+// ensureTmux returns true when tmux is present on the system afterwards. main()
+// uses that to qualify the closing message: reporting an unconditional "Setup
+// complete" while tmux is missing pushes the failure out to the user's first
+// `vibeflow launch`, far from its cause. (issue #4341.)
 function ensureTmux(isWindows) {
   step('Checking for tmux');
   if (isWindows) {
@@ -160,9 +164,9 @@ function ensureTmux(isWindows) {
     // config that `vibeflow bootstrap` writes does not.
     warn('tmux is not available on Windows. MCP config is still written, so Claude Desktop');
     warn('and the other agents work; `vibeflow launch` needs tmux, so run it under WSL.');
-    return;
+    return false;
   }
-  if (haveCmd('tmux')) { ok('tmux already installed'); return; }
+  if (haveCmd('tmux')) { ok('tmux already installed'); return true; }
 
   const sudo = process.getuid && process.getuid() === 0 ? '' : 'sudo ';
   let installCmd = null;
@@ -170,15 +174,22 @@ function ensureTmux(isWindows) {
   else if (haveCmd('apt-get')) installCmd = `${sudo}apt-get update && ${sudo}apt-get install -y tmux`;
   else if (haveCmd('dnf')) installCmd = `${sudo}dnf install -y tmux`;
   else if (haveCmd('yum')) installCmd = `${sudo}yum install -y tmux`;
+  // Alpine: everything else in the installer works there, including the static
+  // binary — only this step was missing a branch.
+  else if (haveCmd('apk')) installCmd = `${sudo}apk add --no-cache tmux`;
 
   if (!installCmd) {
     warn('could not auto-install tmux (no known package manager). Install it manually, then re-run.');
-    return;
+    return false;
   }
   step(`Installing tmux: ${installCmd}`);
   const r = spawnSync('bash', ['-lc', installCmd], { stdio: 'inherit' });
-  if (r.status !== 0 || !haveCmd('tmux')) warn('tmux install may have failed; check the output above.');
-  else ok('tmux installed');
+  if (r.status !== 0 || !haveCmd('tmux')) {
+    warn('tmux install may have failed; check the output above.');
+    return haveCmd('tmux');
+  }
+  ok('tmux installed');
+  return true;
 }
 
 // ---------------------------------------------------------------- integrity
@@ -365,7 +376,7 @@ async function main() {
   const plat = detectPlatform();
 
   const binPath = await installBinary(plat, args.version, args.skipChecksum);
-  ensureTmux(plat.isWindows);
+  const haveTmux = ensureTmux(plat.isWindows);
 
   step('Configuring MCP for your agents (vibeflow bootstrap)');
   const bootstrapArgs = ['bootstrap', '--api-key', args.apiKey, '--base-url', args.baseURL];
@@ -378,9 +389,15 @@ async function main() {
   ok(`${c.bold}Setup complete.${c.reset}`);
   const binDirHint = plat.isWindows ? '%USERPROFILE%\\.vibeflow\\bin' : '~/.vibeflow/bin';
   console.log(`${c.dim}   The vibeflow binary is at ${binPath} — add ${binDirHint} to your PATH to use it directly.${c.reset}`);
-  console.log(`${c.dim}   Verify with: claude mcp list  (should show vibeflow ... ✓ Connected)${c.reset}`);
-  if (plat.isWindows) {
-    console.log(`${c.dim}   Session launching (vibeflow launch) needs tmux — run it under WSL.${c.reset}`);
+  // The MCP config references ${MCP_TOKEN}; vibeflow injects it at launch, so a
+  // hand-started agent needs the variable exported or it reports the server as
+  // unconfigured. Showing the bare command here reads as a failed setup.
+  console.log(`${c.dim}   Verify with: MCP_TOKEN=<your-api-key> claude mcp list   (should show vibeflow ... ✓ Connected)${c.reset}`);
+  console.log(`${c.dim}   Agents started by 'vibeflow launch' get MCP_TOKEN automatically — only hand-started ones need it.${c.reset}`);
+  if (!haveTmux) {
+    warn(plat.isWindows
+      ? 'tmux is not available on Windows, so `vibeflow launch` will not work here — use WSL.'
+      : 'tmux is still missing, so `vibeflow launch` will not work until you install it.');
   }
 }
 
