@@ -8,7 +8,10 @@ npx @axiom-studio/vibeflow-setup --api-key <API_KEY>
 
 It will:
 
-1. Download the matching `vibeflow-cli` release binary for your OS/arch into `~/.vibeflow/bin`.
+1. Download the matching `vibeflow-cli` release binary for your OS/arch into
+   `~/.vibeflow/bin`, after verifying its SHA-256 against the release's published
+   `checksums.txt`. A mismatch deletes the download and aborts — the binary is
+   executed in step 3, so an unverified artifact is never run.
 2. Install **tmux** if it is missing (apt / dnf / yum / brew).
 3. Run `vibeflow bootstrap --all --api-key <key>`, which writes the VibeFlow MCP
    server config for every supported agent (Claude CLI, Claude Desktop, Gemini,
@@ -23,6 +26,7 @@ It will:
 | `--agents <csv>` | all | Configure only these agents |
 | `--all` | on | Configure all supported agents |
 | `--version <tag>` | latest | Pin a specific `vibeflow-cli` release |
+| `--skip-checksum` | off | Skip SHA-256 verification of the download (not recommended) |
 
 ## Verify
 
