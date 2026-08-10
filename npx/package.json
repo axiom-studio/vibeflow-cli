@@ -8,6 +8,9 @@
   "files": [
     "index.js"
   ],
+  "scripts": {
+    "test": "node --test index.test.js"
+  },
   "engines": {
     "node": ">=18"
   },

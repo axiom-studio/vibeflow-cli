@@ -401,4 +401,13 @@ async function main() {
   }
 }
 
-main().catch((e) => fail(e.message || String(e)));
+// Only run when invoked as a program, so the pure helpers below can be unit
+// tested. `npx @axiom-studio/vibeflow-setup` and `node npx/index.js` both take
+// this branch; `require()` from a test does not.
+if (require.main === module) {
+  main().catch((e) => fail(e.message || String(e)));
+}
+
+// Exported for tests only. package.json `files` ships index.js alone, so the
+// test file is not published.
+module.exports = { systemRootBin, parseChecksums, parseArgs, psLiteral };
