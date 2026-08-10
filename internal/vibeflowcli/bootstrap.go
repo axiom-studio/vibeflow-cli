@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -116,12 +117,36 @@ func jsonHTTPEntry(transport string, withTimeout bool) func(url, apiKey string) 
 	}
 }
 
+// resolveNpxCommand returns an absolute path to npx, falling back to the bare
+// name when it cannot be resolved.
+//
+// Claude Desktop is a GUI app, so it inherits the launchd/session environment
+// rather than the user's shell PATH. On macOS that is /usr/bin:/bin:/usr/sbin:
+// /sbin, and npx lives in /opt/homebrew/bin, /usr/local/bin, or an nvm
+// directory — none of which are on it. A bare "npx" therefore fails to spawn
+// with ENOENT and the server never starts, which presents as "cannot connect".
+//
+// Writing the absolute path makes this deterministic instead of dependent on how
+// the user installed Node. bootstrap re-resolves on every run and the writers are
+// idempotent, so a path invalidated by an nvm/volta/fnm switch self-heals on the
+// next `vibeflow bootstrap` rather than needing a hand edit. (issue #4336.)
+//
+// NOTE: this cannot explain an HTTP 401. A 401 means a request reached the
+// server, so npx ran and mcp-remote sent the expanded header; a PATH failure
+// produces no request at all. See issue #4333.
+func resolveNpxCommand() string {
+	if p, err := exec.LookPath("npx"); err == nil && filepath.IsAbs(p) {
+		return p
+	}
+	return "npx"
+}
+
 // claudeDesktopEntry builds the npx/mcp-remote bridge entry for Claude Desktop.
 // The desktop app is a GUI that does not inherit the launching shell, so the
 // token must live in the entry's own env block, referenced as ${MCP_TOKEN}.
 func claudeDesktopEntry(url, apiKey string) map[string]any {
 	return map[string]any{
-		"command": "npx",
+		"command": resolveNpxCommand(),
 		"args":    []any{"-y", "mcp-remote", url, "--header", "Authorization: " + mcpBearerRef},
 		"env":     map[string]any{mcpTokenEnvVar: apiKey},
 		"timeout": mcpClientTimeoutMS,
@@ -533,11 +558,27 @@ func setupInitialConfig(cfgPath, baseURL, apiKey, serverName string) (action, ba
 	if err != nil {
 		return "", "", err
 	}
+	// Snapshot the loaded state so an identical re-run can be detected. Compare
+	// against the post-load struct, not a re-read of the file: LoadConfig
+	// deliberately blanks TmuxSocket (see its comment), so a file comparison
+	// would always look changed.
+	before := *cfg
+
 	cfg.ServerURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	cfg.APIToken = strings.TrimSpace(apiKey)
 	if serverName != "" {
 		cfg.MCPToolName = serverName
 	}
+
+	// Match the two sibling writers (writeJSONMCPServer, writeCodexTOMLServer):
+	// report "unchanged" and skip the backup when nothing actually differs.
+	// Without this, every re-run left another 0600 backup copy of the API key on
+	// disk and reported "(updated)" while the agent configs correctly reported
+	// "unchanged".
+	if existed && equalJSON(before, *cfg) {
+		return "unchanged", "", nil
+	}
+
 	if existed {
 		// Back up before SaveConfig overwrites. SaveConfig is shared with other
 		// callers (wizard, migrations) and must stay backup-free, so the backup
@@ -589,6 +630,14 @@ func resolveAgentsCSV(agents []bootstrapAgent, csv string) ([]bootstrapAgent, er
 		}
 	}
 	return out, nil
+}
+
+// agentsFlagUsage builds the --agents help text from the live agent registry, so
+// the advertised list cannot drift from the supported one. It previously omitted
+// kiro (issue #4334), leaving no way to discover it from the CLI.
+func agentsFlagUsage(verb string) string {
+	return fmt.Sprintf("Comma-separated agents to %s (%s); skips the interactive picker",
+		verb, strings.Join(agentKeys(bootstrapAgents()), ","))
 }
 
 func agentKeys(agents []bootstrapAgent) []string {
@@ -746,7 +795,7 @@ vibeflow-cli config.`,
 
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "VibeFlow API key (required)")
 	cmd.Flags().StringVar(&baseURL, "base-url", defaultBootstrapBaseURL, "VibeFlow base URL")
-	cmd.Flags().StringVar(&agentsCSV, "agents", "", "Comma-separated agents to configure (codex,gemini,cursor,claude-cli,claude-desktop); skips the interactive picker")
+	cmd.Flags().StringVar(&agentsCSV, "agents", "", agentsFlagUsage("configure"))
 	cmd.Flags().BoolVar(&allAgents, "all", false, "Configure all supported agents (skips the interactive picker)")
 	return cmd
 }
@@ -799,7 +848,7 @@ config keys are preserved. You will be prompted for which agents to clean unless
 		},
 	}
 
-	cmd.Flags().StringVar(&agentsCSV, "agents", "", "Comma-separated agents to clean (codex,gemini,cursor,claude-cli,claude-desktop); skips the interactive picker")
+	cmd.Flags().StringVar(&agentsCSV, "agents", "", agentsFlagUsage("clean"))
 	cmd.Flags().BoolVar(&allAgents, "all", false, "Remove from all supported agents (skips the interactive picker)")
 	return cmd
 }
