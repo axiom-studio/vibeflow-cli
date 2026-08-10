@@ -33,7 +33,9 @@ claude mcp list   # should show: vibeflow ... ✓ Connected
 ## Notes
 
 - Requires Node >= 18. No npm dependencies (built-in modules only).
-- macOS and Linux (amd64/arm64) are supported. Windows falls back to the manual
-  Setup-page steps for now.
+- Linux, macOS, and Windows (amd64/arm64) are supported.
+- On Windows the MCP config is written normally, so Claude Desktop and the other
+  agents connect — but `vibeflow launch` needs **tmux**, which has no Windows
+  port, so run session launching under WSL. Step 2 (tmux install) is skipped.
 - Model selection from the Setup UI is handled at agent-launch time, not by
   `bootstrap`, so it is not a flag here.

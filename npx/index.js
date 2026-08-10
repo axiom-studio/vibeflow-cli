@@ -10,8 +10,11 @@
  *   npx @axiom-studio/vibeflow-setup --api-key <API_KEY>
  *
  * What it does, in order:
- *   1. Detect the platform and download the matching vibeflow-cli release binary.
- *   2. Install tmux if it is missing (apt / dnf / brew).
+ *   1. Detect the platform and download the matching vibeflow-cli release binary
+ *      (tar.gz on linux/darwin, zip on windows).
+ *   2. Install tmux if it is missing (apt / dnf / brew). Skipped on Windows,
+ *      where tmux has no port — only `vibeflow launch` needs it, not the MCP
+ *      config written in step 3.
  *   3. Run `vibeflow bootstrap --all --api-key <key>` to write the MCP config
  *      for every supported agent (Claude CLI/Desktop, Gemini, Cursor, Codex).
  *
@@ -132,11 +135,20 @@ async function downloadTo(url, dest) {
 
 // ---------------------------------------------------------------- tmux
 function haveCmd(cmd) {
-  try { execSync(`command -v ${cmd}`, { stdio: 'ignore' }); return true; } catch { return false; }
+  // cmd.exe has no `command` builtin; `where` is the Windows equivalent.
+  const probe = process.platform === 'win32' ? `where ${cmd}` : `command -v ${cmd}`;
+  try { execSync(probe, { stdio: 'ignore' }); return true; } catch { return false; }
 }
 
-function ensureTmux() {
+function ensureTmux(isWindows) {
   step('Checking for tmux');
+  if (isWindows) {
+    // tmux has no Windows port, and only `vibeflow launch` needs it — the MCP
+    // config that `vibeflow bootstrap` writes does not.
+    warn('tmux is not available on Windows. MCP config is still written, so Claude Desktop');
+    warn('and the other agents work; `vibeflow launch` needs tmux, so run it under WSL.');
+    return;
+  }
   if (haveCmd('tmux')) { ok('tmux already installed'); return; }
 
   const sudo = process.getuid && process.getuid() === 0 ? '' : 'sudo ';
@@ -157,11 +169,39 @@ function ensureTmux() {
 }
 
 // ---------------------------------------------------------------- binary
-async function installBinary({ osName, goArch, isWindows }, version) {
-  if (isWindows) {
-    fail('Windows is not supported by this installer yet. Use the manual steps on the Setup page.');
-  }
 
+// psLiteral single-quotes a path for PowerShell. Single-quoted PowerShell
+// strings do not interpolate, so a `$` in a path stays literal; embedded single
+// quotes are escaped by doubling.
+function psLiteral(s) {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+// extractArchive unpacks a release archive. goreleaser ships tar.gz for
+// linux/darwin and zip for windows.
+//
+// `tar -xf` reads tar.gz everywhere. For zip it depends on the flavor: the
+// tar.exe bundled with Windows 10 1803+ is bsdtar, which reads zip, but GNU tar
+// (e.g. a Git Bash tar earlier on PATH) does not — verified: GNU tar 1.35 fails
+// on our release zip. So on Windows the Expand-Archive fallback is load-bearing,
+// not just a shim for pre-1803 builds.
+function extractArchive(archivePath, destDir, isWindows) {
+  const asset = path.basename(archivePath);
+  const tar = spawnSync('tar', ['-xf', archivePath, '-C', destDir], { stdio: 'ignore' });
+  if (!tar.error && tar.status === 0) return;
+
+  if (isWindows) {
+    const ps = spawnSync('powershell', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      `Expand-Archive -LiteralPath ${psLiteral(archivePath)} -DestinationPath ${psLiteral(destDir)} -Force`,
+    ], { stdio: 'ignore' });
+    if (!ps.error && ps.status === 0) return;
+    fail(`could not extract ${asset} with either tar or Expand-Archive`);
+  }
+  fail(`could not extract ${asset}: ${tar.error ? tar.error.message : `tar exited ${tar.status}`}`);
+}
+
+async function installBinary({ osName, goArch, isWindows }, version) {
   step('Resolving vibeflow-cli release');
   let tag = version;
   if (!tag) {
@@ -180,26 +220,26 @@ async function installBinary({ osName, goArch, isWindows }, version) {
   const ver = tag.replace(/^v/, '');
   ok(`version ${tag}`);
 
-  const asset = `vibeflow_${ver}_${osName}_${goArch}.tar.gz`;
+  // goreleaser's format_overrides ships a zip for windows, tar.gz elsewhere.
+  const binName = isWindows ? 'vibeflow.exe' : 'vibeflow';
+  const asset = `vibeflow_${ver}_${osName}_${goArch}.${isWindows ? 'zip' : 'tar.gz'}`;
   const url = `https://github.com/${REPO}/releases/download/${tag}/${asset}`;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibeflow-'));
-  const tarPath = path.join(tmpDir, asset);
+  const archivePath = path.join(tmpDir, asset);
 
   step(`Downloading ${asset}`);
-  await downloadTo(url, tarPath);
-  const untar = spawnSync('tar', ['-xzf', tarPath, '-C', tmpDir], { stdio: 'ignore' });
-  if (untar.error || untar.status !== 0) {
-    fail(`could not extract ${asset}: ${untar.error ? untar.error.message : `tar exited ${untar.status}`}`);
-  }
+  await downloadTo(url, archivePath);
+  extractArchive(archivePath, tmpDir, isWindows);
 
-  const extracted = path.join(tmpDir, 'vibeflow');
-  if (!fs.existsSync(extracted)) fail(`binary not found in ${asset} after extraction`);
+  const extracted = path.join(tmpDir, binName);
+  if (!fs.existsSync(extracted)) fail(`${binName} not found in ${asset} after extraction`);
 
   const binDir = path.join(os.homedir(), '.vibeflow', 'bin');
   fs.mkdirSync(binDir, { recursive: true });
-  const binPath = path.join(binDir, 'vibeflow');
+  const binPath = path.join(binDir, binName);
   fs.copyFileSync(extracted, binPath);
-  fs.chmodSync(binPath, 0o755);
+  // Windows derives executability from the file extension, not a mode bit.
+  if (!isWindows) fs.chmodSync(binPath, 0o755);
   ok(`installed to ${binPath}`);
   return binPath;
 }
@@ -214,7 +254,7 @@ async function main() {
   const plat = detectPlatform();
 
   const binPath = await installBinary(plat, args.version);
-  ensureTmux();
+  ensureTmux(plat.isWindows);
 
   step('Configuring MCP for your agents (vibeflow bootstrap)');
   const bootstrapArgs = ['bootstrap', '--api-key', args.apiKey, '--base-url', args.baseURL];
@@ -225,8 +265,12 @@ async function main() {
 
   console.log('');
   ok(`${c.bold}Setup complete.${c.reset}`);
-  console.log(`${c.dim}   The vibeflow binary is at ${binPath} — add ~/.vibeflow/bin to your PATH to use it directly.${c.reset}`);
+  const binDirHint = plat.isWindows ? '%USERPROFILE%\\.vibeflow\\bin' : '~/.vibeflow/bin';
+  console.log(`${c.dim}   The vibeflow binary is at ${binPath} — add ${binDirHint} to your PATH to use it directly.${c.reset}`);
   console.log(`${c.dim}   Verify with: claude mcp list  (should show vibeflow ... ✓ Connected)${c.reset}`);
+  if (plat.isWindows) {
+    console.log(`${c.dim}   Session launching (vibeflow launch) needs tmux — run it under WSL.${c.reset}`);
+  }
 }
 
 main().catch((e) => fail(e.message || String(e)));
