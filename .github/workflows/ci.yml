@@ -74,6 +74,18 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Installer unit tests
+        run: |
+          # Pure-helper tests for npx/index.js via the built-in node:test runner
+          # (no dependencies to install). Name the file explicitly: passing the
+          # directory makes the runner treat index.js itself as a test and
+          # execute the installer. Node is preinstalled on ubuntu-latest.
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::node is not on PATH; the installer unit tests need it" >&2
+            exit 1
+          }
+          node --test npx/index.test.js
+
   # Real-Windows smoke test for the npx installer (issue #4339). Everything else
   # about the Windows path was only ever verified by simulating
   # process.platform='win32' on Linux, which cannot exercise the final
