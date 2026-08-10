@@ -98,7 +98,14 @@ function httpsGet(url, opts = {}) {
       }
       if (res.statusCode !== 200) {
         res.resume();
-        return reject(new Error(`GET ${url} -> HTTP ${res.statusCode}`));
+        // The GitHub API allows 60 unauthenticated requests per hour per IP, so
+        // a shared/NAT/CI address hits 403 well before anything is wrong with
+        // the install. Say so, instead of leaving a bare status code.
+        const rateLimited = (res.statusCode === 403 || res.statusCode === 429) && url.startsWith('https://api.github.com/');
+        const hint = rateLimited
+          ? ' (GitHub API rate limit — retry later, or pin a release with --version <tag>)'
+          : '';
+        return reject(new Error(`GET ${url} -> HTTP ${res.statusCode}${hint}`));
       }
       resolve(res);
     });
@@ -160,6 +167,15 @@ async function installBinary({ osName, goArch, isWindows }, version) {
   if (!tag) {
     const latest = await getJSON(`https://api.github.com/repos/${REPO}/releases/latest`);
     tag = latest.tag_name;
+    // A 200 response with no tag_name (error body, or a repo with no published
+    // release) would otherwise surface as `TypeError: Cannot read properties of
+    // undefined (reading 'replace')` on the line below.
+    if (!tag) {
+      fail(
+        `could not determine the latest ${REPO} release${latest.message ? `: ${latest.message}` : ' (no tag_name in the API response)'}\n` +
+          `       Retry later, or pin a known release with --version <tag>.`,
+      );
+    }
   }
   const ver = tag.replace(/^v/, '');
   ok(`version ${tag}`);
@@ -171,7 +187,10 @@ async function installBinary({ osName, goArch, isWindows }, version) {
 
   step(`Downloading ${asset}`);
   await downloadTo(url, tarPath);
-  spawnSync('tar', ['-xzf', tarPath, '-C', tmpDir], { stdio: 'ignore' });
+  const untar = spawnSync('tar', ['-xzf', tarPath, '-C', tmpDir], { stdio: 'ignore' });
+  if (untar.error || untar.status !== 0) {
+    fail(`could not extract ${asset}: ${untar.error ? untar.error.message : `tar exited ${untar.status}`}`);
+  }
 
   const extracted = path.join(tmpDir, 'vibeflow');
   if (!fs.existsSync(extracted)) fail(`binary not found in ${asset} after extraction`);
