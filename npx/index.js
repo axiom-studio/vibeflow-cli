@@ -25,6 +25,7 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
 const { spawnSync, execSync } = require('child_process');
 
 const REPO = 'axiom-studio/vibeflow-cli';
@@ -55,6 +56,7 @@ function parseArgs(argv) {
       case '--agents': out.agents = val(); out.all = false; break;
       case '--all': out.all = true; break;
       case '--version': out.version = val(); break; // pin a vibeflow-cli release
+      case '--skip-checksum': out.skipChecksum = true; break;
       case '-h': case '--help': out.help = true; break;
       default:
         if (a.startsWith('--api-key=')) out.apiKey = a.slice('--api-key='.length);
@@ -77,6 +79,7 @@ Options:
   --agents <csv>     Only configure these agents (default: all)
   --all              Configure all supported agents (default)
   --version <tag>    Pin a specific vibeflow-cli release (default: latest)
+  --skip-checksum    Skip SHA-256 verification of the download (not recommended)
 `);
 }
 
@@ -114,6 +117,13 @@ function httpsGet(url, opts = {}) {
     });
     req.on('error', reject);
   });
+}
+
+async function getText(url) {
+  const res = await httpsGet(url);
+  const chunks = [];
+  for await (const ch of res) chunks.push(ch);
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 async function getJSON(url) {
@@ -168,6 +178,68 @@ function ensureTmux(isWindows) {
   else ok('tmux installed');
 }
 
+// ---------------------------------------------------------------- integrity
+
+function sha256File(file) {
+  const h = crypto.createHash('sha256');
+  h.update(fs.readFileSync(file));
+  return h.digest('hex');
+}
+
+// parseChecksums maps filename -> sha256 from a goreleaser checksums.txt, whose
+// lines are "<hex>  <filename>".
+function parseChecksums(text) {
+  const out = {};
+  for (const line of text.split('\n')) {
+    const m = line.trim().match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
+    if (m) out[m[2].trim()] = m[1].toLowerCase();
+  }
+  return out;
+}
+
+// verifyChecksum checks the downloaded archive against the release's published
+// checksums.txt. This runs BEFORE extraction, because the extracted binary is
+// chmod 0755'd and then executed — an unverified artifact here is arbitrary code
+// execution. Fails closed: any doubt removes the download and exits non-zero.
+//
+// The release workflow already holds itself to this bar, verifying the Go
+// toolchain tarball against go.dev's published SHA256 before extracting it
+// (.github/workflows/release.yml). This is the client-side counterpart.
+async function verifyChecksum(archivePath, asset, tag, skip) {
+  if (skip) {
+    warn(`skipping checksum verification for ${asset} (--skip-checksum)`);
+    return;
+  }
+  step('Verifying checksum');
+
+  let sums;
+  try {
+    sums = parseChecksums(await getText(`https://github.com/${REPO}/releases/download/${tag}/checksums.txt`));
+  } catch (e) {
+    fs.rmSync(archivePath, { force: true });
+    fail(`could not fetch checksums.txt for ${tag}: ${e.message}\n` +
+      `       Refusing to run an unverified binary. Re-run with --skip-checksum to override.`);
+  }
+
+  const want = sums[asset];
+  if (!want) {
+    fs.rmSync(archivePath, { force: true });
+    fail(`${asset} is not listed in checksums.txt for ${tag}\n` +
+      `       Refusing to run an unverified binary. Re-run with --skip-checksum to override.`);
+  }
+
+  const got = sha256File(archivePath);
+  if (got !== want) {
+    fs.rmSync(archivePath, { force: true });
+    fail(`checksum mismatch for ${asset} — the download does not match the published release.\n` +
+      `       expected ${want}\n` +
+      `       actual   ${got}\n` +
+      `       The archive has been deleted. Do not run it. This can mean a corrupted\n` +
+      `       download or a tampered artifact; retry, and if it repeats, report it.`);
+  }
+  ok(`sha256 ${got.slice(0, 16)}… matches checksums.txt`);
+}
+
 // ---------------------------------------------------------------- binary
 
 // psLiteral single-quotes a path for PowerShell. Single-quoted PowerShell
@@ -201,7 +273,7 @@ function extractArchive(archivePath, destDir, isWindows) {
   fail(`could not extract ${asset}: ${tar.error ? tar.error.message : `tar exited ${tar.status}`}`);
 }
 
-async function installBinary({ osName, goArch, isWindows }, version) {
+async function installBinary({ osName, goArch, isWindows }, version, skipChecksum) {
   step('Resolving vibeflow-cli release');
   let tag = version;
   if (!tag) {
@@ -229,6 +301,7 @@ async function installBinary({ osName, goArch, isWindows }, version) {
 
   step(`Downloading ${asset}`);
   await downloadTo(url, archivePath);
+  await verifyChecksum(archivePath, asset, tag, skipChecksum);
   extractArchive(archivePath, tmpDir, isWindows);
 
   const extracted = path.join(tmpDir, binName);
@@ -253,7 +326,7 @@ async function main() {
   console.log(`${c.bold}VibeFlow setup${c.reset}\n`);
   const plat = detectPlatform();
 
-  const binPath = await installBinary(plat, args.version);
+  const binPath = await installBinary(plat, args.version, args.skipChecksum);
   ensureTmux(plat.isWindows);
 
   step('Configuring MCP for your agents (vibeflow bootstrap)');
