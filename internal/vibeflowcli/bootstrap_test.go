@@ -458,6 +458,59 @@ func TestAgentsFlagUsage_ListsEverySupportedAgent(t *testing.T) {
 	}
 }
 
+// TestBootstrapHelp_NoStaleAgentListAnywhere asserts against the FULL rendered
+// help, not just the generated flag string.
+//
+// The earlier version of this test inspected only agentsFlagUsage() and so
+// passed while `--help` was visibly printing two contradictory agent lists: the
+// derived flag line said six, and the hand-written Long description two lines
+// above still said five with no Kiro. A guard that cannot see the defect it
+// guards is worse than no guard, because it reads as coverage. QA caught this
+// and reopened #4334 for it.
+func TestBootstrapHelp_NoStaleAgentListAnywhere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"bootstrap", bootstrapCmd()},
+		{"uninstall", uninstallCmd()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.cmd.SetOut(&buf)
+			tc.cmd.SetErr(&buf)
+			if err := tc.cmd.Help(); err != nil {
+				t.Fatalf("render help: %v", err)
+			}
+			help := buf.String()
+
+			// Every key must be discoverable from --help alone.
+			for _, a := range bootstrapAgents() {
+				if !strings.Contains(help, a.key) {
+					t.Errorf("%s --help never mentions agent key %q", tc.name, a.key)
+				}
+			}
+
+			// If the help enumerates agents by LABEL (prose), the list must be
+			// complete. Partial label lists are exactly the #4334 defect.
+			labels := agentLabels(bootstrapAgents())
+			var present, missing []string
+			for _, l := range labels {
+				if strings.Contains(help, l) {
+					present = append(present, l)
+				} else {
+					missing = append(missing, l)
+				}
+			}
+			if len(present) > 0 && len(missing) > 0 {
+				t.Errorf("%s --help lists some agents by label but not others; missing %v.\n"+
+					"Derive the prose from agentLabels(bootstrapAgents()) instead of hardcoding.\n---\n%s",
+					tc.name, missing, help)
+			}
+		})
+	}
+}
+
 func TestJSONHTTPEntry_TransportAndTimeout(t *testing.T) {
 	cli := jsonHTTPEntry("http", false)("https://u", "")
 	if cli["type"] != "http" {
