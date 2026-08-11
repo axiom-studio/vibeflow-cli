@@ -103,6 +103,8 @@ jobs:
       # Network-dependent, so a fetch failure is a NOTICE, not an error: a GitHub
       # outage must not red-flag unrelated PRs. Only a real mismatch fails.
       - name: Verify the pinned key against the published release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           key_set="$(node -e 'const {RELEASE_SIGNING_PUBLIC_KEY:k}=require("./npx/index.js"); process.stdout.write(k?"1":"")')"
           floor="$(node -e 'const {SIGNED_FROM_TAG:f}=require("./npx/index.js"); process.stdout.write(f||"")')"
@@ -111,7 +113,22 @@ jobs:
             echo "::notice::no signing key pinned yet — nothing to verify (see npx/SIGNING.md)"
             exit 0
           fi
-          echo "pinned key present; floor=${floor:-<unset>}"
+
+          # Gap 2 (issue #4397): a pinned key with no floor skips BOTH guards below,
+          # while the installer does the opposite — signatureRequiredFor() makes a
+          # missing signature fatal for every network-resolved tag once a key is
+          # pinned, floor or not. So an unsigned release would break every default
+          # install while this step exits 0. The constants are documented as
+          # "set them together"; this enforces it. Local check, no network, so
+          # failing closed here reintroduces no outage sensitivity.
+          if [ -z "$floor" ]; then
+            echo "::error::RELEASE_SIGNING_PUBLIC_KEY is pinned but SIGNED_FROM_TAG is empty." \
+                 "signatureRequiredFor() makes a missing signature fatal for every network-resolved" \
+                 "tag once a key is pinned, so an unsigned release would break every default install" \
+                 "while this guard skips. Set both constants together." >&2
+            exit 1
+          fi
+          echo "pinned key present; floor=$floor"
 
           fetch() { curl -fsSL --max-time 30 -o "$2" "$1"; }
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download"
@@ -138,11 +155,21 @@ jobs:
 
           # 2) Key guard: verify the pinned key against the release users get by
           #    default (latest), falling back to the floor tag.
-          tag="$(curl -fsSL --max-time 30 -H 'Accept: application/vnd.github+json' \
+          # Gap 1 (issue #4397): authenticate this call. Unauthenticated is 60/hr per
+          # IP, shared across GitHub's runner pool — this repo already pins
+          # VF_PIN on the smoke jobs to dodge exactly that, and I reintroduced the
+          # dependency here. GITHUB_TOKEN raises it to 1,000/hr for the repo.
+          tag="$(curl -fsSL --max-time 30 \
+                 -H 'Accept: application/vnd.github+json' \
+                 -H "Authorization: Bearer $GITHUB_TOKEN" \
                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
                  | jq -r '.tag_name // empty')"
           if [ -z "$tag" ]; then
-            echo "::notice::could not resolve the latest release (rate limit or outage); falling back to $floor"
+            # WARNING, not notice: the guard is about to cover LESS than it claims,
+            # and a notice is not surfaced in the PR checks UI. A guard that quietly
+            # covers less than advertised is worse than one that is loudly skipped.
+            echo "::warning::could not resolve the latest release — the CURRENT release was NOT checked." \
+                 "Falling back to the floor tag $floor, which may not be what users install."
             tag="$floor"
           fi
           [ -n "$tag" ] || { echo "::notice::no tag to verify against"; exit 0; }
