@@ -24,8 +24,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
-const FLOOR = 'v1.0.24';
-const ASSET_TAG = 'v1.0.24';
+// Synthetic and deliberately unlike any real tag, so the fixture can never
+// collide with whatever is pinned in source (that collision made the
+// 'did the substitution apply' check misfire).
+const FLOOR = 'v9.9.0';
+const ASSET_TAG = 'v9.9.0';
 
 function makeFixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'signed-rel-'));
@@ -48,12 +51,31 @@ function makeFixture() {
   const goodSig = crypto.sign(null, Buffer.from(checksums, 'utf8'), privateKey);
 
   // Installer copy with the throwaway key and floor pinned in.
+  //
+  // Match the constants by SHAPE, not by their empty value. The original version
+  // replaced the literal `= '';`, which stopped matching the moment a real key was
+  // pinned in source — the fixture then silently kept the production key and the
+  // throwaway signature could not verify. The guard was no better: it asserted
+  // 'BEGIN PUBLIC KEY' was present, which the real key satisfies, so it could not
+  // detect its own failure. Assert the substitution APPLIED and that the value is
+  // the fixture's own.
   let src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8');
-  src = src.replace("const RELEASE_SIGNING_PUBLIC_KEY = '';",
-    'const RELEASE_SIGNING_PUBLIC_KEY = `' + pubPem + '`;');
-  src = src.replace("const SIGNED_FROM_TAG = '';", `const SIGNED_FROM_TAG = '${FLOOR}';`);
-  assert.ok(src.includes('BEGIN PUBLIC KEY'), 'fixture must pin a key');
-  assert.ok(src.includes(`SIGNED_FROM_TAG = '${FLOOR}'`), 'fixture must pin a floor');
+
+  const KEY_RE = /const RELEASE_SIGNING_PUBLIC_KEY = (?:''|`[\s\S]*?`);/;
+  const FLOOR_RE = /const SIGNED_FROM_TAG = '[^']*';/;
+  assert.ok(KEY_RE.test(src), 'key constant not found — has it been renamed?');
+  assert.ok(FLOOR_RE.test(src), 'floor constant not found — has it been renamed?');
+  assert.strictEqual(src.match(/const RELEASE_SIGNING_PUBLIC_KEY =/g).length, 1,
+    'exactly one key constant expected');
+
+  src = src.replace(KEY_RE, 'const RELEASE_SIGNING_PUBLIC_KEY = `' + pubPem + '`;');
+  src = src.replace(FLOOR_RE, `const SIGNED_FROM_TAG = '${FLOOR}';`);
+
+  // Assert the RESULT, not that the text changed: when the fixture's value happens
+  // to equal what source already had, "changed" is false while the substitution
+  // was in fact fine. Checking the outcome is correct either way.
+  assert.ok(src.includes(pubPem), 'the FIXTURE key must be pinned, not whatever source carries');
+  assert.ok(src.includes(`SIGNED_FROM_TAG = '${FLOOR}'`), 'fixture must pin its own floor');
   const installer = path.join(dir, 'installer.js');
   fs.writeFileSync(installer, src);
 
