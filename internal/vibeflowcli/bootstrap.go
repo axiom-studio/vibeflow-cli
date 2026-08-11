@@ -640,6 +640,19 @@ func agentsFlagUsage(verb string) string {
 		verb, strings.Join(agentKeys(bootstrapAgents()), ","))
 }
 
+// agentLabels returns the human-facing labels in registry order, for prose that
+// lists the supported agents. Same reason as agentsFlagUsage: #4334 was filed
+// because a hardcoded list went stale, and the first fix only derived the flag
+// help — the Long description two lines above it still enumerated five agents,
+// so `--help` printed two contradictory lists at once.
+func agentLabels(agents []bootstrapAgent) []string {
+	labels := make([]string, len(agents))
+	for i, a := range agents {
+		labels[i] = a.label
+	}
+	return labels
+}
+
 func agentKeys(agents []bootstrapAgent) []string {
 	keys := make([]string, len(agents))
 	for i, a := range agents {
@@ -721,14 +734,13 @@ func bootstrapCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bootstrap",
 		Short: "Configure the VibeFlow MCP server for your coding agents",
-		Long: `Configure the VibeFlow MCP server for your coding agents and write the
+		Long: fmt.Sprintf(`Configure the VibeFlow MCP server for your coding agents and write the
 initial vibeflow-cli config.
 
-You will be prompted for which agents to configure (Codex, Gemini, Cursor,
-Claude CLI, Claude Desktop) unless --agents or --all is supplied. Each agent's
-config references the token via the MCP_TOKEN environment variable, which
-vibeflow-cli injects at launch; the --api-key value is stored in the
-vibeflow-cli config.`,
+You will be prompted for which agents to configure (%s) unless --agents or --all
+is supplied. Each agent's config references the token via the MCP_TOKEN
+environment variable, which vibeflow-cli injects at launch; the --api-key value
+is stored in the vibeflow-cli config.`, strings.Join(agentLabels(bootstrapAgents()), ", ")),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			apiKey = strings.TrimSpace(apiKey)
 			if apiKey == "" {
