@@ -90,6 +90,89 @@ jobs:
           # production key. (issue #4389.)
           node --test npx/index.test.js npx/signed-release.test.js
 
+      # ACTIVATION INVARIANT (issue #4395): the pinned key must verify the
+      # signature actually published on the releases users install.
+      #
+      # Everything else in CI is blind to this. With an unrelated key pinned:
+      # both offline suites pass 37/37, and the windows/macos smoke jobs exit 0
+      # because they install VF_PIN=v1.0.23 — pre-floor and operator-pinned, so a
+      # missing .sig only warns. Meanwhile a real `--version v1.0.24` install
+      # fails closed with SIGNATURE VERIFICATION FAILED and installs nothing.
+      # One wrong paste takes the installer to a 100% failure rate invisibly.
+      #
+      # Network-dependent, so a fetch failure is a NOTICE, not an error: a GitHub
+      # outage must not red-flag unrelated PRs. Only a real mismatch fails.
+      - name: Verify the pinned key against the published release
+        run: |
+          key_set="$(node -e 'const {RELEASE_SIGNING_PUBLIC_KEY:k}=require("./npx/index.js"); process.stdout.write(k?"1":"")')"
+          floor="$(node -e 'const {SIGNED_FROM_TAG:f}=require("./npx/index.js"); process.stdout.write(f||"")')"
+
+          if [ -z "$key_set" ]; then
+            echo "::notice::no signing key pinned yet — nothing to verify (see npx/SIGNING.md)"
+            exit 0
+          fi
+          echo "pinned key present; floor=${floor:-<unset>}"
+
+          fetch() { curl -fsSL --max-time 30 -o "$2" "$1"; }
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download"
+
+          # 1) Floor guard: if a floor is set, that release MUST carry a .sig.
+          #    Pointing the floor at an unsigned tag makes every install of it
+          #    refuse — the trap #4394 warned about, which was briefly live.
+          if [ -n "$floor" ]; then
+            if fetch "$base/$floor/checksums.txt.sig" floor.sig; then
+              echo "  $floor publishes checksums.txt.sig ($(wc -c < floor.sig) bytes)"
+            elif fetch "$base/$floor/checksums.txt" floor.sums; then
+              # checksums.txt IS reachable but the .sig is not, so the signature is
+              # genuinely absent rather than unreachable. That is a real defect.
+              echo "::error::SIGNED_FROM_TAG=$floor but that release publishes no checksums.txt.sig." \
+                   "Every install of it will be refused. Either sign that release or correct the floor." >&2
+              exit 1
+            else
+              # Neither file is reachable: outage, rate limit, or a repo we cannot
+              # see. Not evidence of a missing signature — skip rather than
+              # red-flag an unrelated PR. (issue #4395.)
+              echo "::notice::cannot reach $floor's release assets at all (outage/rate limit?) — skipping the floor check"
+            fi
+          fi
+
+          # 2) Key guard: verify the pinned key against the release users get by
+          #    default (latest), falling back to the floor tag.
+          tag="$(curl -fsSL --max-time 30 -H 'Accept: application/vnd.github+json' \
+                 "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
+                 | jq -r '.tag_name // empty')"
+          if [ -z "$tag" ]; then
+            echo "::notice::could not resolve the latest release (rate limit or outage); falling back to $floor"
+            tag="$floor"
+          fi
+          [ -n "$tag" ] || { echo "::notice::no tag to verify against"; exit 0; }
+
+          if ! fetch "$base/$tag/checksums.txt" sums || ! fetch "$base/$tag/checksums.txt.sig" sums.sig; then
+            if [ -n "$floor" ] && [ "$tag" != "$floor" ]; then
+              echo "::error::$tag has no checksums.txt/.sig, but it is in the signed era (floor $floor)." \
+                   "Installs of it will be refused." >&2
+              exit 1
+            fi
+            echo "::notice::could not fetch $tag's checksums/signature — treating as a skip, not a failure"
+            exit 0
+          fi
+
+          export TAG="$tag"
+          node -e '
+            const crypto = require("crypto"), fs = require("fs");
+            const { RELEASE_SIGNING_PUBLIC_KEY: k } = require("./npx/index.js");
+            const ok = crypto.verify(null, fs.readFileSync("sums"),
+                                     crypto.createPublicKey(k), fs.readFileSync("sums.sig"));
+            if (!ok) {
+              console.error("::error::the PINNED public key does not verify " + process.env.TAG +
+                "'"'"'s published signature. Every install would fail closed with " +
+                "SIGNATURE VERIFICATION FAILED. The pinned key and the release signing key disagree — " +
+                "re-pin RELEASE_SIGNING_PUBLIC_KEY from the key that signed this release.");
+              process.exit(1);
+            }
+            console.log("pinned key verifies " + process.env.TAG + "'"'"'s published signature");
+          '
+
       # NOTE on scope (issue #4393): these jobs run the installer, which DOWNLOADS
       # the published release — so they cannot assert behaviour introduced in an
       # unreleased commit. Building from source here was tried and removed: Go is
