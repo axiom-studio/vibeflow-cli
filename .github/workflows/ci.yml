@@ -134,7 +134,19 @@ jobs:
           # Resolves the latest release via the unauthenticated GitHub API (60
           # req/hr per IP). If this ever flakes on a shared runner IP, pin the
           # tag with --version <tag>, which skips the API call entirely.
-          node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli
+          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli)"
+          echo "$out"
+
+          # tmux has no Windows port, so the step must WARN and continue, not
+          # fail. Checking only the exit code would let a regression that made
+          # ensureTmux fatal slip through. (issue #4368.)
+          echo "$out" | grep -qi 'tmux' || {
+            echo "::error::installer output never mentions tmux; the warn-not-fail path is unverified" >&2
+            exit 1
+          }
+          echo "$out" | grep -qi 'WSL' || {
+            echo "::error::Windows tmux notice should point at WSL" >&2; exit 1
+          }
 
       - name: Assert the installed binary runs on Windows
         run: |
@@ -200,3 +212,78 @@ jobs:
           }
           "$bin" version
           echo "Expand-Archive fallback verified end-to-end."
+
+  # macOS leg (issue #4368). macOS was only ever stub-verified, and it is the
+  # only place resolveNpxCommand's premise can actually be exercised: Claude
+  # Desktop is a GUI app that inherits the launchd environment rather than the
+  # shell PATH, which is why #4336 pins an absolute npx path. On a real Mac,
+  # `command` must come out absolute — that assertion is impossible to make
+  # anywhere else.
+  #
+  # Shares the POSIX code path with Linux, so this is a platform check rather
+  # than a second full behavioural suite. Action-free; no secrets.
+  macos-installer-smoke:
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c http.extraHeader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" \
+            fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q --detach FETCH_HEAD
+
+      - name: Check prerequisites
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::node is not on PATH on macos-latest" >&2; exit 1
+          }
+          node --version
+          # bsdtar is the macOS tar; confirm it handles our .tar.gz with -xzf,
+          # the flag the POSIX branch uses since #4338.
+          tar --version | head -1
+
+      - name: Run the installer end-to-end
+        run: |
+          node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli
+
+      - name: Assert the darwin binary runs
+        run: |
+          bin="$HOME/.vibeflow/bin/vibeflow"
+          [ -x "$bin" ] || { echo "::error::$bin missing or not executable" >&2; exit 1; }
+          file -b "$bin"
+          "$bin" version
+
+      - name: Assert the Desktop config resolves npx absolutely
+        run: |
+          cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+          [ -f "$cfg" ] || { echo "::error::$cfg was not written" >&2; exit 1; }
+          cat "$cfg"
+
+          cmd="$(node -e "
+            const c=require('$cfg');
+            process.stdout.write(c.mcpServers.vibeflow.command);
+          ")"
+          echo "command = $cmd"
+          case "$cmd" in
+            /*) : ;;  # absolute — the #4336 contract on the platform that needs it
+            npx) echo "::error::command is bare 'npx'; on a GUI-launched Desktop this may not resolve (#4336)" >&2; exit 1 ;;
+            *)  echo "::error::command is neither absolute nor the documented 'npx' fallback: $cmd" >&2; exit 1 ;;
+          esac
+
+          # The #4333 invariant, asserted on macOS too: token in env, never argv.
+          node -e "
+            const c=require('$cfg').mcpServers.vibeflow;
+            const key='smoke-test-not-a-real-key';
+            if (c.args.some(a => String(a).includes(key))) {
+              console.error('::error::raw token leaked into argv'); process.exit(1);
+            }
+            if (c.env.MCP_TOKEN !== key) {
+              console.error('::error::env.MCP_TOKEN missing'); process.exit(1);
+            }
+          "
