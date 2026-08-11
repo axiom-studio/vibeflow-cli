@@ -331,10 +331,17 @@ function isValidReleaseTag(tag) {
 // over the network. The pre-floor exception applies only when the OPERATOR pinned
 // an old tag with --version — a decision made locally, never handed over the
 // wire. (issue #4391.)
-function signatureRequiredFor(tag, tagWasPinnedByOperator) {
-  if (!RELEASE_SIGNING_PUBLIC_KEY) return false;
+// `key` and `floor` default to the pinned constants but are injectable so tests
+// can drive THIS function across every branch. They previously could not: the
+// constants are '' in source, so a test either hit the empty-key early return or
+// re-implemented the logic in its own body and asserted against itself. Mutating
+// `>= 0` to `> 0`, or replacing this body with `return false`, both left the
+// suite green. (issue #4387, QA reopen.)
+function signatureRequiredFor(tag, tagWasPinnedByOperator,
+  key = RELEASE_SIGNING_PUBLIC_KEY, floor = SIGNED_FROM_TAG) {
+  if (!key) return false;
   if (!tagWasPinnedByOperator) return true;
-  return !SIGNED_FROM_TAG || compareTags(tag, SIGNED_FROM_TAG) >= 0;
+  return !floor || compareTags(tag, floor) >= 0;
 }
 
 async function verifySignature(checksumsText, tag) {
