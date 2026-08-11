@@ -31,6 +31,19 @@ const { spawnSync, execSync } = require('child_process');
 const REPO = 'axiom-studio/vibeflow-cli';
 const DEFAULT_BASE_URL = 'https://cloud.axiomstudio.ai';
 
+// RELEASE_SIGNING_PUBLIC_KEY is the Ed25519 public key that release
+// `checksums.txt` files are signed with, pinned here on purpose: a key fetched at
+// runtime would come from the same origin as the artifact and inherit exactly the
+// weakness signing exists to remove (issue #4349, finding #403).
+//
+// EMPTY UNTIL A KEY IS GENERATED. While empty, the installer verifies checksums
+// as before and says plainly that authenticity is unverified — it does not
+// pretend to check a signature. See npx/SIGNING.md for the one-time setup.
+//
+// Rotation is cheap for `npx` users because npx always fetches the latest
+// package, so a new pinned key reaches them on their next run.
+const RELEASE_SIGNING_PUBLIC_KEY = '';
+
 // ---------------------------------------------------------------- output helpers
 const c = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
@@ -57,6 +70,7 @@ function parseArgs(argv) {
       case '--all': out.all = true; break;
       case '--version': out.version = val(); break; // pin a vibeflow-cli release
       case '--skip-checksum': out.skipChecksum = true; break;
+      case '--require-signature': out.requireSignature = true; break;
       case '-h': case '--help': out.help = true; break;
       default:
         if (a.startsWith('--api-key=')) out.apiKey = a.slice('--api-key='.length);
@@ -80,6 +94,7 @@ Options:
   --all              Configure all supported agents (default)
   --version <tag>    Pin a specific vibeflow-cli release (default: latest)
   --skip-checksum    Skip SHA-256 verification of the download (not recommended)
+  --require-signature  Fail unless the release checksums carry a valid signature
 `);
 }
 
@@ -252,7 +267,41 @@ function parseChecksums(text) {
 // corruption and tampering with the archive alone. Closing the rest needs a
 // signature over checksums.txt verified against a key PINNED here — never
 // fetched, since a fetched key inherits the same weakness.
-async function verifyChecksum(archivePath, asset, tag, skip) {
+// verifySignature checks an Ed25519 signature over the raw checksums.txt bytes
+// using the pinned public key. Returns:
+//   'verified'    — signature present and valid
+//   'unavailable' — no pinned key configured, or no .sig published for this tag
+//   'invalid'     — signature present and WRONG (caller must fail closed)
+//
+// Raw Ed25519 rather than the minisign container format: Node's built-in crypto
+// verifies it in a few lines with no parsing of comment lines, key IDs or
+// prehash-mode bytes, and no dependency on the user's machine. `openssl pkeyutl
+// -sign -rawin` on the release runner produces exactly this.
+async function verifySignature(checksumsText, tag) {
+  if (!RELEASE_SIGNING_PUBLIC_KEY) return 'unavailable';
+
+  let sig;
+  try {
+    const res = await httpsGet(`https://github.com/${REPO}/releases/download/${tag}/checksums.txt.sig`);
+    const chunks = [];
+    for await (const ch of res) chunks.push(ch);
+    sig = Buffer.concat(chunks);
+  } catch {
+    // No signature asset — releases published before signing was introduced.
+    return 'unavailable';
+  }
+
+  try {
+    const pub = crypto.createPublicKey(RELEASE_SIGNING_PUBLIC_KEY);
+    return crypto.verify(null, Buffer.from(checksumsText, 'utf8'), pub, sig) ? 'verified' : 'invalid';
+  } catch {
+    // A malformed signature or key is indistinguishable from a bad one here, and
+    // must not be treated as merely "unavailable".
+    return 'invalid';
+  }
+}
+
+async function verifyChecksum(archivePath, asset, tag, skip, requireSignature) {
   if (skip) {
     // This flag disables the only integrity control standing between a network
     // download and `chmod 0755` + execution, so state the consequence rather
@@ -263,14 +312,42 @@ async function verifyChecksum(archivePath, asset, tag, skip) {
   }
   step('Verifying checksum');
 
-  let sums;
+  let checksumsText;
   try {
-    sums = parseChecksums(await getText(`https://github.com/${REPO}/releases/download/${tag}/checksums.txt`));
+    checksumsText = await getText(`https://github.com/${REPO}/releases/download/${tag}/checksums.txt`);
   } catch (e) {
     fs.rmSync(archivePath, { force: true });
     fail(`could not fetch checksums.txt for ${tag}: ${e.message}\n` +
       `       Refusing to run an unverified binary. Re-run with --skip-checksum to override.`);
   }
+
+  // Authenticate checksums.txt BEFORE trusting any hash inside it. Without this,
+  // the hashes only prove the archive matches what the same server described.
+  const sigState = await verifySignature(checksumsText, tag);
+  if (sigState === 'invalid') {
+    // Never negotiable: a present-but-wrong signature means someone altered
+    // either the checksums or the signature. Fail closed regardless of flags.
+    fs.rmSync(archivePath, { force: true });
+    fail(`SIGNATURE VERIFICATION FAILED for ${tag}'s checksums.txt.\n` +
+      `       The signature does not match the pinned release key, so the checksum\n` +
+      `       list cannot be trusted and neither can the download.\n` +
+      `       The archive has been deleted. Do not run it. Report this.`);
+  }
+  if (sigState === 'unavailable') {
+    const why = RELEASE_SIGNING_PUBLIC_KEY
+      ? `${tag} publishes no checksums.txt.sig (released before signing was introduced)`
+      : 'no release signing key is pinned in this installer yet';
+    if (requireSignature) {
+      fs.rmSync(archivePath, { force: true });
+      fail(`--require-signature was given but ${why}.\n` +
+        `       Refusing to continue on checksum alone.`);
+    }
+    warn(`authenticity NOT verified: ${why}.`);
+    warn('Continuing with checksum only — that detects corruption and tampering');
+    warn('with the archive, but does not prove it came from us.');
+  }
+
+  const sums = parseChecksums(checksumsText);
 
   const want = sums[asset];
   if (!want) {
@@ -288,7 +365,11 @@ async function verifyChecksum(archivePath, asset, tag, skip) {
       `       The archive has been deleted. Do not run it. This can mean a corrupted\n` +
       `       download or a tampered artifact; retry, and if it repeats, report it.`);
   }
-  ok(`sha256 ${got.slice(0, 16)}… matches checksums.txt`);
+  if (sigState === 'verified') {
+    ok(`sha256 ${got.slice(0, 16)}… matches checksums.txt (signature verified)`);
+  } else {
+    ok(`sha256 ${got.slice(0, 16)}… matches checksums.txt`);
+  }
 }
 
 // ---------------------------------------------------------------- binary
@@ -372,7 +453,7 @@ function extractArchive(archivePath, destDir, isWindows) {
   fail(`could not extract ${asset}: ${tar.error ? tar.error.message : `tar exited ${tar.status}`}`);
 }
 
-async function installBinary({ osName, goArch, isWindows }, version, skipChecksum) {
+async function installBinary({ osName, goArch, isWindows }, version, skipChecksum, requireSignature) {
   step('Resolving vibeflow-cli release');
   let tag = version;
   if (!tag) {
@@ -400,7 +481,7 @@ async function installBinary({ osName, goArch, isWindows }, version, skipChecksu
 
   step(`Downloading ${asset}`);
   await downloadTo(url, archivePath);
-  await verifyChecksum(archivePath, asset, tag, skipChecksum);
+  await verifyChecksum(archivePath, asset, tag, skipChecksum, requireSignature);
   extractArchive(archivePath, tmpDir, isWindows);
 
   const extracted = path.join(tmpDir, binName);
@@ -425,7 +506,7 @@ async function main() {
   console.log(`${c.bold}VibeFlow setup${c.reset}\n`);
   const plat = detectPlatform();
 
-  const binPath = await installBinary(plat, args.version, args.skipChecksum);
+  const binPath = await installBinary(plat, args.version, args.skipChecksum, args.requireSignature);
   const haveTmux = ensureTmux(plat.isWindows);
 
   step('Configuring MCP for your agents (vibeflow bootstrap)');
@@ -460,5 +541,6 @@ if (require.main === module) {
 // test file is not published.
 module.exports = {
   systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor,
-  pickTmuxInstallCmd, tmuxMissingWarning,
+  pickTmuxInstallCmd, tmuxMissingWarning, verifySignature,
+  RELEASE_SIGNING_PUBLIC_KEY,
 };

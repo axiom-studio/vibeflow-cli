@@ -13,14 +13,17 @@ It will:
    `checksums.txt`. A mismatch deletes the download and aborts before the binary
    is executed in step 3.
 
-   **Scope of that check:** `checksums.txt` is fetched from the same origin, over
-   the same channel, as the archive it describes. So it detects **corruption and
-   tampering with the artifact alone** — it does **not** authenticate the
-   publisher. Anyone able to replace the archive in transit (for example a
-   TLS-intercepting corporate proxy whose CA your machine already trusts) or to
-   overwrite the release assets could replace both files together. Signature
-   verification against a pinned public key is tracked separately and is not in
-   place yet.
+   When the release also publishes `checksums.txt.sig`, its **Ed25519 signature**
+   is verified against a public key pinned in `index.js` — that is what proves the
+   checksum list came from us, not merely from the same server as the archive.
+   Verified with Node's built-in `crypto`, so there is nothing extra to install.
+
+   **Current state:** signing is wired up but **inert until a release key is
+   generated** (see [SIGNING.md](SIGNING.md)). Until then, and for any release
+   published before signing existed, the installer verifies checksums and says
+   plainly that authenticity is unverified rather than implying a check it is not
+   performing. A **bad** signature always aborts, and cannot be overridden.
+   Pass `--require-signature` to refuse anything unsigned.
 2. Install **tmux** if it is missing (apt / dnf / yum / apk / brew). Skipped on
    Windows. If tmux is still missing afterwards the installer says so explicitly,
    because `vibeflow launch` cannot work without it.
@@ -47,6 +50,7 @@ It will:
 | `--all` | on | Configure all supported agents |
 | `--version <tag>` | latest | Pin a specific `vibeflow-cli` release |
 | `--skip-checksum` | off | Skip SHA-256 verification of the download (not recommended) |
+| `--require-signature` | off | Refuse to install unless the release checksums carry a valid signature |
 
 ## Verify
 
