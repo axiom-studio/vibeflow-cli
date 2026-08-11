@@ -73,3 +73,281 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Installer unit tests
+        run: |
+          # Pure-helper tests for npx/index.js via the built-in node:test runner
+          # (no dependencies to install). Name the file explicitly: passing the
+          # directory makes the runner treat index.js itself as a test and
+          # execute the installer. Node is preinstalled on ubuntu-latest.
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::node is not on PATH; the installer unit tests need it" >&2
+            exit 1
+          }
+          # Both suites, named explicitly: the directory form matches index.js
+          # itself and would execute the installer. signed-release.test.js spawns
+          # child processes against a per-run throwaway keypair — no network, no
+          # production key. (issue #4389.)
+          node --test npx/index.test.js npx/signed-release.test.js
+
+      # NOTE on scope (issue #4393): these jobs run the installer, which DOWNLOADS
+      # the published release — so they cannot assert behaviour introduced in an
+      # unreleased commit. Building from source here was tried and removed: Go is
+      # not on PATH on macos-latest, and more importantly the assertion it enabled
+      # was near-tautological. #4336's premise is that a GUI-launched app inherits
+      # the launchd PATH; CI runs in a shell with a full PATH, so it can never
+      # reproduce that. exec.LookPath succeeding in a shell proves almost nothing.
+      #
+      # bootstrap.go behaviour is therefore covered by the Go unit tests on the
+      # ubuntu leg, which are mutation-tested:
+      #   TestClaudeDesktopEntry_CommandIsAbsoluteOrBareNpx   (#4336 contract)
+      #   TestSetupInitialConfig_IdenticalRerunIsUnchanged    (#4342)
+      #   TestClaudeDesktopEntry_RawTokenNeverInArgv          (#4333)
+      # What these smoke jobs uniquely provide is the real OS: a real download,
+      # real extraction (including the forced Expand-Archive fallback), a PE/Mach-O
+      # binary that actually executes, and config landing at the real OS path.
+
+  # Real-Windows smoke test for the npx installer (issue #4339). Everything else
+  # about the Windows path was only ever verified by simulating
+  # process.platform='win32' on Linux, which cannot exercise the final
+  # `vibeflow.exe bootstrap` spawn, %APPDATA% resolution, or the genuine
+  # Expand-Archive fallback. This job closes that gap.
+  #
+  # No secrets: `bootstrap` only writes config files and never contacts the
+  # server, so a placeholder key is sufficient and nothing sensitive enters CI.
+  #
+  # Action-free per the org Actions policy. Node is preinstalled on the
+  # windows-latest image; the job asserts that rather than assuming it. bash is
+  # available via Git for Windows.
+  windows-installer-smoke:
+    runs-on: windows-latest
+    # Pin the release both smoke jobs install. --version skips the
+    # releases/latest API call entirely, which (a) makes these jobs deterministic
+    # and (b) removes the unauthenticated 60-req/hr-per-IP rate limit as a failure
+    # mode. That limit is shared across GitHub's runner pool, so it is not
+    # hypothetical — it is the likeliest cause of a silent exit 1 here. I noted
+    # this mitigation when adding the jobs and did not take it; that was wrong.
+    env:
+      VF_PIN: v1.0.23
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c http.extraHeader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" \
+            fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q --detach FETCH_HEAD
+
+      - name: Check prerequisites
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::node is not on PATH on windows-latest; the smoke test needs it" >&2
+            exit 1
+          }
+          node --version
+          # Confirm the System32 helpers the installer resolves absolutely
+          # (see systemRootBin in npx/index.js) actually exist on this image.
+          for exe in "System32/tar.exe" "System32/where.exe" \
+                     "System32/WindowsPowerShell/v1.0/powershell.exe"; do
+            p="${SYSTEMROOT:-C:/Windows}/$exe"
+            if [ ! -f "$p" ]; then echo "note: missing $p (installer has a fallback)"; fi
+          done
+
+      - name: Run the installer end-to-end
+        run: |
+          # Resolves the latest release via the unauthenticated GitHub API (60
+          # req/hr per IP). If this ever flakes on a shared runner IP, pin the
+          # tag with --version <tag>, which skips the API call entirely.
+          # 2>&1 is load-bearing: warn() writes to STDERR while step()/ok() write
+          # to stdout. Capturing stdout alone made the WSL assertion below
+          # impossible to satisfy, and made the tmux assertion vacuous — it
+          # matched "==> Checking for tmux", which step() prints on every
+          # platform before any branch is taken, so it would still have passed if
+          # ensureTmux were made fatal. That is the regression this is meant to
+          # catch. (issue #4368, QA reopen.)
+          # Capture to a FILE and always cat it. Capturing into a shell variable
+          # hides the output when the command fails: under `-e -o pipefail` the
+          # failed substitution aborts the step before `echo "$out"` runs, so a
+          # failure shows up as a bare exit code with no diagnostics. That happened.
+          log="$RUNNER_TEMP/installer.log"
+          set +e
+          node npx/index.js --api-key "smoke-test-not-a-real-key" \
+            --agents claude-desktop,claude-cli --version "$VF_PIN" > "$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          [ "$rc" -eq 0 ] || { echo "::error::installer exited $rc (output above)" >&2; exit 1; }
+          out="$(cat "$log")"
+
+          # Assert on text that ONLY the warn-not-fail branch emits — never on
+          # the step header, which is printed unconditionally.
+          echo "$out" | grep -q 'tmux is not available on Windows' || {
+            echo "::error::the warn-not-fail path did not run; ensureTmux may have become fatal" >&2
+            exit 1
+          }
+          # Match 'WSL' rather than the closing summary's exact wording: the
+          # ensureTmux notice is emitted unconditionally on Windows, whereas the
+          # closing line only prints on a fully successful run. 'WSL' appears in
+          # no other output, so this still discriminates.
+          echo "$out" | grep -q 'WSL' || {
+            echo "::error::Windows tmux notice should point at WSL" >&2; exit 1
+          }
+
+      - name: Assert the installed binary runs on Windows
+        run: |
+          bin="$USERPROFILE/.vibeflow/bin/vibeflow.exe"
+          [ -f "$bin" ] || { echo "::error::$bin was not installed" >&2; exit 1; }
+          # This is the step no simulation could cover: actually executing the
+          # PE binary.
+          "$bin" version
+
+      - name: Assert the Claude Desktop config landed under %APPDATA%
+        run: |
+          cfg="$APPDATA/Claude/claude_desktop_config.json"
+          [ -f "$cfg" ] || { echo "::error::$cfg was not written" >&2; exit 1; }
+          cat "$cfg"
+          # The token belongs in the env block and must never reach argv.
+          grep -q 'mcp-remote' "$cfg" || { echo "::error::mcp-remote bridge missing" >&2; exit 1; }
+          grep -q 'MCP_TOKEN' "$cfg" || { echo "::error::MCP_TOKEN reference missing" >&2; exit 1; }
+          if grep -q '"args"' "$cfg" && grep -A6 '"args"' "$cfg" | grep -q 'smoke-test-not-a-real-key'; then
+            echo "::error::raw token leaked into argv" >&2; exit 1
+          fi
+
+      # The plain job above never reaches Expand-Archive: windows-latest ships
+      # bsdtar as System32\tar.exe, which reads zip, so the first extractor always
+      # wins. That leaves the PowerShell fallback — the branch that carried
+      # CWE-426 (#4337) and the one a Git-Bash tar makes mainline — with zero real
+      # coverage. Force it by making System32\tar.exe unusable for this step only.
+      # (issue #4368.)
+      - name: Force the Expand-Archive fallback and re-verify
+        run: |
+          set -u
+          root="${SYSTEMROOT:-C:/Windows}"
+          tar_exe="$root/System32/tar.exe"
+          if [ ! -f "$tar_exe" ]; then
+            echo "::notice::no System32 tar.exe on this image; the fallback is already the only path"
+          fi
+
+          # Point SystemRoot at a directory that has System32\WindowsPowerShell
+          # but NO tar.exe. systemRootBin then returns null for tar and resolves
+          # powershell.exe normally, so extraction can only succeed via
+          # Expand-Archive. This avoids touching the real System32.
+          shim="$RUNNER_TEMP/shimroot"
+          rm -rf "$shim"
+          mkdir -p "$shim/System32/WindowsPowerShell/v1.0"
+          cp "$root/System32/WindowsPowerShell/v1.0/powershell.exe" \
+             "$shim/System32/WindowsPowerShell/v1.0/powershell.exe"
+          cp "$root/System32/where.exe" "$shim/System32/where.exe" 2>/dev/null || true
+
+          rm -rf "$USERPROFILE/.vibeflow/bin"
+          SystemRoot="$(cygpath -w "$shim" 2>/dev/null || echo "$shim")" \
+            node npx/index.js --api-key "smoke-test-not-a-real-key" \
+              --agents claude-desktop --version "$VF_PIN"
+
+          bin="$USERPROFILE/.vibeflow/bin/vibeflow.exe"
+          [ -f "$bin" ] || {
+            echo "::error::Expand-Archive fallback failed to produce $bin" >&2; exit 1
+          }
+          "$bin" version
+          echo "Expand-Archive fallback verified end-to-end."
+
+  # macOS leg (issue #4368). macOS was only ever stub-verified, and it is the
+  # only place resolveNpxCommand's premise can actually be exercised: Claude
+  # Desktop is a GUI app that inherits the launchd environment rather than the
+  # shell PATH, which is why #4336 pins an absolute npx path. On a real Mac,
+  # `command` must come out absolute — that assertion is impossible to make
+  # anywhere else.
+  #
+  # Shares the POSIX code path with Linux, so this is a platform check rather
+  # than a second full behavioural suite. Action-free; no secrets.
+  macos-installer-smoke:
+    runs-on: macos-latest
+    # Pin the release both smoke jobs install. --version skips the
+    # releases/latest API call entirely, which (a) makes these jobs deterministic
+    # and (b) removes the unauthenticated 60-req/hr-per-IP rate limit as a failure
+    # mode. That limit is shared across GitHub's runner pool, so it is not
+    # hypothetical — it is the likeliest cause of a silent exit 1 here. I noted
+    # this mitigation when adding the jobs and did not take it; that was wrong.
+    env:
+      VF_PIN: v1.0.23
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c http.extraHeader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" \
+            fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q --detach FETCH_HEAD
+
+      - name: Check prerequisites
+        run: |
+          command -v node >/dev/null 2>&1 || {
+            echo "::error::node is not on PATH on macos-latest" >&2; exit 1
+          }
+          node --version
+          # bsdtar is the macOS tar; confirm it handles our .tar.gz with -xzf,
+          # the flag the POSIX branch uses since #4338.
+          tar --version | head -1
+
+      - name: Run the installer end-to-end
+        run: |
+          # Output to a FILE and always cat it — see the Windows leg for why a shell
+          # variable hides failures under `-e`. Pinned --version avoids the
+          # releases/latest API and its shared-IP rate limit.
+          log="$RUNNER_TEMP/installer.log"
+          set +e
+          node npx/index.js --api-key "smoke-test-not-a-real-key" \
+            --agents claude-desktop,claude-cli --version "$VF_PIN" > "$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          [ "$rc" -eq 0 ] || { echo "::error::installer exited $rc (output above)" >&2; exit 1; }
+
+          # Do NOT assume the image ships tmux — that assumption is what broke the
+          # previous revision of this step (and, separately, the Go one). Assert the
+          # real property instead: the tmux step ran and reached a KNOWN outcome,
+          # whichever it was, rather than dying or silently doing nothing.
+          grep -qE 'tmux already installed|tmux installed|tmux is still missing|could not auto-install tmux' "$log" || {
+            echo "::error::the tmux step reached no recognised outcome — see output above" >&2
+            exit 1
+          }
+
+      - name: Assert the darwin binary runs
+        run: |
+          bin="$HOME/.vibeflow/bin/vibeflow"
+          [ -x "$bin" ] || { echo "::error::$bin missing or not executable" >&2; exit 1; }
+          file -b "$bin"
+          "$bin" version
+
+      - name: Assert the installed release wrote a Desktop config at the macOS path
+        run: |
+          # This asserts what the DOWNLOADED release does — path resolution and the
+          # token contract, both true of any version. Behaviour introduced in this
+          # PR is asserted in the next step, against a source build. (issue #4393.)
+          cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+          [ -f "$cfg" ] || { echo "::error::$cfg was not written" >&2; exit 1; }
+          cat "$cfg"
+          node -e "
+            const c=require('$cfg').mcpServers.vibeflow;
+            const key='smoke-test-not-a-real-key';
+            if (c.args.some(a => String(a).includes(key))) {
+              console.error('::error::raw token leaked into argv'); process.exit(1);
+            }
+            if (c.env.MCP_TOKEN !== key) {
+              console.error('::error::env.MCP_TOKEN missing'); process.exit(1);
+            }
+            if (!c.args.join(' ').includes('mcp-remote')) {
+              console.error('::error::mcp-remote bridge missing'); process.exit(1);
+            }
+          "
+

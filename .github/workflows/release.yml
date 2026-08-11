@@ -62,3 +62,51 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: goreleaser release --clean
+
+      # Sign checksums.txt so the npx installer can verify AUTHENTICITY, not just
+      # integrity: checksums.txt otherwise comes from the same origin as the
+      # archive it describes, so replacing both defeats the hash check
+      # (issue #4349, finding #403).
+      #
+      # Deliberately a post-release step rather than a goreleaser `signs` block:
+      # this way it is conditional in plain shell, so a release still succeeds
+      # before RELEASE_SIGNING_KEY exists. Action-free per the org policy; `gh` is
+      # preinstalled on ubuntu-latest.
+      - name: Sign checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::warning::RELEASE_SIGNING_KEY is not set — publishing this release UNSIGNED." \
+                 "The installer will verify checksums but cannot prove authenticity." \
+                 "See npx/SIGNING.md for the one-time setup."
+            exit 0
+          fi
+
+          sums="dist/checksums.txt"
+          [ -f "$sums" ] || { echo "::error::$sums not found after goreleaser" >&2; exit 1; }
+
+          # Key material goes to a 0600 file under the runner's own temp dir, and
+          # is removed on exit whether signing succeeds or fails.
+          key="$(mktemp)"
+          chmod 600 "$key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$key"
+
+          # Raw Ed25519 over the exact bytes of checksums.txt. -rawin means no
+          # prehash, which is what Node's crypto.verify(null, ...) expects.
+          openssl pkeyutl -sign -inkey "$key" -rawin -in "$sums" -out "$sums.sig" || {
+            echo "::error::signing failed — is RELEASE_SIGNING_KEY a valid Ed25519 PEM?" >&2
+            exit 1
+          }
+
+          # Self-check before publishing: verify with the derived public key so a
+          # broken signature is caught here rather than by users.
+          openssl pkey -in "$key" -pubout -out "$key.pub"
+          openssl pkeyutl -verify -pubin -inkey "$key.pub" -rawin -in "$sums" -sigfile "$sums.sig" \
+            || { echo "::error::self-verification of the new signature failed" >&2; exit 1; }
+          rm -f "$key.pub"
+
+          gh release upload "${GITHUB_REF_NAME}" "$sums.sig" --clobber
+          echo "Uploaded checksums.txt.sig ($(wc -c < "$sums.sig") bytes) for ${GITHUB_REF_NAME}."

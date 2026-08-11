@@ -19,7 +19,9 @@ package vibeflowcli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -357,6 +359,200 @@ func TestClaudeDesktopEntry_TokenInEnvBlockReferencedByName(t *testing.T) {
 	}
 }
 
+// TestClaudeDesktopEntry_RawTokenNeverInArgv locks the division of labor that
+// makes the ${MCP_TOKEN} indirection work for Claude Desktop: the raw token
+// lives ONLY in the entry's env block, and argv carries the placeholder.
+//
+// mcp-remote resolves the placeholder itself — it env-expands every --header
+// value before use (dist/chunk-65X3S4HB.js in 0.1.38, present since 0.1.0):
+//
+//	headers[key] = value.replace(/\$\{([^}]+)}/g, (m, name) => process.env[name] ?? "")
+//
+// Verified on the wire against a local server that echoes Authorization, with
+// npx spawned exactly as Claude Desktop spawns it (direct spawn, no shell, env
+// block merged): every request carried the real key, never the placeholder.
+//
+// Inlining the token into argv instead would be a security regression — argv is
+// readable by any local process via `ps`, whereas a child's environment is not.
+func TestClaudeDesktopEntry_RawTokenNeverInArgv(t *testing.T) {
+	const token = "sk-super-secret-token"
+	entry := claudeDesktopEntry("https://cloud.example/rest/v1/vibeflow/mcp", token)
+
+	args, _ := entry["args"].([]any)
+	for _, a := range args {
+		if s, _ := a.(string); strings.Contains(s, token) {
+			t.Errorf("raw token leaked into argv (readable via ps): %q", s)
+		}
+	}
+
+	// The env block is the only place the real token belongs.
+	env, _ := entry["env"].(map[string]any)
+	if env[mcpTokenEnvVar] != token {
+		t.Errorf("env.%s = %v, want the raw token", mcpTokenEnvVar, env[mcpTokenEnvVar])
+	}
+}
+
+// TestClaudeDesktopEntry_CommandIsAbsoluteOrBareNpx guards issue #4336: a GUI
+// app gets the launchd PATH, not the shell's, so a bare "npx" often cannot be
+// spawned. The entry must carry either an absolute path or exactly "npx" (the
+// documented fallback) — never something half-resolved.
+func TestClaudeDesktopEntry_CommandIsAbsoluteOrBareNpx(t *testing.T) {
+	cmd, _ := claudeDesktopEntry("https://u", "k")["command"].(string)
+	if cmd != "npx" && !filepath.IsAbs(cmd) {
+		t.Errorf("command = %q, want an absolute path or exactly \"npx\"", cmd)
+	}
+	if cmd == "npx" {
+		if p, err := exec.LookPath("npx"); err == nil {
+			t.Errorf("npx resolved to %q but the entry kept the bare name", p)
+		}
+	}
+}
+
+// TestSetupInitialConfig_IdenticalRerunIsUnchanged guards issue #4342: an
+// identical re-run used to report "updated" and write another 0600 backup of the
+// API token, unlike the agent-config writers which correctly report "unchanged".
+func TestSetupInitialConfig_IdenticalRerunIsUnchanged(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("VIBEFLOW_ROOT", root)
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	action, _, err := setupInitialConfig(cfgPath, "https://cloud.example", "sk-same", "vibeflow")
+	if err != nil || action != "created" {
+		t.Fatalf("first run: action=%q err=%v, want created", action, err)
+	}
+
+	action, backup, err := setupInitialConfig(cfgPath, "https://cloud.example", "sk-same", "vibeflow")
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if action != "unchanged" {
+		t.Errorf("identical re-run action = %q, want unchanged", action)
+	}
+	if backup != "" {
+		t.Errorf("identical re-run wrote a backup at %q; it should write none", backup)
+	}
+	// No backup file should exist at all — each one is another at-rest copy of
+	// the token.
+	if entries, err := os.ReadDir(filepath.Join(root, ".backup")); err == nil && len(entries) > 0 {
+		t.Errorf(".backup gained %d entries on a no-op re-run", len(entries))
+	}
+
+	// A real change must still be detected and still back up.
+	action, backup, err = setupInitialConfig(cfgPath, "https://cloud.example", "sk-DIFFERENT", "vibeflow")
+	if err != nil || action != "updated" {
+		t.Fatalf("changed run: action=%q err=%v, want updated", action, err)
+	}
+	if backup == "" {
+		t.Error("changed run wrote no backup; the prior config must be preserved")
+	}
+}
+
+// TestAgentsFlagUsage_ListsEverySupportedAgent guards issue #4334: the help text
+// omitted kiro, so it was undiscoverable from the CLI. Deriving it from the
+// registry means adding a 7th agent cannot silently skip the docs.
+func TestAgentsFlagUsage_ListsEverySupportedAgent(t *testing.T) {
+	usage := agentsFlagUsage("configure")
+	for _, a := range bootstrapAgents() {
+		if !strings.Contains(usage, a.key) {
+			t.Errorf("--agents usage omits %q: %s", a.key, usage)
+		}
+	}
+}
+
+// TestNpxReadmeAgentListMatchesRegistry ties npx/README.md's agent claims to the
+// live registry, which is what #4341 asked for and #4369 filed as missing.
+//
+// #4341 items 4 and 5 were themselves README-drift bugs: the doc claimed five
+// agents when six are registered, and claimed every agent gets the 300000 ms
+// timeout when Claude CLI deliberately gets none. Correcting the prose fixed the
+// instance; only a test tied to bootstrapAgents() closes the class, so the
+// seventh agent cannot silently reopen it.
+func TestNpxReadmeAgentListMatchesRegistry(t *testing.T) {
+	// bootstrap_test.go lives in internal/vibeflowcli/, so the repo root is two up.
+	readmePath := filepath.Join("..", "..", "npx", "README.md")
+	data, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", readmePath, err)
+	}
+	readme := string(data)
+
+	agents := bootstrapAgents()
+	for _, a := range agents {
+		if !strings.Contains(readme, a.label) {
+			t.Errorf("npx/README.md never mentions %q — it documents the agents bootstrap configures, "+
+				"so a newly registered agent must be added there too", a.label)
+		}
+	}
+
+	// The count claim has to move with the registry. bootstrap writes one target
+	// per agent plus the vibeflow-cli config.yaml.
+	wantTargets := fmt.Sprintf("%d targets", len(agents)+1)
+	if !strings.Contains(readme, wantTargets) {
+		t.Errorf("npx/README.md does not state %q; with %d registered agents plus config.yaml "+
+			"that is the correct total", wantTargets, len(agents))
+	}
+
+	// Guard the specific false claim #4341 item 5 corrected: Claude CLI takes no
+	// per-server timeout, it honors MCP_TIMEOUT.
+	if !strings.Contains(readme, "MCP_TIMEOUT") {
+		t.Error("npx/README.md must explain that Claude CLI uses MCP_TIMEOUT rather than a " +
+			"per-server timeout, or the corrected timeout claim can silently regress")
+	}
+}
+
+// TestBootstrapHelp_NoStaleAgentListAnywhere asserts against the FULL rendered
+// help, not just the generated flag string.
+//
+// The earlier version of this test inspected only agentsFlagUsage() and so
+// passed while `--help` was visibly printing two contradictory agent lists: the
+// derived flag line said six, and the hand-written Long description two lines
+// above still said five with no Kiro. A guard that cannot see the defect it
+// guards is worse than no guard, because it reads as coverage. QA caught this
+// and reopened #4334 for it.
+func TestBootstrapHelp_NoStaleAgentListAnywhere(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"bootstrap", bootstrapCmd()},
+		{"uninstall", uninstallCmd()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.cmd.SetOut(&buf)
+			tc.cmd.SetErr(&buf)
+			if err := tc.cmd.Help(); err != nil {
+				t.Fatalf("render help: %v", err)
+			}
+			help := buf.String()
+
+			// Every key must be discoverable from --help alone.
+			for _, a := range bootstrapAgents() {
+				if !strings.Contains(help, a.key) {
+					t.Errorf("%s --help never mentions agent key %q", tc.name, a.key)
+				}
+			}
+
+			// If the help enumerates agents by LABEL (prose), the list must be
+			// complete. Partial label lists are exactly the #4334 defect.
+			labels := agentLabels(bootstrapAgents())
+			var present, missing []string
+			for _, l := range labels {
+				if strings.Contains(help, l) {
+					present = append(present, l)
+				} else {
+					missing = append(missing, l)
+				}
+			}
+			if len(present) > 0 && len(missing) > 0 {
+				t.Errorf("%s --help lists some agents by label but not others; missing %v.\n"+
+					"Derive the prose from agentLabels(bootstrapAgents()) instead of hardcoding.\n---\n%s",
+					tc.name, missing, help)
+			}
+		})
+	}
+}
+
 func TestJSONHTTPEntry_TransportAndTimeout(t *testing.T) {
 	cli := jsonHTTPEntry("http", false)("https://u", "")
 	if cli["type"] != "http" {
@@ -511,8 +707,12 @@ func TestSetupInitialConfig_StoresValuesAndHonorsName(t *testing.T) {
 		t.Errorf("MCPToolName = %q, want custommcp", cfg.MCPToolName)
 	}
 
-	// Re-running updates rather than re-creating, and backs up the prior file.
-	action2, backup2, _ := setupInitialConfig(cfgPath, "https://cloud.example", "the-key", "custommcp")
+	// Re-running with a CHANGED value updates rather than re-creating, and backs
+	// up the prior file. The value must actually differ: a byte-identical re-run
+	// is "unchanged" and deliberately writes no backup, since each backup is
+	// another at-rest copy of the API token (issue #4342, covered by
+	// TestSetupInitialConfig_IdenticalRerunIsUnchanged).
+	action2, backup2, _ := setupInitialConfig(cfgPath, "https://cloud.example", "a-rotated-key", "custommcp")
 	if action2 != "updated" {
 		t.Errorf("second run action = %q, want updated", action2)
 	}
