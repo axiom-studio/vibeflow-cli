@@ -73,9 +73,26 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
-            echo "::warning::RELEASE_SIGNING_KEY is not set — this release will be published UNSIGNED." \
-                 "Installers with a pinned key REFUSE unsigned signed-era releases, so this" \
-                 "release may be uninstallable. See npx/SIGNING.md."
+            # A missing secret used to warn and ship. That was right when no key was
+            # pinned. It is not any more: with RELEASE_SIGNING_PUBLIC_KEY pinned,
+            # signatureRequiredFor() makes a missing signature fatal for every
+            # network-resolved tag, so an unsigned release is not "may be
+            # uninstallable" — it is a certainty of 100% default install failure.
+            # The old warning diagnosed exactly that and then shipped it green.
+            # (issue #4401.)
+            #
+            # Gate the fatality on the pinned key so pre-activation behaviour is
+            # byte-identical: no key pinned => warn and continue, as before.
+            pinned="$(node -e 'const {RELEASE_SIGNING_PUBLIC_KEY:k}=require("./npx/index.js"); process.stdout.write(k?"1":"")')"
+            if [ -n "$pinned" ]; then
+              echo "::error::RELEASE_SIGNING_KEY is not set, but RELEASE_SIGNING_PUBLIC_KEY IS pinned in" \
+                   "npx/index.js. Publishing unsigned would break EVERY default install" \
+                   "(NO SIGNATURE published for <tag>...). Restore the secret, or clear the pinned key" \
+                   "first if you are intentionally deactivating signing. See npx/SIGNING.md." >&2
+              exit 1
+            fi
+            echo "::warning::RELEASE_SIGNING_KEY is not set and no key is pinned — publishing UNSIGNED" \
+                 "(pre-activation). See npx/SIGNING.md for the one-time setup."
             exit 0
           fi
 
@@ -149,6 +166,15 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            # Unreachable while "Validate the signing key" runs first (#4394), but
+            # mirror its condition so reordering or removing that step cannot
+            # silently re-open the ship-it-broken path. (issue #4401.)
+            pinned="$(node -e 'const {RELEASE_SIGNING_PUBLIC_KEY:k}=require("./npx/index.js"); process.stdout.write(k?"1":"")')"
+            if [ -n "$pinned" ]; then
+              echo "::error::RELEASE_SIGNING_KEY is not set while a key is pinned — refusing to leave" \
+                   "this release unsigned, which would break every default install." >&2
+              exit 1
+            fi
             echo "::warning::RELEASE_SIGNING_KEY is not set — publishing this release UNSIGNED." \
                  "The installer will verify checksums but cannot prove authenticity." \
                  "See npx/SIGNING.md for the one-time setup."
