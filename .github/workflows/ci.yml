@@ -182,15 +182,47 @@ jobs:
             echo "::error::raw token leaked into argv" >&2; exit 1
           fi
 
-      - name: Assert re-running is idempotent
+      # bootstrap.go behaviour must be asserted against a binary built from THIS
+      # commit. `node npx/index.js` downloads the latest PUBLISHED release, which
+      # predates the changes under review — so assertions about resolveNpxCommand
+      # (#4336) or setupInitialConfig idempotence (#4342) were testing the wrong
+      # build: one failed for the right reason, the other passed for the wrong
+      # one. (issue #4393.)
+      - name: Build vibeflow from source and assert bootstrap behaviour
         run: |
-          # 2>&1 on every capture-and-grep, by design rather than by luck:
-          # 'unchanged' happens to reach stdout via bootstrap's inherited output,
-          # but the next assertion added here might target a warn() line. (#4368)
-          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli 2>&1)"
-          echo "$out"
-          echo "$out" | grep -q 'unchanged' || {
-            echo "::error::a second identical run should report unchanged" >&2; exit 1
+          command -v go >/dev/null 2>&1 || {
+            echo "::error::go is not on PATH on windows-latest; needed to test THIS commit" >&2
+            exit 1
+          }
+          go version
+          go build -o "$RUNNER_TEMP/vibeflow.exe" ./cmd/vibeflow
+
+          root="$RUNNER_TEMP/vfroot"; rm -rf "$root"; mkdir -p "$root"
+          run1="$("$RUNNER_TEMP/vibeflow.exe" bootstrap --api-key "smoke-test-not-a-real-key" \
+                  --agents claude-desktop --root "$root" 2>&1)"
+          echo "$run1"
+
+          # #4342: an identical re-run must report the vibeflow-cli config as
+          # unchanged and write no new backup. Assert on the config.yaml LINE, not
+          # on any 'unchanged' anywhere in the output.
+          run2="$("$RUNNER_TEMP/vibeflow.exe" bootstrap --api-key "smoke-test-not-a-real-key" \
+                  --agents claude-desktop --root "$root" 2>&1)"
+          echo "$run2"
+          echo "$run2" | grep -E 'vibeflow-cli .*\(unchanged\)' >/dev/null || {
+            echo "::error::identical re-run should report config.yaml as (unchanged)" >&2; exit 1
+          }
+          # Count backups BEFORE and AFTER the no-op run. Asserting the dir is
+          # empty would be wrong: the first run legitimately backs up any config
+          # it genuinely changes. What must not happen is a NEW backup from a run
+          # that changed nothing.
+          before="$(ls -1 "$root/.backup" 2>/dev/null | wc -l | tr -d ' ')"
+          run3="$("$RUNNER_TEMP/vibeflow.exe" bootstrap --api-key "smoke-test-not-a-real-key" \
+                  --agents claude-desktop --root "$root" 2>&1)"
+          after="$(ls -1 "$root/.backup" 2>/dev/null | wc -l | tr -d ' ')"
+          echo "backups before=$before after=$after"
+          [ "$before" = "$after" ] || {
+            echo "::error::a no-op re-run wrote $((after-before)) new backup(s) of the token-bearing config" >&2
+            exit 1
           }
 
       # The plain job above never reaches Expand-Archive: windows-latest ships
@@ -283,24 +315,14 @@ jobs:
           file -b "$bin"
           "$bin" version
 
-      - name: Assert the Desktop config resolves npx absolutely
+      - name: Assert the installed release wrote a Desktop config at the macOS path
         run: |
+          # This asserts what the DOWNLOADED release does — path resolution and the
+          # token contract, both true of any version. Behaviour introduced in this
+          # PR is asserted in the next step, against a source build. (issue #4393.)
           cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
           [ -f "$cfg" ] || { echo "::error::$cfg was not written" >&2; exit 1; }
           cat "$cfg"
-
-          cmd="$(node -e "
-            const c=require('$cfg');
-            process.stdout.write(c.mcpServers.vibeflow.command);
-          ")"
-          echo "command = $cmd"
-          case "$cmd" in
-            /*) : ;;  # absolute — the #4336 contract on the platform that needs it
-            npx) echo "::error::command is bare 'npx'; on a GUI-launched Desktop this may not resolve (#4336)" >&2; exit 1 ;;
-            *)  echo "::error::command is neither absolute nor the documented 'npx' fallback: $cmd" >&2; exit 1 ;;
-          esac
-
-          # The #4333 invariant, asserted on macOS too: token in env, never argv.
           node -e "
             const c=require('$cfg').mcpServers.vibeflow;
             const key='smoke-test-not-a-real-key';
@@ -310,4 +332,41 @@ jobs:
             if (c.env.MCP_TOKEN !== key) {
               console.error('::error::env.MCP_TOKEN missing'); process.exit(1);
             }
+            if (!c.args.join(' ').includes('mcp-remote')) {
+              console.error('::error::mcp-remote bridge missing'); process.exit(1);
+            }
           "
+
+      # The reason the macOS leg exists (#4368): resolveNpxCommand's premise is
+      # that a GUI-launched Claude Desktop inherits the launchd PATH, so `command`
+      # must be an absolute path. That can only be checked on a real Mac — and only
+      # against a binary built from THIS commit, since the published release
+      # predates the change.
+      - name: Build vibeflow from source and assert the absolute npx path
+        run: |
+          command -v go >/dev/null 2>&1 || {
+            echo "::error::go is not on PATH on macos-latest; needed to test THIS commit" >&2
+            exit 1
+          }
+          go version
+          go build -o "$RUNNER_TEMP/vibeflow" ./cmd/vibeflow
+
+          root="$RUNNER_TEMP/vfroot"; rm -rf "$root"; mkdir -p "$root"
+          "$RUNNER_TEMP/vibeflow" bootstrap --api-key "smoke-test-not-a-real-key" \
+            --agents claude-desktop --root "$root" 2>&1 | tail -5
+
+          cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+          cmd="$(node -e "process.stdout.write(require('$cfg').mcpServers.vibeflow.command)")"
+          echo "command = $cmd"
+          case "$cmd" in
+            /*) echo "absolute npx path resolved — #4336 contract holds on macOS" ;;
+            npx)
+              # The documented fallback. Legitimate only if npx genuinely is not
+              # resolvable; on a runner with Node installed it should be, so this
+              # means exec.LookPath failed and is worth knowing about.
+              echo "::error::command is the bare-'npx' fallback, but npx should be resolvable here:" >&2
+              echo "  which npx -> $(command -v npx || echo '<not found>')" >&2
+              echo "  PATH      -> $PATH" >&2
+              exit 1 ;;
+            *) echo "::error::command is neither absolute nor the documented fallback: $cmd" >&2; exit 1 ;;
+          esac
