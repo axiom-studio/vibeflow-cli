@@ -23,6 +23,10 @@ const {
   compareTags, signatureRequiredFor, isValidReleaseTag,
 } = require('./index.js');
 
+// A syntactically-valid-looking PEM used only to make the "a key is pinned"
+// branch reachable. Never used for real verification.
+const KEY = '-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----';
+
 // --- #4349: Ed25519 signature verification over checksums.txt ---
 
 // These exercise the crypto contract the installer depends on, using a real
@@ -117,39 +121,29 @@ test('isValidReleaseTag rejects tags we would never publish', () => {
 
 test('a network-supplied tag can never relax enforcement, however low it claims to be', () => {
   // The #4391 bypass: a proxy answers releases/latest with {"tag_name":"v0.0.1"},
-  // which sits below any floor, so the old signatureRequiredFor(tag) returned
-  // false and the installer degraded to checksum-only — exactly what signing
-  // exists to prevent. Provenance, not value, now decides.
-  const withKey = (tag, pinned) => {
-    // Mirror the shipped logic with a key present, since the real constant is ''.
-    if (!'KEY') return false;
-    if (!pinned) return true;
-    return !'' || compareTags(tag, 'v1.0.24') >= 0;
-  };
-  assert.strictEqual(withKey('v0.0.1', false), true, 'attacker-chosen low tag must still require a signature');
-  assert.strictEqual(withKey('v1.0.23', false), true, 'below-floor from the network must still require');
-  assert.strictEqual(withKey('v99.0.0', false), true);
+  // which sits below any floor, so enforcement was skipped and the installer
+  // degraded to checksum-only. Provenance, not value, now decides.
+  //
+  // Calls the REAL signatureRequiredFor with key/floor injected — an earlier
+  // version of this test re-implemented the logic locally and so could not fail.
+  for (const tag of ['v0.0.1', 'v1.0.23', 'v99.0.0', 'v1.0.24']) {
+    assert.strictEqual(signatureRequiredFor(tag, false, KEY, 'v1.0.24'), true,
+      `network-supplied ${tag} must still require a signature`);
+  }
 });
 
 test('only an OPERATOR-pinned tag may take the pre-floor exception', () => {
-  const decide = (key, floor, tag, pinnedByOperator) => {
-    if (!key) return false;
-    if (!pinnedByOperator) return true;
-    return !floor || compareTags(tag, floor) >= 0;
-  };
-  const KEY = '-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----';
-
   // --version v1.0.23: a local decision, so the old-release exception applies.
-  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.23', true), false);
-  // Same tag, but arrived over the wire: no exception.
-  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.23', false), true);
+  assert.strictEqual(signatureRequiredFor('v1.0.23', true, KEY, 'v1.0.24'), false);
+  // Same tag, arrived over the wire: no exception.
+  assert.strictEqual(signatureRequiredFor('v1.0.23', false, KEY, 'v1.0.24'), true);
   // Operator pins a signed-era tag: still enforced.
-  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.25', true), true);
-  // Key pinned but no floor recorded: require, even for an operator pin — we
-  // cannot know which releases are supposed to carry a signature.
-  assert.strictEqual(decide(KEY, '', 'v1.0.23', true), true);
+  assert.strictEqual(signatureRequiredFor('v1.0.25', true, KEY, 'v1.0.24'), true);
+  // Key pinned, no floor recorded: require even for an operator pin — we cannot
+  // know which releases are supposed to carry a signature.
+  assert.strictEqual(signatureRequiredFor('v1.0.23', true, KEY, ''), true);
   // No key: nothing to enforce, regardless of provenance.
-  assert.strictEqual(decide('', 'v1.0.24', 'v0.0.1', false), false);
+  assert.strictEqual(signatureRequiredFor('v0.0.1', false, '', 'v1.0.24'), false);
 });
 
 test('signatureRequiredFor is inert until BOTH a key and a floor exist', () => {
@@ -161,28 +155,42 @@ test('signatureRequiredFor is inert until BOTH a key and a floor exist', () => {
   }
 });
 
-// The behaviour the ticket called uncovered. Rather than mutate the module
-// constants (they are consts), re-evaluate the logic against a pinned fixture so
-// the decision table itself is asserted.
+// Drives the REAL signatureRequiredFor across every branch, with key and floor
+// injected. The previous version defined its own `decide` and asserted against
+// that, so mutating `>= 0` to `> 0` — or replacing the function body with
+// `return false` — left the suite green. Verified: both mutations now turn it
+// red. (issue #4387, QA reopen.)
+//
+// Operator-pinned throughout, because that is the only path where the floor is
+// consulted at all; provenance is covered by the #4391 cases above.
 test('the floor decision table: at-or-after is fatal, before only warns', () => {
-  const decide = (key, floor, tag) => {
-    if (!key || !floor) return false;
-    return compareTags(tag, floor) >= 0;
-  };
-  const KEY = '-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----';
-
   // Post-floor: missing signature must be fatal — withholding a .sig is free.
-  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.24'), true, 'the floor tag itself is enforced');
-  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.25'), true);
-  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.1.0'), true);
+  assert.strictEqual(signatureRequiredFor('v1.0.24', true, KEY, 'v1.0.24'), true,
+    'the floor tag ITSELF must be enforced — this is the >= vs > off-by-one');
+  assert.strictEqual(signatureRequiredFor('v1.0.25', true, KEY, 'v1.0.24'), true);
+  assert.strictEqual(signatureRequiredFor('v1.1.0', true, KEY, 'v1.0.24'), true);
 
   // Pre-floor: legitimately unsigned, stays installable.
-  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.23'), false);
-  assert.strictEqual(decide(KEY, 'v1.0.24', 'v0.9.0'), false);
+  assert.strictEqual(signatureRequiredFor('v1.0.23', true, KEY, 'v1.0.24'), false);
+  assert.strictEqual(signatureRequiredFor('v0.9.0', true, KEY, 'v1.0.24'), false);
 
   // Missing either half disables enforcement.
-  assert.strictEqual(decide('', 'v1.0.24', 'v1.0.25'), false);
-  assert.strictEqual(decide(KEY, '', 'v1.0.25'), false);
+  assert.strictEqual(signatureRequiredFor('v1.0.25', true, '', 'v1.0.24'), false, 'no key');
+  assert.strictEqual(signatureRequiredFor('v1.0.25', true, KEY, ''), true,
+    'no floor recorded: require rather than guess which releases are signed');
+});
+
+test('--allow-unsigned cannot rescue an INVALID signature, only a missing one', () => {
+  // The two must not be conflated. A wrong signature means someone altered the
+  // checksums or the signature; a missing one means nothing was published. The
+  // installer treats 'invalid' as fatal on a separate branch that no flag reads —
+  // pinned here so a future refactor cannot fold them together.
+  const src = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8');
+  const invalidBranch = src.slice(src.indexOf("if (sigState === 'invalid')"),
+    src.indexOf("if (sigState === 'unavailable')"));
+  assert.ok(invalidBranch.includes('fail('), 'the invalid branch must fail closed');
+  assert.ok(!/allowUnsigned|requireSignature/.test(invalidBranch),
+    'no flag may be consulted on the invalid-signature path');
 });
 
 test('an invalid signature is fatal independently of the floor', () => {
