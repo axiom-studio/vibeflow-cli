@@ -9,7 +9,7 @@
     "index.js"
   ],
   "scripts": {
-    "test": "node --test index.test.js"
+    "test": "node --test index.test.js signed-release.test.js"
   },
   "engines": {
     "node": ">=18"
