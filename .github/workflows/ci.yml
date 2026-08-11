@@ -134,17 +134,27 @@ jobs:
           # Resolves the latest release via the unauthenticated GitHub API (60
           # req/hr per IP). If this ever flakes on a shared runner IP, pin the
           # tag with --version <tag>, which skips the API call entirely.
-          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli)"
+          # 2>&1 is load-bearing: warn() writes to STDERR while step()/ok() write
+          # to stdout. Capturing stdout alone made the WSL assertion below
+          # impossible to satisfy, and made the tmux assertion vacuous — it
+          # matched "==> Checking for tmux", which step() prints on every
+          # platform before any branch is taken, so it would still have passed if
+          # ensureTmux were made fatal. That is the regression this is meant to
+          # catch. (issue #4368, QA reopen.)
+          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli 2>&1)"
           echo "$out"
 
-          # tmux has no Windows port, so the step must WARN and continue, not
-          # fail. Checking only the exit code would let a regression that made
-          # ensureTmux fatal slip through. (issue #4368.)
-          echo "$out" | grep -qi 'tmux' || {
-            echo "::error::installer output never mentions tmux; the warn-not-fail path is unverified" >&2
+          # Assert on text that ONLY the warn-not-fail branch emits — never on
+          # the step header, which is printed unconditionally.
+          echo "$out" | grep -q 'tmux is not available on Windows' || {
+            echo "::error::the warn-not-fail path did not run; ensureTmux may have become fatal" >&2
             exit 1
           }
-          echo "$out" | grep -qi 'WSL' || {
+          # Match 'WSL' rather than the closing summary's exact wording: the
+          # ensureTmux notice is emitted unconditionally on Windows, whereas the
+          # closing line only prints on a fully successful run. 'WSL' appears in
+          # no other output, so this still discriminates.
+          echo "$out" | grep -q 'WSL' || {
             echo "::error::Windows tmux notice should point at WSL" >&2; exit 1
           }
 
@@ -170,7 +180,10 @@ jobs:
 
       - name: Assert re-running is idempotent
         run: |
-          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli)"
+          # 2>&1 on every capture-and-grep, by design rather than by luck:
+          # 'unchanged' happens to reach stdout via bootstrap's inherited output,
+          # but the next assertion added here might target a warn() line. (#4368)
+          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli 2>&1)"
           echo "$out"
           echo "$out" | grep -q 'unchanged' || {
             echo "::error::a second identical run should report unchanged" >&2; exit 1
@@ -250,7 +263,14 @@ jobs:
 
       - name: Run the installer end-to-end
         run: |
-          node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli
+          # 2>&1: warn() is on stderr (see the Windows leg's note, issue #4368).
+          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli 2>&1)"
+          echo "$out"
+          # macOS runners ship tmux, so the INSTALLED branch is the one to pin
+          # here — the mirror of the Windows warn-not-fail assertion.
+          echo "$out" | grep -qE 'tmux already installed|tmux installed' || {
+            echo "::error::tmux step did not report a usable tmux on macOS" >&2; exit 1
+          }
 
       - name: Assert the darwin binary runs
         run: |
