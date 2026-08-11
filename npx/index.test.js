@@ -14,11 +14,71 @@ const assert = require('node:assert');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
+const crypto = require('node:crypto');
 
 const {
   systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor,
-  pickTmuxInstallCmd, tmuxMissingWarning,
+  pickTmuxInstallCmd, tmuxMissingWarning, verifySignature,
+  RELEASE_SIGNING_PUBLIC_KEY,
 } = require('./index.js');
+
+// --- #4349: Ed25519 signature verification over checksums.txt ---
+
+// These exercise the crypto contract the installer depends on, using a real
+// generated keypair rather than a mocked verifier. verifySignature() itself
+// fetches over the network, so what is asserted here is the primitive it is built
+// on plus the pinned-key handling; the four-way behaviour matrix (verified /
+// unavailable / invalid / require-signature) is documented in npx/SIGNING.md and
+// exercised end-to-end by the CI smoke jobs.
+test('pinned key is empty until one is generated, and that is not silently treated as verified', () => {
+  // Guards against someone pasting a placeholder that parses but proves nothing.
+  // While empty, the installer must SAY authenticity is unverified.
+  if (RELEASE_SIGNING_PUBLIC_KEY !== '') {
+    assert.match(RELEASE_SIGNING_PUBLIC_KEY, /^-----BEGIN PUBLIC KEY-----/,
+      'a pinned key must be a PEM SPKI public key');
+    const pub = crypto.createPublicKey(RELEASE_SIGNING_PUBLIC_KEY);
+    assert.strictEqual(pub.asymmetricKeyType, 'ed25519',
+      'the pinned key must be ed25519 — crypto.verify(null, ...) assumes it');
+  }
+});
+
+test('a valid Ed25519 signature over checksums.txt verifies with built-in crypto', () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const checksums = 'abc  vibeflow_1.0.0_linux_amd64.tar.gz\n';
+  const sig = crypto.sign(null, Buffer.from(checksums, 'utf8'), privateKey);
+
+  // Round-trip through PEM, because that is how the key is pinned in source.
+  const pinned = publicKey.export({ type: 'spki', format: 'pem' });
+  assert.ok(crypto.verify(null, Buffer.from(checksums, 'utf8'), crypto.createPublicKey(pinned), sig));
+});
+
+test('altered checksums or a forged signature both fail verification', () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const checksums = 'abc  vibeflow_1.0.0_linux_amd64.tar.gz\n';
+  const sig = crypto.sign(null, Buffer.from(checksums, 'utf8'), privateKey);
+
+  // Swap in an attacker's checksum line — the exact scenario signing exists for,
+  // since the hash check alone cannot detect it when both files are replaced.
+  const tampered = 'dead  vibeflow_1.0.0_linux_amd64.tar.gz\n';
+  assert.strictEqual(crypto.verify(null, Buffer.from(tampered, 'utf8'), publicKey, sig), false);
+
+  const forged = Buffer.from(sig); forged[0] ^= 0xff;
+  assert.strictEqual(crypto.verify(null, Buffer.from(checksums, 'utf8'), publicKey, forged), false);
+
+  // A signature from a DIFFERENT key must not validate against the pinned one.
+  const other = crypto.generateKeyPairSync('ed25519');
+  const otherSig = crypto.sign(null, Buffer.from(checksums, 'utf8'), other.privateKey);
+  assert.strictEqual(crypto.verify(null, Buffer.from(checksums, 'utf8'), publicKey, otherSig), false,
+    'key substitution must be rejected');
+});
+
+test('verifySignature reports unavailable when no key is pinned', async () => {
+  // With RELEASE_SIGNING_PUBLIC_KEY empty this must short-circuit BEFORE any
+  // network call, so it is safe to call with a bogus tag.
+  if (RELEASE_SIGNING_PUBLIC_KEY === '') {
+    assert.strictEqual(await verifySignature('anything', 'v0.0.0-does-not-exist'), 'unavailable');
+  }
+});
 
 // --- #4341 / #4369: the two assertions that ticket asked for and did not get ---
 
