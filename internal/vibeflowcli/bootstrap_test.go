@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -455,6 +456,47 @@ func TestAgentsFlagUsage_ListsEverySupportedAgent(t *testing.T) {
 		if !strings.Contains(usage, a.key) {
 			t.Errorf("--agents usage omits %q: %s", a.key, usage)
 		}
+	}
+}
+
+// TestNpxReadmeAgentListMatchesRegistry ties npx/README.md's agent claims to the
+// live registry, which is what #4341 asked for and #4369 filed as missing.
+//
+// #4341 items 4 and 5 were themselves README-drift bugs: the doc claimed five
+// agents when six are registered, and claimed every agent gets the 300000 ms
+// timeout when Claude CLI deliberately gets none. Correcting the prose fixed the
+// instance; only a test tied to bootstrapAgents() closes the class, so the
+// seventh agent cannot silently reopen it.
+func TestNpxReadmeAgentListMatchesRegistry(t *testing.T) {
+	// bootstrap_test.go lives in internal/vibeflowcli/, so the repo root is two up.
+	readmePath := filepath.Join("..", "..", "npx", "README.md")
+	data, err := os.ReadFile(readmePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", readmePath, err)
+	}
+	readme := string(data)
+
+	agents := bootstrapAgents()
+	for _, a := range agents {
+		if !strings.Contains(readme, a.label) {
+			t.Errorf("npx/README.md never mentions %q — it documents the agents bootstrap configures, "+
+				"so a newly registered agent must be added there too", a.label)
+		}
+	}
+
+	// The count claim has to move with the registry. bootstrap writes one target
+	// per agent plus the vibeflow-cli config.yaml.
+	wantTargets := fmt.Sprintf("%d targets", len(agents)+1)
+	if !strings.Contains(readme, wantTargets) {
+		t.Errorf("npx/README.md does not state %q; with %d registered agents plus config.yaml "+
+			"that is the correct total", wantTargets, len(agents))
+	}
+
+	// Guard the specific false claim #4341 item 5 corrected: Claude CLI takes no
+	// per-server timeout, it honors MCP_TIMEOUT.
+	if !strings.Contains(readme, "MCP_TIMEOUT") {
+		t.Error("npx/README.md must explain that Claude CLI uses MCP_TIMEOUT rather than a " +
+			"per-server timeout, or the corrected timeout claim can silently regress")
 	}
 }
 

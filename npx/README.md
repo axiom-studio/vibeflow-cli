@@ -26,7 +26,7 @@ It will:
    because `vibeflow launch` cannot work without it.
 3. Run `vibeflow bootstrap --all --api-key <key>`, which writes **7 targets**: the
    MCP server config for all six supported agents — Claude CLI, Claude Desktop,
-   Gemini CLI, Cursor, Codex, **Kiro CLI** — plus the `vibeflow-cli` `config.yaml`
+   Gemini CLI, Cursor, Codex CLI, **Kiro CLI** — plus the `vibeflow-cli` `config.yaml`
    that stores your API key.
 
    Each agent config carries the endpoint and a `${MCP_TOKEN}` reference rather

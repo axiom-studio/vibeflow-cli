@@ -12,8 +12,56 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 
-const { systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor } = require('./index.js');
+const {
+  systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor,
+  pickTmuxInstallCmd, tmuxMissingWarning,
+} = require('./index.js');
+
+// --- #4341 / #4369: the two assertions that ticket asked for and did not get ---
+
+test('pickTmuxInstallCmd selects apk when it is the only package manager', () => {
+  // The regression this guards actually happened: apk was missing from
+  // brew -> apt-get -> dnf -> yum for the life of the installer, so Alpine
+  // silently got no tmux.
+  const only = (name) => (c) => c === name;
+  assert.strictEqual(pickTmuxInstallCmd('linux', 'sudo ', only('apk')),
+    'sudo apk add --no-cache tmux');
+});
+
+test('pickTmuxInstallCmd covers every supported manager and returns null for none', () => {
+  const only = (name) => (c) => c === name;
+  assert.match(pickTmuxInstallCmd('linux', 'sudo ', only('apt-get')), /apt-get install -y tmux/);
+  assert.strictEqual(pickTmuxInstallCmd('linux', 'sudo ', only('dnf')), 'sudo dnf install -y tmux');
+  assert.strictEqual(pickTmuxInstallCmd('linux', 'sudo ', only('yum')), 'sudo yum install -y tmux');
+  assert.strictEqual(pickTmuxInstallCmd('darwin', '', only('brew')), 'brew install tmux');
+  assert.strictEqual(pickTmuxInstallCmd('linux', 'sudo ', () => false), null,
+    'no package manager must yield null so the caller can warn');
+});
+
+test('pickTmuxInstallCmd keeps apt-get ahead of apk and brew to darwin only', () => {
+  const all = () => true;
+  assert.match(pickTmuxInstallCmd('linux', 'sudo ', all), /apt-get/,
+    'precedence must not change: apt-get wins on linux when several are present');
+  // brew must not be selected on linux even when present (e.g. linuxbrew).
+  assert.match(pickTmuxInstallCmd('linux', 'sudo ', (c) => c === 'brew' || c === 'apk'), /apk/);
+});
+
+test('tmuxMissingWarning names tmux and vibeflow launch on both platforms', () => {
+  // #4341's fix was that "Setup complete" alone hid a missing tmux. The message
+  // is the fix, so assert its content rather than that some warning fired.
+  const posix = tmuxMissingWarning(false);
+  assert.match(posix, /tmux/);
+  assert.match(posix, /vibeflow launch/);
+  assert.match(posix, /still missing/);
+
+  const win = tmuxMissingWarning(true);
+  assert.match(win, /tmux/);
+  assert.match(win, /vibeflow launch/);
+  assert.match(win, /WSL/, 'Windows users need the WSL pointer, not an install hint');
+});
 
 // --- tarFlagFor: the #4338 regression guard ---
 
@@ -43,6 +91,52 @@ test('systemRootBin returns an absolute System32-rooted path', (t) => {
   // silently degrading to a bare name.
   assert.strictEqual(systemRootBin('tar.exe'), null,
     'must return null when the System32 helper is absent — never a bare name');
+});
+
+test('systemRootBin returns an ABSOLUTE path when the helper really exists', (t) => {
+  // The positive case. Without this, the "absolute or null" contract was only
+  // ever asserted against null on a Linux host, so it passed vacuously and
+  // guarded nothing — the blind spot finding #4364 called out.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srb-'));
+  fs.mkdirSync(path.join(dir, 'System32'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'System32', 'tar.exe'), '');
+
+  const prev = process.env.SystemRoot;
+  process.env.SystemRoot = dir;
+  t.after(() => {
+    if (prev === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const got = systemRootBin('tar.exe');
+  assert.ok(got, 'should resolve when System32/tar.exe exists');
+  assert.ok(path.isAbsolute(got), `resolved to a non-absolute path: ${got}`);
+  assert.strictEqual(got, path.join(dir, 'System32', 'tar.exe'));
+});
+
+test('systemRootBin returns null for a RELATIVE SystemRoot even if the file exists', (t) => {
+  // The #4364 exploit precondition: `set SystemRoot=. && npx ...` alongside a
+  // planted ./System32/tar.exe. path.join preserves relativity, and spawnSync
+  // resolves a relative program against the CWD — so this must refuse.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srb-rel-'));
+  fs.mkdirSync(path.join(dir, 'System32'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'System32', 'tar.exe'), '');
+
+  const prevCwd = process.cwd();
+  const prev = process.env.SystemRoot;
+  process.chdir(dir);
+  process.env.SystemRoot = '.';
+  t.after(() => {
+    process.chdir(prevCwd);
+    if (prev === undefined) delete process.env.SystemRoot; else process.env.SystemRoot = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ./System32/tar.exe genuinely exists relative to cwd, so only the
+  // path.isAbsolute guard can reject it.
+  assert.ok(fs.existsSync(path.join('System32', 'tar.exe')), 'precondition: planted file is reachable');
+  assert.strictEqual(systemRootBin('tar.exe'), null,
+    'a relative SystemRoot must not yield a spawnable relative program path');
 });
 
 test('systemRootBin never returns a bare, relative program name', () => {
