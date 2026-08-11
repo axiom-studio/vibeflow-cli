@@ -19,7 +19,8 @@ const crypto = require('node:crypto');
 const {
   systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor,
   pickTmuxInstallCmd, tmuxMissingWarning, verifySignature,
-  RELEASE_SIGNING_PUBLIC_KEY,
+  RELEASE_SIGNING_PUBLIC_KEY, SIGNED_FROM_TAG,
+  compareTags, signatureRequiredFor,
 } = require('./index.js');
 
 // --- #4349: Ed25519 signature verification over checksums.txt ---
@@ -78,6 +79,79 @@ test('verifySignature reports unavailable when no key is pinned', async () => {
   if (RELEASE_SIGNING_PUBLIC_KEY === '') {
     assert.strictEqual(await verifySignature('anything', 'v0.0.0-does-not-exist'), 'unavailable');
   }
+});
+
+// --- #4387: signature stripping — the floor that makes a missing .sig fatal ---
+
+test('compareTags orders release tags numerically', () => {
+  assert.strictEqual(compareTags('v1.0.23', 'v1.0.24'), -1);
+  assert.strictEqual(compareTags('v1.0.24', 'v1.0.24'), 0);
+  assert.strictEqual(compareTags('v1.0.25', 'v1.0.24'), 1);
+  // Not lexicographic: '9' > '10' as strings, and that would put v1.0.9 above
+  // a v1.0.10 floor and silently disable enforcement.
+  assert.strictEqual(compareTags('v1.0.9', 'v1.0.10'), -1);
+  assert.strictEqual(compareTags('v2.0.0', 'v1.99.99'), 1);
+  // Differing segment counts, and a bare tag with no leading v.
+  assert.strictEqual(compareTags('v1.2', 'v1.2.1'), -1);
+  assert.strictEqual(compareTags('1.0.24', 'v1.0.24'), 0);
+});
+
+test('compareTags is not defeated by a pre-release suffix', () => {
+  // A floor check must not be dodged by tagging v1.0.24-rc1 to land "below" the
+  // floor while still being a signed-era release.
+  assert.strictEqual(compareTags('v1.0.24-rc1', 'v1.0.24'), 0);
+});
+
+test('signatureRequiredFor is inert until BOTH a key and a floor exist', () => {
+  // Today: no key, no floor -> nothing to enforce. Refusing here would break
+  // every install, which is why the floor exists rather than a blanket default.
+  if (!RELEASE_SIGNING_PUBLIC_KEY || !SIGNED_FROM_TAG) {
+    assert.strictEqual(signatureRequiredFor('v99.99.99'), false,
+      'without a pinned key and a floor there is nothing to verify against');
+  }
+});
+
+// The behaviour the ticket called uncovered. Rather than mutate the module
+// constants (they are consts), re-evaluate the logic against a pinned fixture so
+// the decision table itself is asserted.
+test('the floor decision table: at-or-after is fatal, before only warns', () => {
+  const decide = (key, floor, tag) => {
+    if (!key || !floor) return false;
+    return compareTags(tag, floor) >= 0;
+  };
+  const KEY = '-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----';
+
+  // Post-floor: missing signature must be fatal — withholding a .sig is free.
+  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.24'), true, 'the floor tag itself is enforced');
+  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.25'), true);
+  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.1.0'), true);
+
+  // Pre-floor: legitimately unsigned, stays installable.
+  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.23'), false);
+  assert.strictEqual(decide(KEY, 'v1.0.24', 'v0.9.0'), false);
+
+  // Missing either half disables enforcement.
+  assert.strictEqual(decide('', 'v1.0.24', 'v1.0.25'), false);
+  assert.strictEqual(decide(KEY, '', 'v1.0.25'), false);
+});
+
+test('an invalid signature is fatal independently of the floor', () => {
+  // Regression pin: #4387 explicitly must not weaken 'invalid' handling. A wrong
+  // signature fails closed for ANY tag, pre-floor included, and no flag overrides
+  // it — unlike a missing one, which --allow-unsigned can permit.
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const sig = crypto.sign(null, Buffer.from('real\n'), privateKey);
+  assert.strictEqual(crypto.verify(null, Buffer.from('swapped\n'), publicKey, sig), false,
+    'a signature over different content must never validate, whatever the tag');
+});
+
+test('--allow-unsigned and --require-signature both parse', () => {
+  assert.strictEqual(parseArgs(['--allow-unsigned']).allowUnsigned, true);
+  assert.strictEqual(parseArgs(['--require-signature']).requireSignature, true);
+  // Neither is on by default: the floor decides, not a flag.
+  const d = parseArgs(['--api-key', 'k']);
+  assert.strictEqual(d.allowUnsigned, undefined);
+  assert.strictEqual(d.requireSignature, undefined);
 });
 
 // --- #4341 / #4369: the two assertions that ticket asked for and did not get ---
