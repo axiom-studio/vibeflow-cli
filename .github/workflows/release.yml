@@ -58,6 +58,77 @@ jobs:
         # deliberately via PR.
         run: go install github.com/goreleaser/goreleaser/v2@v2.16.0
 
+      # Validate the signing key BEFORE anything is published (issue #4394).
+      #
+      # v1.0.24 was published and then failed to sign, because this check did not
+      # exist and the signing step runs after GoReleaser. That left a
+      # published-but-unsigned release. Since SIGNED_FROM_TAG is now set, a repeat
+      # would be worse than untidy: the installer refuses a signed-era release with
+      # no signature, so the release would be UNINSTALLABLE.
+      #
+      # Failing here costs nothing — no tag artifacts exist yet, so the operator
+      # fixes the secret and re-tags.
+      - name: Validate the signing key
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::warning::RELEASE_SIGNING_KEY is not set — this release will be published UNSIGNED." \
+                 "Installers with a pinned key REFUSE unsigned signed-era releases, so this" \
+                 "release may be uninstallable. See npx/SIGNING.md."
+            exit 0
+          fi
+
+          key="$(mktemp)"; chmod 600 "$key"
+          trap 'rm -f "$key" "$key.pub"' EXIT
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
+
+          # Distinguish the failure modes instead of emitting one generic openssl
+          # error. The v1.0.24 incident was flattened newlines, and the message at
+          # the time blamed the operator's key file, which was in fact correct.
+          if grep -q 'BEGIN PUBLIC KEY' "$key"; then
+            echo "::error::RELEASE_SIGNING_KEY contains a PUBLIC key. It must be the PRIVATE half" \
+                 "(-----BEGIN PRIVATE KEY-----). The public half belongs in" \
+                 "RELEASE_SIGNING_PUBLIC_KEY in npx/index.js." >&2
+            exit 1
+          fi
+          if ! grep -q 'BEGIN PRIVATE KEY' "$key"; then
+            echo "::error::RELEASE_SIGNING_KEY does not look like a PEM private key — no" \
+                 "'-----BEGIN PRIVATE KEY-----' header found. Re-set it from the key file:" \
+                 "gh secret set RELEASE_SIGNING_KEY < your-key.pem" >&2
+            exit 1
+          fi
+          if [ "$(wc -l < "$key")" -lt 2 ]; then
+            echo "::error::RELEASE_SIGNING_KEY is a single line — its newlines were lost," \
+                 "which openssl reports only as 'Could not read private key'. This happens when" \
+                 "a multi-line PEM is pasted into the web secret field. Re-set it from the file" \
+                 "instead: gh secret set RELEASE_SIGNING_KEY < your-key.pem" >&2
+            exit 1
+          fi
+          if ! openssl pkey -in "$key" -noout 2>/dev/null; then
+            echo "::error::openssl cannot read RELEASE_SIGNING_KEY as a private key — the PEM is" \
+                 "present but malformed or truncated. Re-set it from the key file." >&2
+            exit 1
+          fi
+
+          alg="$(openssl pkey -in "$key" -noout -text 2>/dev/null | head -1)"
+          case "$alg" in
+            *ED25519*) : ;;
+            *) echo "::error::RELEASE_SIGNING_KEY is not Ed25519 ($alg). The installer verifies with" \
+                    "crypto.verify(null, ...), which assumes Ed25519." >&2; exit 1 ;;
+          esac
+
+          # Prove it can actually sign and self-verify, so the only way the later
+          # signing step can fail is an infrastructure problem, not the key.
+          echo "preflight" > "$key.data"
+          openssl pkey -in "$key" -pubout -out "$key.pub" 2>/dev/null
+          openssl pkeyutl -sign -inkey "$key" -rawin -in "$key.data" -out "$key.sig" 2>/dev/null \
+            && openssl pkeyutl -verify -pubin -inkey "$key.pub" -rawin -in "$key.data" -sigfile "$key.sig" >/dev/null 2>&1 \
+            || { echo "::error::the key parsed but could not sign+verify a test payload" >&2; exit 1; }
+          rm -f "$key.data" "$key.sig"
+
+          echo "signing key validated: Ed25519, signs and self-verifies."
+
       - name: Run GoReleaser
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
