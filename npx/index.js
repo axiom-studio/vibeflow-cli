@@ -310,12 +310,31 @@ function compareTags(a, b) {
   return 0;
 }
 
-// signatureRequiredFor reports whether a MISSING signature must be fatal for
-// this tag. Only meaningful once a key is pinned and a floor is recorded —
-// otherwise there is nothing to enforce and refusing would break every install.
-function signatureRequiredFor(tag) {
-  if (!RELEASE_SIGNING_PUBLIC_KEY || !SIGNED_FROM_TAG) return false;
-  return compareTags(tag, SIGNED_FROM_TAG) >= 0;
+// isValidReleaseTag matches the tag shape we publish. An API-supplied tag that
+// does not match is not a release we made, and must not be fed to compareTags —
+// parseInt('X') is NaN, mapped to 0, so an unparseable tag would sort below every
+// floor and silently disable enforcement. (issue #4391.)
+function isValidReleaseTag(tag) {
+  return /^v?\d+(\.\d+)*(-[A-Za-z0-9.]+)?$/.test(String(tag));
+}
+
+// signatureRequiredFor reports whether a MISSING signature must be fatal.
+//
+// The relaxation is keyed on PROVENANCE, not on the tag's value. The floor in
+// #4387 was decided from `tag`, but with no --version that value comes from the
+// releases/latest API — i.e. from the adversary this control exists for. Serving
+// `{"tag_name":"v0.0.1"}` put every install below the floor and degraded it to
+// checksum-only. Forging a signature is hard; withholding one is free; and
+// choosing the tag was also free.
+//
+// So: once a key is pinned, a missing signature is fatal for ANY tag that arrived
+// over the network. The pre-floor exception applies only when the OPERATOR pinned
+// an old tag with --version — a decision made locally, never handed over the
+// wire. (issue #4391.)
+function signatureRequiredFor(tag, tagWasPinnedByOperator) {
+  if (!RELEASE_SIGNING_PUBLIC_KEY) return false;
+  if (!tagWasPinnedByOperator) return true;
+  return !SIGNED_FROM_TAG || compareTags(tag, SIGNED_FROM_TAG) >= 0;
 }
 
 async function verifySignature(checksumsText, tag) {
@@ -342,7 +361,7 @@ async function verifySignature(checksumsText, tag) {
   }
 }
 
-async function verifyChecksum(archivePath, asset, tag, skip, requireSignature, allowUnsigned) {
+async function verifyChecksum(archivePath, asset, tag, skip, requireSignature, allowUnsigned, tagWasPinnedByOperator) {
   if (skip) {
     // This flag disables the only integrity control standing between a network
     // download and `chmod 0755` + execution, so state the consequence rather
@@ -383,7 +402,7 @@ async function verifyChecksum(archivePath, asset, tag, skip, requireSignature, a
     // signing floor. Withholding a .sig costs an attacker nothing, so this must
     // not be an opt-in protection — an opt-in control does not defend the
     // population being targeted. (issue #4387.)
-    if (signatureRequiredFor(tag) && !allowUnsigned) {
+    if (signatureRequiredFor(tag, tagWasPinnedByOperator) && !allowUnsigned) {
       fs.rmSync(archivePath, { force: true });
       fail(`NO SIGNATURE published for ${tag}, but releases from ${SIGNED_FROM_TAG} onward are signed.\n` +
         `       An absent signature is how a tampered download avoids being caught, so this\n` +
@@ -511,10 +530,20 @@ function extractArchive(archivePath, destDir, isWindows) {
 
 async function installBinary({ osName, goArch, isWindows }, version, skipChecksum, requireSignature, allowUnsigned) {
   step('Resolving vibeflow-cli release');
+  // Provenance, not value: only an operator-pinned tag may relax enforcement.
+  const tagWasPinnedByOperator = Boolean(version);
   let tag = version;
   if (!tag) {
     const latest = await getJSON(`https://api.github.com/repos/${REPO}/releases/latest`);
     tag = latest.tag_name;
+    // This value arrives over the network and is used to pick the asset URL AND
+    // (before #4391) to decide signature enforcement. Reject anything that is not
+    // a tag shape we publish rather than letting it reach compareTags, where an
+    // unparseable value floors to 0. (issue #4391.)
+    if (tag && !isValidReleaseTag(tag)) {
+      fail(`refusing an implausible release tag from the GitHub API: ${JSON.stringify(String(tag))}\n` +
+        `       Expected something like v1.2.3. Pin a known release with --version <tag>.`);
+    }
     // A 200 response with no tag_name (error body, or a repo with no published
     // release) would otherwise surface as `TypeError: Cannot read properties of
     // undefined (reading 'replace')` on the line below.
@@ -537,7 +566,7 @@ async function installBinary({ osName, goArch, isWindows }, version, skipChecksu
 
   step(`Downloading ${asset}`);
   await downloadTo(url, archivePath);
-  await verifyChecksum(archivePath, asset, tag, skipChecksum, requireSignature, allowUnsigned);
+  await verifyChecksum(archivePath, asset, tag, skipChecksum, requireSignature, allowUnsigned, tagWasPinnedByOperator);
   extractArchive(archivePath, tmpDir, isWindows);
 
   const extracted = path.join(tmpDir, binName);
@@ -599,5 +628,5 @@ module.exports = {
   systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor,
   pickTmuxInstallCmd, tmuxMissingWarning, verifySignature,
   RELEASE_SIGNING_PUBLIC_KEY, SIGNED_FROM_TAG,
-  compareTags, signatureRequiredFor,
+  compareTags, signatureRequiredFor, isValidReleaseTag,
 };
