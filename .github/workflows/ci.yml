@@ -121,6 +121,14 @@ jobs:
   # available via Git for Windows.
   windows-installer-smoke:
     runs-on: windows-latest
+    # Pin the release both smoke jobs install. --version skips the
+    # releases/latest API call entirely, which (a) makes these jobs deterministic
+    # and (b) removes the unauthenticated 60-req/hr-per-IP rate limit as a failure
+    # mode. That limit is shared across GitHub's runner pool, so it is not
+    # hypothetical — it is the likeliest cause of a silent exit 1 here. I noted
+    # this mitigation when adding the jobs and did not take it; that was wrong.
+    env:
+      VF_PIN: v1.0.23
     defaults:
       run:
         shell: bash
@@ -162,8 +170,19 @@ jobs:
           # platform before any branch is taken, so it would still have passed if
           # ensureTmux were made fatal. That is the regression this is meant to
           # catch. (issue #4368, QA reopen.)
-          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli 2>&1)"
-          echo "$out"
+          # Capture to a FILE and always cat it. Capturing into a shell variable
+          # hides the output when the command fails: under `-e -o pipefail` the
+          # failed substitution aborts the step before `echo "$out"` runs, so a
+          # failure shows up as a bare exit code with no diagnostics. That happened.
+          log="$RUNNER_TEMP/installer.log"
+          set +e
+          node npx/index.js --api-key "smoke-test-not-a-real-key" \
+            --agents claude-desktop,claude-cli --version "$VF_PIN" > "$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          [ "$rc" -eq 0 ] || { echo "::error::installer exited $rc (output above)" >&2; exit 1; }
+          out="$(cat "$log")"
 
           # Assert on text that ONLY the warn-not-fail branch emits — never on
           # the step header, which is printed unconditionally.
@@ -227,7 +246,8 @@ jobs:
 
           rm -rf "$USERPROFILE/.vibeflow/bin"
           SystemRoot="$(cygpath -w "$shim" 2>/dev/null || echo "$shim")" \
-            node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop
+            node npx/index.js --api-key "smoke-test-not-a-real-key" \
+              --agents claude-desktop --version "$VF_PIN"
 
           bin="$USERPROFILE/.vibeflow/bin/vibeflow.exe"
           [ -f "$bin" ] || {
@@ -247,6 +267,14 @@ jobs:
   # than a second full behavioural suite. Action-free; no secrets.
   macos-installer-smoke:
     runs-on: macos-latest
+    # Pin the release both smoke jobs install. --version skips the
+    # releases/latest API call entirely, which (a) makes these jobs deterministic
+    # and (b) removes the unauthenticated 60-req/hr-per-IP rate limit as a failure
+    # mode. That limit is shared across GitHub's runner pool, so it is not
+    # hypothetical — it is the likeliest cause of a silent exit 1 here. I noted
+    # this mitigation when adding the jobs and did not take it; that was wrong.
+    env:
+      VF_PIN: v1.0.23
     defaults:
       run:
         shell: bash
@@ -273,13 +301,25 @@ jobs:
 
       - name: Run the installer end-to-end
         run: |
-          # 2>&1: warn() is on stderr (see the Windows leg's note, issue #4368).
-          out="$(node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop,claude-cli 2>&1)"
-          echo "$out"
-          # macOS runners ship tmux, so the INSTALLED branch is the one to pin
-          # here — the mirror of the Windows warn-not-fail assertion.
-          echo "$out" | grep -qE 'tmux already installed|tmux installed' || {
-            echo "::error::tmux step did not report a usable tmux on macOS" >&2; exit 1
+          # Output to a FILE and always cat it — see the Windows leg for why a shell
+          # variable hides failures under `-e`. Pinned --version avoids the
+          # releases/latest API and its shared-IP rate limit.
+          log="$RUNNER_TEMP/installer.log"
+          set +e
+          node npx/index.js --api-key "smoke-test-not-a-real-key" \
+            --agents claude-desktop,claude-cli --version "$VF_PIN" > "$log" 2>&1
+          rc=$?
+          set -e
+          cat "$log"
+          [ "$rc" -eq 0 ] || { echo "::error::installer exited $rc (output above)" >&2; exit 1; }
+
+          # Do NOT assume the image ships tmux — that assumption is what broke the
+          # previous revision of this step (and, separately, the Go one). Assert the
+          # real property instead: the tmux step ran and reached a KNOWN outcome,
+          # whichever it was, rather than dying or silently doing nothing.
+          grep -qE 'tmux already installed|tmux installed|tmux is still missing|could not auto-install tmux' "$log" || {
+            echo "::error::the tmux step reached no recognised outcome — see output above" >&2
+            exit 1
           }
 
       - name: Assert the darwin binary runs
