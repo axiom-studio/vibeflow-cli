@@ -73,9 +73,26 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
-            echo "::warning::RELEASE_SIGNING_KEY is not set — this release will be published UNSIGNED." \
-                 "Installers with a pinned key REFUSE unsigned signed-era releases, so this" \
-                 "release may be uninstallable. See npx/SIGNING.md."
+            # A missing secret used to warn and ship. That was right when no key was
+            # pinned. It is not any more: with RELEASE_SIGNING_PUBLIC_KEY pinned,
+            # signatureRequiredFor() makes a missing signature fatal for every
+            # network-resolved tag, so an unsigned release is not "may be
+            # uninstallable" — it is a certainty of 100% default install failure.
+            # The old warning diagnosed exactly that and then shipped it green.
+            # (issue #4401.)
+            #
+            # Gate the fatality on the pinned key so pre-activation behaviour is
+            # byte-identical: no key pinned => warn and continue, as before.
+            pinned="$(node -e 'const {RELEASE_SIGNING_PUBLIC_KEY:k}=require("./npx/index.js"); process.stdout.write(k?"1":"")')"
+            if [ -n "$pinned" ]; then
+              echo "::error::RELEASE_SIGNING_KEY is not set, but RELEASE_SIGNING_PUBLIC_KEY IS pinned in" \
+                   "npx/index.js. Publishing unsigned would break EVERY default install" \
+                   "(NO SIGNATURE published for <tag>...). Restore the secret, or clear the pinned key" \
+                   "first if you are intentionally deactivating signing. See npx/SIGNING.md." >&2
+              exit 1
+            fi
+            echo "::warning::RELEASE_SIGNING_KEY is not set and no key is pinned — publishing UNSIGNED" \
+                 "(pre-activation). See npx/SIGNING.md for the one-time setup."
             exit 0
           fi
 
@@ -149,6 +166,15 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            # Unreachable while "Validate the signing key" runs first (#4394), but
+            # mirror its condition so reordering or removing that step cannot
+            # silently re-open the ship-it-broken path. (issue #4401.)
+            pinned="$(node -e 'const {RELEASE_SIGNING_PUBLIC_KEY:k}=require("./npx/index.js"); process.stdout.write(k?"1":"")')"
+            if [ -n "$pinned" ]; then
+              echo "::error::RELEASE_SIGNING_KEY is not set while a key is pinned — refusing to leave" \
+                   "this release unsigned, which would break every default install." >&2
+              exit 1
+            fi
             echo "::warning::RELEASE_SIGNING_KEY is not set — publishing this release UNSIGNED." \
                  "The installer will verify checksums but cannot prove authenticity." \
                  "See npx/SIGNING.md for the one-time setup."
@@ -156,6 +182,7 @@ jobs:
           fi
 
           sums="dist/checksums.txt"
+          export SUMS="$sums"
           [ -f "$sums" ] || { echo "::error::$sums not found after goreleaser" >&2; exit 1; }
 
           # Key material goes to a 0600 file under the runner's own temp dir, and
@@ -172,12 +199,45 @@ jobs:
             exit 1
           }
 
-          # Self-check before publishing: verify with the derived public key so a
-          # broken signature is caught here rather than by users.
+          # Self-check with the derived public key. Necessary but NOT sufficient: it
+          # passes by construction for any valid Ed25519 private key, so it only
+          # proves the signature is well-formed.
           openssl pkey -in "$key" -pubout -out "$key.pub"
           openssl pkeyutl -verify -pubin -inkey "$key.pub" -rawin -in "$sums" -sigfile "$sums.sig" \
             || { echo "::error::self-verification of the new signature failed" >&2; exit 1; }
           rm -f "$key.pub"
+
+          # THE INVARIANT THAT MATTERS (issue #4396): the signature must verify
+          # under RELEASE_SIGNING_PUBLIC_KEY as pinned in npx/index.js — the only
+          # key users hold. The derived-key check above cannot see a key MISMATCH:
+          # rotate the secret without re-pinning and it still passes, the release
+          # publishes green, and every install then fails closed with SIGNATURE
+          # VERIFICATION FAILED, which --allow-unsigned cannot rescue.
+          #
+          # The ci.yml guard from #4395 asserts this too, but on pull_request — so
+          # it only fires AFTER a bad release, whenever someone next opens a PR.
+          # Fail CLOSED here: no network dependency, so no outage ambiguity, and
+          # aborting before `gh release upload` leaves the release UNSIGNED rather
+          # than MIS-signed. Unsigned is recoverable (upload the right .sig);
+          # mis-signed is fail-closed for every user.
+          node -e '
+            const crypto = require("crypto"), fs = require("fs");
+            const { RELEASE_SIGNING_PUBLIC_KEY: k } = require("./npx/index.js");
+            if (!k) {
+              console.log("::warning::no key pinned in npx/index.js — cannot check the publish invariant");
+              process.exit(0);
+            }
+            const ok = crypto.verify(null, fs.readFileSync(process.env.SUMS),
+                                     crypto.createPublicKey(k), fs.readFileSync(process.env.SUMS + ".sig"));
+            if (!ok) {
+              console.error("::error::the signing secret does not match RELEASE_SIGNING_PUBLIC_KEY pinned in " +
+                "npx/index.js. Publishing this signature would make EVERY install fail closed with " +
+                "SIGNATURE VERIFICATION FAILED. Re-pin the public key from the current signing secret, " +
+                "or restore the previous secret. The release is left unsigned, which is recoverable.");
+              process.exit(1);
+            }
+            console.log("published signature verifies under the PINNED public key");
+          '
 
           gh release upload "${GITHUB_REF_NAME}" "$sums.sig" --clobber
           echo "Uploaded checksums.txt.sig ($(wc -c < "$sums.sig") bytes) for ${GITHUB_REF_NAME}."
