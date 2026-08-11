@@ -42,7 +42,9 @@ const DEFAULT_BASE_URL = 'https://cloud.axiomstudio.ai';
 //
 // Rotation is cheap for `npx` users because npx always fetches the latest
 // package, so a new pinned key reaches them on their next run.
-const RELEASE_SIGNING_PUBLIC_KEY = '';
+const RELEASE_SIGNING_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA1yuuDET/x4vETCgeGWS3WkaM7eq3mqzLm9TVGYii4Ww=
+-----END PUBLIC KEY-----`;
 
 // SIGNED_FROM_TAG is the first release tag published WITH a checksums.txt.sig.
 //
@@ -58,7 +60,7 @@ const RELEASE_SIGNING_PUBLIC_KEY = '';
 //
 // EMPTY UNTIL THE FIRST SIGNED RELEASE. Set it to that tag (e.g. 'v1.0.24') in
 // the same change that pins RELEASE_SIGNING_PUBLIC_KEY. See npx/SIGNING.md.
-const SIGNED_FROM_TAG = '';
+const SIGNED_FROM_TAG = 'v1.0.24';
 
 // ---------------------------------------------------------------- output helpers
 const c = {
