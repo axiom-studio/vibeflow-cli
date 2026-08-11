@@ -46,6 +46,11 @@ MCowBQYDK2VwAyEAlDnrnwAl5cApoLfwm9nO2mrFh6dDk7kAEhHYBNdLDSs=
 It is pinned, never fetched at runtime. A key downloaded alongside the artifact
 would inherit exactly the weakness signing removes.
 
+### 3b. After the first signed release, set the floor
+
+`SIGNED_FROM_TAG` must be the tag of that first signed release. Skipping this
+leaves signature stripping open — see **Why the floor exists** below.
+
 ### 4. Store the private key as a repo secret
 
 Add the **full PEM** of `vibeflow-release-signing.pem` as the Actions secret
@@ -96,15 +101,44 @@ npx @axiom-studio/vibeflow-setup --api-key <key> --require-signature
 
 ## Behaviour matrix
 
-| Pinned key | `.sig` published | Signature | Result |
-|---|---|---|---|
-| absent | — | — | warn, continue on checksum only (`--require-signature` → fail) |
-| present | absent | — | warn, continue on checksum only (`--require-signature` → fail) |
-| present | present | valid | ✅ verified — "signature verified" |
-| present | present | **invalid** | ❌ **always fails closed**, archive deleted, flags cannot override |
+`SIGNED_FROM_TAG` is the first tag published with a signature. At or after it, a
+**missing** signature is fatal; before it, a missing signature is expected.
 
-Failing closed on a *bad* signature is unconditional. Failing closed on a
-*missing* one is opt-in for now, because every release up to and including
-v1.0.23 predates signing — making it the default immediately would break every
-existing install. Flip `--require-signature` to the default once the first signed
-release has shipped and older tags are no longer supported.
+| Pinned key | Floor set | Tag vs floor | `.sig` | Signature | Result |
+|---|---|---|---|---|---|
+| absent | — | — | — | — | warn, continue on checksum (`--require-signature` → fail) |
+| present | no | — | absent | — | warn, continue on checksum (`--require-signature` → fail) |
+| present | yes | **before** floor | absent | — | warn, continue on checksum — legitimately unsigned |
+| present | yes | **at/after** floor | absent | — | ❌ **fails closed by default** (`--allow-unsigned` to override) |
+| present | — | — | present | valid | ✅ "signature verified" |
+| present | — | — | present | **invalid** | ❌ **always fails closed** — no flag overrides it |
+
+### Why the floor exists
+
+Forging a signature is hard. **Withholding one is free.** An adversary able to
+rewrite the archive and `checksums.txt` — a TLS-intercepting proxy, or anyone who
+can write to the release — can simply serve a 404 for `checksums.txt.sig`. Without
+a floor the installer would degrade to same-origin checksum trust, which is
+exactly the state signing was introduced to replace, having printed a warning that
+scrolls past in a noisy install (issue #4387).
+
+`--require-signature` alone does not solve this: an opt-in control does not
+protect the population an attacker is targeting. Hence the floor makes refusal the
+**default** for every release published in the signed era, while keeping genuinely
+older tags installable.
+
+### Setting the floor
+
+After the first signed release is published, set both constants in `npx/index.js`
+in the same change:
+
+```js
+const RELEASE_SIGNING_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+...
+-----END PUBLIC KEY-----`;
+const SIGNED_FROM_TAG = 'v1.0.24';   // the first tag with a checksums.txt.sig
+```
+
+Until `SIGNED_FROM_TAG` is set, enforcement is inert — a pinned key alone verifies
+a signature when present but cannot tell a stripped one from a legitimately absent
+one, because it has no idea which releases are supposed to have it.

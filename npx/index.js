@@ -44,6 +44,22 @@ const DEFAULT_BASE_URL = 'https://cloud.axiomstudio.ai';
 // package, so a new pinned key reaches them on their next run.
 const RELEASE_SIGNING_PUBLIC_KEY = '';
 
+// SIGNED_FROM_TAG is the first release tag published WITH a checksums.txt.sig.
+//
+// It closes signature stripping (issue #4387): an adversary able to rewrite the
+// archive and checksums.txt can also simply not serve the .sig, and without a
+// floor the installer would shrug and fall back to same-origin checksum trust —
+// the exact state signing exists to replace. Forging a signature is hard;
+// withholding one is free.
+//
+// At or after this tag a missing signature is FATAL. Before it, a missing
+// signature is expected and only warns, so genuinely older releases stay
+// installable and nothing breaks retroactively.
+//
+// EMPTY UNTIL THE FIRST SIGNED RELEASE. Set it to that tag (e.g. 'v1.0.24') in
+// the same change that pins RELEASE_SIGNING_PUBLIC_KEY. See npx/SIGNING.md.
+const SIGNED_FROM_TAG = '';
+
 // ---------------------------------------------------------------- output helpers
 const c = {
   reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m',
@@ -71,6 +87,7 @@ function parseArgs(argv) {
       case '--version': out.version = val(); break; // pin a vibeflow-cli release
       case '--skip-checksum': out.skipChecksum = true; break;
       case '--require-signature': out.requireSignature = true; break;
+      case '--allow-unsigned': out.allowUnsigned = true; break;
       case '-h': case '--help': out.help = true; break;
       default:
         if (a.startsWith('--api-key=')) out.apiKey = a.slice('--api-key='.length);
@@ -95,6 +112,7 @@ Options:
   --version <tag>    Pin a specific vibeflow-cli release (default: latest)
   --skip-checksum    Skip SHA-256 verification of the download (not recommended)
   --require-signature  Fail unless the release checksums carry a valid signature
+  --allow-unsigned   Permit a signed-era release that publishes no signature (unsafe)
 `);
 }
 
@@ -277,6 +295,29 @@ function parseChecksums(text) {
 // verifies it in a few lines with no parsing of comment lines, key IDs or
 // prehash-mode bytes, and no dependency on the user's machine. `openssl pkeyutl
 // -sign -rawin` on the release runner produces exactly this.
+// compareTags orders release tags numerically: -1 if a < b, 0 if equal, 1 if
+// a > b. Tolerates a leading `v` and differing segment counts (v1.2 < v1.2.1).
+// Non-numeric suffixes (pre-releases) are ignored for ordering, which is
+// deliberate: a floor check must not be defeated by a `-rc1` suffix.
+function compareTags(a, b) {
+  const parts = (t) => String(t).replace(/^v/, '').split('.')
+    .map((s) => parseInt(s, 10)).map((n) => (Number.isFinite(n) ? n : 0));
+  const x = parts(a), y = parts(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+// signatureRequiredFor reports whether a MISSING signature must be fatal for
+// this tag. Only meaningful once a key is pinned and a floor is recorded —
+// otherwise there is nothing to enforce and refusing would break every install.
+function signatureRequiredFor(tag) {
+  if (!RELEASE_SIGNING_PUBLIC_KEY || !SIGNED_FROM_TAG) return false;
+  return compareTags(tag, SIGNED_FROM_TAG) >= 0;
+}
+
 async function verifySignature(checksumsText, tag) {
   if (!RELEASE_SIGNING_PUBLIC_KEY) return 'unavailable';
 
@@ -301,7 +342,7 @@ async function verifySignature(checksumsText, tag) {
   }
 }
 
-async function verifyChecksum(archivePath, asset, tag, skip, requireSignature) {
+async function verifyChecksum(archivePath, asset, tag, skip, requireSignature, allowUnsigned) {
   if (skip) {
     // This flag disables the only integrity control standing between a network
     // download and `chmod 0755` + execution, so state the consequence rather
@@ -335,8 +376,23 @@ async function verifyChecksum(archivePath, asset, tag, skip, requireSignature) {
   }
   if (sigState === 'unavailable') {
     const why = RELEASE_SIGNING_PUBLIC_KEY
-      ? `${tag} publishes no checksums.txt.sig (released before signing was introduced)`
+      ? `${tag} publishes no checksums.txt.sig`
       : 'no release signing key is pinned in this installer yet';
+
+    // A missing signature is fatal by DEFAULT for any tag at or after the
+    // signing floor. Withholding a .sig costs an attacker nothing, so this must
+    // not be an opt-in protection — an opt-in control does not defend the
+    // population being targeted. (issue #4387.)
+    if (signatureRequiredFor(tag) && !allowUnsigned) {
+      fs.rmSync(archivePath, { force: true });
+      fail(`NO SIGNATURE published for ${tag}, but releases from ${SIGNED_FROM_TAG} onward are signed.\n` +
+        `       An absent signature is how a tampered download avoids being caught, so this\n` +
+        `       is treated exactly like a bad one. The archive has been deleted.\n` +
+        `       If you are certain this release is legitimately unsigned, re-run with\n` +
+        `       --allow-unsigned. Otherwise report it.`);
+    }
+    // Pre-floor, or no key pinned yet: nothing to enforce. --require-signature
+    // lets a caller demand strictness anyway.
     if (requireSignature) {
       fs.rmSync(archivePath, { force: true });
       fail(`--require-signature was given but ${why}.\n` +
@@ -453,7 +509,7 @@ function extractArchive(archivePath, destDir, isWindows) {
   fail(`could not extract ${asset}: ${tar.error ? tar.error.message : `tar exited ${tar.status}`}`);
 }
 
-async function installBinary({ osName, goArch, isWindows }, version, skipChecksum, requireSignature) {
+async function installBinary({ osName, goArch, isWindows }, version, skipChecksum, requireSignature, allowUnsigned) {
   step('Resolving vibeflow-cli release');
   let tag = version;
   if (!tag) {
@@ -481,7 +537,7 @@ async function installBinary({ osName, goArch, isWindows }, version, skipChecksu
 
   step(`Downloading ${asset}`);
   await downloadTo(url, archivePath);
-  await verifyChecksum(archivePath, asset, tag, skipChecksum, requireSignature);
+  await verifyChecksum(archivePath, asset, tag, skipChecksum, requireSignature, allowUnsigned);
   extractArchive(archivePath, tmpDir, isWindows);
 
   const extracted = path.join(tmpDir, binName);
@@ -506,7 +562,7 @@ async function main() {
   console.log(`${c.bold}VibeFlow setup${c.reset}\n`);
   const plat = detectPlatform();
 
-  const binPath = await installBinary(plat, args.version, args.skipChecksum, args.requireSignature);
+  const binPath = await installBinary(plat, args.version, args.skipChecksum, args.requireSignature, args.allowUnsigned);
   const haveTmux = ensureTmux(plat.isWindows);
 
   step('Configuring MCP for your agents (vibeflow bootstrap)');
@@ -542,5 +598,6 @@ if (require.main === module) {
 module.exports = {
   systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor,
   pickTmuxInstallCmd, tmuxMissingWarning, verifySignature,
-  RELEASE_SIGNING_PUBLIC_KEY,
+  RELEASE_SIGNING_PUBLIC_KEY, SIGNED_FROM_TAG,
+  compareTags, signatureRequiredFor,
 };

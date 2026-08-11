@@ -18,12 +18,17 @@ It will:
    checksum list came from us, not merely from the same server as the archive.
    Verified with Node's built-in `crypto`, so there is nothing extra to install.
 
+   Once signing is live, a **missing** signature is refused by default for any
+   release in the signed era — withholding a `.sig` would otherwise be a free way
+   to downgrade the check back to same-origin trust. `--allow-unsigned` overrides
+   that; a **bad** signature always aborts and cannot be overridden.
+
    **Current state:** signing is wired up but **inert until a release key is
-   generated** (see [SIGNING.md](SIGNING.md)). Until then, and for any release
-   published before signing existed, the installer verifies checksums and says
-   plainly that authenticity is unverified rather than implying a check it is not
-   performing. A **bad** signature always aborts, and cannot be overridden.
-   Pass `--require-signature` to refuse anything unsigned.
+   generated and the signed-era floor is set** (see [SIGNING.md](SIGNING.md)).
+   Until then, and for genuinely older releases, the installer verifies checksums
+   and says plainly that authenticity is unverified rather than implying a check
+   it is not performing. Pass `--require-signature` to refuse anything unsigned
+   even now.
 2. Install **tmux** if it is missing (apt / dnf / yum / apk / brew). Skipped on
    Windows. If tmux is still missing afterwards the installer says so explicitly,
    because `vibeflow launch` cannot work without it.
