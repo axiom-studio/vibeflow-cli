@@ -156,6 +156,7 @@ jobs:
           fi
 
           sums="dist/checksums.txt"
+          export SUMS="$sums"
           [ -f "$sums" ] || { echo "::error::$sums not found after goreleaser" >&2; exit 1; }
 
           # Key material goes to a 0600 file under the runner's own temp dir, and
@@ -172,12 +173,45 @@ jobs:
             exit 1
           }
 
-          # Self-check before publishing: verify with the derived public key so a
-          # broken signature is caught here rather than by users.
+          # Self-check with the derived public key. Necessary but NOT sufficient: it
+          # passes by construction for any valid Ed25519 private key, so it only
+          # proves the signature is well-formed.
           openssl pkey -in "$key" -pubout -out "$key.pub"
           openssl pkeyutl -verify -pubin -inkey "$key.pub" -rawin -in "$sums" -sigfile "$sums.sig" \
             || { echo "::error::self-verification of the new signature failed" >&2; exit 1; }
           rm -f "$key.pub"
+
+          # THE INVARIANT THAT MATTERS (issue #4396): the signature must verify
+          # under RELEASE_SIGNING_PUBLIC_KEY as pinned in npx/index.js — the only
+          # key users hold. The derived-key check above cannot see a key MISMATCH:
+          # rotate the secret without re-pinning and it still passes, the release
+          # publishes green, and every install then fails closed with SIGNATURE
+          # VERIFICATION FAILED, which --allow-unsigned cannot rescue.
+          #
+          # The ci.yml guard from #4395 asserts this too, but on pull_request — so
+          # it only fires AFTER a bad release, whenever someone next opens a PR.
+          # Fail CLOSED here: no network dependency, so no outage ambiguity, and
+          # aborting before `gh release upload` leaves the release UNSIGNED rather
+          # than MIS-signed. Unsigned is recoverable (upload the right .sig);
+          # mis-signed is fail-closed for every user.
+          node -e '
+            const crypto = require("crypto"), fs = require("fs");
+            const { RELEASE_SIGNING_PUBLIC_KEY: k } = require("./npx/index.js");
+            if (!k) {
+              console.log("::warning::no key pinned in npx/index.js — cannot check the publish invariant");
+              process.exit(0);
+            }
+            const ok = crypto.verify(null, fs.readFileSync(process.env.SUMS),
+                                     crypto.createPublicKey(k), fs.readFileSync(process.env.SUMS + ".sig"));
+            if (!ok) {
+              console.error("::error::the signing secret does not match RELEASE_SIGNING_PUBLIC_KEY pinned in " +
+                "npx/index.js. Publishing this signature would make EVERY install fail closed with " +
+                "SIGNATURE VERIFICATION FAILED. Re-pin the public key from the current signing secret, " +
+                "or restore the previous secret. The release is left unsigned, which is recoverable.");
+              process.exit(1);
+            }
+            console.log("published signature verifies under the PINNED public key");
+          '
 
           gh release upload "${GITHUB_REF_NAME}" "$sums.sig" --clobber
           echo "Uploaded checksums.txt.sig ($(wc -c < "$sums.sig") bytes) for ${GITHUB_REF_NAME}."
