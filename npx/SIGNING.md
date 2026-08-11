@@ -25,11 +25,11 @@ chmod 600 vibeflow-release-signing.pem
 openssl pkey -in vibeflow-release-signing.pem -pubout
 ```
 
-That prints something like:
+That prints something like — the body below is a PLACEHOLDER, not a usable key:
 
 ```
 -----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAlDnrnwAl5cApoLfwm9nO2mrFh6dDk7kAEhHYBNdLDSs=
+MCowBQYDK2VwAyEA_EXAMPLE_ONLY_REPLACE_WITH_YOUR_OWN_KEY_xxx=
 -----END PUBLIC KEY-----
 ```
 
@@ -39,7 +39,7 @@ Paste it into `RELEASE_SIGNING_PUBLIC_KEY` in `npx/index.js`, newlines included:
 
 ```js
 const RELEASE_SIGNING_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAlDnrnwAl5cApoLfwm9nO2mrFh6dDk7kAEhHYBNdLDSs=
+MCowBQYDK2VwAyEA_EXAMPLE_ONLY_REPLACE_WITH_YOUR_OWN_KEY_xxx=
 -----END PUBLIC KEY-----`;
 ```
 
