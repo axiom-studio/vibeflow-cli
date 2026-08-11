@@ -163,3 +163,40 @@ jobs:
           echo "$out" | grep -q 'unchanged' || {
             echo "::error::a second identical run should report unchanged" >&2; exit 1
           }
+
+      # The plain job above never reaches Expand-Archive: windows-latest ships
+      # bsdtar as System32\tar.exe, which reads zip, so the first extractor always
+      # wins. That leaves the PowerShell fallback — the branch that carried
+      # CWE-426 (#4337) and the one a Git-Bash tar makes mainline — with zero real
+      # coverage. Force it by making System32\tar.exe unusable for this step only.
+      # (issue #4368.)
+      - name: Force the Expand-Archive fallback and re-verify
+        run: |
+          set -u
+          root="${SYSTEMROOT:-C:/Windows}"
+          tar_exe="$root/System32/tar.exe"
+          if [ ! -f "$tar_exe" ]; then
+            echo "::notice::no System32 tar.exe on this image; the fallback is already the only path"
+          fi
+
+          # Point SystemRoot at a directory that has System32\WindowsPowerShell
+          # but NO tar.exe. systemRootBin then returns null for tar and resolves
+          # powershell.exe normally, so extraction can only succeed via
+          # Expand-Archive. This avoids touching the real System32.
+          shim="$RUNNER_TEMP/shimroot"
+          rm -rf "$shim"
+          mkdir -p "$shim/System32/WindowsPowerShell/v1.0"
+          cp "$root/System32/WindowsPowerShell/v1.0/powershell.exe" \
+             "$shim/System32/WindowsPowerShell/v1.0/powershell.exe"
+          cp "$root/System32/where.exe" "$shim/System32/where.exe" 2>/dev/null || true
+
+          rm -rf "$USERPROFILE/.vibeflow/bin"
+          SystemRoot="$(cygpath -w "$shim" 2>/dev/null || echo "$shim")" \
+            node npx/index.js --api-key "smoke-test-not-a-real-key" --agents claude-desktop
+
+          bin="$USERPROFILE/.vibeflow/bin/vibeflow.exe"
+          [ -f "$bin" ] || {
+            echo "::error::Expand-Archive fallback failed to produce $bin" >&2; exit 1
+          }
+          "$bin" version
+          echo "Expand-Archive fallback verified end-to-end."

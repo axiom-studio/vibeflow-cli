@@ -147,10 +147,42 @@ async function downloadTo(url, dest) {
 function haveCmd(cmd) {
   // cmd.exe has no `command` builtin; `where` is the Windows equivalent. Invoke
   // it by absolute path — see systemRootBin() for why a bare name is unsafe here.
-  const probe = process.platform === 'win32'
-    ? `"${systemRootBin('where.exe')}" ${cmd}`
-    : `command -v ${cmd}`;
+  let probe;
+  if (process.platform === 'win32') {
+    const where = systemRootBin('where.exe');
+    // Be explicit rather than interpolating null into the shell string, where it
+    // would become the literal `"null" tmux`. Unresolvable probe => unknown =>
+    // report absent.
+    if (!where) return false;
+    probe = `"${where}" ${cmd}`;
+  } else {
+    probe = `command -v ${cmd}`;
+  }
   try { execSync(probe, { stdio: 'ignore' }); return true; } catch { return false; }
+}
+
+// pickTmuxInstallCmd chooses the package-manager command, or null when none is
+// available. Pure (the `has` probe is injected) so the selection order is
+// testable — `apk` was absent from this chain for the life of the installer,
+// which is exactly the kind of omission a unit test catches. (issues #4341, #4369.)
+function pickTmuxInstallCmd(platform, sudo, has) {
+  if (platform === 'darwin' && has('brew')) return 'brew install tmux';
+  if (has('apt-get')) return `${sudo}apt-get update && ${sudo}apt-get install -y tmux`;
+  if (has('dnf')) return `${sudo}dnf install -y tmux`;
+  if (has('yum')) return `${sudo}yum install -y tmux`;
+  // Alpine: everything else in the installer works there, including the static
+  // binary — only this step was missing a branch.
+  if (has('apk')) return `${sudo}apk add --no-cache tmux`;
+  return null;
+}
+
+// tmuxMissingWarning is the closing line shown when tmux is not present. Kept
+// separate so a test can assert the message names tmux and `vibeflow launch`
+// rather than trusting that an unqualified "Setup complete" was qualified.
+function tmuxMissingWarning(isWindows) {
+  return isWindows
+    ? 'tmux is not available on Windows, so `vibeflow launch` will not work here — use WSL.'
+    : 'tmux is still missing, so `vibeflow launch` will not work until you install it.';
 }
 
 // ensureTmux returns true when tmux is present on the system afterwards. main()
@@ -169,14 +201,7 @@ function ensureTmux(isWindows) {
   if (haveCmd('tmux')) { ok('tmux already installed'); return true; }
 
   const sudo = process.getuid && process.getuid() === 0 ? '' : 'sudo ';
-  let installCmd = null;
-  if (process.platform === 'darwin' && haveCmd('brew')) installCmd = 'brew install tmux';
-  else if (haveCmd('apt-get')) installCmd = `${sudo}apt-get update && ${sudo}apt-get install -y tmux`;
-  else if (haveCmd('dnf')) installCmd = `${sudo}dnf install -y tmux`;
-  else if (haveCmd('yum')) installCmd = `${sudo}yum install -y tmux`;
-  // Alpine: everything else in the installer works there, including the static
-  // binary — only this step was missing a branch.
-  else if (haveCmd('apk')) installCmd = `${sudo}apk add --no-cache tmux`;
+  const installCmd = pickTmuxInstallCmd(process.platform, sudo, haveCmd);
 
   if (!installCmd) {
     warn('could not auto-install tmux (no known package manager). Install it manually, then re-run.');
@@ -292,7 +317,13 @@ function systemRootBin(exe) {
     ? [path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')]
     : [path.join(root, 'System32', exe)];
   for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+    // path.join preserves relativity, so a relative SystemRoot (e.g. ".") would
+    // otherwise yield a relative "system path" — and spawnSync resolves a
+    // relative program against the CWD, reinstating the very hijack this
+    // function exists to prevent. Enforce the documented contract instead of
+    // only stating it. Returning null is the safe outcome: every call site
+    // already handles it (tar -> PowerShell -> specific fail). (issue #4364.)
+    if (path.isAbsolute(p) && fs.existsSync(p)) return p;
   }
   return null;
 }
@@ -414,9 +445,7 @@ async function main() {
   console.log(`${c.dim}   Verify with: MCP_TOKEN=<your-api-key> claude mcp list   (should show vibeflow ... ✓ Connected)${c.reset}`);
   console.log(`${c.dim}   Agents started by 'vibeflow launch' get MCP_TOKEN automatically — only hand-started ones need it.${c.reset}`);
   if (!haveTmux) {
-    warn(plat.isWindows
-      ? 'tmux is not available on Windows, so `vibeflow launch` will not work here — use WSL.'
-      : 'tmux is still missing, so `vibeflow launch` will not work until you install it.');
+    warn(tmuxMissingWarning(plat.isWindows));
   }
 }
 
@@ -429,4 +458,7 @@ if (require.main === module) {
 
 // Exported for tests only. package.json `files` ships index.js alone, so the
 // test file is not published.
-module.exports = { systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor };
+module.exports = {
+  systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor,
+  pickTmuxInstallCmd, tmuxMissingWarning,
+};
