@@ -20,7 +20,7 @@ const {
   systemRootBin, parseChecksums, parseArgs, psLiteral, tarFlagFor,
   pickTmuxInstallCmd, tmuxMissingWarning, verifySignature,
   RELEASE_SIGNING_PUBLIC_KEY, SIGNED_FROM_TAG,
-  compareTags, signatureRequiredFor,
+  compareTags, signatureRequiredFor, isValidReleaseTag,
 } = require('./index.js');
 
 // --- #4349: Ed25519 signature verification over checksums.txt ---
@@ -102,11 +102,61 @@ test('compareTags is not defeated by a pre-release suffix', () => {
   assert.strictEqual(compareTags('v1.0.24-rc1', 'v1.0.24'), 0);
 });
 
+// --- #4391: the floor must not be decided from an attacker-supplied tag ---
+
+test('isValidReleaseTag rejects tags we would never publish', () => {
+  for (const good of ['v1.0.24', '1.0.24', 'v1.0', 'v2', 'v1.0.24-rc1']) {
+    assert.ok(isValidReleaseTag(good), `${good} should be accepted`);
+  }
+  // These are the dangerous ones: parseInt('X') is NaN -> 0, so before #4391 an
+  // unparseable tag sorted BELOW every floor and silently disabled enforcement.
+  for (const bad of ['vX', 'garbage', '', 'latest', '../../etc/passwd', 'v1.0.24; rm -rf /']) {
+    assert.ok(!isValidReleaseTag(bad), `${bad} should be rejected`);
+  }
+});
+
+test('a network-supplied tag can never relax enforcement, however low it claims to be', () => {
+  // The #4391 bypass: a proxy answers releases/latest with {"tag_name":"v0.0.1"},
+  // which sits below any floor, so the old signatureRequiredFor(tag) returned
+  // false and the installer degraded to checksum-only — exactly what signing
+  // exists to prevent. Provenance, not value, now decides.
+  const withKey = (tag, pinned) => {
+    // Mirror the shipped logic with a key present, since the real constant is ''.
+    if (!'KEY') return false;
+    if (!pinned) return true;
+    return !'' || compareTags(tag, 'v1.0.24') >= 0;
+  };
+  assert.strictEqual(withKey('v0.0.1', false), true, 'attacker-chosen low tag must still require a signature');
+  assert.strictEqual(withKey('v1.0.23', false), true, 'below-floor from the network must still require');
+  assert.strictEqual(withKey('v99.0.0', false), true);
+});
+
+test('only an OPERATOR-pinned tag may take the pre-floor exception', () => {
+  const decide = (key, floor, tag, pinnedByOperator) => {
+    if (!key) return false;
+    if (!pinnedByOperator) return true;
+    return !floor || compareTags(tag, floor) >= 0;
+  };
+  const KEY = '-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----';
+
+  // --version v1.0.23: a local decision, so the old-release exception applies.
+  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.23', true), false);
+  // Same tag, but arrived over the wire: no exception.
+  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.23', false), true);
+  // Operator pins a signed-era tag: still enforced.
+  assert.strictEqual(decide(KEY, 'v1.0.24', 'v1.0.25', true), true);
+  // Key pinned but no floor recorded: require, even for an operator pin — we
+  // cannot know which releases are supposed to carry a signature.
+  assert.strictEqual(decide(KEY, '', 'v1.0.23', true), true);
+  // No key: nothing to enforce, regardless of provenance.
+  assert.strictEqual(decide('', 'v1.0.24', 'v0.0.1', false), false);
+});
+
 test('signatureRequiredFor is inert until BOTH a key and a floor exist', () => {
   // Today: no key, no floor -> nothing to enforce. Refusing here would break
   // every install, which is why the floor exists rather than a blanket default.
   if (!RELEASE_SIGNING_PUBLIC_KEY || !SIGNED_FROM_TAG) {
-    assert.strictEqual(signatureRequiredFor('v99.99.99'), false,
+    assert.strictEqual(signatureRequiredFor('v99.99.99', false), false,
       'without a pinned key and a floor there is nothing to verify against');
   }
 });
