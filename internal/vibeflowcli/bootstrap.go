@@ -77,6 +77,7 @@ func bootstrapAgents() []bootstrapAgent {
 		{key: "claude-cli", label: "Claude CLI", path: claudeCLIConfigPath, entry: jsonHTTPEntry("http", false)},
 		{key: "claude-desktop", label: "Claude Desktop", path: claudeDesktopConfigPath, entry: claudeDesktopEntry},
 		{key: "kiro", label: "Kiro CLI", path: kiroConfigPath, entry: jsonHTTPEntry("http", true)},
+		{key: "copilot", label: "GitHub Copilot CLI", path: copilotConfigPath, entry: copilotEntry},
 	}
 }
 
@@ -92,6 +93,8 @@ var agentAliases = map[string]string{
 	"claude_desktop": "claude-desktop",
 	"desktop":        "claude-desktop",
 	"kiro-cli":       "kiro",
+	"copilot-cli":    "copilot",
+	"github-copilot": "copilot",
 }
 
 func normalizeAgentKey(key string) string {
@@ -212,6 +215,32 @@ func cursorConfigPath() (string, error) {
 	return filepath.Join(home, ".cursor", "mcp.json"), nil
 }
 
+// copilotConfigPath returns Copilot CLI's user-level MCP config path
+// (~/.copilot/mcp-config.json, verified on v1.0.79 — the path is named in
+// `copilot --additional-mcp-config`'s help text and written by `copilot mcp
+// add`). Copilot also loads workspace configs (.mcp.json / .github/mcp.json),
+// but bootstrap writes user-level config for every agent so a single run
+// covers all of the user's projects. COPILOT_HOME overrides are not resolved,
+// matching the fixed-path precedent of the other resolvers here. Distinct
+// from copilotUserConfigPath (config.json, first-run state — see copilot.go).
+func copilotConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".copilot", "mcp-config.json"), nil
+}
+
+// copilotEntry builds the mcpServers entry for Copilot CLI: the standard
+// HTTP entry (Bearer ${MCP_TOKEN} reference expands from the process env at
+// connect time — verified on v1.0.79) plus copilot's `tools` filter, which
+// `copilot mcp add` always writes; "*" enables every tool the server offers.
+func copilotEntry(url, apiKey string) map[string]any {
+	entry := jsonHTTPEntry("http", true)(url, apiKey)
+	entry["tools"] = []any{"*"}
+	return entry
+}
+
 // codexBootstrapConfigPath reuses CodexConfigPath so a custom --root keeps the
 // codex MCP config isolated under the root directory, matching the existing
 // codex session-launch behavior.
@@ -247,7 +276,7 @@ func bootstrapMCPURL(baseURL string) string {
 	return strings.TrimRight(strings.TrimSpace(baseURL), "/") + mcpEndpointPath
 }
 
-// --- JSON mcpServers helpers (claude-cli, claude-desktop, gemini, cursor) ---
+// --- JSON mcpServers helpers (claude-cli, claude-desktop, gemini, cursor, kiro, copilot) ---
 
 // writeJSONMCPServer loads (or creates) a JSON config file, sets
 // mcpServers[serverName] to entry, and writes it back — preserving every other

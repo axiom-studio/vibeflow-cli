@@ -629,6 +629,43 @@ func TestBootstrapAgents_CursorUsesStreamableHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestBootstrapAgents_CopilotUsesHTTPTransportWithToolsWildcard(t *testing.T) {
+	agents := bootstrapAgents()
+	var copilot bootstrapAgent
+	for _, a := range agents {
+		if a.key == "copilot" {
+			copilot = a
+			break
+		}
+	}
+	if copilot.entry == nil {
+		t.Fatal("copilot bootstrap agent missing entry builder")
+	}
+	entry := copilot.entry("https://cloud.example/rest/v1/vibeflow/mcp", "")
+	if entry["type"] != "http" {
+		t.Errorf("copilot type = %v, want http", entry["type"])
+	}
+	if !equalJSON(entry["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("copilot timeout = %v, want %d", entry["timeout"], mcpClientTimeoutMS)
+	}
+	// copilot mcp add always writes a tools filter; "*" enables every tool.
+	if !equalJSON(entry["tools"], []any{"*"}) {
+		t.Errorf("copilot tools = %v, want [*]", entry["tools"])
+	}
+	// The bearer must be an env reference, never a literal token.
+	headers, _ := entry["headers"].(map[string]any)
+	if headers["Authorization"] != mcpBearerRef {
+		t.Errorf("copilot Authorization = %v, want %s", headers["Authorization"], mcpBearerRef)
+	}
+	p, err := copilotConfigPath()
+	if err != nil {
+		t.Fatalf("copilotConfigPath: %v", err)
+	}
+	if filepath.Base(p) != "mcp-config.json" || filepath.Base(filepath.Dir(p)) != ".copilot" {
+		t.Errorf("copilotConfigPath = %q, want ~/.copilot/mcp-config.json", p)
+	}
+}
+
 func TestBootstrapCmd_WritesGeminiHTTPTransport(t *testing.T) {
 	withTempRoot(t)
 	home := t.TempDir()
@@ -772,7 +809,7 @@ func TestParseAgentSelection(t *testing.T) {
 
 func TestBootstrapAgents_OrderAndKeys(t *testing.T) {
 	got := agentKeys(bootstrapAgents())
-	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro"}
+	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro", "copilot"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("agent order = %v, want %v", got, want)
 	}
@@ -831,6 +868,7 @@ func TestBootstrapAndUninstall_EndToEnd(t *testing.T) {
 		"cursor":         cursorConfigPath,
 		"claude-desktop": claudeDesktopConfigPath,
 		"kiro":           kiroConfigPath,
+		"copilot":        copilotConfigPath,
 	}
 	for name, resolve := range jsonAgents {
 		p, _ := resolve()
