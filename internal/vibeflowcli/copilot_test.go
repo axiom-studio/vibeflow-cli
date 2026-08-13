@@ -156,6 +156,43 @@ func TestEnsureCopilotFirstRunConfig_IdempotentSecondCall(t *testing.T) {
 	}
 }
 
+func TestEnsureCopilotFirstRunConfig_RelativeWorkDirStoredAbsolute(t *testing.T) {
+	// Launch paths pass "." when launching from the project directory;
+	// copilot matches trustedFolders against absolute paths, so a literal
+	// "." entry never matches and the trust dialog still fires. Regression
+	// caught live during feature #667 E2E.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	work := filepath.Join(home, "project")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCopilotFirstRunConfig("."); err != nil {
+		t.Fatalf("EnsureCopilotFirstRunConfig: %v", err)
+	}
+
+	root := readCopilotTestConfig(t, home)
+	got := trustedFolderStrings(t, root)
+	if len(got) != 1 || !filepath.IsAbs(got[0]) {
+		t.Fatalf("trustedFolders = %v, want a single absolute path", got)
+	}
+	// macOS: /tmp symlinks to /private/tmp, so compare resolved paths.
+	wantResolved, _ := filepath.EvalSymlinks(work)
+	gotResolved, _ := filepath.EvalSymlinks(got[0])
+	if gotResolved != wantResolved {
+		t.Errorf("trustedFolders[0] = %q, want path resolving to %q", got[0], work)
+	}
+}
+
 func TestEnsureCopilotFirstRunConfig_CorruptFileErrors(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

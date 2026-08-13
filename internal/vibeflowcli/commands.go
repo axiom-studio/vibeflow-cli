@@ -383,7 +383,10 @@ func launchCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider key (claude, codex, cursor, gemini, qwen)")
+	// Derive the advertised key list from the built-in provider map so a new
+	// provider cannot leave this help text stale (same defect class as #4334:
+	// this string previously omitted kiro and copilot).
+	cmd.Flags().StringVar(&provider, "provider", "", "Provider key ("+strings.Join(NewProviderRegistry(DefaultConfig()).Keys(), ", ")+")")
 	cmd.Flags().StringVar(&branch, "branch", "", "Git branch (default: main)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "Create a new git worktree for the session")
 	cmd.Flags().StringVar(&worktreeName, "worktree-name", "", "Custom worktree directory name (default: auto-generated)")

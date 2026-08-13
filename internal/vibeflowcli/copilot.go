@@ -60,6 +60,14 @@ func EnsureCopilotFirstRunConfig(workDir string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// Launch paths may pass a relative workDir (e.g. "." when launching from
+	// the project directory). Copilot matches trustedFolders against the
+	// absolute folder path, so a relative entry would never match and the
+	// trust dialog would still fire — caught live during feature #667 E2E.
+	workDir, err = filepath.Abs(workDir)
+	if err != nil {
+		return false, fmt.Errorf("resolve absolute path of %s: %w", workDir, err)
+	}
 	root, err := readJSONObjectStripComments(path)
 	if err != nil {
 		return false, err
