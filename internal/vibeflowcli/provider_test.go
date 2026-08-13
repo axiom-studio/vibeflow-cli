@@ -28,10 +28,10 @@ func TestNewProviderRegistry(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	keys := reg.Keys()
-	if len(keys) != 6 {
-		t.Fatalf("expected 6 providers, got %d", len(keys))
+	if len(keys) != 7 {
+		t.Fatalf("expected 7 providers, got %d", len(keys))
 	}
-	for _, k := range []string{"claude", "codex", "cursor", "gemini", "qwen", "kiro"} {
+	for _, k := range []string{"claude", "codex", "copilot", "cursor", "gemini", "qwen", "kiro"} {
 		if _, ok := reg.Get(k); !ok {
 			t.Errorf("missing provider %q", k)
 		}
@@ -43,11 +43,11 @@ func TestProviderRegistry_List(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	list := reg.List()
-	if len(list) != 6 {
-		t.Fatalf("expected 6 providers, got %d", len(list))
+	if len(list) != 7 {
+		t.Fatalf("expected 7 providers, got %d", len(list))
 	}
-	// Should be sorted alphabetically by key: claude, codex, cursor, gemini, kiro, qwen.
-	names := []string{"Claude Code", "OpenAI Codex CLI", "Cursor Agent", "Google Gemini CLI", "Kiro CLI", "Qwen Code"}
+	// Should be sorted alphabetically by key: claude, codex, copilot, cursor, gemini, kiro, qwen.
+	names := []string{"Claude Code", "OpenAI Codex CLI", "GitHub Copilot CLI", "Cursor Agent", "Google Gemini CLI", "Kiro CLI", "Qwen Code"}
 	for i, p := range list {
 		if p.Name != names[i] {
 			t.Errorf("list[%d].Name = %q, want %q", i, p.Name, names[i])
@@ -130,7 +130,7 @@ func TestProviderRegistry_Keys(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	keys := reg.Keys()
-	expected := []string{"claude", "codex", "cursor", "gemini", "kiro", "qwen"}
+	expected := []string{"claude", "codex", "copilot", "cursor", "gemini", "kiro", "qwen"}
 	if len(keys) != len(expected) {
 		t.Fatalf("expected %d keys, got %d", len(expected), len(keys))
 	}
@@ -279,6 +279,35 @@ func TestCheckBinaryAvailable(t *testing.T) {
 			t.Error("missing absolute path should not be available")
 		}
 	})
+}
+
+func TestDefaultConfig_CopilotProviderFields(t *testing.T) {
+	cfg := DefaultConfig()
+	p, ok := cfg.Providers["copilot"]
+	if !ok {
+		t.Fatal("expected copilot provider in defaults")
+	}
+	if p.Name != "GitHub Copilot CLI" {
+		t.Errorf("Name = %q, want GitHub Copilot CLI", p.Name)
+	}
+	if p.Binary != "copilot" {
+		t.Errorf("Binary = %q, want copilot", p.Binary)
+	}
+	if p.LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}" {
+		t.Errorf("LaunchTemplate = %q, want --yolo + --model template", p.LaunchTemplate)
+	}
+	if p.Env["COPILOT_AUTO_UPDATE"] != "false" {
+		t.Errorf("Env[COPILOT_AUTO_UPDATE] = %q, want false (mid-session self-update breaks the tmux session)", p.Env["COPILOT_AUTO_UPDATE"])
+	}
+	if !p.VibeFlowIntegrated {
+		t.Error("VibeFlowIntegrated should be true (copilot runs vibeflow MCP sessions)")
+	}
+	if p.SessionFile != ".vibeflow-session" {
+		t.Errorf("SessionFile = %q, want .vibeflow-session", p.SessionFile)
+	}
+	if p.Default {
+		t.Error("Default should be false (claude is the default)")
+	}
 }
 
 func TestDefaultConfig_QwenProviderFields(t *testing.T) {

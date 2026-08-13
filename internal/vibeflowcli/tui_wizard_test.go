@@ -800,6 +800,7 @@ func TestProviderSupportsGateway(t *testing.T) {
 		{"gemini", true},
 		{"qwen", false},
 		{"cursor", false},
+		{"copilot", false},                    // talks only to GitHub's model routing
 		{"some-future-custom-provider", true}, // default: gateway-eligible
 	}
 	for _, tt := range tests {

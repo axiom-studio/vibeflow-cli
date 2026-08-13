@@ -129,6 +129,11 @@ func TestAppendVibeflowInitPrompt(t *testing.T) {
 			want:        `kiro --dangerously-skip-permissions 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,
 		},
 		{
+			name:        "copilot — -i (start interactive and auto-execute, verified v1.0.79)",
+			providerKey: "copilot",
+			want:        `copilot --dangerously-skip-permissions -i 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,
+		},
+		{
 			name:        "unknown provider — defaults to positional",
 			providerKey: "rogue-provider",
 			want:        `rogue-provider --dangerously-skip-permissions 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,
