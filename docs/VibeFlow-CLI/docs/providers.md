@@ -12,6 +12,7 @@ A **provider** is a configured AI agent CLI: display name, binary name, launch t
 | `cursor` | Cursor Agent | `agent` | `--yolo --approve-mcps` |
 | `qwen` | Qwen Code | `qwen` | `--yolo` |
 | `kiro` | Kiro CLI | `kiro-cli` | `--trust-all-tools` |
+| `copilot` | GitHub Copilot CLI | `copilot` | `--yolo` |
 
 The **Cursor** provider uses the official Cursor CLI binary name **`agent`**, not `cursor`. Install the CLI from Cursor’s documentation if `agent` is not on your `PATH`.
 
@@ -19,9 +20,17 @@ The **Cursor** provider uses the official Cursor CLI binary name **`agent`**, no
 
 **Kiro CLI** ([kiro.dev/docs/cli](https://kiro.dev/docs/cli/)) is AWS's terminal agent, a companion CLI to the Kiro VS Code-based IDE. The `--trust-all-tools` flag pre-authorizes all tool calls — required for autonomous sessions since Kiro's non-interactive mode has no human to approve tool use. There is no documented `--model` flag for `kiro-cli chat`, so vibeflow-cli does not expose model selection for Kiro (unlike Claude/Codex/Cursor). See [Kiro CLI caveats](#kiro-cli-caveats) below for open questions and feature gaps versus other providers.
 
+**GitHub Copilot CLI** ([github/copilot-cli](https://github.com/github/copilot-cli)) is GitHub's terminal agent, backed by the user's Copilot subscription.
+Install with `npm install -g @github/copilot`.
+Auth is GitHub login (`copilot login`) or a `COPILOT_GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN` env var — vibeflow-cli does no key handling for it.
+The `--yolo` flag expands to `--allow-all-tools --allow-all-paths --allow-all-urls` (verified on v1.0.79).
+Model selection uses `--model`; `auto` works on every plan, while concrete slugs are plan-gated server-side.
+vibeflow-cli pre-seeds `~/.copilot/config.json` (trusted folder + first-run nudge markers) at launch so unattended sessions never stall on Copilot's first-run dialogs, and sets `COPILOT_AUTO_UPDATE=false` so a mid-session self-update cannot break the tmux session.
+The customer's Copilot org policy must allow Copilot CLI and MCP servers; every session turn consumes Copilot AI credits (premium requests).
+
 ## VibeFlow-integrated providers
 
-**Claude** and **Cursor** are marked VibeFlow-integrated in the default config (session file templates align with autonomous flows). **Codex**, **Gemini**, **Qwen**, and **Kiro** remain available with their own launch templates; gateway and env behavior may differ by product.
+**Claude**, **Cursor**, and **Copilot** are marked VibeFlow-integrated in the default config (session file templates align with autonomous flows). **Codex**, **Gemini**, **Qwen**, and **Kiro** remain available with their own launch templates; gateway and env behavior may differ by product.
 
 ## Prompt passing
 
@@ -30,6 +39,7 @@ VibeFlow init prompts are passed in the argument shape each CLI expects so the a
 - **Claude / Codex / Cursor / Kiro** — positional argument (`claude '<prompt>'`). These CLIs treat a positional prompt as the initial input and stay interactive. Kiro's shape is verified — see [Kiro CLI caveats](#kiro-cli-caveats).
 - **Gemini** — `-p '<prompt>'` (non-interactive headless mode).
 - **Qwen** — `-i '<prompt>'` (`--prompt-interactive`: execute the prompt and continue in interactive mode). Qwen's positional argument is **one-shot mode** (process the prompt, then exit) — wrong for vibeflow autonomous sessions, which need the agent to remain running.
+- **Copilot** — `-i '<prompt>'` (`--interactive`: start interactive mode and auto-execute the prompt; verified on v1.0.79). Copilot's `-p/--prompt` is **one-shot mode** (exits after completion) and there is no positional prompt argument, so copilot must not use the default positional shape.
 
 ## Kiro CLI caveats
 
