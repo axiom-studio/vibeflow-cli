@@ -2750,11 +2750,12 @@ func (w *WizardModel) applyQwenPreset() {
 }
 
 // providerSupportsGateway reports whether a provider can route LLM requests
-// through the Axiom Cloud LLM Gateway. qwen and cursor connect directly to the
-// provider, so the wizard never offers them the gateway routing choice.
+// through the Axiom Cloud LLM Gateway. qwen, cursor, and copilot connect
+// directly to their own backend (copilot talks only to GitHub's model
+// routing), so the wizard never offers them the gateway routing choice.
 func providerSupportsGateway(providerKey string) bool {
 	switch providerKey {
-	case "qwen", "cursor":
+	case "qwen", "cursor", "copilot":
 		return false
 	default:
 		return true

@@ -36,6 +36,13 @@ var builtInProviderModels = map[string][]ModelOption{
 		{ID: "sonnet", Description: "Claude Sonnet alias"},
 		{ID: "opus", Description: "Claude Opus alias"},
 	},
+	// copilot: "auto" is the only slug available on every Copilot plan
+	// (verified on v1.0.79); paid-plan slugs are plan-gated server-side and
+	// fail loudly at startup, so they are added only once enumerated on an
+	// entitled account (feature #667 E2E).
+	"copilot": {
+		{ID: "auto", Description: "Copilot picks the best available model"},
+	},
 	"gemini": {
 		{ID: "gemini-2.5-pro", Description: "Gemini Pro model"},
 		{ID: "gemini-2.5-flash", Description: "Gemini Flash model"},

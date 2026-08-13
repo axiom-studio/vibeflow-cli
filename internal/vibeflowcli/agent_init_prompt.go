@@ -83,12 +83,20 @@ func BuildVibeflowCloudDispatchInitPrompt(mcpName, projectName, persona, session
 //     LaunchTemplate or to this switch, since a one-shot process can't back
 //     vibeflow's persistent tmux session that stays alive polling
 //     wait_for_work.
+//   - copilot → `-i 'prompt'` (start interactive mode and auto-execute the
+//     prompt). VERIFIED against the real `copilot` binary (v1.0.79): the
+//     seeded turn executes and the composer stays alive for follow-up
+//     turns (scripted tmux session, process liveness confirmed after the
+//     seeded response). Copilot's `-p/--prompt` is ONE-SHOT (documented
+//     "exits after completion") and there is NO positional prompt argument
+//     (usage is `copilot [options] [command]`, a positional would parse as
+//     a subcommand) — so copilot must NOT fall through to default.
 func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	escaped := strings.ReplaceAll(prompt, "'", `'\''`)
 	switch providerKey {
 	case "gemini":
 		return baseCommand + fmt.Sprintf(" -p '%s'", escaped)
-	case "qwen":
+	case "qwen", "copilot":
 		return baseCommand + fmt.Sprintf(" -i '%s'", escaped)
 	default:
 		return baseCommand + fmt.Sprintf(" '%s'", escaped)

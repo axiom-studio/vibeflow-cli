@@ -497,7 +497,7 @@ func modelsCmd() *cobra.Command {
 			if len(args) == 1 {
 				return printProviderModels(args[0])
 			}
-			for _, provider := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
+			for _, provider := range []string{"claude", "codex", "copilot", "cursor", "gemini", "qwen"} {
 				if err := printProviderModels(provider); err != nil {
 					return err
 				}

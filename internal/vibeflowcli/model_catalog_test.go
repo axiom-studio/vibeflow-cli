@@ -28,6 +28,14 @@ func TestIsKnownModelForProvider(t *testing.T) {
 	if IsKnownModelForProvider("custom-provider", "whatever-model") {
 		t.Fatal("custom providers should not have a built-in catalog")
 	}
+	// copilot: "auto" is the only universally available slug (plan-gated
+	// slugs are added after E2E enumeration on an entitled account).
+	if !IsKnownModelForProvider("copilot", "auto") {
+		t.Fatal("expected auto to be known for copilot")
+	}
+	if IsKnownModelForProvider("copilot", "gpt-5.4") {
+		t.Fatal("plan-gated copilot slugs must not be in the catalog until E2E-verified")
+	}
 }
 
 func TestModelsForProviderReturnsCopy(t *testing.T) {

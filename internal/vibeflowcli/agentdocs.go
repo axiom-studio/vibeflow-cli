@@ -41,6 +41,10 @@ var providerDocFile = map[string]string{
 	// Qwen Code reads QWEN.md (plus AGENTS.md) — it does NOT read GEMINI.md despite
 	// being a gemini-cli fork. See https://github.com/QwenLM/qwen-code docs/users/features/memory.md
 	"qwen": "QWEN.md",
+	// Copilot CLI loads AGENTS.md by default from the git root and cwd
+	// (its --no-custom-instructions flag disables exactly that) — same
+	// template as Codex/Cursor. Verified on v1.0.79.
+	"copilot": "AGENTS.md",
 }
 
 // vibeflowSectionMarker is the heading used to identify the vibeflow rules
@@ -52,7 +56,7 @@ const vibeflowSectionMarker = "## vibeflow Agent Session Rules"
 func GetAgentDoc(providerKey string) ([]byte, error) {
 	docFile, ok := providerDocFile[providerKey]
 	if !ok {
-		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini, cursor, qwen)", providerKey)
+		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini, cursor, qwen, copilot)", providerKey)
 	}
 	return agentDocsFS.ReadFile("agentdocs/" + docFile)
 }
@@ -67,8 +71,8 @@ func GetAgentDoc(providerKey string) ([]byte, error) {
 func EnsureAllAgentDocs(workDir string) []string {
 	var updated []string
 	seenFile := make(map[string]bool)
-	// Stable order; codex before cursor so AGENTS.md is written once (both use same file).
-	for _, providerKey := range []string{"claude", "codex", "gemini", "cursor", "qwen"} {
+	// Stable order; codex before cursor/copilot so AGENTS.md is written once (all three use same file).
+	for _, providerKey := range []string{"claude", "codex", "gemini", "cursor", "qwen", "copilot"} {
 		docName, ok := providerDocFile[providerKey]
 		if !ok {
 			continue

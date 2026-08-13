@@ -261,6 +261,26 @@ func DefaultConfig() *Config {
 				SessionFile:        "",
 				Default:            false,
 			},
+			"copilot": {
+				Name:   "GitHub Copilot CLI",
+				Binary: "copilot",
+				// Copilot CLI: https://github.com/github/copilot-cli — binary is
+				// `copilot` (npm @github/copilot). --yolo expands to
+				// --allow-all-tools --allow-all-paths --allow-all-urls, matching
+				// the autonomous-session semantics of
+				// --dangerously-skip-permissions/--yolo elsewhere in this map
+				// (verified against v1.0.79). --model accepts "auto" on every
+				// plan; concrete slugs are plan-gated and fail loudly at startup.
+				// COPILOT_AUTO_UPDATE=false mirrors the claude autoupdater
+				// hardening (issue #3493): a mid-session self-update restart
+				// would break the tmux session.
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}",
+				PromptTemplate:     "",
+				Env:                map[string]string{"COPILOT_AUTO_UPDATE": "false"},
+				VibeFlowIntegrated: true,
+				SessionFile:        ".vibeflow-session",
+				Default:            false,
+			},
 			"kiro": {
 				Name:   "Kiro CLI",
 				Binary: "kiro-cli",
