@@ -17,7 +17,9 @@
 package vibeflowcli
 
 import (
+	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -193,5 +195,26 @@ func TestModelForPersona(t *testing.T) {
 	}
 	if got := modelForPersona("sonnet", models, "architect"); got != "sonnet" {
 		t.Errorf("architect model = %q", got)
+	}
+}
+
+// TestLaunchHelp_ListsEveryBuiltInProviderKey guards the --provider flag help
+// against the #4334 defect class: the hardcoded key list omitted kiro and
+// copilot, leaving new providers undiscoverable from `launch --help`. The
+// usage string is now derived from the built-in provider map; this test keeps
+// it that way.
+func TestLaunchHelp_ListsEveryBuiltInProviderKey(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := launchCmd()
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	if err := cmd.Help(); err != nil {
+		t.Fatalf("render help: %v", err)
+	}
+	help := buf.String()
+	for _, key := range NewProviderRegistry(DefaultConfig()).Keys() {
+		if !strings.Contains(help, key) {
+			t.Errorf("launch --help never mentions provider key %q", key)
+		}
 	}
 }
