@@ -957,6 +957,9 @@ func TestConfigureStatusBar_EscapesInjection(t *testing.T) {
 		Provider: "claude",
 		Branch:   "main#(touch /tmp/vf_should_not_exist)",
 		Project:  "proj#(id)",
+		// Persona joined the same format string in #4535, so it is covered by
+		// the same end-to-end injection proof.
+		Persona: "pe#(touch /tmp/vf_persona_should_not_exist)",
 	}); err != nil {
 		t.Fatalf("ConfigureStatusBar: %v", err)
 	}
@@ -1073,4 +1076,69 @@ func TestWorkbenchHeader_StripsControlChars(t *testing.T) {
 	if got := workbenchPaneTitle("vibeflow_claude-a\x1b[2Jb"); strings.ContainsAny(got, "\x1b") {
 		t.Errorf("workbenchPaneTitle leaked ESC: %q", got)
 	}
+}
+
+// TestBuildStatusBarSettings_Persona covers issue #4535: a multi-persona team
+// launch used to render N identical status bars, so the user could not tell
+// which pane was which agent.
+func TestBuildStatusBarSettings_Persona(t *testing.T) {
+	t.Run("persona is rendered in status-left", func(t *testing.T) {
+		got := buildStatusBarSettings(StatusBarOpts{
+			Provider: "claude",
+			Branch:   "feat/dead-pane",
+			Project:  "vibeflow-cli",
+			Persona:  "principal_engineer",
+		})
+		if !strings.Contains(got["status-left"], "principal_engineer") {
+			t.Errorf("status-left has no persona: %q", got["status-left"])
+		}
+		// Persona takes the leading (teal) slot; provider and branch shift right.
+		wantOrder := []string{"principal_engineer", "claude", "feat/dead-pane"}
+		pos := -1
+		for _, want := range wantOrder {
+			at := strings.Index(got["status-left"], want)
+			if at < 0 {
+				t.Fatalf("status-left missing %q: %q", want, got["status-left"])
+			}
+			if at <= pos {
+				t.Errorf("status-left segments out of order at %q: %q", want, got["status-left"])
+			}
+			pos = at
+		}
+		// Project must remain visible alongside it (acceptance criterion).
+		if !strings.Contains(got["status-right"], "vibeflow-cli") {
+			t.Errorf("status-right lost the project: %q", got["status-right"])
+		}
+	})
+
+	t.Run("no persona renders exactly what shipped before", func(t *testing.T) {
+		// Pins the vanilla (non-vibeflow) session bar byte-for-byte, so the
+		// segment-list refactor provably did not change sessions that have no
+		// persona. If this string ever needs updating, it is a real UI change.
+		const want = "#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] claude #[fg=#576574]|#[fg=#c8d6e5] main "
+		got := buildStatusBarSettings(StatusBarOpts{Provider: "claude", Branch: "main"})
+		if got["status-left"] != want {
+			t.Errorf("vanilla status-left changed:\n got:  %q\n want: %q", got["status-left"], want)
+		}
+	})
+
+	t.Run("whitespace-only persona is treated as absent", func(t *testing.T) {
+		got := buildStatusBarSettings(StatusBarOpts{Provider: "claude", Branch: "main", Persona: "   "})
+		if strings.Contains(got["status-left"], "|  |") || strings.Contains(got["status-left"], "nobold]  ") {
+			t.Errorf("blank persona left an empty segment: %q", got["status-left"])
+		}
+	})
+
+	t.Run("persona cannot inject a tmux format string", func(t *testing.T) {
+		// Same class as the #3289 finding on branch names: persona reaches the
+		// status format from the server, so it must be escaped too.
+		got := buildStatusBarSettings(StatusBarOpts{
+			Provider: "claude",
+			Branch:   "main",
+			Persona:  "pe#(touch /tmp/vf_persona_pwned)",
+		})
+		if strings.Contains(strings.ReplaceAll(got["status-left"], "##", ""), "#(") {
+			t.Errorf("persona left a live #( command-substitution: %q", got["status-left"])
+		}
+	})
 }

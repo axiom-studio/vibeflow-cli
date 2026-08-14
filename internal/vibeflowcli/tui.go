@@ -1715,6 +1715,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		Env:      result.Provider.Env,
 		Branch:   branch,
 		Project:  projectName,
+		Persona:  result.Persona,
 	})
 	if err != nil {
 		m.logger.Error("create session (provider=%s, workdir=%s): %v", provider, workDir, err)
