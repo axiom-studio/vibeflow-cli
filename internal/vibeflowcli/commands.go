@@ -808,6 +808,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		Env:      sessionEnv,
 		Branch:   branch,
 		Project:  projectName,
+		Persona:  meta.Persona,
 	}); err != nil {
 		return SessionMeta{}, err
 	}

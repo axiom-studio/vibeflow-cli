@@ -118,6 +118,7 @@ type StatusBarOpts struct {
 	Provider string
 	Branch   string
 	Project  string
+	Persona  string // Empty for vanilla (non-vibeflow) sessions.
 }
 
 // LaunchTemplateVars are the variables available in a Provider's LaunchTemplate.
@@ -412,6 +413,7 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 		Provider: opts.Provider,
 		Branch:   opts.Branch,
 		Project:  opts.Project,
+		Persona:  opts.Persona,
 	})
 
 	return nil
@@ -1140,15 +1142,32 @@ func buildStatusBarSettings(opts StatusBarOpts) map[string]string {
 		branch = "main"
 	}
 	// Neutralize tmux format-string injection from repo-derived values (#3289).
+	// Persona goes through the same sanitizer: it reaches us from the server and
+	// lands in the same format string a git branch name did when #3289 was found.
 	provider = sanitizeTmuxStatusValue(provider)
 	branch = sanitizeTmuxStatusValue(branch)
+	persona := sanitizeTmuxStatusValue(strings.TrimSpace(opts.Persona))
 
-	// Build status-left: [vibeflow] provider | branch (Ocean palette, theme.go:
-	// deep-ocean bg, teal accent, surface, storm-gray muted, soft fg).
-	statusLeft := fmt.Sprintf(
-		"#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] %s #[fg=#576574]|#[fg=#c8d6e5] %s ",
-		provider, branch,
-	)
+	// Build status-left: [vibeflow] persona | provider | branch (Ocean palette,
+	// theme.go: deep-ocean bg, teal accent, surface, storm-gray muted, soft fg).
+	//
+	// Persona leads because it is the only field that tells two panes of the same
+	// team apart: without it a multi-persona launch renders N identical bars
+	// (issue #4535). It is absent on vanilla sessions, in which case the segments
+	// collapse to provider | branch and the rendered string is byte-identical to
+	// what shipped before, so vanilla chrome is provably unchanged.
+	segments := make([]string, 0, 3)
+	if persona != "" {
+		segments = append(segments, persona)
+	}
+	segments = append(segments, provider, branch)
+
+	var left strings.Builder
+	fmt.Fprintf(&left, "#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] %s ", segments[0])
+	for _, seg := range segments[1:] {
+		fmt.Fprintf(&left, "#[fg=#576574]|#[fg=#c8d6e5] %s ", seg)
+	}
+	statusLeft := left.String()
 
 	// Build status-right: shortcuts + project
 	project := opts.Project
@@ -1162,11 +1181,13 @@ func buildStatusBarSettings(opts StatusBarOpts) map[string]string {
 	)
 
 	return map[string]string{
-		"status":              "on",
-		"status-style":        "fg=#c8d6e5,bg=#0b1929",
-		"status-left":         statusLeft,
-		"status-right":        statusRight,
-		"status-left-length":  "60",
+		"status":       "on",
+		"status-style": "fg=#c8d6e5,bg=#0b1929",
+		"status-left":  statusLeft,
+		"status-right": statusRight,
+		// Raised from 60 for the persona segment: persona keys run to ~20 chars
+		// ("principal_engineer"), which pushed the branch off the end of the bar.
+		"status-left-length":  "100",
 		"status-right-length": "60",
 	}
 }
