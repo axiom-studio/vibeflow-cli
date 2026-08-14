@@ -135,6 +135,13 @@ func (r RestartSelectModel) View() string {
 		if s.Project != "" {
 			details += " | " + s.Project
 		}
+		// Say which of the two restarts this is, so the user is not guessing
+		// whether the agent comes back with its history (issue #4534).
+		if ProviderResumesConversation(s.Provider) {
+			details += " | resumes conversation"
+		} else {
+			details += " | fresh start"
+		}
 
 		line := fmt.Sprintf("%s%s %s  %s", cursor, check, name, lipgloss.NewStyle().Foreground(dimColor).Render(details))
 		if i == r.cursor {

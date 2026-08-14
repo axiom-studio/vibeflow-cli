@@ -445,3 +445,111 @@ func TestApplyQwenModelPassthrough(t *testing.T) {
 		applyQwenModelPassthrough("qwen", nil) // must not panic
 	})
 }
+
+func TestAppendResumeFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		providerKey string
+		base        string
+		want        string
+	}{
+		{
+			name:        "claude - --continue reattaches to the most recent conversation",
+			providerKey: "claude",
+			base:        "claude --dangerously-skip-permissions",
+			want:        "claude --dangerously-skip-permissions --continue",
+		},
+		{
+			name:        "gemini - --resume takes a value",
+			providerKey: "gemini",
+			base:        "gemini --yolo",
+			want:        "gemini --yolo --resume latest",
+		},
+		{
+			name:        "qwen - --continue",
+			providerKey: "qwen",
+			base:        "qwen --yolo",
+			want:        "qwen --yolo --continue",
+		},
+		{
+			name:        "codex - resume is a subcommand, not a flag, so restart stays fresh",
+			providerKey: "codex",
+			base:        "codex --dangerously-skip-permissions",
+			want:        "codex --dangerously-skip-permissions",
+		},
+		{
+			name:        "cursor - unverified, restart stays fresh",
+			providerKey: "cursor",
+			base:        "agent --yolo",
+			want:        "agent --yolo",
+		},
+		{
+			name:        "kiro - unverified, restart stays fresh",
+			providerKey: "kiro",
+			base:        "kiro-cli chat",
+			want:        "kiro-cli chat",
+		},
+		{
+			name:        "unknown provider is returned unchanged",
+			providerKey: "totally-made-up",
+			base:        "whatever --flag",
+			want:        "whatever --flag",
+		},
+		{
+			name:        "empty provider key is returned unchanged",
+			providerKey: "",
+			base:        "claude",
+			want:        "claude",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AppendResumeFlag(tt.base, tt.providerKey); got != tt.want {
+				t.Errorf("AppendResumeFlag(%q, %q):\n got:  %q\n want: %q", tt.base, tt.providerKey, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAppendResumeFlag_OrderingWithInitPrompt(t *testing.T) {
+	// The resume flag must land BEFORE the init prompt. claude takes the prompt
+	// as a positional argument, so a flag appended afterwards would sit on the
+	// far side of it and be read as prompt text rather than as an option.
+	cmd := "claude --dangerously-skip-permissions"
+	cmd = AppendResumeFlag(cmd, "claude")
+	cmd = AppendVibeflowInitPrompt(cmd, "claude", "hello world")
+
+	const want = `claude --dangerously-skip-permissions --continue 'hello world'`
+	if cmd != want {
+		t.Errorf("Ordering integration:\n got:  %q\n want: %q", cmd, want)
+	}
+}
+
+func TestResumeFlagsMatchBuiltinProviders(t *testing.T) {
+	// A resume flag keyed on a provider that does not exist never fires, and the
+	// failure is silent: the session just restarts fresh forever. Pin every key
+	// to the real built-in registry so a typo or a provider added on another
+	// branch fails here instead of in production.
+	builtins := DefaultConfig().Providers
+	for key := range resumeFlags {
+		if _, ok := builtins[key]; !ok {
+			t.Errorf("resumeFlags has key %q, which is not a built-in provider in DefaultConfig()", key)
+		}
+	}
+}
+
+func TestProviderResumesConversation(t *testing.T) {
+	// Drives the dead-session picker's "resumes conversation" / "fresh start"
+	// label, so it must agree with resumeFlags exactly.
+	for _, key := range []string{"claude", "gemini", "qwen"} {
+		if !ProviderResumesConversation(key) {
+			t.Errorf("ProviderResumesConversation(%q) = false, want true", key)
+		}
+	}
+	for _, key := range []string{"codex", "cursor", "kiro", "", "made-up"} {
+		if ProviderResumesConversation(key) {
+			t.Errorf("ProviderResumesConversation(%q) = true, want false", key)
+		}
+	}
+}

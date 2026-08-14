@@ -95,6 +95,78 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	}
 }
 
+// resumeFlags maps a provider key to the CLI flag that reattaches the agent to
+// the most recent conversation for its working directory. Used when a dead
+// session is brought back so the user keeps the conversation instead of
+// starting from zero (issue #4534). Providers absent from the map restart with
+// a fresh conversation, exactly as they did before.
+//
+// Verified against the installed binaries, not from memory:
+//   - claude → `-c, --continue`: "Continue the most recent conversation in
+//     [this directory]".
+//   - gemini → `-r, --resume` takes a value; "latest" selects the most recent.
+//   - qwen   → `-c, --continue`: "Resume the most recent session for the
+//     current project". Inert unless the user enabled `--chat-recording`
+//     (qwen's help says history is not saved without it), which is harmless:
+//     it degrades to today's fresh restart rather than failing.
+//
+// Deliberately absent:
+//   - codex → resume is a SUBCOMMAND (`codex resume --last`), not a flag, so it
+//     cannot be appended to an already-rendered launch command. Supporting it
+//     means rewriting the command shape, which is a separate change.
+//   - cursor / kiro → resume capability not verified against the real binary.
+//     A wrong flag here breaks restart entirely, so they stay on fresh restart
+//     until someone confirms the real flag.
+//   - copilot → `copilot --help` does document `--continue` ("Resume the most
+//     recent session"), but the copilot provider (feature #667, PR #9) is not
+//     on this branch. Adding the key now would be an entry for a provider that
+//     does not exist. TestResumeFlagsMatchBuiltinProviders fails on it by
+//     design. Add it in the same change that adds the provider.
+//
+// This lives in code rather than in the provider's LaunchTemplate or a new
+// Provider field because migrateProviders (config.go) never refreshes an
+// existing built-in's template or backfills new struct fields: every current
+// user has the old provider block persisted in their config.yaml, so a
+// config-side change would silently do nothing for them. Appending after
+// render is the same pattern AppendCodexGatewayProviderFlags and
+// AppendQwenAPIFlags already use for provider-conditional flags.
+var resumeFlags = map[string]string{
+	"claude": "--continue",
+	"gemini": "--resume latest",
+	"qwen":   "--continue",
+}
+
+// AppendResumeFlag appends the provider's resume flag to a rendered launch
+// command. Providers with no known resume flag are returned unchanged.
+//
+// Ordering: this MUST run before AppendVibeflowInitPrompt. claude, codex,
+// cursor and kiro take the init prompt as a POSITIONAL argument, so a flag
+// appended afterwards would land on the far side of the prompt.
+//
+// The flag is passed unconditionally for known providers, with no check that a
+// conversation actually exists to resume: `claude --continue` in a directory
+// with no history starts a fresh conversation rather than failing (verified by
+// running it under `--print` in an empty temp directory). That makes a
+// transcript-existence probe (which would need a per-provider history
+// location, path escaping and a filesystem race) pure cost for identical
+// behaviour. A session being restarted has by definition already run once, so
+// the no-history case is close to unreachable regardless.
+func AppendResumeFlag(baseCommand, providerKey string) string {
+	flag, ok := resumeFlags[providerKey]
+	if !ok {
+		return baseCommand
+	}
+	return baseCommand + " " + flag
+}
+
+// ProviderResumesConversation reports whether a restart of the given provider
+// keeps the prior conversation. The dead-session picker uses it to tell the
+// user which of the two they are about to get.
+func ProviderResumesConversation(providerKey string) bool {
+	_, ok := resumeFlags[providerKey]
+	return ok
+}
+
 // AppendCodexGatewayProviderFlags appends a temporary Codex CLI custom
 // provider definition when the launch env has a routed OpenAI-compatible
 // base URL.
