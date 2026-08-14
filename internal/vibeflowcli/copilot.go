@@ -110,16 +110,27 @@ func EnsureCopilotFirstRunConfig(workDir string) (bool, error) {
 		return false, nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, fmt.Errorf("create %s: %w", dir, err)
+	}
+	// Ensure directory mode is strict even if it already existed with wider perms.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return false, fmt.Errorf("chmod %s: %w", dir, err)
 	}
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return false, fmt.Errorf("marshal %s: %w", path, err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return false, fmt.Errorf("write %s: %w", path, err)
+	// Atomic write: write to a temp file in the same directory and rename.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return false, fmt.Errorf("write tmp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return false, fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
 	}
 	return true, nil
 }
