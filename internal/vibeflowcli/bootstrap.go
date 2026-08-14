@@ -403,11 +403,22 @@ func writeConfigFileWithBackup(path string, data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create dir for %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	// Ensure the directory is not widened by a pre-existing permissive mode.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("chmod %s: %w", dir, err)
+	}
+	// Atomic write: write to a temp file and rename into place with 0600.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return "", fmt.Errorf("write tmp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
 	}
 	return backup, nil
 }
