@@ -265,16 +265,42 @@ func DefaultConfig() *Config {
 				Name:   "GitHub Copilot CLI",
 				Binary: "copilot",
 				// Copilot CLI: https://github.com/github/copilot-cli — binary is
-				// `copilot` (npm @github/copilot). --yolo expands to
-				// --allow-all-tools --allow-all-paths --allow-all-urls, matching
-				// the autonomous-session semantics of
-				// --dangerously-skip-permissions/--yolo elsewhere in this map
-				// (verified against v1.0.79). --model accepts "auto" on every
+				// `copilot` (npm @github/copilot). --model accepts "auto" on every
 				// plan; concrete slugs are plan-gated and fail loudly at startup.
 				// COPILOT_AUTO_UPDATE=false mirrors the claude autoupdater
 				// hardening (issue #3493): a mid-session self-update restart
 				// would break the tmux session.
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}",
+				//
+				// Unlike every other provider in this map, copilot splits
+				// "don't ask permission" and "keep working" onto two independent
+				// axes, so an autonomous session needs BOTH (issue #4602):
+				//
+				//   --yolo      expands to --allow-all-tools --allow-all-paths
+				//               --allow-all-urls. Permissions ONLY — the docs are
+				//               explicit that "with --allow-all, you are still in
+				//               the normal interactive flow", i.e. the agent still
+				//               stops and idles at the prompt when it ends a turn.
+				//   --autopilot the continuation loop that makes the agent resume
+				//               after end-of-turn. Without it a vibeflow session
+				//               dies at its first natural stopping point instead
+				//               of returning to wait_for_work.
+				//   --no-ask-user
+				//               drops the ask_user tool. Nobody is watching an
+				//               unattended pane; the vibeflow protocol routes
+				//               questions through the prompt_user MCP tool.
+				//
+				// --max-autopilot-continues defaults to 5, which would cap a
+				// session that is supposed to poll indefinitely, so it is raised
+				// here. 1000 rather than 0 because "non-negative integer" is all
+				// the CLI validator documents — 0 as an unlimited sentinel is
+				// undocumented and could equally mean "no continuations at all".
+				// This is the cost knob: autopilot spends AI credits per
+				// continuation without a human in the loop, and migrateProviders
+				// never rewrites a user's launch_template, so lowering it in
+				// ~/.vibeflow-cli/config.yaml sticks.
+				//
+				// Verified against v1.0.80.
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo --autopilot --no-ask-user --max-autopilot-continues 1000{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{"COPILOT_AUTO_UPDATE": "false"},
 				VibeFlowIntegrated: true,

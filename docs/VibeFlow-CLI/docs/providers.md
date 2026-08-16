@@ -12,7 +12,7 @@ A **provider** is a configured AI agent CLI: display name, binary name, launch t
 | `cursor` | Cursor Agent | `agent` | `--yolo --approve-mcps` |
 | `qwen` | Qwen Code | `qwen` | `--yolo` |
 | `kiro` | Kiro CLI | `kiro-cli` | `--trust-all-tools` |
-| `copilot` | GitHub Copilot CLI | `copilot` | `--yolo` |
+| `copilot` | GitHub Copilot CLI | `copilot` | `--yolo --autopilot --no-ask-user --max-autopilot-continues 1000` |
 
 The **Cursor** provider uses the official Cursor CLI binary name **`agent`**, not `cursor`. Install the CLI from Cursor’s documentation if `agent` is not on your `PATH`.
 
@@ -23,7 +23,11 @@ The **Cursor** provider uses the official Cursor CLI binary name **`agent`**, no
 **GitHub Copilot CLI** ([github/copilot-cli](https://github.com/github/copilot-cli)) is GitHub's terminal agent, backed by the user's Copilot subscription.
 Install with `npm install -g @github/copilot`.
 Auth is GitHub login (`copilot login`) or a `COPILOT_GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN` env var — vibeflow-cli does no key handling for it.
-The `--yolo` flag expands to `--allow-all-tools --allow-all-paths --allow-all-urls` (verified on v1.0.79).
+Copilot is the one provider where permissions and autonomy are **separate flags**, so an autonomous session needs four of them rather than one (verified on v1.0.80).
+`--yolo` expands to `--allow-all-tools --allow-all-paths --allow-all-urls`, but it grants permissions only — GitHub's docs are explicit that "with `--allow-all`, you are still in the normal interactive flow", so a `--yolo`-only session runs every tool without prompting and then goes idle at the prompt as soon as it finishes a turn.
+`--autopilot` adds the continuation loop that makes the agent resume after end-of-turn, which is what keeps a vibeflow session returning to `wait_for_work`.
+`--no-ask-user` drops Copilot's `ask_user` tool, since nobody is watching an unattended pane — vibeflow agents raise questions through the `prompt_user` MCP tool instead.
+`--max-autopilot-continues` caps continuations and **defaults to 5**, which would stop a session that is meant to poll indefinitely, so vibeflow-cli raises it to 1000. Each continuation spends Copilot AI credits with no human in the loop; lower it in `~/.vibeflow-cli/config.yaml` if you want a tighter budget, and note that vibeflow-cli never rewrites a `launch_template` you have already customised.
 Model selection uses `--model`; `auto` works on every plan, while concrete slugs are plan-gated server-side.
 vibeflow-cli pre-seeds `~/.copilot/config.json` (trusted folder + first-run nudge markers) at launch so unattended sessions never stall on Copilot's first-run dialogs, and sets `COPILOT_AUTO_UPDATE=false` so a mid-session self-update cannot break the tmux session.
 The customer's Copilot org policy must allow Copilot CLI and MCP servers; every session turn consumes Copilot AI credits (premium requests).
