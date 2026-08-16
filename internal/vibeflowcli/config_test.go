@@ -676,6 +676,55 @@ func TestMigrateProviders_PreservesLaunchTemplates(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_CopilotAutonomyFlagsReachExistingUsers pins the delivery path
+// for the issue #4602 fix. A user whose config.yaml predates the copilot
+// provider has no `copilot:` block on disk, and LoadConfig merges the file over
+// DefaultConfig() rather than replacing its provider map — so the shipped
+// template is what actually launches, and the fix arrives on the next run with
+// no migration step. The inverse case (a config that DOES pin an old copilot
+// template keeps it, because migrateProviders never rewrites launch templates)
+// is covered by TestMigrateProviders_PreservesLaunchTemplates.
+func TestLoadConfig_CopilotAutonomyFlagsReachExistingUsers(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	// A pre-copilot config: claude only, no `copilot:` block anywhere.
+	if err := os.WriteFile(cfgPath, []byte(`server_url: https://cloud.axiomstudio.ai
+default_provider: claude
+providers:
+    claude:
+        name: Claude Code
+        binary: claude
+        launch_template: '{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}'
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, ok := cfg.Providers["copilot"]
+	if !ok {
+		t.Fatal("copilot provider missing after loading a pre-copilot config")
+	}
+	got, err := RenderLaunchCommand(p.LaunchTemplate, LaunchTemplateVars{
+		Binary:          p.Binary,
+		SkipPermissions: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	// The user's own claude override must survive the merge untouched.
+	if cfg.Providers["claude"].LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}" {
+		t.Errorf("user's claude template was clobbered: %q", cfg.Providers["claude"].LaunchTemplate)
+	}
+}
+
 func TestMigrateProviders_RemovesVibeflowEnvVars(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")

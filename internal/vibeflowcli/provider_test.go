@@ -293,8 +293,8 @@ func TestDefaultConfig_CopilotProviderFields(t *testing.T) {
 	if p.Binary != "copilot" {
 		t.Errorf("Binary = %q, want copilot", p.Binary)
 	}
-	if p.LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}" {
-		t.Errorf("LaunchTemplate = %q, want --yolo + --model template", p.LaunchTemplate)
+	if p.LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --yolo --autopilot --no-ask-user --max-autopilot-continues 1000{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}" {
+		t.Errorf("LaunchTemplate = %q, want --yolo + autopilot autonomy flags + --model template", p.LaunchTemplate)
 	}
 	if p.Env["COPILOT_AUTO_UPDATE"] != "false" {
 		t.Errorf("Env[COPILOT_AUTO_UPDATE] = %q, want false (mid-session self-update breaks the tmux session)", p.Env["COPILOT_AUTO_UPDATE"])
@@ -308,6 +308,68 @@ func TestDefaultConfig_CopilotProviderFields(t *testing.T) {
 	if p.Default {
 		t.Error("Default should be false (claude is the default)")
 	}
+}
+
+// TestDefaultConfig_CopilotAutonomyFlags is the regression guard for issue
+// #4602. Copilot splits permissions and autonomy onto two flags: --yolo grants
+// full trust but leaves the agent "in the normal interactive flow", so an
+// autonomous session that had only --yolo ran every tool without prompting and
+// then idled at the prompt the moment it ended a turn, never returning to
+// wait_for_work. Rendering goes through the SHIPPED template rather than a copy
+// of it, so editing the registry entry cannot silently pass this test.
+func TestDefaultConfig_CopilotAutonomyFlags(t *testing.T) {
+	tmpl := DefaultConfig().Providers["copilot"].LaunchTemplate
+
+	t.Run("autonomous session gets permissions and continuation", func(t *testing.T) {
+		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
+			Binary:          "copilot",
+			SkipPermissions: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("autonomous session with model keeps model last", func(t *testing.T) {
+		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
+			Binary:          "copilot",
+			SkipPermissions: true,
+			Model:           "auto",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000 --model auto"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	// The autonomy flags are gated on SkipPermissions for a reason: a user who
+	// picked "Keep permissions (interactive)" is sitting at the pane and must
+	// keep both the approval prompts and the ask_user tool.
+	t.Run("interactive session gets none of them", func(t *testing.T) {
+		got, err := RenderLaunchCommand(tmpl, LaunchTemplateVars{
+			Binary:          "copilot",
+			SkipPermissions: false,
+			Model:           "auto",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "copilot --model auto" {
+			t.Errorf("got %q, want %q", got, "copilot --model auto")
+		}
+		for _, flag := range []string{"--yolo", "--autopilot", "--no-ask-user", "--max-autopilot-continues"} {
+			if strings.Contains(got, flag) {
+				t.Errorf("interactive launch leaked %s: %q", flag, got)
+			}
+		}
+	})
 }
 
 func TestDefaultConfig_QwenProviderFields(t *testing.T) {
