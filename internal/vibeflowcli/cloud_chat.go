@@ -316,6 +316,14 @@ func (m CloudChatModel) sessionForPersona(personaKey string) *Session {
 }
 
 // appendMessage records a message under the given persona key.
+//
+// The sanitize below covers hand-built CloudChatMessage values that never pass
+// through sessionMessageToCloudChatMessage — notably the local pending "you"
+// echo in handleInputKey, whose Text is the raw input buffer and can carry
+// pasted escape sequences. Server-derived messages are already sanitized by
+// sessionMessageToCloudChatMessage; re-running it here is a no-op because
+// sanitizeCloudChatText strips every control rune (including bare ESC) and
+// truncateRunes is idempotent.
 func (m *CloudChatModel) appendMessage(personaKey string, msg CloudChatMessage) {
 	if m.history == nil {
 		m.history = make(map[string][]CloudChatMessage)
@@ -396,6 +404,11 @@ func (m *CloudChatModel) replaceLastPendingUserMessage(personaKey string, text s
 	}
 }
 
+// sessionMessageToCloudChatMessage converts a backend message into a render
+// history entry. Sanitizing here (rather than only in appendMessage) is what
+// keeps server-controlled text out of the terminal on every construction site,
+// including replaceLastPendingUserMessage's direct slice assignment which does
+// not go through appendMessage.
 func sessionMessageToCloudChatMessage(msg SessionMessage, personaDisplayName string) CloudChatMessage {
 	sender := strings.TrimSpace(msg.Sender)
 	if sender == "" {
@@ -412,8 +425,8 @@ func sessionMessageToCloudChatMessage(msg SessionMessage, personaDisplayName str
 		timestamp = time.Now()
 	}
 	return CloudChatMessage{
-		Sender:    sender,
-		Text:      msg.Text,
+		Sender:    sanitizeCloudChatText(sender, cloudChatMaxSenderRunes),
+		Text:      sanitizeCloudChatText(msg.Text, cloudChatMaxMessageRunes),
 		Timestamp: timestamp,
 		Pending:   msg.Pending,
 	}

@@ -429,6 +429,83 @@ func TestCloudChatModel_AppendMessageTruncatesLongText(t *testing.T) {
 	}
 }
 
+// The successful-send path replaces the pending local echo by assigning
+// straight into the history slice, bypassing appendMessage. Server-echoed text
+// must still be neutralized on that path.
+func TestCloudChatModel_PromptSentReplaceSanitizesServerEchoedMessage(t *testing.T) {
+	m := NewCloudChatModel()
+	m.appendMessage("principal_engineer", CloudChatMessage{
+		Sender:    "you",
+		Text:      "hello",
+		Timestamp: time.Now(),
+		Pending:   true,
+	})
+
+	m, _ = m.Update(cloudPromptSentMsg{
+		personaKey: "principal_engineer",
+		text:       "hello",
+		message: &SessionMessage{
+			Sender: "you\x1b[31m\x00",
+			Text:   "hello\x1b[2J\x1b[Hinjected\x07",
+			Kind:   "user",
+		},
+	})
+
+	msgs := m.Messages("principal_engineer")
+	if len(msgs) != 1 {
+		t.Fatalf("history len = %d, want 1 (pending echo should be replaced in place)", len(msgs))
+	}
+	got := msgs[0]
+	if strings.ContainsAny(got.Text, "\x1b\x07") {
+		t.Fatalf("server-echoed text still contains control sequences: %q", got.Text)
+	}
+	if want := "helloinjected"; got.Text != want {
+		t.Errorf("sanitized text = %q, want %q", got.Text, want)
+	}
+	if strings.ContainsAny(got.Sender, "\x1b\x00") {
+		t.Fatalf("server-echoed sender still contains control sequences: %q", got.Sender)
+	}
+	if want := "you"; got.Sender != want {
+		t.Errorf("sanitized sender = %q, want %q", got.Sender, want)
+	}
+	if got.Pending {
+		t.Errorf("acknowledged message should no longer be pending")
+	}
+}
+
+// Same path, length cap: the bypass also skipped truncateRunes, so an
+// unbounded server Text could land in render history.
+func TestCloudChatModel_PromptSentReplaceTruncatesLongServerText(t *testing.T) {
+	m := NewCloudChatModel()
+	m.appendMessage("principal_engineer", CloudChatMessage{
+		Sender:    "you",
+		Text:      "hi",
+		Timestamp: time.Now(),
+		Pending:   true,
+	})
+
+	m, _ = m.Update(cloudPromptSentMsg{
+		personaKey: "principal_engineer",
+		text:       "hi",
+		message: &SessionMessage{
+			Sender: "Principal Eng",
+			Text:   strings.Repeat("x", cloudChatMaxMessageRunes+50),
+			Kind:   "agent",
+		},
+	})
+
+	msgs := m.Messages("principal_engineer")
+	if len(msgs) != 1 {
+		t.Fatalf("history len = %d, want 1", len(msgs))
+	}
+	if got := len([]rune(msgs[0].Text)); got != cloudChatMaxMessageRunes+1 {
+		t.Fatalf("stored rune len = %d, want %d (cap + ellipsis)", got, cloudChatMaxMessageRunes+1)
+	}
+	if !strings.HasSuffix(msgs[0].Text, "…") {
+		t.Errorf("truncated text missing ellipsis suffix")
+	}
+}
+
 func TestCloudChatModel_AppendMessageCapsHistoryPerPersona(t *testing.T) {
 	m := NewCloudChatModel()
 	for i := 0; i < cloudChatMaxMessagesPerPersona+5; i++ {
