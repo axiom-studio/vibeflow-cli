@@ -629,6 +629,43 @@ func TestBootstrapAgents_CursorUsesStreamableHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestBootstrapAgents_CopilotUsesHTTPTransportWithToolsWildcard(t *testing.T) {
+	agents := bootstrapAgents()
+	var copilot bootstrapAgent
+	for _, a := range agents {
+		if a.key == "copilot" {
+			copilot = a
+			break
+		}
+	}
+	if copilot.entry == nil {
+		t.Fatal("copilot bootstrap agent missing entry builder")
+	}
+	entry := copilot.entry("https://cloud.example/rest/v1/vibeflow/mcp", "")
+	if entry["type"] != "http" {
+		t.Errorf("copilot type = %v, want http", entry["type"])
+	}
+	if !equalJSON(entry["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("copilot timeout = %v, want %d", entry["timeout"], mcpClientTimeoutMS)
+	}
+	// copilot mcp add always writes a tools filter; "*" enables every tool.
+	if !equalJSON(entry["tools"], []any{"*"}) {
+		t.Errorf("copilot tools = %v, want [*]", entry["tools"])
+	}
+	// The bearer must be an env reference, never a literal token.
+	headers, _ := entry["headers"].(map[string]any)
+	if headers["Authorization"] != mcpBearerRef {
+		t.Errorf("copilot Authorization = %v, want %s", headers["Authorization"], mcpBearerRef)
+	}
+	p, err := copilotConfigPath()
+	if err != nil {
+		t.Fatalf("copilotConfigPath: %v", err)
+	}
+	if filepath.Base(p) != "mcp-config.json" || filepath.Base(filepath.Dir(p)) != ".copilot" {
+		t.Errorf("copilotConfigPath = %q, want ~/.copilot/mcp-config.json", p)
+	}
+}
+
 func TestBootstrapCmd_WritesGeminiHTTPTransport(t *testing.T) {
 	withTempRoot(t)
 	home := t.TempDir()
@@ -772,7 +809,7 @@ func TestParseAgentSelection(t *testing.T) {
 
 func TestBootstrapAgents_OrderAndKeys(t *testing.T) {
 	got := agentKeys(bootstrapAgents())
-	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro"}
+	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro", "copilot"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("agent order = %v, want %v", got, want)
 	}
@@ -831,6 +868,7 @@ func TestBootstrapAndUninstall_EndToEnd(t *testing.T) {
 		"cursor":         cursorConfigPath,
 		"claude-desktop": claudeDesktopConfigPath,
 		"kiro":           kiroConfigPath,
+		"copilot":        copilotConfigPath,
 	}
 	for name, resolve := range jsonAgents {
 		p, _ := resolve()
@@ -974,5 +1012,152 @@ func TestBootstrapCmd_RequiresAPIKey(t *testing.T) {
 	root.SetArgs([]string{"bootstrap", "--all"})
 	if err := root.Execute(); err == nil {
 		t.Fatalf("expected error when --api-key missing")
+	}
+}
+
+// dirMode returns path's permission bits, failing the test if it cannot stat.
+func dirMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Mode().Perm()
+}
+
+// Regression test for issue #4559: writeConfigFileWithBackup used to run an
+// unconditional os.Chmod(dir, 0700). For claude-cli the config is
+// ~/.claude.json, so dir is $HOME and every bootstrap run silently re-moded
+// the user's home directory. The two halves of the invariant are asserted
+// together so a future "hardening" cannot restore the regression unnoticed:
+// a directory we did not create keeps its mode, one we do create is 0700.
+func TestWriteConfigFileWithBackup_DirModes(t *testing.T) {
+	withTempRoot(t)
+
+	t.Run("pre-existing dir keeps its mode", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeConfigFileWithBackup(filepath.Join(dir, "cfg.json"), []byte("{}\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if got := dirMode(t, dir); got != 0o755 {
+			t.Errorf("pre-existing dir mode = %04o, want 0755 (unchanged)", got)
+		}
+	})
+
+	t.Run("created dir is hardened to 0700", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "made-by-vibeflow")
+		if _, err := writeConfigFileWithBackup(filepath.Join(dir, "cfg.json"), []byte("{}\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if got := dirMode(t, dir); got != 0o700 {
+			t.Errorf("created dir mode = %04o, want 0700", got)
+		}
+	})
+}
+
+// End-to-end form of the issue #4559 repro: bootstrap claude-cli into an
+// isolated HOME at 0755 and assert the home directory mode survives.
+func TestBootstrapCmd_ClaudeCLIDoesNotRemodeHome(t *testing.T) {
+	withTempRoot(t)
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+
+	root := newBootstrapTestRoot()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"bootstrap", "--api-key", "K", "--config", filepath.Join(t.TempDir(), "config.yaml"), "--agents", "claude-cli"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\n%s", err, out.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(home, ".claude.json")); err != nil {
+		t.Fatalf("bootstrap did not write ~/.claude.json: %v", err)
+	}
+	if got := dirMode(t, home); got != 0o755 {
+		t.Errorf("$HOME mode = %04o after bootstrap, want 0755 (unchanged)", got)
+	}
+}
+
+// Regression test for issue #4546 (and its duplicate #4604): the atomic write
+// used to build a fully predictable temp path (`path + ".tmp"`) and open it
+// with os.WriteFile, which sets neither O_EXCL nor O_NOFOLLOW. An attacker who
+// could write to the config directory could pre-plant that name as a symlink;
+// the write then followed it, leaking config contents (bearer tokens, for the
+// gemini/cursor/codex/claude-desktop targets) to a path of their choosing, and
+// the following rename installed the symlink as the permanent config file.
+func TestWriteConfigFileWithBackup_IgnoresPrePlantedTmpSymlink(t *testing.T) {
+	withTempRoot(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+
+	canary := filepath.Join(t.TempDir(), "exfil")
+	const canaryContent = "attacker-owned, must not be overwritten\n"
+	if err := os.WriteFile(canary, []byte(canaryContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canary, path+".tmp"); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	secret := `{"headers":{"Authorization":"Bearer super-secret-token"}}` + "\n"
+	if _, err := writeConfigFileWithBackup(path, []byte(secret)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := os.ReadFile(canary)
+	if err != nil {
+		t.Fatalf("read canary: %v", err)
+	}
+	if string(got) != canaryContent {
+		t.Errorf("symlink target was written through: canary = %q, want %q", got, canaryContent)
+	}
+	if strings.Contains(string(got), "super-secret-token") {
+		t.Errorf("config contents leaked through the planted symlink")
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read destination: %v", err)
+	}
+	if string(written) != secret {
+		t.Errorf("destination = %q, want %q", written, secret)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("destination is a symlink; the planted link was renamed into place")
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("destination mode = %04o, want 0600 (config may carry bearer tokens)", got)
+	}
+}
+
+// Issue #4546: the backup directory holds snapshots of config files that carry
+// bearer tokens. The files are 0600, but the directory listing should not be
+// world-readable either.
+func TestBackupDir_IsNotWorldReadable(t *testing.T) {
+	root := withTempRoot(t)
+	path := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(path, []byte("{\"old\":true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeConfigFileWithBackup(path, []byte("{\"new\":true}\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if files := backupFiles(t, root); len(files) != 1 {
+		t.Fatalf("expected 1 backup, got %d: %v", len(files), files)
+	}
+	if got := dirMode(t, filepath.Join(root, ".backup")); got != 0o700 {
+		t.Errorf("backup dir mode = %04o, want 0700", got)
 	}
 }
