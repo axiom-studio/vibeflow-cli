@@ -209,3 +209,75 @@ func TestEnsureCopilotFirstRunConfig_CorruptFileErrors(t *testing.T) {
 		t.Fatal("expected error on corrupt config.json (must not silently clobber a file we cannot parse)")
 	}
 }
+
+// Regression test for issue #4539. The pre-seed is designed to run BEFORE
+// copilot has ever run, which is exactly the ordering where MkdirAll actually
+// creates ~/.copilot and therefore actually sets its mode. Copilot then writes
+// session-store.db (0644) and logs/ into that directory, so a 0755 directory
+// exposes complete agent session transcripts to every other local user.
+// None of the five original TestEnsureCopilotFirstRunConfig_* tests asserted
+// permissions, which is why the regression was invisible to CI.
+func TestEnsureCopilotFirstRunConfig_Permissions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	copilotDir := filepath.Join(home, ".copilot")
+	if _, err := os.Stat(copilotDir); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must not exist, stat err = %v", copilotDir, err)
+	}
+
+	if _, err := EnsureCopilotFirstRunConfig(filepath.Join(home, "project")); err != nil {
+		t.Fatalf("EnsureCopilotFirstRunConfig: %v", err)
+	}
+
+	if got := dirMode(t, copilotDir); got != 0o700 {
+		t.Errorf("~/.copilot mode = %04o, want 0700 (copilot writes session-store.db here)", got)
+	}
+	info, err := os.Stat(filepath.Join(copilotDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("config.json mode = %04o, want 0600", got)
+	}
+}
+
+// Issue #4539, second defect: the pre-seed used to truncate the user's existing
+// copilot config in place with no snapshot, so a merge bug or interrupted write
+// destroyed their settings with no recovery path. Every other agent-config
+// writer in this repo backs up first; this one now does too.
+func TestEnsureCopilotFirstRunConfig_BacksUpExistingConfig(t *testing.T) {
+	root := withTempRoot(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	configPath := filepath.Join(home, ".copilot", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := `{"trustedFolders":["/existing"],"userSetting":"must survive"}` + "\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCopilotFirstRunConfig(filepath.Join(home, "project")); err != nil {
+		t.Fatalf("EnsureCopilotFirstRunConfig: %v", err)
+	}
+
+	files := backupFiles(t, root)
+	if len(files) != 1 {
+		t.Fatalf("expected exactly 1 backup of the user's config, got %d: %v", len(files), files)
+	}
+	got, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Errorf("backup = %q, want the pre-write content %q", got, original)
+	}
+
+	// The merge itself must still be sibling-preserving.
+	if v, _ := readCopilotTestConfig(t, home)["userSetting"].(string); v != "must survive" {
+		t.Errorf("userSetting = %q, want %q", v, "must survive")
+	}
+}
