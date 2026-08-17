@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -280,4 +281,81 @@ func TestEnsureCopilotFirstRunConfig_BacksUpExistingConfig(t *testing.T) {
 	if v, _ := readCopilotTestConfig(t, home)["userSetting"].(string); v != "must survive" {
 		t.Errorf("userSetting = %q, want %q", v, "must survive")
 	}
+}
+
+// Regression test for issue #4542. EnsureCopilotFirstRunConfig itself is well
+// covered, but nothing asserted that CreateSessionWithOpts still CALLS it. A
+// refactor that renames the provider key, moves the pre-seed above the
+// "session already exists" early return, or drops the block in a merge would
+// ship green - and the regression only surfaces as an unattended tmux pane
+// hung forever on copilot's folder-trust dialog, invisible to CI.
+//
+// Drives a real tmux server, no mocks, following the precedent in
+// TestCreateSessionWithOpts_ClaudeHardeningEnv.
+func TestCreateSessionWithOpts_CopilotFirstRunPreSeed(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	t.Run("copilot provider pre-seeds trust for the absolute workdir", func(t *testing.T) {
+		withTempRoot(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Chdir(t.TempDir())
+
+		tm := NewTmuxManager("vftest-copilot-preseed")
+		_, _ = tm.run("kill-server")
+		defer func() { _, _ = tm.run("kill-server") }()
+
+		// "." is what the real launch paths pass. Copilot matches trustedFolders
+		// against the absolute folder path, so a relative entry would never match
+		// and the trust dialog would still fire - the exact failure caught during
+		// feature #667 E2E.
+		if err := tm.CreateSessionWithOpts(SessionOpts{
+			Name:     "preseed",
+			Provider: "copilot",
+			WorkDir:  ".",
+			Command:  "sleep 300",
+		}); err != nil {
+			t.Fatalf("CreateSessionWithOpts(copilot) error = %v", err)
+		}
+
+		wantAbs, err := filepath.Abs(".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := trustedFolderStrings(t, readCopilotTestConfig(t, home))
+		if len(got) != 1 {
+			t.Fatalf("trustedFolders = %v, want exactly 1 entry", got)
+		}
+		if !filepath.IsAbs(got[0]) {
+			t.Errorf("trustedFolders[0] = %q, want an absolute path", got[0])
+		}
+		if got[0] != wantAbs {
+			t.Errorf("trustedFolders[0] = %q, want %q", got[0], wantAbs)
+		}
+	})
+
+	t.Run("non-copilot provider does not touch ~/.copilot", func(t *testing.T) {
+		withTempRoot(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		tm := NewTmuxManager("vftest-copilot-preseed-neg")
+		_, _ = tm.run("kill-server")
+		defer func() { _, _ = tm.run("kill-server") }()
+
+		if err := tm.CreateSessionWithOpts(SessionOpts{
+			Name:     "preseed",
+			Provider: "claude",
+			WorkDir:  t.TempDir(),
+			Command:  "sleep 300",
+		}); err != nil {
+			t.Fatalf("CreateSessionWithOpts(claude) error = %v", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(home, ".copilot")); !os.IsNotExist(err) {
+			t.Errorf("claude session created ~/.copilot (stat err = %v); the pre-seed must be copilot-only", err)
+		}
+	})
 }
