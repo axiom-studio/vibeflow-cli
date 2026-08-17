@@ -291,6 +291,9 @@ func TestCloudChatModel_PollTickFetchesMessagesSinceLatestStoredMessage(t *testi
 		Pending:   true,
 	})
 
+	// The parent sets active when it forwards a tick while ViewCloudChat is up.
+	m.active = true
+
 	var cmd tea.Cmd
 	m, cmd = m.Update(cloudChatPollTickMsg(time.Now()))
 	if cmd == nil {
@@ -327,6 +330,60 @@ func TestCloudChatModel_PollTickFetchesMessagesSinceLatestStoredMessage(t *testi
 	}
 	if got := msgs[len(msgs)-1].Text; got != "new update" {
 		t.Errorf("last merged message = %q, want new update", got)
+	}
+}
+
+// tea.Tick has no cancel handle, so a chain is stopped by refusing to re-arm
+// it once the view is no longer active. Without this the chain outlives the
+// view forever.
+func TestCloudChatModel_PollTickWhileInactiveDoesNotRearm(t *testing.T) {
+	m := pollingCloudChatModel(&fakeCloudChatBackend{})
+	m.active = false
+
+	var cmd tea.Cmd
+	m, cmd = m.Update(cloudChatPollTickMsg(time.Now()))
+	if cmd != nil {
+		t.Fatalf("tick delivered while the view is inactive must not re-arm the poll chain (got %T)", cmd())
+	}
+	if m.polling {
+		t.Errorf("chain stopped, so polling should be cleared for the next view entry")
+	}
+}
+
+// Entering the view while a chain is still in flight (re-entry inside the 2s
+// window) must not add a second chain.
+func TestCloudChatModel_PollStartIsIdempotent(t *testing.T) {
+	m := NewCloudChatModelWithClient(&fakeCloudChatBackend{}, 13)
+
+	var first, second tea.Cmd
+	m, first = m.Update(cloudChatPollStartMsg{})
+	if first == nil {
+		t.Fatal("first start should arm a poll chain")
+	}
+	if !m.polling {
+		t.Fatal("first start should mark the chain live")
+	}
+	m, second = m.Update(cloudChatPollStartMsg{})
+	if second != nil {
+		t.Fatalf("second start while a chain is live must not arm another (got %T)", second())
+	}
+}
+
+// The stop path must not wedge polling off: once a stale chain has ended, the
+// next entry into the view starts exactly one fresh chain.
+func TestCloudChatModel_PollRestartsAfterInactiveTickStoppedTheChain(t *testing.T) {
+	m := pollingCloudChatModel(&fakeCloudChatBackend{})
+
+	m.active = false
+	m, _ = m.Update(cloudChatPollTickMsg(time.Now()))
+
+	var cmd tea.Cmd
+	m, cmd = m.Update(cloudChatPollStartMsg{})
+	if cmd == nil {
+		t.Fatal("after the stale chain stopped, re-entering the view should arm a new chain")
+	}
+	if !m.polling {
+		t.Errorf("restarted chain should be marked live")
 	}
 }
 
@@ -579,6 +636,18 @@ func TestTrimToHeight(t *testing.T) {
 }
 
 // --- helpers ---
+
+// pollingCloudChatModel returns a model with one live poll chain, as if the
+// user had just entered ViewCloudChat.
+func pollingCloudChatModel(client cloudChatBackend) CloudChatModel {
+	m := NewCloudChatModelWithClient(client, 13)
+	m.active = true
+	next, cmd := m.Update(cloudChatPollStartMsg{})
+	if cmd == nil {
+		panic("poll start did not arm a chain")
+	}
+	return next
+}
 
 func focusInput(m CloudChatModel) CloudChatModel {
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
