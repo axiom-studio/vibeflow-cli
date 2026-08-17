@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -497,11 +498,21 @@ func modelsCmd() *cobra.Command {
 		Short: "List built-in provider model ids",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
 			if len(args) == 1 {
-				return printProviderModels(args[0])
+				// An explicit request for a provider without a catalog should
+				// say so rather than print nothing.
+				return printProviderModels(out, args[0])
 			}
-			for _, provider := range []string{"claude", "codex", "copilot", "cursor", "gemini", "qwen"} {
-				if err := printProviderModels(provider); err != nil {
+			// Derived from the registry, not hardcoded: the previous literal
+			// list went stale on every provider addition (it omitted kiro and
+			// copilot). Providers with no curated catalog are skipped rather
+			// than erroring, which would break the whole listing.
+			for _, provider := range NewProviderRegistry(DefaultConfig()).Keys() {
+				if len(ModelsForProvider(provider)) == 0 {
+					continue
+				}
+				if err := printProviderModels(out, provider); err != nil {
 					return err
 				}
 			}
@@ -511,17 +522,17 @@ func modelsCmd() *cobra.Command {
 	return cmd
 }
 
-func printProviderModels(provider string) error {
+func printProviderModels(out io.Writer, provider string) error {
 	options := ModelsForProvider(provider)
 	if len(options) == 0 {
 		return fmt.Errorf("no curated model list for provider %q", provider)
 	}
-	fmt.Printf("%s:\n", provider)
+	fmt.Fprintf(out, "%s:\n", provider)
 	for _, option := range options {
 		if option.Description != "" {
-			fmt.Printf("  %-20s %s\n", option.ID, option.Description)
+			fmt.Fprintf(out, "  %-20s %s\n", option.ID, option.Description)
 		} else {
-			fmt.Printf("  %s\n", option.ID)
+			fmt.Fprintf(out, "  %s\n", option.ID)
 		}
 	}
 	return nil
