@@ -1085,3 +1085,79 @@ func TestBootstrapCmd_ClaudeCLIDoesNotRemodeHome(t *testing.T) {
 		t.Errorf("$HOME mode = %04o after bootstrap, want 0755 (unchanged)", got)
 	}
 }
+
+// Regression test for issue #4546 (and its duplicate #4604): the atomic write
+// used to build a fully predictable temp path (`path + ".tmp"`) and open it
+// with os.WriteFile, which sets neither O_EXCL nor O_NOFOLLOW. An attacker who
+// could write to the config directory could pre-plant that name as a symlink;
+// the write then followed it, leaking config contents (bearer tokens, for the
+// gemini/cursor/codex/claude-desktop targets) to a path of their choosing, and
+// the following rename installed the symlink as the permanent config file.
+func TestWriteConfigFileWithBackup_IgnoresPrePlantedTmpSymlink(t *testing.T) {
+	withTempRoot(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+
+	canary := filepath.Join(t.TempDir(), "exfil")
+	const canaryContent = "attacker-owned, must not be overwritten\n"
+	if err := os.WriteFile(canary, []byte(canaryContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canary, path+".tmp"); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	secret := `{"headers":{"Authorization":"Bearer super-secret-token"}}` + "\n"
+	if _, err := writeConfigFileWithBackup(path, []byte(secret)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := os.ReadFile(canary)
+	if err != nil {
+		t.Fatalf("read canary: %v", err)
+	}
+	if string(got) != canaryContent {
+		t.Errorf("symlink target was written through: canary = %q, want %q", got, canaryContent)
+	}
+	if strings.Contains(string(got), "super-secret-token") {
+		t.Errorf("config contents leaked through the planted symlink")
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read destination: %v", err)
+	}
+	if string(written) != secret {
+		t.Errorf("destination = %q, want %q", written, secret)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("destination is a symlink; the planted link was renamed into place")
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("destination mode = %04o, want 0600 (config may carry bearer tokens)", got)
+	}
+}
+
+// Issue #4546: the backup directory holds snapshots of config files that carry
+// bearer tokens. The files are 0600, but the directory listing should not be
+// world-readable either.
+func TestBackupDir_IsNotWorldReadable(t *testing.T) {
+	root := withTempRoot(t)
+	path := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(path, []byte("{\"old\":true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeConfigFileWithBackup(path, []byte("{\"new\":true}\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if files := backupFiles(t, root); len(files) != 1 {
+		t.Fatalf("expected 1 backup, got %d: %v", len(files), files)
+	}
+	if got := dirMode(t, filepath.Join(root, ".backup")); got != 0o700 {
+		t.Errorf("backup dir mode = %04o, want 0700", got)
+	}
+}

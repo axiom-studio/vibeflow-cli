@@ -376,8 +376,11 @@ func backupConfigFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read %s for backup: %w", path, err)
 	}
+	// 0700: these are snapshots of config files that may carry bearer tokens.
+	// The files themselves are 0600, but the directory listing should not be
+	// world-readable either (issue #4546).
 	backupDir := filepath.Join(RootDir(), ".backup")
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return "", fmt.Errorf("create backup dir %s: %w", backupDir, err)
 	}
 	dst := filepath.Join(backupDir, filepath.Base(path)+"."+backupTimestamp()+".bak")
@@ -413,10 +416,27 @@ func writeConfigFileWithBackup(path string, data []byte) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create dir for %s: %w", path, err)
 	}
-	// Atomic write: write to a temp file and rename into place with 0600.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return "", fmt.Errorf("write tmp %s: %w", tmp, err)
+	// Atomic write: write to a temp file in the same directory (so the rename
+	// stays within one filesystem) and rename into place. os.CreateTemp opens
+	// with O_EXCL and a random suffix, which is what makes this safe: a fixed
+	// `path + ".tmp"` written via os.WriteFile has neither O_EXCL nor
+	// O_NOFOLLOW, so an attacker who can write to dir could pre-plant that
+	// name as a symlink and the write would follow it - leaking whatever the
+	// config carries, including bearer tokens (issue #4546). os.CreateTemp
+	// also creates with 0600, so the mode requirement above is preserved.
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".*")
+	if err != nil {
+		return "", fmt.Errorf("create temp file for %s: %w", path, err)
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("write temp file %s for %s: %w", tmp, path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("close temp file %s for %s: %w", tmp, path, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)

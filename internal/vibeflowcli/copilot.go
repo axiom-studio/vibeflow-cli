@@ -110,25 +110,19 @@ func EnsureCopilotFirstRunConfig(workDir string) (bool, error) {
 		return false, nil
 	}
 
-	// See writeConfigFileWithBackup: MkdirAll already hardens what it creates,
-	// and re-moding a pre-existing directory is the issue #4559 regression.
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return false, fmt.Errorf("create %s: %w", dir, err)
-	}
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return false, fmt.Errorf("marshal %s: %w", path, err)
 	}
 	data = append(data, '\n')
-	// Atomic write: write to a temp file in the same directory and rename.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return false, fmt.Errorf("write tmp %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return false, fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
+	// Route through the shared config writer rather than hand-rolling the
+	// sequence, so this path inherits the same guarantees as every other
+	// agent-config write: a backup of the user's existing copilot settings
+	// before we touch them (issue #4539), 0700 on a directory we create,
+	// 0600 on the file, and an O_EXCL temp file + rename that cannot be
+	// redirected by a pre-planted symlink (issue #4546).
+	if _, err := writeConfigFileWithBackup(path, data); err != nil {
+		return false, err
 	}
 	return true, nil
 }
