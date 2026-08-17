@@ -1014,3 +1014,74 @@ func TestBootstrapCmd_RequiresAPIKey(t *testing.T) {
 		t.Fatalf("expected error when --api-key missing")
 	}
 }
+
+// dirMode returns path's permission bits, failing the test if it cannot stat.
+func dirMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Mode().Perm()
+}
+
+// Regression test for issue #4559: writeConfigFileWithBackup used to run an
+// unconditional os.Chmod(dir, 0700). For claude-cli the config is
+// ~/.claude.json, so dir is $HOME and every bootstrap run silently re-moded
+// the user's home directory. The two halves of the invariant are asserted
+// together so a future "hardening" cannot restore the regression unnoticed:
+// a directory we did not create keeps its mode, one we do create is 0700.
+func TestWriteConfigFileWithBackup_DirModes(t *testing.T) {
+	withTempRoot(t)
+
+	t.Run("pre-existing dir keeps its mode", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeConfigFileWithBackup(filepath.Join(dir, "cfg.json"), []byte("{}\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if got := dirMode(t, dir); got != 0o755 {
+			t.Errorf("pre-existing dir mode = %04o, want 0755 (unchanged)", got)
+		}
+	})
+
+	t.Run("created dir is hardened to 0700", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "made-by-vibeflow")
+		if _, err := writeConfigFileWithBackup(filepath.Join(dir, "cfg.json"), []byte("{}\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if got := dirMode(t, dir); got != 0o700 {
+			t.Errorf("created dir mode = %04o, want 0700", got)
+		}
+	})
+}
+
+// End-to-end form of the issue #4559 repro: bootstrap claude-cli into an
+// isolated HOME at 0755 and assert the home directory mode survives.
+func TestBootstrapCmd_ClaudeCLIDoesNotRemodeHome(t *testing.T) {
+	withTempRoot(t)
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+
+	root := newBootstrapTestRoot()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"bootstrap", "--api-key", "K", "--config", filepath.Join(t.TempDir(), "config.yaml"), "--agents", "claude-cli"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v\n%s", err, out.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(home, ".claude.json")); err != nil {
+		t.Fatalf("bootstrap did not write ~/.claude.json: %v", err)
+	}
+	if got := dirMode(t, home); got != 0o755 {
+		t.Errorf("$HOME mode = %04o after bootstrap, want 0755 (unchanged)", got)
+	}
+}
