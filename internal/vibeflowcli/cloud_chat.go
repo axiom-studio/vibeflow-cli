@@ -90,6 +90,13 @@ type cloudPromptSentMsg struct {
 
 type cloudChatPollTickMsg time.Time
 
+// cloudChatPollStartMsg asks the model to arm the poll tick chain. Starting via
+// a message rather than calling cloudChatPollCmd directly keeps the "is a chain
+// already live?" check inside Update, where the resulting state change actually
+// persists — Model.Init has a value receiver and returns only a tea.Cmd, so a
+// direct call there could never record that a chain was started.
+type cloudChatPollStartMsg struct{}
+
 // CloudChatMessage is one entry in the chat history pane.
 type CloudChatMessage struct {
 	Sender    string    // "you" or a persona display name
@@ -117,6 +124,12 @@ type CloudChatModel struct {
 
 	client   cloudChatBackend
 	projectID int64
+
+	// polling is true while exactly one poll tick chain is live. active mirrors
+	// the parent's activeView == ViewCloudChat and is refreshed by the parent
+	// each time it forwards a tick, so no view-transition bookkeeping is needed.
+	polling bool
+	active  bool
 }
 
 // NewCloudChatModel constructs an empty cloud chat model. The persona list
@@ -179,10 +192,23 @@ func (m CloudChatModel) Update(msg tea.Msg) (CloudChatModel, tea.Cmd) {
 		m.err = ""
 		m.replaceLastPendingUserMessage(msg.personaKey, msg.text, msg.message)
 		return m, m.loadMessagesCmd(msg.personaKey)
-	case cloudChatPollTickMsg:
-		if m.client == nil {
+	case cloudChatPollStartMsg:
+		// Idempotent: a chain already in flight keeps serving this view, so a
+		// second entry must not add one.
+		if m.polling || m.client == nil {
 			return m, nil
 		}
+		m.polling = true
+		return m, cloudChatPollCmd()
+	case cloudChatPollTickMsg:
+		// tea.Tick has no cancel handle, so a chain is stopped by simply not
+		// re-arming it. Dropping the tick here ends this chain and clears the
+		// flag so the next view entry starts exactly one fresh chain.
+		if !m.active || m.client == nil {
+			m.polling = false
+			return m, nil
+		}
+		m.polling = true
 		return m, tea.Batch(
 			m.loadMessagesSinceCmd(m.SelectedPersona().Key, m.latestMessageSinceISO(m.SelectedPersona().Key), false),
 			cloudChatPollCmd(),
@@ -656,6 +682,12 @@ func (m CloudChatModel) CloudChatHelpKeys() string {
 		return "esc: back  enter: send  ctrl+c: quit"
 	}
 	return "↑/↓: persona  enter: compose  r: refresh  s: start hint  esc: back  q: quit"
+}
+
+// cloudChatPollStartCmd asks the cloud chat model to arm the poll tick chain if
+// one is not already running. Safe to call on every entry into ViewCloudChat.
+func cloudChatPollStartCmd() tea.Cmd {
+	return func() tea.Msg { return cloudChatPollStartMsg{} }
 }
 
 func cloudChatPollCmd() tea.Cmd {

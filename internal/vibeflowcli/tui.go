@@ -476,7 +476,7 @@ func (m Model) Init() tea.Cmd {
 		cacheGCTickCmd(),
 	}
 	if m.activeView == ViewCloudChat {
-		cmds = append(cmds, m.cloudChat.loadPersonaSessionsCmd(), cloudChatPollCmd())
+		cmds = append(cmds, m.cloudChat.loadPersonaSessionsCmd(), cloudChatPollStartCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -537,6 +537,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case cloudChatPollTickMsg:
+		// Routed here rather than only from the ViewCloudChat branch below: a
+		// tick chain left over from a previous visit must still be delivered
+		// once so it can see the view is no longer active and stop itself.
+		// Reading activeView live means no view-transition hook can be missed.
+		m.cloudChat.active = m.activeView == ViewCloudChat
+		var cmd tea.Cmd
+		m.cloudChat, cmd = m.cloudChat.Update(msg)
+		return m, cmd
 	case cacheGCMsg:
 		// Periodic session cache garbage collection (every 1 minute).
 		if m.cache != nil {
@@ -774,7 +783,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "c":
 			m.activeView = ViewCloudChat
-			return m, tea.Batch(m.cloudChat.loadPersonaSessionsCmd(), cloudChatPollCmd())
+			return m, tea.Batch(m.cloudChat.loadPersonaSessionsCmd(), cloudChatPollStartCmd())
 		case "?":
 			m.activeView = ViewHelp
 			return m, nil
