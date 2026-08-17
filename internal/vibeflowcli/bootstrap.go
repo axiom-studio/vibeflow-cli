@@ -77,6 +77,7 @@ func bootstrapAgents() []bootstrapAgent {
 		{key: "claude-cli", label: "Claude CLI", path: claudeCLIConfigPath, entry: jsonHTTPEntry("http", false)},
 		{key: "claude-desktop", label: "Claude Desktop", path: claudeDesktopConfigPath, entry: claudeDesktopEntry},
 		{key: "kiro", label: "Kiro CLI", path: kiroConfigPath, entry: jsonHTTPEntry("http", true)},
+		{key: "copilot", label: "GitHub Copilot CLI", path: copilotConfigPath, entry: copilotEntry},
 	}
 }
 
@@ -92,6 +93,8 @@ var agentAliases = map[string]string{
 	"claude_desktop": "claude-desktop",
 	"desktop":        "claude-desktop",
 	"kiro-cli":       "kiro",
+	"copilot-cli":    "copilot",
+	"github-copilot": "copilot",
 }
 
 func normalizeAgentKey(key string) string {
@@ -212,6 +215,32 @@ func cursorConfigPath() (string, error) {
 	return filepath.Join(home, ".cursor", "mcp.json"), nil
 }
 
+// copilotConfigPath returns Copilot CLI's user-level MCP config path
+// (~/.copilot/mcp-config.json, verified on v1.0.79 — the path is named in
+// `copilot --additional-mcp-config`'s help text and written by `copilot mcp
+// add`). Copilot also loads workspace configs (.mcp.json / .github/mcp.json),
+// but bootstrap writes user-level config for every agent so a single run
+// covers all of the user's projects. COPILOT_HOME overrides are not resolved,
+// matching the fixed-path precedent of the other resolvers here. Distinct
+// from copilotUserConfigPath (config.json, first-run state — see copilot.go).
+func copilotConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".copilot", "mcp-config.json"), nil
+}
+
+// copilotEntry builds the mcpServers entry for Copilot CLI: the standard
+// HTTP entry (Bearer ${MCP_TOKEN} reference expands from the process env at
+// connect time — verified on v1.0.79) plus copilot's `tools` filter, which
+// `copilot mcp add` always writes; "*" enables every tool the server offers.
+func copilotEntry(url, apiKey string) map[string]any {
+	entry := jsonHTTPEntry("http", true)(url, apiKey)
+	entry["tools"] = []any{"*"}
+	return entry
+}
+
 // codexBootstrapConfigPath reuses CodexConfigPath so a custom --root keeps the
 // codex MCP config isolated under the root directory, matching the existing
 // codex session-launch behavior.
@@ -247,7 +276,7 @@ func bootstrapMCPURL(baseURL string) string {
 	return strings.TrimRight(strings.TrimSpace(baseURL), "/") + mcpEndpointPath
 }
 
-// --- JSON mcpServers helpers (claude-cli, claude-desktop, gemini, cursor) ---
+// --- JSON mcpServers helpers (claude-cli, claude-desktop, gemini, cursor, kiro, copilot) ---
 
 // writeJSONMCPServer loads (or creates) a JSON config file, sets
 // mcpServers[serverName] to entry, and writes it back — preserving every other
@@ -347,8 +376,11 @@ func backupConfigFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read %s for backup: %w", path, err)
 	}
+	// 0700: these are snapshots of config files that may carry bearer tokens.
+	// The files themselves are 0600, but the directory listing should not be
+	// world-readable either (issue #4546).
 	backupDir := filepath.Join(RootDir(), ".backup")
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return "", fmt.Errorf("create backup dir %s: %w", backupDir, err)
 	}
 	dst := filepath.Join(backupDir, filepath.Base(path)+"."+backupTimestamp()+".bak")
@@ -374,11 +406,41 @@ func writeConfigFileWithBackup(path string, data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// MkdirAll applies 0700 only to directories it creates and is a no-op on
+	// ones that already exist, which is exactly the rule we want: harden what
+	// we make, never re-mode what the user already had. Do NOT add a chmod
+	// here - for claude-cli the config is ~/.claude.json, so dir is $HOME
+	// itself, and an unconditional chmod silently re-modes the user's home
+	// directory (issue #4559, regression from a916f29).
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create dir for %s: %w", path, err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	// Atomic write: write to a temp file in the same directory (so the rename
+	// stays within one filesystem) and rename into place. os.CreateTemp opens
+	// with O_EXCL and a random suffix, which is what makes this safe: a fixed
+	// `path + ".tmp"` written via os.WriteFile has neither O_EXCL nor
+	// O_NOFOLLOW, so an attacker who can write to dir could pre-plant that
+	// name as a symlink and the write would follow it - leaking whatever the
+	// config carries, including bearer tokens (issue #4546). os.CreateTemp
+	// also creates with 0600, so the mode requirement above is preserved.
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".*")
+	if err != nil {
+		return "", fmt.Errorf("create temp file for %s: %w", path, err)
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("write temp file %s for %s: %w", tmp, path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("close temp file %s for %s: %w", tmp, path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("rename %s -> %s: %w", tmp, path, err)
 	}
 	return backup, nil
 }
