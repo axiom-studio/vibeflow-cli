@@ -403,13 +403,15 @@ func writeConfigFileWithBackup(path string, data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// MkdirAll applies 0700 only to directories it creates and is a no-op on
+	// ones that already exist, which is exactly the rule we want: harden what
+	// we make, never re-mode what the user already had. Do NOT add a chmod
+	// here - for claude-cli the config is ~/.claude.json, so dir is $HOME
+	// itself, and an unconditional chmod silently re-modes the user's home
+	// directory (issue #4559, regression from a916f29).
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create dir for %s: %w", path, err)
-	}
-	// Ensure the directory is not widened by a pre-existing permissive mode.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", fmt.Errorf("chmod %s: %w", dir, err)
 	}
 	// Atomic write: write to a temp file and rename into place with 0600.
 	tmp := path + ".tmp"

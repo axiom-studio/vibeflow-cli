@@ -110,13 +110,11 @@ func EnsureCopilotFirstRunConfig(workDir string) (bool, error) {
 		return false, nil
 	}
 
+	// See writeConfigFileWithBackup: MkdirAll already hardens what it creates,
+	// and re-moding a pre-existing directory is the issue #4559 regression.
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false, fmt.Errorf("create %s: %w", dir, err)
-	}
-	// Ensure directory mode is strict even if it already existed with wider perms.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return false, fmt.Errorf("chmod %s: %w", dir, err)
 	}
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
