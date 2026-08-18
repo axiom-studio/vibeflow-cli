@@ -451,110 +451,201 @@ func TestApplyQwenModelPassthrough(t *testing.T) {
 	})
 }
 
-func TestAppendResumeFlag(t *testing.T) {
-	tests := []struct {
-		name        string
-		providerKey string
-		base        string
-		want        string
-	}{
-		{
-			name:        "claude - --continue reattaches to the most recent conversation",
-			providerKey: "claude",
-			base:        "claude --dangerously-skip-permissions",
-			want:        "claude --dangerously-skip-permissions --continue",
-		},
-		{
-			name:        "gemini - --resume takes a value",
-			providerKey: "gemini",
-			base:        "gemini --yolo",
-			want:        "gemini --yolo --resume latest",
-		},
-		{
-			name:        "qwen - --continue",
-			providerKey: "qwen",
-			base:        "qwen --yolo",
-			want:        "qwen --yolo --continue",
-		},
-		{
-			name:        "codex - resume is a subcommand, not a flag, so restart stays fresh",
-			providerKey: "codex",
-			base:        "codex --dangerously-skip-permissions",
-			want:        "codex --dangerously-skip-permissions",
-		},
-		{
-			name:        "cursor - unverified, restart stays fresh",
-			providerKey: "cursor",
-			base:        "agent --yolo",
-			want:        "agent --yolo",
-		},
-		{
-			name:        "kiro - unverified, restart stays fresh",
-			providerKey: "kiro",
-			base:        "kiro-cli chat",
-			want:        "kiro-cli chat",
-		},
-		{
-			name:        "unknown provider is returned unchanged",
-			providerKey: "totally-made-up",
-			base:        "whatever --flag",
-			want:        "whatever --flag",
-		},
-		{
-			name:        "empty provider key is returned unchanged",
-			providerKey: "",
-			base:        "claude",
-			want:        "claude",
-		},
-	}
+// resumeCases is the single source of truth for the per-provider resume shape
+// (issues #4534, #4670). Every entry mirrors a capability probed against the
+// real installed binary; `base` mirrors that provider's real LaunchTemplate
+// output so the assertions are about commands we actually spawn.
+var resumeCases = []struct {
+	name        string
+	providerKey string
+	base        string
+	want        string
+}{
+	{
+		name:        "claude - --continue appended",
+		providerKey: "claude",
+		base:        "claude --dangerously-skip-permissions",
+		want:        "claude --dangerously-skip-permissions --continue",
+	},
+	{
+		name:        "copilot - --continue appended (provider merged from main)",
+		providerKey: "copilot",
+		base:        "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000",
+		want:        "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000 --continue",
+	},
+	{
+		name:        "cursor - --continue appended (binary is agent)",
+		providerKey: "cursor",
+		base:        "agent --yolo --approve-mcps",
+		want:        "agent --yolo --approve-mcps --continue",
+	},
+	{
+		name:        "gemini - --resume takes a value",
+		providerKey: "gemini",
+		base:        "gemini --yolo",
+		want:        "gemini --yolo --resume latest",
+	},
+	{
+		name:        "kiro - --resume is a flag on the chat subcommand",
+		providerKey: "kiro",
+		base:        "kiro-cli chat --trust-all-tools",
+		want:        "kiro-cli chat --trust-all-tools --resume",
+	},
+	{
+		name:        "qwen - --continue appended",
+		providerKey: "qwen",
+		base:        "qwen --yolo",
+		want:        "qwen --yolo --continue",
+	},
+	{
+		name:        "codex - subcommand inserted between binary and its options",
+		providerKey: "codex",
+		base:        "codex --yolo -m 'gpt-5'",
+		want:        "codex resume --last --yolo -m 'gpt-5'",
+	},
+	{
+		name:        "codex - bare binary with no options still gets the subcommand",
+		providerKey: "codex",
+		base:        "codex",
+		want:        "codex resume --last",
+	},
+	{
+		name:        "unknown provider is returned unchanged",
+		providerKey: "totally-made-up",
+		base:        "whatever --flag",
+		want:        "whatever --flag",
+	},
+	{
+		name:        "empty provider key is returned unchanged",
+		providerKey: "",
+		base:        "claude",
+		want:        "claude",
+	},
+	{
+		name:        "empty command is returned unchanged",
+		providerKey: "codex",
+		base:        "",
+		want:        "",
+	},
+}
 
-	for _, tt := range tests {
+func TestApplyResume(t *testing.T) {
+	for _, tt := range resumeCases {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := AppendResumeFlag(tt.base, tt.providerKey); got != tt.want {
-				t.Errorf("AppendResumeFlag(%q, %q):\n got:  %q\n want: %q", tt.base, tt.providerKey, got, tt.want)
+			if got := ApplyResume(tt.base, tt.providerKey, false); got != tt.want {
+				t.Errorf("ApplyResume(%q, %q, false):\n got:  %q\n want: %q", tt.base, tt.providerKey, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestAppendResumeFlag_OrderingWithInitPrompt(t *testing.T) {
-	// The resume flag must land BEFORE the init prompt. claude takes the prompt
-	// as a positional argument, so a flag appended afterwards would sit on the
-	// far side of it and be read as prompt text rather than as an option.
-	cmd := "claude --dangerously-skip-permissions"
-	cmd = AppendResumeFlag(cmd, "claude")
-	cmd = AppendVibeflowInitPrompt(cmd, "claude", "hello world")
-
-	const want = `claude --dangerously-skip-permissions --continue 'hello world'`
-	if cmd != want {
-		t.Errorf("Ordering integration:\n got:  %q\n want: %q", cmd, want)
+func TestApplyResume_PrecedesInitPrompt(t *testing.T) {
+	// The resume flag/subcommand must land BEFORE the init prompt for EVERY
+	// provider, not just the positional-argument ones: a flag on the far side of
+	// the prompt is read as prompt text (or as a codex SESSION_ID), which fails
+	// silently rather than loudly. One row per real provider.
+	for _, tt := range []struct{ providerKey, base, want string }{
+		{"claude", "claude --dangerously-skip-permissions",
+			`claude --dangerously-skip-permissions --continue 'hi'`},
+		{"copilot", "copilot --yolo",
+			`copilot --yolo --continue -i 'hi'`},
+		{"cursor", "agent --yolo",
+			`agent --yolo --continue 'hi'`},
+		{"gemini", "gemini --yolo",
+			`gemini --yolo --resume latest -p 'hi'`},
+		{"kiro", "kiro-cli chat --trust-all-tools",
+			`kiro-cli chat --trust-all-tools --resume 'hi'`},
+		{"qwen", "qwen --yolo",
+			`qwen --yolo --continue -i 'hi'`},
+		// codex is deliberately NOT resumed when a prompt follows: its single
+		// positional would bind to [SESSION_ID] rather than [PROMPT]. See
+		// takesPositionalSessionID.
+		{"codex", "codex --yolo",
+			`codex --yolo 'hi'`},
+	} {
+		t.Run(tt.providerKey, func(t *testing.T) {
+			cmd := ApplyResume(tt.base, tt.providerKey, true)
+			cmd = AppendVibeflowInitPrompt(cmd, tt.providerKey, "hi")
+			if cmd != tt.want {
+				t.Errorf("%s ordering:\n got:  %q\n want: %q", tt.providerKey, cmd, tt.want)
+			}
+		})
 	}
 }
 
-func TestResumeFlagsMatchBuiltinProviders(t *testing.T) {
-	// A resume flag keyed on a provider that does not exist never fires, and the
-	// failure is silent: the session just restarts fresh forever. Pin every key
-	// to the real built-in registry so a typo or a provider added on another
-	// branch fails here instead of in production.
+func TestResumeStrategiesMatchBuiltinProviders(t *testing.T) {
+	// A resume strategy keyed on a provider that does not exist never fires, and
+	// the failure is silent: the session just restarts fresh forever. Pin every
+	// key to the real built-in registry so a typo, or a provider that only
+	// exists on another branch, fails here instead of in production.
 	builtins := DefaultConfig().Providers
-	for key := range resumeFlags {
+	for key := range resumeStrategies {
 		if _, ok := builtins[key]; !ok {
-			t.Errorf("resumeFlags has key %q, which is not a built-in provider in DefaultConfig()", key)
+			t.Errorf("resumeStrategies has key %q, which is not a built-in provider in DefaultConfig()", key)
 		}
 	}
 }
 
-func TestProviderResumesConversation(t *testing.T) {
-	// Drives the dead-session picker's "resumes conversation" / "fresh start"
-	// label, so it must agree with resumeFlags exactly.
-	for _, key := range []string{"claude", "gemini", "qwen"} {
-		if !ProviderResumesConversation(key) {
-			t.Errorf("ProviderResumesConversation(%q) = false, want true", key)
+func TestResumeStrategiesExactlyOneShape(t *testing.T) {
+	// flag and subcommand are mutually exclusive; setting both would append AND
+	// insert, producing a command no CLI accepts.
+	for key, s := range resumeStrategies {
+		switch {
+		case s.flag == "" && s.subcommand == "":
+			t.Errorf("resumeStrategies[%q] sets neither flag nor subcommand", key)
+		case s.flag != "" && s.subcommand != "":
+			t.Errorf("resumeStrategies[%q] sets both flag %q and subcommand %q", key, s.flag, s.subcommand)
 		}
 	}
-	for _, key := range []string{"codex", "cursor", "kiro", "", "made-up"} {
-		if ProviderResumesConversation(key) {
-			t.Errorf("ProviderResumesConversation(%q) = true, want false", key)
+}
+
+func TestEveryBuiltinProviderResumes(t *testing.T) {
+	// As of #4670 every built-in provider has a verified resume capability. If a
+	// new provider is added without one, this fails and forces a decision:
+	// either probe the real binary and add a strategy, or document why the
+	// provider genuinely cannot resume.
+	for key := range DefaultConfig().Providers {
+		if !ProviderResumesConversation(key, false) {
+			t.Errorf("provider %q has no resume strategy; probe the real binary and add one, or document why it cannot resume", key)
 		}
+	}
+}
+
+func TestApplyResume_CodexSkippedWhenInitPromptFollows(t *testing.T) {
+	// `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` binds a single positional to
+	// SESSION_ID, so resuming AND appending the vibeflow init prompt would hand
+	// codex the entire prompt as a session id. The agent would come back looking
+	// resumed while never receiving its instructions — a silent failure. Assert
+	// the guard, and assert that vanilla codex sessions (no init prompt) still
+	// get the resume they can safely take.
+	const base = "codex --yolo"
+
+	if got := ApplyResume(base, "codex", true); got != base {
+		t.Errorf("vibeflow codex session must NOT resume:\n got:  %q\n want: %q", got, base)
+	}
+
+	const wantVanilla = "codex resume --last --yolo"
+	if got := ApplyResume(base, "codex", false); got != wantVanilla {
+		t.Errorf("vanilla codex session must resume:\n got:  %q\n want: %q", got, wantVanilla)
+	}
+
+	// The whole point is that the init prompt survives intact for the vibeflow
+	// case: it must still be the trailing positional of a plain `codex` command.
+	full := AppendVibeflowInitPrompt(ApplyResume(base, "codex", true), "codex", "run the loop")
+	if full != `codex --yolo 'run the loop'` {
+		t.Errorf("init prompt mangled for codex: %q", full)
+	}
+
+	// Every other provider is unaffected by the guard.
+	for _, key := range []string{"claude", "copilot", "cursor", "gemini", "kiro", "qwen"} {
+		if !ProviderResumesConversation(key, true) {
+			t.Errorf("provider %q must still resume when an init prompt follows", key)
+		}
+	}
+	if ProviderResumesConversation("codex", true) {
+		t.Error("picker would mislabel a vibeflow codex session as resuming")
+	}
+	if !ProviderResumesConversation("codex", false) {
+		t.Error("picker would mislabel a vanilla codex session as a fresh start")
 	}
 }
