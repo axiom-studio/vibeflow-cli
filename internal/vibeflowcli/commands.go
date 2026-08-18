@@ -114,6 +114,13 @@ func launchCmd() *cobra.Command {
 			}
 
 			workDir := "."
+			// Kept alongside workDir so the status bar can mark the session as
+			// running in a worktree (#4671). NOTE: this launch path still does not
+			// persist it onto SessionMeta the way the TUI path does, so a restart of
+			// a CLI-launched worktree session loses the marker. Pre-existing gap,
+			// left alone here because SessionMeta.WorktreePath also drives
+			// --cleanup-worktree removal.
+			sessionWorktreePath := ""
 
 			if worktree && wm != nil {
 				wtName := worktreeName
@@ -123,6 +130,7 @@ func launchCmd() *cobra.Command {
 				wtPath, err := wm.CreateBranch(wtName, branch, newBranch, "")
 				if err == nil {
 					workDir = wtPath
+					sessionWorktreePath = wtPath
 				}
 			}
 
@@ -328,14 +336,15 @@ func launchCmd() *cobra.Command {
 				}
 
 				if err := tmux.CreateSessionWithOpts(SessionOpts{
-					Name:     sessionName,
-					Provider: provider,
-					WorkDir:  workDir,
-					Command:  sessionCommand,
-					Env:      sessionEnv,
-					Branch:   branch,
-					Project:  sessionProject,
-					Persona:  p,
+					Name:         sessionName,
+					Provider:     provider,
+					WorkDir:      workDir,
+					Command:      sessionCommand,
+					Env:          sessionEnv,
+					Branch:       branch,
+					Project:      sessionProject,
+					Persona:      p,
+					WorktreePath: sessionWorktreePath,
 				}); err != nil {
 					return err
 				}
@@ -818,14 +827,15 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 
 	if err := tmux.CreateSessionWithOpts(SessionOpts{
-		Name:     meta.Name,
-		Provider: provider,
-		WorkDir:  workDir,
-		Command:  command,
-		Env:      sessionEnv,
-		Branch:   branch,
-		Project:  projectName,
-		Persona:  meta.Persona,
+		Name:         meta.Name,
+		Provider:     provider,
+		WorkDir:      workDir,
+		Command:      command,
+		Env:          sessionEnv,
+		Branch:       branch,
+		Project:      projectName,
+		Persona:      meta.Persona,
+		WorktreePath: meta.WorktreePath,
 	}); err != nil {
 		return SessionMeta{}, err
 	}
