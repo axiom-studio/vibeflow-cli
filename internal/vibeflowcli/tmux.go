@@ -371,6 +371,17 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 		return fmt.Errorf("session %q already exists — use 'vibeflow delete' to remove it first", fullName)
 	}
 
+	// Copilot CLI shows blocking first-run dialogs (folder trust + one-time
+	// desktop-app nudge) that would stall an unattended launch; pre-seed its
+	// config so they never appear (verified v1.0.79). Non-fatal: worst case
+	// the user answers the dialog in the pane. This is the single choke
+	// point every launch path (TUI, headless, restart) goes through.
+	if opts.Provider == "copilot" {
+		if _, err := EnsureCopilotFirstRunConfig(opts.WorkDir); err != nil && tm.logger != nil {
+			tm.logger.Warn("copilot first-run pre-seed failed: %v", err)
+		}
+	}
+
 	args := []string{"new-session", "-d", "-s", fullName, "-c", opts.WorkDir}
 
 	// Set environment variables via tmux -e flags. For the claude provider this

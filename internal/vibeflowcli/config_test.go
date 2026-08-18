@@ -46,11 +46,11 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("MCPToolName = %q, want %q", cfg.MCPToolName, DefaultMCPToolName)
 	}
 
-	// Six built-in providers.
-	if len(cfg.Providers) != 6 {
-		t.Fatalf("expected 6 providers, got %d", len(cfg.Providers))
+	// Seven built-in providers.
+	if len(cfg.Providers) != 7 {
+		t.Fatalf("expected 7 providers, got %d", len(cfg.Providers))
 	}
-	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen", "kiro"} {
+	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen", "kiro", "copilot"} {
 		if _, ok := cfg.Providers[key]; !ok {
 			t.Errorf("missing provider %q", key)
 		}
@@ -88,8 +88,8 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
-	if len(cfg.Providers) != 6 {
-		t.Errorf("expected 6 default providers, got %d", len(cfg.Providers))
+	if len(cfg.Providers) != 7 {
+		t.Errorf("expected 7 default providers, got %d", len(cfg.Providers))
 	}
 }
 
@@ -673,6 +673,55 @@ func TestMigrateProviders_PreservesLaunchTemplates(t *testing.T) {
 	// Custom template should NOT be overwritten.
 	if cfg.Providers["codex"].LaunchTemplate != "{{.Binary}} --dangerously-bypass-hook-trust --full-auto" {
 		t.Errorf("expected custom launch template to be preserved, got %q", cfg.Providers["codex"].LaunchTemplate)
+	}
+}
+
+// TestLoadConfig_CopilotAutonomyFlagsReachExistingUsers pins the delivery path
+// for the issue #4602 fix. A user whose config.yaml predates the copilot
+// provider has no `copilot:` block on disk, and LoadConfig merges the file over
+// DefaultConfig() rather than replacing its provider map — so the shipped
+// template is what actually launches, and the fix arrives on the next run with
+// no migration step. The inverse case (a config that DOES pin an old copilot
+// template keeps it, because migrateProviders never rewrites launch templates)
+// is covered by TestMigrateProviders_PreservesLaunchTemplates.
+func TestLoadConfig_CopilotAutonomyFlagsReachExistingUsers(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	// A pre-copilot config: claude only, no `copilot:` block anywhere.
+	if err := os.WriteFile(cfgPath, []byte(`server_url: https://cloud.axiomstudio.ai
+default_provider: claude
+providers:
+    claude:
+        name: Claude Code
+        binary: claude
+        launch_template: '{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}'
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, ok := cfg.Providers["copilot"]
+	if !ok {
+		t.Fatal("copilot provider missing after loading a pre-copilot config")
+	}
+	got, err := RenderLaunchCommand(p.LaunchTemplate, LaunchTemplateVars{
+		Binary:          p.Binary,
+		SkipPermissions: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	// The user's own claude override must survive the merge untouched.
+	if cfg.Providers["claude"].LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}" {
+		t.Errorf("user's claude template was clobbered: %q", cfg.Providers["claude"].LaunchTemplate)
 	}
 }
 
