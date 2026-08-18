@@ -1708,14 +1708,15 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 
 	err = m.tmux.CreateSessionWithOpts(SessionOpts{
-		Name:     name,
-		Provider: provider,
-		WorkDir:  workDir,
-		Command:  command,
-		Env:      result.Provider.Env,
-		Branch:   branch,
-		Project:  projectName,
-		Persona:  result.Persona,
+		Name:         name,
+		Provider:     provider,
+		WorkDir:      workDir,
+		Command:      command,
+		Env:          result.Provider.Env,
+		Branch:       branch,
+		Project:      projectName,
+		Persona:      result.Persona,
+		WorktreePath: worktreePath,
 	})
 	if err != nil {
 		m.logger.Error("create session (provider=%s, workdir=%s): %v", provider, workDir, err)
