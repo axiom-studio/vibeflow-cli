@@ -137,7 +137,7 @@ func (r RestartSelectModel) View() string {
 		}
 		// Say which of the two restarts this is, so the user is not guessing
 		// whether the agent comes back with its history (issue #4534).
-		if ProviderResumesConversation(s.Provider) {
+		if ProviderResumesConversation(s.Provider, s.SessionType == "vibeflow") {
 			details += " | resumes conversation"
 		} else {
 			details += " | fresh start"

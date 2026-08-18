@@ -784,9 +784,12 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
 	// Bring the agent back with the conversation it had when it died instead of
-	// a blank one (issue #4534). No-op for providers with no known resume flag.
-	// Must run before the init-prompt append; see AppendResumeFlag.
-	command = AppendResumeFlag(command, provider)
+	// a blank one (issues #4534, #4670). No-op for providers with no known
+	// resume support. Must run before the init-prompt append; see ApplyResume.
+	// The flag mirrors the `meta.SessionType == "vibeflow"` guard below that
+	// decides whether an init prompt is appended at all: codex cannot resume
+	// and carry a positional prompt at the same time.
+	command = ApplyResume(command, provider, meta.SessionType == "vibeflow")
 
 	// For vibeflow sessions, append the init prompt so the agent starts autonomously.
 	projectName := meta.Project
