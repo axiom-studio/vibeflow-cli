@@ -13,7 +13,7 @@
 
 # vibeflow-cli
 
-A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, Qwen Code, and Kiro CLI sessions from a single TUI - with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
+A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, Qwen Code, Kiro CLI, and GitHub Copilot CLI sessions from a single TUI - with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
 
 ## Supported Agents
 
@@ -25,8 +25,9 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | **Cursor Agent** | `agent` | `--yolo --approve-mcps` | Positional argument |
 | **Qwen Code** | `qwen` | `--yolo` | `-i` flag (interactive after prompt) |
 | **Kiro CLI** | `kiro-cli` | `--trust-all-tools` | Positional argument (verified — see [Providers — Kiro CLI caveats](docs/VibeFlow-CLI/docs/providers.md#kiro-cli-caveats)) |
+| **GitHub Copilot CLI** | `copilot` | `--yolo` | `-i` flag (interactive after prompt) |
 
-All six agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
+All seven agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
 
 ### VibeFlow Terminal UI
 
@@ -87,9 +88,10 @@ go build -o vibeflow ./cmd/vibeflow
 
 - **Go 1.25+**
 - **tmux 3.2+** (for `-e` env var passthrough)
-- At least one supported agent CLI installed (`claude`, `codex`, `gemini`, `agent` (Cursor), `qwen`, or `kiro-cli`)
+- At least one supported agent CLI installed (`claude`, `codex`, `gemini`, `agent` (Cursor), `qwen`, `kiro-cli`, or `copilot`)
   - Install Qwen Code: `npm install -g @qwen-code/qwen-code@latest`
   - Install Kiro CLI: see [kiro.dev/docs/cli](https://kiro.dev/docs/cli/)
+  - Install GitHub Copilot CLI: `npm install -g @github/copilot`
 
 ## Usage
 
@@ -226,7 +228,7 @@ The interactive wizard walks through:
 2. **Session type** - VibeFlow (server-connected) or Vanilla (standalone)
 3. **Project** - Select VibeFlow project (VibeFlow mode only)
 4. **Persona** - Developer, Principal Engineer, Architect, UX Designer, QA Lead, Security Lead, Product Manager, Project Manager, or Customer (VibeFlow mode only)
-5. **Provider** - Choose agent (Claude, Codex, Gemini, Cursor, Qwen, Kiro CLI) with availability detection
+5. **Provider** - Choose agent (Claude, Codex, Gemini, Cursor, Qwen, Kiro CLI, GitHub Copilot CLI) with availability detection
 6. **Environment token** - Enter required API keys if not already saved (e.g. `OPENAI_API_KEY` for Qwen API-key mode)
 7. **LLM Gateway** - Optional: route LLM traffic via VibeFlow server gateway
 7a. **Qwen launch config** _(qwen-only)_ - Pick a vendor preset (OpenAI / Qwen DashScope / z.ai / Custom) to auto-fill `OPENAI_BASE_URL` + `OPENAI_MODEL`; values are editable. With the LLM Gateway **on**, only the model is used (endpoint + key come from the gateway). See [Providers — Qwen launch config](docs/VibeFlow-CLI/docs/providers.md#qwen-launch-config-api-key-mode)
