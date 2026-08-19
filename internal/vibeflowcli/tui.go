@@ -1588,6 +1588,18 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 			workDir = result.SpecifiedWorkDir
 		}
 	}
+
+	// The cases above that CREATE a worktree already put us on the selected
+	// branch. The ones that reuse an existing directory do not, so the selection
+	// has to be applied here or it is merely decorative (#4680). WorktreeCurrent
+	// is the common one and was not even a case in the switch above, which is how
+	// a session could run on main while every UI surface said develop.
+	switch result.WorktreeChoice {
+	case WorktreeCurrent, WorktreeSpecifyDir, WorktreeExisting:
+		if err := ensureBranchCheckedOut(workDir, branch, result.NewBranch, result.NewBranchBase); err != nil {
+			return "", "", err
+		}
+	}
 	return workDir, worktreePath, nil
 }
 
@@ -1599,7 +1611,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 	name := sessionid.GenerateSessionID(workDir)
 	provider := result.ProviderKey
-	branch := result.Branch
+	branch := effectiveBranch(workDir, result.Branch)
 
 	// For VibeFlow managed sessions, ensure a valid .vibeflow-session file
 	// exists before spawning. The agent will call session_init itself via MCP

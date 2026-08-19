@@ -132,7 +132,16 @@ func launchCmd() *cobra.Command {
 					workDir = wtPath
 					sessionWorktreePath = wtPath
 				}
+			} else if err := ensureBranchCheckedOut(workDir, branch, newBranch, ""); err != nil {
+				// Without --worktree, --branch used to be decorative: it named the
+				// status bar and SessionMeta while the agent ran on whatever branch
+				// the directory was already on (#4680). Same hole the TUI had.
+				return err
 			}
+
+			// Report the branch the session is REALLY on, not the one requested, so
+			// no UI surface can disagree with the agent's own git_branch.
+			branch = effectiveBranch(workDir, branch)
 
 			// Resolve project, persona, and session type from CLI flags.
 			sessionProject := cfg.DefaultProject
