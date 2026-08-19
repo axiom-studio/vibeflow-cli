@@ -649,3 +649,88 @@ func TestApplyResume_CodexSkippedWhenInitPromptFollows(t *testing.T) {
 		t.Error("picker would mislabel a vanilla codex session as a fresh start")
 	}
 }
+
+// TestCanResumeSession_SameWorkdirTeamIsRefused is the acceptance check for
+// #4618. Every resume strategy resolves "the most recent conversation for the
+// working DIRECTORY", so a team launch sharing one workDir would have persona A
+// come back holding persona B's transcript - B's init prompt, B's session id,
+// and anything sensitive echoed into it. Reproduced for real against the claude
+// binary: seed ALPHA, seed BRAVO in the same directory, `--continue` returns
+// BRAVO. Until resume is bound to a conversation id, the only safe
+// directory-scoped resume is a directory with exactly one session.
+func TestCanResumeSession_SameWorkdirTeamIsRefused(t *testing.T) {
+	dev := SessionMeta{
+		Name: "dev", Provider: "claude", SessionType: "vibeflow",
+		Persona: "developer", WorkingDir: "/repo",
+	}
+	sec := SessionMeta{
+		Name: "sec", Provider: "claude", SessionType: "vibeflow",
+		Persona: "security_lead", WorkingDir: "/repo",
+	}
+	other := SessionMeta{
+		Name: "other", Provider: "claude", SessionType: "vibeflow",
+		Persona: "qa_lead", WorkingDir: "/elsewhere",
+	}
+
+	t.Run("alone in its directory resumes", func(t *testing.T) {
+		ok, why := canResumeSession(dev, []SessionMeta{dev, other})
+		if !ok {
+			t.Errorf("a solitary session must resume, refused with: %s", why)
+		}
+	})
+
+	t.Run("sharing a directory refuses", func(t *testing.T) {
+		ok, why := canResumeSession(dev, []SessionMeta{dev, sec, other})
+		if ok {
+			t.Error("two personas in one workdir must NOT resume: persona A would attach to persona B's conversation")
+		}
+		if why == "" {
+			t.Error("refusal must explain itself; the picker shows this to the user")
+		}
+	})
+
+	t.Run("both peers refuse, not just one", func(t *testing.T) {
+		// Whichever pane the user restarts first must be refused. Guarding only
+		// one direction would still leak in the other.
+		for _, m := range []SessionMeta{dev, sec} {
+			if ok, _ := canResumeSession(m, []SessionMeta{dev, sec}); ok {
+				t.Errorf("%s must not resume while sharing a workdir", m.Name)
+			}
+		}
+	})
+
+	t.Run("duplicate peer entries do not count twice", func(t *testing.T) {
+		// The active store and the dead-session cache overlap, so the same
+		// session arrives twice. Counting it twice would refuse every resume.
+		if ok, why := canResumeSession(dev, []SessionMeta{dev, dev, dev}); !ok {
+			t.Errorf("deduplication failed, refused with: %s", why)
+		}
+	})
+
+	t.Run("relative workdirs are treated as possibly-shared", func(t *testing.T) {
+		// "." from the CLI launch path cannot be compared across repos. Counting
+		// them as shared costs a resume; the opposite leaks a conversation.
+		a := SessionMeta{Name: "a", Provider: "claude", WorkingDir: "."}
+		b := SessionMeta{Name: "b", Provider: "claude", WorkingDir: "."}
+		if ok, _ := canResumeSession(a, []SessionMeta{a, b}); ok {
+			t.Error("two sessions both recorded as \".\" must not be assumed distinct")
+		}
+	})
+
+	t.Run("path forms that mean the same directory are matched", func(t *testing.T) {
+		a := SessionMeta{Name: "a", Provider: "claude", WorkingDir: "/repo/"}
+		b := SessionMeta{Name: "b", Provider: "claude", WorkingDir: "/repo/./"}
+		if ok, _ := canResumeSession(a, []SessionMeta{a, b}); ok {
+			t.Error("trailing-slash and dot forms of one directory must count as shared")
+		}
+	})
+
+	t.Run("a provider with no resume support is still refused", func(t *testing.T) {
+		codexVibeflow := SessionMeta{
+			Name: "cx", Provider: "codex", SessionType: "vibeflow", WorkingDir: "/solo",
+		}
+		if ok, _ := canResumeSession(codexVibeflow, []SessionMeta{codexVibeflow}); ok {
+			t.Error("codex vibeflow sessions cannot resume (positional SESSION_ID); label must say fresh start")
+		}
+	})
+}

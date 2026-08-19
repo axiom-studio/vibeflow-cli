@@ -713,6 +713,25 @@ func deleteCmd() *cobra.Command {
 
 // --- restart ---
 
+// sessionPeers returns every session known to the active store and the
+// dead-session cache. The two overlap; callers deduplicate by name. Errors are
+// swallowed on purpose: a peer list that fails to load must read as "unknown",
+// and the resume gate treats unknown as unsafe rather than assuming solitude.
+func sessionPeers(store *Store, cache *SessionCache) []SessionMeta {
+	var peers []SessionMeta
+	if store != nil {
+		if list, err := store.List(); err == nil {
+			peers = append(peers, list...)
+		}
+	}
+	if cache != nil {
+		if list, err := cache.List(); err == nil {
+			peers = append(peers, list...)
+		}
+	}
+	return peers
+}
+
 // RestartSession kills any existing tmux session and re-launches it using
 // the stored metadata. Used by both the CLI restart command and the TUI
 // dead-session restart popup. Returns the updated SessionMeta on success.
@@ -802,12 +821,12 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
 	// Bring the agent back with the conversation it had when it died instead of
-	// a blank one (issues #4534, #4670). No-op for providers with no known
-	// resume support. Must run before the init-prompt append; see ApplyResume.
-	// The flag mirrors the `meta.SessionType == "vibeflow"` guard below that
-	// decides whether an init prompt is appended at all: codex cannot resume
-	// and carry a positional prompt at the same time.
-	command = ApplyResume(command, provider, meta.SessionType == "vibeflow")
+	// a blank one (issues #4534, #4670) -- but only when a directory-scoped
+	// resume provably cannot land on a peer persona's conversation (#4618).
+	// Must run before the init-prompt append; see ApplyResume.
+	if ok, _ := canResumeSession(meta, sessionPeers(store, cache)); ok {
+		command = ApplyResume(command, provider, meta.SessionType == "vibeflow")
+	}
 
 	// For vibeflow sessions, append the init prompt so the agent starts autonomously.
 	projectName := meta.Project
