@@ -28,6 +28,11 @@ import (
 // list of dead sessions the user can choose to restart on CLI startup.
 type RestartSelectModel struct {
 	sessions []SessionMeta
+	// resumes[i] records whether sessions[i] will actually come back with its
+	// prior conversation. Computed once at construction, where the session store
+	// is in scope, so the label cannot promise a resume the restart will refuse
+	// (issue #4618).
+	resumes  []bool
 	selected map[int]bool
 	cursor   int
 	done     bool
@@ -35,9 +40,17 @@ type RestartSelectModel struct {
 }
 
 // NewRestartSelectModel creates a restart selector for the given dead sessions.
-func NewRestartSelectModel(dead []SessionMeta) RestartSelectModel {
+// peers is every session known to the store and cache, used to decide per row
+// whether a resume is safe; pass nil when that is unavailable, which reads as
+// "cannot prove it is safe" and labels every row a fresh start.
+func NewRestartSelectModel(dead []SessionMeta, peers []SessionMeta) RestartSelectModel {
+	resumes := make([]bool, len(dead))
+	for i, meta := range dead {
+		resumes[i], _ = canResumeSession(meta, peers)
+	}
 	return RestartSelectModel{
 		sessions: dead,
+		resumes:  resumes,
 		selected: make(map[int]bool),
 		cursor:   0,
 	}
@@ -134,6 +147,13 @@ func (r RestartSelectModel) View() string {
 		}
 		if s.Project != "" {
 			details += " | " + s.Project
+		}
+		// Say which of the two restarts this is, so the user is not guessing
+		// whether the agent comes back with its history (issue #4534).
+		if i < len(r.resumes) && r.resumes[i] {
+			details += " | resumes conversation"
+		} else {
+			details += " | fresh start"
 		}
 
 		line := fmt.Sprintf("%s%s %s  %s", cursor, check, name, lipgloss.NewStyle().Foreground(dimColor).Render(details))

@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -101,6 +102,186 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	default:
 		return baseCommand + fmt.Sprintf(" '%s'", escaped)
 	}
+}
+
+// resumeStrategy describes how one provider reattaches to its previous
+// conversation. Two shapes exist in the wild and they are NOT interchangeable:
+// most CLIs take a flag that can be appended to a rendered command, while codex
+// takes a subcommand that has to sit between the binary and its options.
+// Exactly one field is set.
+type resumeStrategy struct {
+	flag       string // appended after the rendered command, e.g. "--continue"
+	subcommand string // inserted right after the binary, e.g. "resume --last"
+
+	// takesPositionalSessionID marks a provider whose resume shape consumes a
+	// leading POSITIONAL argument for the session id. codex is the only one:
+	// `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`. With `--last` and a single
+	// positional, that positional binds to SESSION_ID, NOT to PROMPT, so
+	// appending the vibeflow init prompt would hand codex the whole prompt as a
+	// session id. The pane would come back looking resumed while the agent never
+	// received its instructions and never entered the polling loop: a silent
+	// failure, which is worse than not resuming. Resume is therefore skipped for
+	// these providers whenever an init prompt follows, until issue #4669 supplies
+	// a real session id and the shape becomes `resume <id> '<prompt>'` with both
+	// positionals filled.
+	takesPositionalSessionID bool
+}
+
+// resumeStrategies maps a provider key to the way it reattaches to the most
+// recent conversation for its working directory. Used when a dead session is
+// brought back so the user keeps the conversation instead of starting from zero
+// (issues #4534, #4670). Providers absent from the map restart fresh.
+//
+// Every entry was probed against the real installed binary, and the four that
+// #4534 originally excluded turned out to be supportable (#4670):
+//   - claude  → `-c, --continue`: "Continue the most recent conversation in
+//     [this directory]".
+//   - copilot → `--continue`: "Resume the most recent session".
+//   - cursor  → `--continue`: "Continue previous session". Binary is `agent`.
+//   - gemini  → `-r, --resume` takes a value; "latest" selects the most recent.
+//   - kiro    → `chat -r, --resume`: "Resume the most recent conversation from
+//     this directory". The flag belongs to the `chat` subcommand the template
+//     already renders, so appending is correct. NOTE: probe `kiro-cli`, the
+//     provider's real binary: a `kiro` binary also exists (the IDE launcher)
+//     whose `-r` is `--reuse-window`, which is what made #4534 call this
+//     unverified.
+//   - qwen    → `-c, --continue`: "Resume the most recent session for the
+//     current project". Inert unless the user enabled `--chat-recording`
+//     (qwen's help says history is not saved without it), which is harmless:
+//     it degrades to a fresh restart rather than failing.
+//   - codex   → `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` with `--last`.
+//     It accepts the same options the launch template renders and takes the
+//     init prompt as its optional trailing PROMPT, so the only change needed is
+//     where the subcommand goes. `--yolo` is accepted even though `codex resume
+//     --help` does not list it; confirmed by control (an unknown flag in the
+//     same position IS rejected, so acceptance is real parsing rather than a
+//     `--help` short-circuit).
+//
+// This lives in code rather than in the provider's LaunchTemplate or a new
+// Provider field because migrateProviders (config.go) never refreshes an
+// existing built-in's template or backfills new struct fields: every current
+// user has the old provider block persisted in their config.yaml, so a
+// config-side change would silently do nothing for them. Transforming after
+// render is the same pattern AppendCodexGatewayProviderFlags and
+// AppendQwenAPIFlags already use for provider-conditional flags.
+var resumeStrategies = map[string]resumeStrategy{
+	"claude":  {flag: "--continue"},
+	"copilot": {flag: "--continue"},
+	"cursor":  {flag: "--continue"},
+	"gemini":  {flag: "--resume latest"},
+	"kiro":    {flag: "--resume"},
+	"qwen":    {flag: "--continue"},
+	"codex":   {subcommand: "resume --last", takesPositionalSessionID: true},
+}
+
+// ApplyResume rewrites a rendered launch command so the agent reattaches to its
+// previous conversation. Providers with no known resume support are returned
+// unchanged.
+//
+// Ordering: this MUST run before AppendVibeflowInitPrompt. claude, codex and
+// cursor take the init prompt as a POSITIONAL argument, so anything appended
+// afterwards would land on the far side of the prompt.
+//
+// Resume is applied unconditionally for known providers, with no check that a
+// conversation actually exists: `claude --continue` in a directory with no
+// history starts a fresh conversation rather than failing (verified by running
+// it under `--print` in an empty temp directory). That makes a
+// transcript-existence probe (which would need a per-provider history location,
+// path escaping and a filesystem race) pure cost for identical behaviour. A
+// session being restarted has by definition already run once, so the no-history
+// case is close to unreachable regardless.
+//
+// KNOWN LIMIT (issue #4669): every strategy here resolves the most recent
+// conversation for the working DIRECTORY, not for this session. Personas
+// launched as a team into one workdir without worktrees will therefore resume
+// the same conversation. Resume-by-session-id is the fix and is tracked
+// separately.
+func ApplyResume(baseCommand, providerKey string, initPromptFollows bool) string {
+	s, ok := resumeStrategies[providerKey]
+	if !ok || baseCommand == "" {
+		return baseCommand
+	}
+	if s.takesPositionalSessionID && initPromptFollows {
+		// See takesPositionalSessionID: resuming here would swallow the init
+		// prompt as a session id. Restart fresh instead, which is what this
+		// provider did before resume existed.
+		return baseCommand
+	}
+	if s.subcommand == "" {
+		return baseCommand + " " + s.flag
+	}
+	// Subcommand shape: it has to precede the binary's own options, so split off
+	// the leading binary token rather than appending. A bare command with no
+	// options still works ("codex" -> "codex resume --last").
+	binary, rest, found := strings.Cut(baseCommand, " ")
+	if !found {
+		return binary + " " + s.subcommand
+	}
+	return binary + " " + s.subcommand + " " + rest
+}
+
+// sessionsSharingWorkDir counts the distinct sessions recorded against meta's
+// working directory, meta itself included. peers may contain duplicates (the
+// active store and the dead-session cache overlap); they are deduplicated by
+// session name.
+//
+// A relative working directory ("." from the CLI launch path, or "") cannot be
+// compared meaningfully across sessions, so two sessions in DIFFERENT repos both
+// recorded as "." count as sharing. That is deliberately the conservative
+// direction: it costs a resume, where the opposite would hand one persona
+// another's conversation.
+func sessionsSharingWorkDir(meta SessionMeta, peers []SessionMeta) int {
+	dir := filepath.Clean(meta.WorkingDir)
+	seen := map[string]bool{meta.Name: true}
+	for _, p := range peers {
+		if p.Name == "" || seen[p.Name] {
+			continue
+		}
+		if filepath.Clean(p.WorkingDir) == dir {
+			seen[p.Name] = true
+		}
+	}
+	return len(seen)
+}
+
+// canResumeSession reports whether restarting meta may reattach to its previous
+// conversation, and a short reason when it may not.
+//
+// Every resume strategy in resumeStrategies resolves "the most recent
+// conversation for the working DIRECTORY", never "the conversation this session
+// had". A team launch puts N personas in ONE workDir, so a restart there
+// attaches to whichever peer wrote last: persona A comes back holding persona
+// B's transcript, its init prompt, its session id, and anything sensitive that
+// was echoed into it. Because persona is an authorization dimension, that
+// crosses a privilege boundary rather than merely confusing the display
+// (issue #4618).
+//
+// Until resume is bound to a conversation id, the only safe directory-scoped
+// resume is one where the directory holds exactly one session, so "most recent
+// in this directory" and "this session's conversation" cannot differ. Anything
+// else falls back to a FRESH restart. Falling back to the directory-scoped flag
+// instead would preserve the exact defect this guards against.
+func canResumeSession(meta SessionMeta, peers []SessionMeta) (bool, string) {
+	if !ProviderResumesConversation(meta.Provider, meta.SessionType == "vibeflow") {
+		return false, "provider has no usable resume for this session type"
+	}
+	if n := sessionsSharingWorkDir(meta, peers); n > 1 {
+		return false, fmt.Sprintf("%d sessions share this working directory, so resume could attach to another persona's conversation", n)
+	}
+	return true, ""
+}
+
+// ProviderResumesConversation reports whether a restart of the given provider
+// keeps the prior conversation. The dead-session picker uses it to tell the
+// user which of the two they are about to get, so it must agree with
+// ApplyResume exactly, including the codex-with-init-prompt case, where the
+// honest answer is "fresh start".
+func ProviderResumesConversation(providerKey string, initPromptFollows bool) bool {
+	s, ok := resumeStrategies[providerKey]
+	if !ok {
+		return false
+	}
+	return !(s.takesPositionalSessionID && initPromptFollows)
 }
 
 // AppendCodexGatewayProviderFlags appends a temporary Codex CLI custom

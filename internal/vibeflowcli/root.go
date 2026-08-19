@@ -178,7 +178,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Detect dead sessions from cache and show restart popup if any.
 	if tmuxNames, err := tmux.ListSessionNames(); err == nil {
 		if deadSessions, err := cache.DeadSessions(tmuxNames); err == nil && len(deadSessions) > 0 {
-			model.restartSelect = NewRestartSelectModel(deadSessions)
+			model.restartSelect = NewRestartSelectModel(deadSessions, sessionPeers(store, cache))
 			model.activeView = ViewRestart
 		}
 	}

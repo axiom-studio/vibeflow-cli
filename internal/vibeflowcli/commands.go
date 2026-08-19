@@ -114,6 +114,13 @@ func launchCmd() *cobra.Command {
 			}
 
 			workDir := "."
+			// Kept alongside workDir so the status bar can mark the session as
+			// running in a worktree (#4671). NOTE: this launch path still does not
+			// persist it onto SessionMeta the way the TUI path does, so a restart of
+			// a CLI-launched worktree session loses the marker. Pre-existing gap,
+			// left alone here because SessionMeta.WorktreePath also drives
+			// --cleanup-worktree removal.
+			sessionWorktreePath := ""
 
 			if worktree && wm != nil {
 				wtName := worktreeName
@@ -123,8 +130,18 @@ func launchCmd() *cobra.Command {
 				wtPath, err := wm.CreateBranch(wtName, branch, newBranch, "")
 				if err == nil {
 					workDir = wtPath
+					sessionWorktreePath = wtPath
 				}
+			} else if err := ensureBranchCheckedOut(workDir, branch, newBranch, ""); err != nil {
+				// Without --worktree, --branch used to be decorative: it named the
+				// status bar and SessionMeta while the agent ran on whatever branch
+				// the directory was already on (#4680). Same hole the TUI had.
+				return err
 			}
+
+			// Report the branch the session is REALLY on, not the one requested, so
+			// no UI surface can disagree with the agent's own git_branch.
+			branch = effectiveBranch(workDir, branch)
 
 			// Resolve project, persona, and session type from CLI flags.
 			sessionProject := cfg.DefaultProject
@@ -328,14 +345,15 @@ func launchCmd() *cobra.Command {
 				}
 
 				if err := tmux.CreateSessionWithOpts(SessionOpts{
-					Name:     sessionName,
-					Provider: provider,
-					WorkDir:  workDir,
-					Command:  sessionCommand,
-					Env:      sessionEnv,
-					Branch:   branch,
-					Project:  sessionProject,
-					Persona:  p,
+					Name:         sessionName,
+					Provider:     provider,
+					WorkDir:      workDir,
+					Command:      sessionCommand,
+					Env:          sessionEnv,
+					Branch:       branch,
+					Project:      sessionProject,
+					Persona:      p,
+					WorktreePath: sessionWorktreePath,
 				}); err != nil {
 					return err
 				}
@@ -695,6 +713,25 @@ func deleteCmd() *cobra.Command {
 
 // --- restart ---
 
+// sessionPeers returns every session known to the active store and the
+// dead-session cache. The two overlap; callers deduplicate by name. Errors are
+// swallowed on purpose: a peer list that fails to load must read as "unknown",
+// and the resume gate treats unknown as unsafe rather than assuming solitude.
+func sessionPeers(store *Store, cache *SessionCache) []SessionMeta {
+	var peers []SessionMeta
+	if store != nil {
+		if list, err := store.List(); err == nil {
+			peers = append(peers, list...)
+		}
+	}
+	if cache != nil {
+		if list, err := cache.List(); err == nil {
+			peers = append(peers, list...)
+		}
+	}
+	return peers
+}
+
 // RestartSession kills any existing tmux session and re-launches it using
 // the stored metadata. Used by both the CLI restart command and the TUI
 // dead-session restart popup. Returns the updated SessionMeta on success.
@@ -783,6 +820,14 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
+	// Bring the agent back with the conversation it had when it died instead of
+	// a blank one (issues #4534, #4670) -- but only when a directory-scoped
+	// resume provably cannot land on a peer persona's conversation (#4618).
+	// Must run before the init-prompt append; see ApplyResume.
+	if ok, _ := canResumeSession(meta, sessionPeers(store, cache)); ok {
+		command = ApplyResume(command, provider, meta.SessionType == "vibeflow")
+	}
+
 	// For vibeflow sessions, append the init prompt so the agent starts autonomously.
 	projectName := meta.Project
 	if projectName == "" {
@@ -810,13 +855,15 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 
 	if err := tmux.CreateSessionWithOpts(SessionOpts{
-		Name:     meta.Name,
-		Provider: provider,
-		WorkDir:  workDir,
-		Command:  command,
-		Env:      sessionEnv,
-		Branch:   branch,
-		Project:  projectName,
+		Name:         meta.Name,
+		Provider:     provider,
+		WorkDir:      workDir,
+		Command:      command,
+		Env:          sessionEnv,
+		Branch:       branch,
+		Project:      projectName,
+		Persona:      meta.Persona,
+		WorktreePath: meta.WorktreePath,
 	}); err != nil {
 		return SessionMeta{}, err
 	}

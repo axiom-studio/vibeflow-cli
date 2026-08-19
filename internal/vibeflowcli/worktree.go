@@ -324,6 +324,54 @@ func isDirtyGit(dir string) bool {
 	return len(strings.TrimSpace(string(out))) > 0
 }
 
+// effectiveBranch returns the branch a session will REALLY be on: whatever git
+// reports for workDir, falling back to the requested branch only when workDir is
+// not a git repo (or is detached) and git can tell us nothing.
+//
+// Everything user-facing should use this rather than the requested branch
+// (issue #4680). The agent registers with the server using its own
+// `git branch --show-current`, so if the status bar and SessionMeta echo the
+// REQUEST instead, the two disagree: the UI says develop, wait_for_work filters
+// on main, work items targeting develop never surface, and commits land on main.
+// Deriving from the working directory keeps every surface consistent with the
+// one source of truth even if some future path skips the checkout.
+func effectiveBranch(workDir, requested string) string {
+	if actual := GetGitBranch(workDir); actual != "" {
+		return actual
+	}
+	return requested
+}
+
+// ensureBranchCheckedOut makes dir actually be on branch, and is the in-place
+// counterpart to the worktree-creating paths (issue #4680).
+//
+// Selecting a branch used to be honoured ONLY when a worktree was created. For
+// an in-place launch the selection was cosmetic: it reached the status bar and
+// SessionMeta while the agent ran on whatever branch the directory happened to
+// be on. That is how a session showed "develop" in its status bar while running
+// on main, filtering wait_for_work to main, and would have committed there too.
+//
+// A dirty tree refuses rather than checking out over uncommitted work, matching
+// the guard the switch/edit path in updateWizard has always applied. No-ops when
+// the branch is empty, the directory is not a git repo (or is detached), or the
+// branch is already the current one - the last case matters because it must not
+// refuse a dirty tree that is already exactly where it should be.
+func ensureBranchCheckedOut(dir, branch string, create bool, base string) error {
+	if dir == "" || branch == "" {
+		return nil
+	}
+	current := GetGitBranch(dir)
+	if current == "" || current == branch {
+		return nil
+	}
+	if isDirtyGit(dir) {
+		return fmt.Errorf(
+			"working tree at %s is on %q but this session asks for %q, and it has uncommitted changes - commit/stash first, or choose 'New worktree'",
+			dir, current, branch)
+	}
+	return gitCheckoutBranch(dir, branch, create, base)
+}
+
 // gitCheckoutBranch switches to the given branch (or creates it if create is true).
 // When create is true and base is non-empty, the new branch forks from base (not HEAD).
 // If a remote branch with the same name exists, it tracks the remote instead of creating

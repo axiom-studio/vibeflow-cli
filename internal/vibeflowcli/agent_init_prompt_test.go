@@ -450,3 +450,287 @@ func TestApplyQwenModelPassthrough(t *testing.T) {
 		applyQwenModelPassthrough("qwen", nil) // must not panic
 	})
 }
+
+// resumeCases is the single source of truth for the per-provider resume shape
+// (issues #4534, #4670). Every entry mirrors a capability probed against the
+// real installed binary; `base` mirrors that provider's real LaunchTemplate
+// output so the assertions are about commands we actually spawn.
+var resumeCases = []struct {
+	name        string
+	providerKey string
+	base        string
+	want        string
+}{
+	{
+		name:        "claude - --continue appended",
+		providerKey: "claude",
+		base:        "claude --dangerously-skip-permissions",
+		want:        "claude --dangerously-skip-permissions --continue",
+	},
+	{
+		name:        "copilot - --continue appended (provider merged from main)",
+		providerKey: "copilot",
+		base:        "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000",
+		want:        "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000 --continue",
+	},
+	{
+		name:        "cursor - --continue appended (binary is agent)",
+		providerKey: "cursor",
+		base:        "agent --yolo --approve-mcps",
+		want:        "agent --yolo --approve-mcps --continue",
+	},
+	{
+		name:        "gemini - --resume takes a value",
+		providerKey: "gemini",
+		base:        "gemini --yolo",
+		want:        "gemini --yolo --resume latest",
+	},
+	{
+		name:        "kiro - --resume is a flag on the chat subcommand",
+		providerKey: "kiro",
+		base:        "kiro-cli chat --trust-all-tools",
+		want:        "kiro-cli chat --trust-all-tools --resume",
+	},
+	{
+		name:        "qwen - --continue appended",
+		providerKey: "qwen",
+		base:        "qwen --yolo",
+		want:        "qwen --yolo --continue",
+	},
+	{
+		name:        "codex - subcommand inserted between binary and its options",
+		providerKey: "codex",
+		base:        "codex --yolo -m 'gpt-5'",
+		want:        "codex resume --last --yolo -m 'gpt-5'",
+	},
+	{
+		name:        "codex - bare binary with no options still gets the subcommand",
+		providerKey: "codex",
+		base:        "codex",
+		want:        "codex resume --last",
+	},
+	{
+		name:        "unknown provider is returned unchanged",
+		providerKey: "totally-made-up",
+		base:        "whatever --flag",
+		want:        "whatever --flag",
+	},
+	{
+		name:        "empty provider key is returned unchanged",
+		providerKey: "",
+		base:        "claude",
+		want:        "claude",
+	},
+	{
+		name:        "empty command is returned unchanged",
+		providerKey: "codex",
+		base:        "",
+		want:        "",
+	},
+}
+
+func TestApplyResume(t *testing.T) {
+	for _, tt := range resumeCases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ApplyResume(tt.base, tt.providerKey, false); got != tt.want {
+				t.Errorf("ApplyResume(%q, %q, false):\n got:  %q\n want: %q", tt.base, tt.providerKey, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyResume_PrecedesInitPrompt(t *testing.T) {
+	// The resume flag/subcommand must land BEFORE the init prompt for EVERY
+	// provider, not just the positional-argument ones: a flag on the far side of
+	// the prompt is read as prompt text (or as a codex SESSION_ID), which fails
+	// silently rather than loudly. One row per real provider.
+	for _, tt := range []struct{ providerKey, base, want string }{
+		{"claude", "claude --dangerously-skip-permissions",
+			`claude --dangerously-skip-permissions --continue 'hi'`},
+		{"copilot", "copilot --yolo",
+			`copilot --yolo --continue -i 'hi'`},
+		{"cursor", "agent --yolo",
+			`agent --yolo --continue 'hi'`},
+		{"gemini", "gemini --yolo",
+			`gemini --yolo --resume latest -p 'hi'`},
+		{"kiro", "kiro-cli chat --trust-all-tools",
+			`kiro-cli chat --trust-all-tools --resume 'hi'`},
+		{"qwen", "qwen --yolo",
+			`qwen --yolo --continue -i 'hi'`},
+		// codex is deliberately NOT resumed when a prompt follows: its single
+		// positional would bind to [SESSION_ID] rather than [PROMPT]. See
+		// takesPositionalSessionID.
+		{"codex", "codex --yolo",
+			`codex --yolo 'hi'`},
+	} {
+		t.Run(tt.providerKey, func(t *testing.T) {
+			cmd := ApplyResume(tt.base, tt.providerKey, true)
+			cmd = AppendVibeflowInitPrompt(cmd, tt.providerKey, "hi")
+			if cmd != tt.want {
+				t.Errorf("%s ordering:\n got:  %q\n want: %q", tt.providerKey, cmd, tt.want)
+			}
+		})
+	}
+}
+
+func TestResumeStrategiesMatchBuiltinProviders(t *testing.T) {
+	// A resume strategy keyed on a provider that does not exist never fires, and
+	// the failure is silent: the session just restarts fresh forever. Pin every
+	// key to the real built-in registry so a typo, or a provider that only
+	// exists on another branch, fails here instead of in production.
+	builtins := DefaultConfig().Providers
+	for key := range resumeStrategies {
+		if _, ok := builtins[key]; !ok {
+			t.Errorf("resumeStrategies has key %q, which is not a built-in provider in DefaultConfig()", key)
+		}
+	}
+}
+
+func TestResumeStrategiesExactlyOneShape(t *testing.T) {
+	// flag and subcommand are mutually exclusive; setting both would append AND
+	// insert, producing a command no CLI accepts.
+	for key, s := range resumeStrategies {
+		switch {
+		case s.flag == "" && s.subcommand == "":
+			t.Errorf("resumeStrategies[%q] sets neither flag nor subcommand", key)
+		case s.flag != "" && s.subcommand != "":
+			t.Errorf("resumeStrategies[%q] sets both flag %q and subcommand %q", key, s.flag, s.subcommand)
+		}
+	}
+}
+
+func TestEveryBuiltinProviderResumes(t *testing.T) {
+	// As of #4670 every built-in provider has a verified resume capability. If a
+	// new provider is added without one, this fails and forces a decision:
+	// either probe the real binary and add a strategy, or document why the
+	// provider genuinely cannot resume.
+	for key := range DefaultConfig().Providers {
+		if !ProviderResumesConversation(key, false) {
+			t.Errorf("provider %q has no resume strategy; probe the real binary and add one, or document why it cannot resume", key)
+		}
+	}
+}
+
+func TestApplyResume_CodexSkippedWhenInitPromptFollows(t *testing.T) {
+	// `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` binds a single positional to
+	// SESSION_ID, so resuming AND appending the vibeflow init prompt would hand
+	// codex the entire prompt as a session id. The agent would come back looking
+	// resumed while never receiving its instructions — a silent failure. Assert
+	// the guard, and assert that vanilla codex sessions (no init prompt) still
+	// get the resume they can safely take.
+	const base = "codex --yolo"
+
+	if got := ApplyResume(base, "codex", true); got != base {
+		t.Errorf("vibeflow codex session must NOT resume:\n got:  %q\n want: %q", got, base)
+	}
+
+	const wantVanilla = "codex resume --last --yolo"
+	if got := ApplyResume(base, "codex", false); got != wantVanilla {
+		t.Errorf("vanilla codex session must resume:\n got:  %q\n want: %q", got, wantVanilla)
+	}
+
+	// The whole point is that the init prompt survives intact for the vibeflow
+	// case: it must still be the trailing positional of a plain `codex` command.
+	full := AppendVibeflowInitPrompt(ApplyResume(base, "codex", true), "codex", "run the loop")
+	if full != `codex --yolo 'run the loop'` {
+		t.Errorf("init prompt mangled for codex: %q", full)
+	}
+
+	// Every other provider is unaffected by the guard.
+	for _, key := range []string{"claude", "copilot", "cursor", "gemini", "kiro", "qwen"} {
+		if !ProviderResumesConversation(key, true) {
+			t.Errorf("provider %q must still resume when an init prompt follows", key)
+		}
+	}
+	if ProviderResumesConversation("codex", true) {
+		t.Error("picker would mislabel a vibeflow codex session as resuming")
+	}
+	if !ProviderResumesConversation("codex", false) {
+		t.Error("picker would mislabel a vanilla codex session as a fresh start")
+	}
+}
+
+// TestCanResumeSession_SameWorkdirTeamIsRefused is the acceptance check for
+// #4618. Every resume strategy resolves "the most recent conversation for the
+// working DIRECTORY", so a team launch sharing one workDir would have persona A
+// come back holding persona B's transcript - B's init prompt, B's session id,
+// and anything sensitive echoed into it. Reproduced for real against the claude
+// binary: seed ALPHA, seed BRAVO in the same directory, `--continue` returns
+// BRAVO. Until resume is bound to a conversation id, the only safe
+// directory-scoped resume is a directory with exactly one session.
+func TestCanResumeSession_SameWorkdirTeamIsRefused(t *testing.T) {
+	dev := SessionMeta{
+		Name: "dev", Provider: "claude", SessionType: "vibeflow",
+		Persona: "developer", WorkingDir: "/repo",
+	}
+	sec := SessionMeta{
+		Name: "sec", Provider: "claude", SessionType: "vibeflow",
+		Persona: "security_lead", WorkingDir: "/repo",
+	}
+	other := SessionMeta{
+		Name: "other", Provider: "claude", SessionType: "vibeflow",
+		Persona: "qa_lead", WorkingDir: "/elsewhere",
+	}
+
+	t.Run("alone in its directory resumes", func(t *testing.T) {
+		ok, why := canResumeSession(dev, []SessionMeta{dev, other})
+		if !ok {
+			t.Errorf("a solitary session must resume, refused with: %s", why)
+		}
+	})
+
+	t.Run("sharing a directory refuses", func(t *testing.T) {
+		ok, why := canResumeSession(dev, []SessionMeta{dev, sec, other})
+		if ok {
+			t.Error("two personas in one workdir must NOT resume: persona A would attach to persona B's conversation")
+		}
+		if why == "" {
+			t.Error("refusal must explain itself; the picker shows this to the user")
+		}
+	})
+
+	t.Run("both peers refuse, not just one", func(t *testing.T) {
+		// Whichever pane the user restarts first must be refused. Guarding only
+		// one direction would still leak in the other.
+		for _, m := range []SessionMeta{dev, sec} {
+			if ok, _ := canResumeSession(m, []SessionMeta{dev, sec}); ok {
+				t.Errorf("%s must not resume while sharing a workdir", m.Name)
+			}
+		}
+	})
+
+	t.Run("duplicate peer entries do not count twice", func(t *testing.T) {
+		// The active store and the dead-session cache overlap, so the same
+		// session arrives twice. Counting it twice would refuse every resume.
+		if ok, why := canResumeSession(dev, []SessionMeta{dev, dev, dev}); !ok {
+			t.Errorf("deduplication failed, refused with: %s", why)
+		}
+	})
+
+	t.Run("relative workdirs are treated as possibly-shared", func(t *testing.T) {
+		// "." from the CLI launch path cannot be compared across repos. Counting
+		// them as shared costs a resume; the opposite leaks a conversation.
+		a := SessionMeta{Name: "a", Provider: "claude", WorkingDir: "."}
+		b := SessionMeta{Name: "b", Provider: "claude", WorkingDir: "."}
+		if ok, _ := canResumeSession(a, []SessionMeta{a, b}); ok {
+			t.Error("two sessions both recorded as \".\" must not be assumed distinct")
+		}
+	})
+
+	t.Run("path forms that mean the same directory are matched", func(t *testing.T) {
+		a := SessionMeta{Name: "a", Provider: "claude", WorkingDir: "/repo/"}
+		b := SessionMeta{Name: "b", Provider: "claude", WorkingDir: "/repo/./"}
+		if ok, _ := canResumeSession(a, []SessionMeta{a, b}); ok {
+			t.Error("trailing-slash and dot forms of one directory must count as shared")
+		}
+	})
+
+	t.Run("a provider with no resume support is still refused", func(t *testing.T) {
+		codexVibeflow := SessionMeta{
+			Name: "cx", Provider: "codex", SessionType: "vibeflow", WorkingDir: "/solo",
+		}
+		if ok, _ := canResumeSession(codexVibeflow, []SessionMeta{codexVibeflow}); ok {
+			t.Error("codex vibeflow sessions cannot resume (positional SESSION_ID); label must say fresh start")
+		}
+	})
+}

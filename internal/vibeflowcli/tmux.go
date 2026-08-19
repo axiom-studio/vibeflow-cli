@@ -111,6 +111,9 @@ type SessionOpts struct {
 	Branch   string            // Git branch for status bar display.
 	Project  string            // Project name for status bar display.
 	Persona  string            // Persona key for vibeflow sessions.
+	// WorktreePath is set when the session runs in an isolated git worktree.
+	// Only its presence is used (as a status-bar marker), never its value.
+	WorktreePath string
 }
 
 // StatusBarOpts holds display parameters for the tmux status bar.
@@ -118,6 +121,9 @@ type StatusBarOpts struct {
 	Provider string
 	Branch   string
 	Project  string
+	Persona  string // Empty for vanilla (non-vibeflow) sessions.
+	// WorktreePath is non-empty when the session runs in a git worktree.
+	WorktreePath string
 }
 
 // LaunchTemplateVars are the variables available in a Provider's LaunchTemplate.
@@ -420,9 +426,11 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 
 	// Configure vibeflow-themed status bar for this session.
 	_ = tm.ConfigureStatusBar(fullName, StatusBarOpts{
-		Provider: opts.Provider,
-		Branch:   opts.Branch,
-		Project:  opts.Project,
+		Provider:     opts.Provider,
+		Branch:       opts.Branch,
+		Project:      opts.Project,
+		Persona:      opts.Persona,
+		WorktreePath: opts.WorktreePath,
 	})
 
 	return nil
@@ -1104,6 +1112,21 @@ func (tm *TmuxManager) BindAllSessionKeys() {
 // '##' (tmux's literal '#') defuses all #-based expansion; control characters
 // are dropped and the result is clamped. Encoding happens at the tmux sink,
 // not the source, so the real branch/project name is preserved everywhere else.
+//
+// ',' and '}' are escaped too (as tmux's '#,' and '#}'), because #4671 puts
+// values inside #{?condition,true,false} conditionals where both characters are
+// STRUCTURAL. Measured against tmux 3.6a:
+//
+//	#{?#{==:a,a},[proj,with,comma],[F]}  ->  "[proj"                truncated
+//	#{?#{==:a,a},[proj}brace],[F]}       ->  "[projbrace],[F]}"     leaked
+//
+// Git branch names may contain commas and project names easily can, so an
+// unescaped comma would silently swallow the rest of the status bar. The escapes
+// are inert outside conditionals ('#,' renders as ',' either way), so applying
+// them unconditionally does not change how existing fields render.
+//
+// Order matters: '#' is doubled FIRST, then ',' and '}' introduce their own
+// single '#' prefix which must not be doubled in turn.
 func sanitizeTmuxStatusValue(s string) string {
 	const maxRunes = 64
 	var b strings.Builder
@@ -1113,11 +1136,16 @@ func sanitizeTmuxStatusValue(s string) string {
 			break
 		}
 		if r < 0x20 || r == 0x7f {
-			continue // drop control chars (incl. ESC — no escape-sequence injection)
+			continue // drop control chars (incl. ESC, so no escape-sequence injection)
 		}
-		if r == '#' {
+		switch r {
+		case '#':
 			b.WriteString("##")
-		} else {
+		case ',':
+			b.WriteString("#,")
+		case '}':
+			b.WriteString("#}")
+		default:
 			b.WriteRune(r)
 		}
 		n++
@@ -1137,6 +1165,34 @@ func (tm *TmuxManager) ConfigureStatusBar(sessionName string, opts StatusBarOpts
 	return nil
 }
 
+// Window widths at which each additional status-left field becomes visible.
+// Ordered by how much the field identifies the session, so a shrinking terminal
+// drops the least useful one first (issue #4671).
+const (
+	statusTierProject  = 70
+	statusTierBranch   = 100
+	statusTierWorkdir  = 140
+	statusTierProvider = 170
+)
+
+// tmuxWidthAtLeast wraps body in a format conditional that renders it only when
+// the window is at least w columns wide.
+//
+// Two things here are load-bearing and were both measured against tmux 3.6a
+// rather than assumed:
+//
+//  1. The comparison uses the arithmetic `e|` prefix. tmux's bare `#{>=:x,y}`
+//     compares STRINGS, so `#{>=:60,140}` is TRUE ('6' sorts after '1') and a
+//     60-column terminal would render the widest layout. `#{e|>=:60,140}` is
+//     correctly false.
+//  2. It keys off `#{window_width}`, not `#{client_width}`. client_width expands
+//     to empty when no client is attached, which makes every comparison fall to
+//     the narrow branch and, incidentally, cannot be tested without a tty.
+//     window_width is always populated.
+func tmuxWidthAtLeast(w int, body string) string {
+	return fmt.Sprintf("#{?#{e|>=:#{window_width},%d},%s,}", w, body)
+}
+
 // buildStatusBarSettings builds the vibeflow-themed tmux status-bar options.
 // Split from ConfigureStatusBar so the format construction — including the
 // #3289 injection sanitization of repo-derived values — is unit-testable
@@ -1151,33 +1207,76 @@ func buildStatusBarSettings(opts StatusBarOpts) map[string]string {
 		branch = "main"
 	}
 	// Neutralize tmux format-string injection from repo-derived values (#3289).
+	// Persona goes through the same sanitizer: it reaches us from the server and
+	// lands in the same format string a git branch name did when #3289 was found.
 	provider = sanitizeTmuxStatusValue(provider)
 	branch = sanitizeTmuxStatusValue(branch)
+	persona := sanitizeTmuxStatusValue(strings.TrimSpace(opts.Persona))
 
-	// Build status-left: [vibeflow] provider | branch (Ocean palette, theme.go:
-	// deep-ocean bg, teal accent, surface, storm-gray muted, soft fg).
-	statusLeft := fmt.Sprintf(
-		"#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] %s #[fg=#576574]|#[fg=#c8d6e5] %s ",
-		provider, branch,
-	)
-
-	// Build status-right: shortcuts + project
 	project := opts.Project
 	if project == "" {
 		project = "default"
 	}
 	project = sanitizeTmuxStatusValue(project)
-	statusRight := fmt.Sprintf(
-		"#[fg=#576574]Ctrl+q:#[fg=#c8d6e5]Menu #[fg=#576574]|#[fg=#576574] Ctrl+\\:#[fg=#c8d6e5]Menu #[fg=#576574]| #[fg=#00d4aa]%s ",
-		project,
-	)
+
+	// Build status-left: the session's identity, widest-first (issue #4671).
+	//
+	// Field order is a priority order, because the terminal is often too narrow
+	// for all of it: persona distinguishes two panes of the same team, project
+	// says which work they belong to, branch+worktree says where the code lands,
+	// and the directory is the least surprising thing to lose. Provider is
+	// deliberately last-resort: the agent's own UI announces itself and the tmux
+	// session name already encodes it, so it is shown only when there is no
+	// persona (a vanilla session), where it is the only identity available.
+	identity := persona
+	if identity == "" {
+		identity = provider
+	}
+
+	// The worktree marker is plain ASCII on purpose: it has to survive whatever
+	// font and locale the user's terminal happens to have.
+	worktree := ""
+	if strings.TrimSpace(opts.WorktreePath) != "" {
+		worktree = " [wt]"
+	}
+
+	// Segments beyond the identity appear only once the window is wide enough.
+	// Styles inside a conditional must be single-attribute (`#[fg=X]`): a
+	// multi-attribute style like `#[fg=X,bg=Y]` contains a comma, which tmux
+	// would read as the conditional's argument separator and truncate. The badge
+	// below keeps its multi-attribute style because it sits OUTSIDE any
+	// conditional.
+	const sep = "#[fg=#576574]|#[fg=#c8d6e5] "
+
+	var left strings.Builder
+	fmt.Fprintf(&left, "#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] %s ", identity)
+	left.WriteString(tmuxWidthAtLeast(statusTierProject, sep+project+" "))
+	left.WriteString(tmuxWidthAtLeast(statusTierBranch, sep+branch+worktree+" "))
+	// The directory comes from tmux itself rather than SessionMeta.WorkDir so it
+	// follows the agent if it moves, and costs no extra plumbing. `b:` takes a
+	// bare variable name - `#{b:#{pane_current_path}}` does NOT work, it returns
+	// the un-shortened path.
+	left.WriteString(tmuxWidthAtLeast(statusTierWorkdir, sep+"#{b:pane_current_path} "))
+	// Provider last, and only when it is not already the identity: on a vanilla
+	// session it is shown up front, so repeating it here would be noise.
+	if persona != "" {
+		left.WriteString(tmuxWidthAtLeast(statusTierProvider, sep+provider+" "))
+	}
+	statusLeft := left.String()
+
+	// status-right is only the keyboard hints now that project moved left, and it
+	// yields entirely on narrow terminals so it never competes with identity.
+	statusRight := tmuxWidthAtLeast(statusTierBranch,
+		"#[fg=#576574]Ctrl+q:#[fg=#c8d6e5]Menu #[fg=#576574]|#[fg=#576574] Ctrl+\\:#[fg=#c8d6e5]Menu ")
 
 	return map[string]string{
-		"status":              "on",
-		"status-style":        "fg=#c8d6e5,bg=#0b1929",
-		"status-left":         statusLeft,
-		"status-right":        statusRight,
-		"status-left-length":  "60",
+		"status":       "on",
+		"status-style": "fg=#c8d6e5,bg=#0b1929",
+		"status-left":  statusLeft,
+		"status-right": statusRight,
+		// Generous: the value is a FORMAT, and its conditionals expand to far more
+		// characters than they render. tmux clips to the real window width anyway.
+		"status-left-length":  "400",
 		"status-right-length": "60",
 	}
 }
@@ -1203,8 +1302,18 @@ func ParseSessionProvider(tmuxName string) string {
 	return ""
 }
 
-// GetGitBranch returns the current git branch for a directory.
+// GetGitBranch returns the current git branch for a directory, or "" when dir
+// is not a git repo (or is in detached HEAD).
+//
+// An empty dir returns "" rather than falling through to git. `git -C ""` does
+// NOT error: it operates on the CALLING PROCESS's directory, so an empty dir
+// would report vibeflow-cli's own branch as if it were the session's. That is
+// silently wrong in exactly the way #4680 is about, so it is refused at the
+// source where every caller benefits.
 func GetGitBranch(dir string) string {
+	if dir == "" {
+		return ""
+	}
 	cmd := exec.Command("git", "-C", dir, "branch", "--show-current")
 	out, err := cmd.Output()
 	if err != nil {
