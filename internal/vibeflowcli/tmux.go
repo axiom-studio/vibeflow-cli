@@ -1302,8 +1302,18 @@ func ParseSessionProvider(tmuxName string) string {
 	return ""
 }
 
-// GetGitBranch returns the current git branch for a directory.
+// GetGitBranch returns the current git branch for a directory, or "" when dir
+// is not a git repo (or is in detached HEAD).
+//
+// An empty dir returns "" rather than falling through to git. `git -C ""` does
+// NOT error: it operates on the CALLING PROCESS's directory, so an empty dir
+// would report vibeflow-cli's own branch as if it were the session's. That is
+// silently wrong in exactly the way #4680 is about, so it is refused at the
+// source where every caller benefits.
 func GetGitBranch(dir string) string {
+	if dir == "" {
+		return ""
+	}
 	cmd := exec.Command("git", "-C", dir, "branch", "--show-current")
 	out, err := cmd.Output()
 	if err != nil {
