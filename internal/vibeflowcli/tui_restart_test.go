@@ -28,7 +28,7 @@ func TestRestartSelectModel_InitialState(t *testing.T) {
 		{Name: "session-a", Provider: "claude", Persona: "developer"},
 		{Name: "session-b", Provider: "codex", Persona: "architect"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, dead)
 
 	if r.cursor != 0 {
 		t.Errorf("cursor = %d, want 0", r.cursor)
@@ -46,7 +46,7 @@ func TestRestartSelectModel_ToggleSelection(t *testing.T) {
 		{Name: "session-a", Provider: "claude"},
 		{Name: "session-b", Provider: "codex"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, dead)
 
 	// Toggle first item.
 	r, _ = r.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
@@ -67,7 +67,7 @@ func TestRestartSelectModel_Navigation(t *testing.T) {
 		{Name: "session-b"},
 		{Name: "session-c"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, dead)
 
 	// Move down.
 	r, _ = r.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
@@ -99,7 +99,7 @@ func TestRestartSelectModel_SelectAll(t *testing.T) {
 		{Name: "session-a"},
 		{Name: "session-b"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, dead)
 
 	// Select all.
 	r, _ = r.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
@@ -119,7 +119,7 @@ func TestRestartSelectModel_EnterWithSelection(t *testing.T) {
 		{Name: "session-a", Provider: "claude"},
 		{Name: "session-b", Provider: "codex"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, dead)
 
 	// Select first item.
 	r, _ = r.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
@@ -151,7 +151,7 @@ func TestRestartSelectModel_EnterNoSelection(t *testing.T) {
 	dead := []SessionMeta{
 		{Name: "session-a"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, dead)
 
 	// Press enter without selecting anything → skip.
 	r, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -171,7 +171,7 @@ func TestRestartSelectModel_EscSkips(t *testing.T) {
 	dead := []SessionMeta{
 		{Name: "session-a"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, dead)
 
 	r, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if !r.skipped {
@@ -191,7 +191,7 @@ func TestRestartSelectModel_View(t *testing.T) {
 		{Name: "session-a", Provider: "claude", Persona: "developer", Branch: "main", Project: "myproj"},
 		{Name: "session-b", Provider: "codex", Branch: "feature"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, dead)
 
 	view := r.View()
 	if !strings.Contains(view, "Dead sessions detected") {

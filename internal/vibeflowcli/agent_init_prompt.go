@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -217,6 +218,57 @@ func ApplyResume(baseCommand, providerKey string, initPromptFollows bool) string
 		return binary + " " + s.subcommand
 	}
 	return binary + " " + s.subcommand + " " + rest
+}
+
+// sessionsSharingWorkDir counts the distinct sessions recorded against meta's
+// working directory, meta itself included. peers may contain duplicates (the
+// active store and the dead-session cache overlap); they are deduplicated by
+// session name.
+//
+// A relative working directory ("." from the CLI launch path, or "") cannot be
+// compared meaningfully across sessions, so two sessions in DIFFERENT repos both
+// recorded as "." count as sharing. That is deliberately the conservative
+// direction: it costs a resume, where the opposite would hand one persona
+// another's conversation.
+func sessionsSharingWorkDir(meta SessionMeta, peers []SessionMeta) int {
+	dir := filepath.Clean(meta.WorkingDir)
+	seen := map[string]bool{meta.Name: true}
+	for _, p := range peers {
+		if p.Name == "" || seen[p.Name] {
+			continue
+		}
+		if filepath.Clean(p.WorkingDir) == dir {
+			seen[p.Name] = true
+		}
+	}
+	return len(seen)
+}
+
+// canResumeSession reports whether restarting meta may reattach to its previous
+// conversation, and a short reason when it may not.
+//
+// Every resume strategy in resumeStrategies resolves "the most recent
+// conversation for the working DIRECTORY", never "the conversation this session
+// had". A team launch puts N personas in ONE workDir, so a restart there
+// attaches to whichever peer wrote last: persona A comes back holding persona
+// B's transcript, its init prompt, its session id, and anything sensitive that
+// was echoed into it. Because persona is an authorization dimension, that
+// crosses a privilege boundary rather than merely confusing the display
+// (issue #4618).
+//
+// Until resume is bound to a conversation id, the only safe directory-scoped
+// resume is one where the directory holds exactly one session, so "most recent
+// in this directory" and "this session's conversation" cannot differ. Anything
+// else falls back to a FRESH restart. Falling back to the directory-scoped flag
+// instead would preserve the exact defect this guards against.
+func canResumeSession(meta SessionMeta, peers []SessionMeta) (bool, string) {
+	if !ProviderResumesConversation(meta.Provider, meta.SessionType == "vibeflow") {
+		return false, "provider has no usable resume for this session type"
+	}
+	if n := sessionsSharingWorkDir(meta, peers); n > 1 {
+		return false, fmt.Sprintf("%d sessions share this working directory, so resume could attach to another persona's conversation", n)
+	}
+	return true, ""
 }
 
 // ProviderResumesConversation reports whether a restart of the given provider
