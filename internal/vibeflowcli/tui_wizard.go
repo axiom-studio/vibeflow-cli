@@ -42,10 +42,8 @@ const (
 	StepWorktree
 	StepPermissions
 	StepConfirm
-	// StepQwenLaunchConfig is appended (not inserted) so the breadcrumb's
-	// WizardStep(i) display-index mapping at View() stays correct. The flow
-	// position is between StepLLMGateway and StepBranch when active — see
-	// postProviderConfigStep() — but the iota index is end-of-list.
+	// Qwen configuration runs before branch selection; View maps steps
+	// explicitly so display order does not depend on these numeric values.
 	StepQwenLaunchConfig
 )
 
@@ -1409,30 +1407,39 @@ func (w WizardModel) View() string {
 	b.WriteString("\n\n")
 
 	// Step indicator.
-	var steps []string
-	var stepMapping []WizardStep // maps display index → actual WizardStep
+	type stepLabel struct {
+		step  WizardStep
+		label string
+	}
+	steps := []stepLabel{
+		{StepWorkDir, "Directory"},
+		{StepSessionType, "Type"},
+		{StepProject, "Project"},
+		{StepTeam, "Team"},
+		{StepProvider, "Provider"},
+		{StepEnvToken, "Env"},
+		{StepLLMGateway, "Gateway"},
+		{StepQwenLaunchConfig, "Qwen"},
+		{StepBranch, "Branch"},
+		{StepWorktree, "Worktree"},
+		{StepPermissions, "Permissions"},
+		{StepConfirm, "Confirm"},
+	}
 	if w.quickSwitch {
-		steps = []string{"Branch", "Worktree"}
-		stepMapping = []WizardStep{StepBranch, StepWorktree}
-	} else {
-		steps = []string{"Directory", "Type", "Project", "Team", "Provider", "Env", "Branch", "Worktree", "Permissions", "Confirm"}
-		stepMapping = make([]WizardStep, len(steps))
-		for i := range steps {
-			stepMapping[i] = WizardStep(i)
-		}
+		steps = []stepLabel{{StepBranch, "Branch"}, {StepWorktree, "Worktree"}}
 	}
 	var stepLine strings.Builder
-	for i, s := range steps {
-		actualStep := stepMapping[i]
-		if actualStep == w.step {
-			stepLine.WriteString(lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render(fmt.Sprintf("[%s]", s)))
-		} else if actualStep < w.step {
-			stepLine.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" %s ", s)))
-		} else {
-			stepLine.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" %s ", s)))
+	for _, s := range steps {
+		if s.step == StepQwenLaunchConfig && w.postProviderConfigStep() != StepQwenLaunchConfig {
+			continue
 		}
-		if i < len(steps)-1 {
+		if stepLine.Len() > 0 {
 			stepLine.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(" > "))
+		}
+		if s.step == w.step {
+			stepLine.WriteString(lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render(fmt.Sprintf("[%s]", s.label)))
+		} else {
+			stepLine.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf(" %s ", s.label)))
 		}
 	}
 	b.WriteString(stepLine.String())
