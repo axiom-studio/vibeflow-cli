@@ -32,16 +32,19 @@ func TestView_FitsTerminalHeight_HelpBarLastRow(t *testing.T) {
 	cases := []struct {
 		name    string
 		warning string
+		width   int
 	}{
-		{"no warning line", ""},
-		{"with server warning line", "Server unreachable (test)"},
+		{"no warning line", "", 100},
+		{"with server warning line", "Server unreachable (test)", 100},
+		{"narrow terminal", "", 80},
+		{"wide terminal", "", 200},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := Model{
 				config:        &Config{},
 				hitmap:        &listHitmap{},
-				width:         100,
+				width:         tc.width,
 				height:        30,
 				sessions:      []SessionRow{{Name: "alpha"}, {Name: "beta"}},
 				serverWarning: tc.warning,
@@ -52,8 +55,14 @@ func TestView_FitsTerminalHeight_HelpBarLastRow(t *testing.T) {
 			}
 			lines := strings.Split(content, "\n")
 			last := lines[len(lines)-1]
-			if !strings.Contains(last, "q: quit") {
+			if got := lipgloss.Width(strings.TrimRight(last, " ")); got > m.width {
+				t.Errorf("footer width = %d, exceeds terminal width %d", got, m.width)
+			}
+			if !strings.Contains(last, "q: quit") || !strings.Contains(last, "?: help") {
 				t.Fatalf("last row must carry the keyboard shortcuts bar, got: %q", last)
+			}
+			if tc.width == 200 && (!strings.Contains(last, "w: worktrees") || !strings.Contains(last, "tmux -L vibeflow")) {
+				t.Errorf("wide footer should retain all shortcuts and socket information: %q", last)
 			}
 		})
 	}
