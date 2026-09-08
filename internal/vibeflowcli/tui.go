@@ -1882,7 +1882,7 @@ func (m Model) viewContent() string {
 	// Delegate to sub-views if active.
 	switch m.activeView {
 	case ViewWizard:
-		return m.wizard.View()
+		return lipgloss.NewStyle().Width(m.width).Render(m.wizard.View())
 	case ViewConflict:
 		return m.conflictModal.View()
 	case ViewWorktrees:
