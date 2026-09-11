@@ -176,9 +176,15 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	model.serverWarning = serverWarning
 
 	// Detect dead sessions from cache and show restart popup if any.
-	if tmuxNames, err := tmux.ListSessionNames(); err == nil {
+	if sessions, err := tmux.ListSessions(); err == nil {
+		var tmuxNames []string
+		for _, session := range sessions {
+			if !session.PaneDead {
+				tmuxNames = append(tmuxNames, session.Name)
+			}
+		}
 		if deadSessions, err := cache.DeadSessions(tmuxNames); err == nil && len(deadSessions) > 0 {
-			model.restartSelect = NewRestartSelectModel(deadSessions, sessionPeers(store, cache))
+			model.restartSelect = NewRestartSelectModel(deadSessions, tmux)
 			model.activeView = ViewRestart
 		}
 	}

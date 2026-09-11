@@ -151,7 +151,7 @@ func TestEffectiveBranchNeverLies(t *testing.T) {
 	})
 
 	t.Run("agrees once the branch is checked out", func(t *testing.T) {
-		if err := ensureBranchCheckedOut(repo, "develop", false, ""); err != nil {
+		if err := ensureBranchCheckedOut(repo, "develop", false, "", nil, nil); err != nil {
 			t.Fatalf("ensureBranchCheckedOut: %v", err)
 		}
 		if got := effectiveBranch(repo, "develop"); got != "develop" {
@@ -183,9 +183,23 @@ func TestEnsureBranchCheckedOutIsSafeOutsideRepos(t *testing.T) {
 		{"not a git repo", t.TempDir(), "develop"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := ensureBranchCheckedOut(tc.dir, tc.branch, false, ""); err != nil {
+			if err := ensureBranchCheckedOut(tc.dir, tc.branch, false, "", nil, nil); err != nil {
 				t.Errorf("must be a no-op, got %v", err)
 			}
 		})
+	}
+}
+
+func TestExplicitBranchLaunchFromDetachedHead(t *testing.T) {
+	repo := newTestRepo(t, "develop")
+	if out, err := exec.Command("git", "-C", repo, "checkout", "--detach").CombinedOutput(); err != nil {
+		t.Fatalf("detach: %v: %s", err, out)
+	}
+	m := Model{config: DefaultConfig()}
+	if _, _, err := m.resolveSessionWorkDir(WizardResult{Branch: "develop", WorktreeChoice: WorktreeCurrent, WorkDir: repo}); err != nil {
+		t.Fatal(err)
+	}
+	if got := GetGitBranch(repo); got != "develop" {
+		t.Fatalf("launch stayed detached: branch = %q", got)
 	}
 }

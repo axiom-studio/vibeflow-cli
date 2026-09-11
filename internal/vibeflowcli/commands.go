@@ -101,8 +101,12 @@ func launchCmd() *cobra.Command {
 			if provider == "" {
 				provider = "claude"
 			}
+			branchRequested := cmd.Flags().Changed("branch")
 			if branch == "" {
-				branch = "main"
+				branch = GetGitBranch(".")
+				if branch == "" {
+					branch = "main"
+				}
 			}
 
 			prov, ok := registry.Get(provider)
@@ -113,7 +117,10 @@ func launchCmd() *cobra.Command {
 				return fmt.Errorf("provider %q binary %q not found on PATH", provider, prov.Binary)
 			}
 
-			workDir := "."
+			workDir, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("resolve working directory: %w", err)
+			}
 			// Kept alongside workDir so the status bar can mark the session as
 			// running in a worktree (#4671). NOTE: this launch path still does not
 			// persist it onto SessionMeta the way the TUI path does, so a restart of
@@ -122,21 +129,27 @@ func launchCmd() *cobra.Command {
 			// --cleanup-worktree removal.
 			sessionWorktreePath := ""
 
-			if worktree && wm != nil {
+			if worktree && wm == nil {
+				return fmt.Errorf("cannot create a worktree outside a git repository")
+			}
+			if worktree {
 				wtName := worktreeName
 				if wtName == "" {
 					wtName = fmt.Sprintf("%s-%s-%d", provider, branch, time.Now().Unix())
 				}
 				wtPath, err := wm.CreateBranch(wtName, branch, newBranch, "")
-				if err == nil {
-					workDir = wtPath
-					sessionWorktreePath = wtPath
+				if err != nil {
+					return fmt.Errorf("create worktree: %w", err)
 				}
-			} else if err := ensureBranchCheckedOut(workDir, branch, newBranch, ""); err != nil {
-				// Without --worktree, --branch used to be decorative: it named the
-				// status bar and SessionMeta while the agent ran on whatever branch
-				// the directory was already on (#4680). Same hole the TUI had.
-				return err
+				workDir = wtPath
+				sessionWorktreePath = wtPath
+			} else if branchRequested || newBranch {
+				if err := ensureBranchCheckedOut(workDir, branch, newBranch, "", store, tmux); err != nil {
+					// Without --worktree, --branch used to be decorative: it named the
+					// status bar and SessionMeta while the agent ran on whatever branch
+					// the directory was already on (#4680). Same hole the TUI had.
+					return err
+				}
 			}
 
 			// Report the branch the session is REALLY on, not the one requested, so
@@ -406,7 +419,7 @@ func launchCmd() *cobra.Command {
 	// provider cannot leave this help text stale (same defect class as #4334:
 	// this string previously omitted kiro and copilot).
 	cmd.Flags().StringVar(&provider, "provider", "", "Provider key ("+strings.Join(NewProviderRegistry(DefaultConfig()).Keys(), ", ")+")")
-	cmd.Flags().StringVar(&branch, "branch", "", "Git branch (default: main)")
+	cmd.Flags().StringVar(&branch, "branch", "", "Git branch (default: current branch, or main outside a repository)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "Create a new git worktree for the session")
 	cmd.Flags().StringVar(&worktreeName, "worktree-name", "", "Custom worktree directory name (default: auto-generated)")
 	cmd.Flags().BoolVar(&newBranch, "new-branch", false, "Create a new git branch (used with --worktree)")
@@ -713,32 +726,10 @@ func deleteCmd() *cobra.Command {
 
 // --- restart ---
 
-// sessionPeers returns every session known to the active store and the
-// dead-session cache. The two overlap; callers deduplicate by name. Errors are
-// swallowed on purpose: a peer list that fails to load must read as "unknown",
-// and the resume gate treats unknown as unsafe rather than assuming solitude.
-func sessionPeers(store *Store, cache *SessionCache) []SessionMeta {
-	var peers []SessionMeta
-	if store != nil {
-		if list, err := store.List(); err == nil {
-			peers = append(peers, list...)
-		}
-	}
-	if cache != nil {
-		if list, err := cache.List(); err == nil {
-			peers = append(peers, list...)
-		}
-	}
-	return peers
-}
-
 // RestartSession kills any existing tmux session and re-launches it using
 // the stored metadata. Used by both the CLI restart command and the TUI
 // dead-session restart popup. Returns the updated SessionMeta on success.
 func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Store, cache *SessionCache, registry *ProviderRegistry) (SessionMeta, error) {
-	// Kill the existing tmux session (ignore error if already dead).
-	_ = tmux.KillSession(meta.TmuxSession)
-
 	provider := meta.Provider
 	if provider == "" {
 		provider = cfg.DefaultProvider
@@ -756,23 +747,24 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 
 	workDir := meta.WorkingDir
-	if workDir == "" {
-		workDir = "."
+	if !filepath.IsAbs(workDir) {
+		return SessionMeta{}, fmt.Errorf("stored working directory %q is relative - launch a new session from the original directory", workDir)
 	}
-	branch := meta.Branch
-	if branch == "" {
-		branch = "main"
+	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
+		return SessionMeta{}, fmt.Errorf("stored working directory %q is unavailable", workDir)
 	}
+	branch := effectiveBranch(workDir, meta.Branch)
 
-	command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
+	conversationID := tmux.ResumeConversationID(meta)
+	command, err := renderResumeCommand(prov.LaunchTemplate, LaunchTemplateVars{
 		WorkDir:         workDir,
 		ServerURL:       cfg.ServerURL,
 		SkipPermissions: meta.SkipPermissions,
 		Model:           meta.Model,
 		Binary:          prov.Binary,
-	})
-	if err != nil || command == "" {
-		command = prov.Binary
+	}, provider, conversationID)
+	if err != nil {
+		return SessionMeta{}, err
 	}
 
 	// Resolve provider env vars.
@@ -820,14 +812,6 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
-	// Bring the agent back with the conversation it had when it died instead of
-	// a blank one (issues #4534, #4670) -- but only when a directory-scoped
-	// resume provably cannot land on a peer persona's conversation (#4618).
-	// Must run before the init-prompt append; see ApplyResume.
-	if ok, _ := canResumeSession(meta, sessionPeers(store, cache)); ok {
-		command = ApplyResume(command, provider, meta.SessionType == "vibeflow")
-	}
-
 	// For vibeflow sessions, append the init prompt so the agent starts autonomously.
 	projectName := meta.Project
 	if projectName == "" {
@@ -854,6 +838,57 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		EnsureAllAgentDocs(workDir)
 	}
 
+	if prov.SessionFile != "" {
+		sessionFileID := meta.Name
+		if meta.VibeFlowSessionID != "" {
+			sessionFileID = meta.VibeFlowSessionID
+		}
+		if err := WriteSessionFileIfNeeded(workDir, meta.Persona, sessionFileID); err != nil {
+			return SessionMeta{}, fmt.Errorf("write restart session identity: %w", err)
+		}
+	}
+
+	// Preserve the old pane before replacing it, including recovery hints for
+	// providers whose exact-ID resume is not supported here.
+	previousOutput := meta.PreviousOutputPath
+	if tmux.HasSession(meta.TmuxSession) {
+		output, err := tmux.CapturePaneOutput(meta.TmuxSession, 10000)
+		if err != nil {
+			return SessionMeta{}, err
+		}
+		dir := filepath.Join(RootDir(), "recovery")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return SessionMeta{}, fmt.Errorf("save previous pane: %w", err)
+		}
+		file, err := os.CreateTemp(dir, "restart-*.txt")
+		if err != nil {
+			return SessionMeta{}, fmt.Errorf("save previous pane: %w", err)
+		}
+		_, writeErr := fmt.Fprintf(file, "Session: %s\nProvider: %s\n\n%s", meta.Name, provider, output)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			return SessionMeta{}, fmt.Errorf("save previous pane: %v %v", writeErr, closeErr)
+		}
+		previousOutput = file.Name()
+	}
+	meta.ProviderConversationID = conversationID
+	meta.PreviousOutputPath = previousOutput
+	if store != nil {
+		if err := store.Add(meta); err != nil {
+			return SessionMeta{}, fmt.Errorf("save restart identity: %w", err)
+		}
+	}
+	if cache != nil {
+		if err := cache.Add(meta); err != nil {
+			return SessionMeta{}, fmt.Errorf("save restart identity: %w", err)
+		}
+	}
+	if tmux.HasSession(meta.TmuxSession) {
+		if err := tmux.KillSession(meta.TmuxSession); err != nil {
+			return SessionMeta{}, err
+		}
+	}
+
 	if err := tmux.CreateSessionWithOpts(SessionOpts{
 		Name:         meta.Name,
 		Provider:     provider,
@@ -873,14 +908,6 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	// Re-bind session keys.
 	_ = tmux.BindSessionKeys(tmuxName)
 
-	if prov.SessionFile != "" {
-		sessionFileID := meta.Name
-		if meta.VibeFlowSessionID != "" {
-			sessionFileID = meta.VibeFlowSessionID
-		}
-		_ = WriteSessionFileIfNeeded(workDir, meta.Persona, sessionFileID)
-	}
-
 	if (meta.CloudDispatch || meta.DispatchMode == "cloud_queue") && meta.ProjectID == 0 {
 		projectInfo, err := ensureCloudDispatchProject(cfg, projectName)
 		if err != nil {
@@ -894,25 +921,27 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 
 	// Build updated metadata.
 	updated := SessionMeta{
-		Name:              meta.Name,
-		TmuxSession:       tmuxName,
-		Provider:          provider,
-		Project:           projectName,
-		ProjectID:         meta.ProjectID,
-		Persona:           meta.Persona,
-		Branch:            branch,
-		WorktreePath:      meta.WorktreePath,
-		WorkingDir:        workDir,
-		VibeFlowSessionID: meta.VibeFlowSessionID,
-		SessionType:       meta.SessionType,
-		DispatchMode:      meta.DispatchMode,
-		CloudDispatch:     meta.CloudDispatch,
-		SkipPermissions:   meta.SkipPermissions,
-		Model:             meta.Model,
-		LLMGatewayEnabled: meta.LLMGatewayEnabled,
-		MCPToolName:       meta.MCPToolName,
-		OpenShell:         meta.OpenShell,
-		CreatedAt:         time.Now(),
+		Name:                   meta.Name,
+		ProviderConversationID: conversationID,
+		PreviousOutputPath:     previousOutput,
+		TmuxSession:            tmuxName,
+		Provider:               provider,
+		Project:                projectName,
+		ProjectID:              meta.ProjectID,
+		Persona:                meta.Persona,
+		Branch:                 branch,
+		WorktreePath:           meta.WorktreePath,
+		WorkingDir:             workDir,
+		VibeFlowSessionID:      meta.VibeFlowSessionID,
+		SessionType:            meta.SessionType,
+		DispatchMode:           meta.DispatchMode,
+		CloudDispatch:          meta.CloudDispatch,
+		SkipPermissions:        meta.SkipPermissions,
+		Model:                  meta.Model,
+		LLMGatewayEnabled:      meta.LLMGatewayEnabled,
+		MCPToolName:            meta.MCPToolName,
+		OpenShell:              meta.OpenShell,
+		CreatedAt:              time.Now(),
 	}
 
 	// Update store and cache.
@@ -1069,12 +1098,19 @@ func restartCmd() *cobra.Command {
 				meta.SkipPermissions = skipPermissions
 			}
 
-			_, err = RestartSession(meta, cfg, tmux, store, cache, registry)
+			updated, err := RestartSession(meta, cfg, tmux, store, cache, registry)
 			if err != nil {
 				return err
 			}
 
-			fmt.Printf("Session %q restarted (provider: %s, branch: %s)\n", name, meta.Provider, meta.Branch)
+			mode := "fresh conversation (no exact conversation ID available)"
+			if updated.ProviderConversationID != "" {
+				mode = "resumed conversation " + updated.ProviderConversationID
+			}
+			fmt.Printf("Session %q restarted (provider: %s, branch: %s; %s)\n", name, updated.Provider, updated.Branch, mode)
+			if updated.PreviousOutputPath != "" {
+				fmt.Printf("Previous pane output: %s\n", updated.PreviousOutputPath)
+			}
 			return nil
 		},
 	}

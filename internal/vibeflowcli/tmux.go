@@ -516,6 +516,27 @@ func (tm *TmuxManager) ensurePrefix(name string) string {
 	return sessionPrefix + name
 }
 
+// ResumeConversationID uses persisted exact identity or a dead pane's final
+// provider exit hint. Live pane output may still contain earlier conversations.
+func (tm *TmuxManager) ResumeConversationID(meta SessionMeta) string {
+	if tm == nil || !tm.HasSession(meta.TmuxSession) {
+		if supportsExactResume(meta.Provider, meta.ProviderConversationID) && ParseSessionProvider(meta.TmuxSession) == meta.Provider {
+			return meta.ProviderConversationID
+		}
+		return ""
+	}
+	dead, err := tm.run("display-message", "-p", "-t", meta.TmuxSession, "#{pane_dead}")
+	if err != nil || strings.TrimSpace(dead) != "1" {
+		return ""
+	}
+	// -J rejoins terminal-wrapped hints, including Codex's long resume line.
+	output, err := tm.run("capture-pane", "-p", "-J", "-t", meta.TmuxSession, "-S", "-30")
+	if err != nil {
+		return ""
+	}
+	return conversationIDFromExitHint(meta.Provider, output)
+}
+
 // CapturePaneOutput returns the last N lines of output from a tmux session's pane.
 // name can be a short name or a full tmux session name (prefix is added if needed).
 func (tm *TmuxManager) CapturePaneOutput(name string, lines int) (string, error) {
