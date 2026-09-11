@@ -505,6 +505,102 @@ bearer_token_env_var = "DEFAULT_ROOT_TOKEN"
 	}
 }
 
+// codexBearerTokenEnvVar isolates HOME and the vibeflow root, then points the
+// root-scoped Codex config at the named bearer token env var. It also clears
+// that var from the process env so the saved-config and api_token branches are
+// the only things under test.
+func codexBearerTokenEnvVar(t *testing.T, varName string) {
+	t.Helper()
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	t.Setenv(varName, "")
+	os.Unsetenv(varName)
+	SetRootDir(root)
+
+	dir := filepath.Join(root, ".codex")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	content := "[mcp_servers.vibeflow]\nbearer_token_env_var = \"" + varName + "\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The launcher resolves MCP_TOKEN from cfg.APIToken and overwrites whatever
+// this function returns, so reporting it missing prompts for a discarded value.
+func TestResolveProviderEnvVars_CodexMCPTokenFallsBackToAPIToken(t *testing.T) {
+	codexBearerTokenEnvVar(t, mcpTokenEnvVar)
+
+	cfg := DefaultConfig()
+	cfg.APIToken = "api-token-value"
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != "" {
+		t.Fatalf("missing = %q, want empty — api_token is set, so nothing should be prompted for", missing)
+	}
+	if got := env[mcpTokenEnvVar]; got != "api-token-value" {
+		t.Errorf("%s = %q, want api-token-value", mcpTokenEnvVar, got)
+	}
+}
+
+// The fallback is guarded on the var name: a user who points
+// bearer_token_env_var at their own variable must never receive the VibeFlow
+// API token, and must still be told the variable is unset.
+func TestResolveProviderEnvVars_CodexCustomBearerVarNeverGetsAPIToken(t *testing.T) {
+	const customVar = "MY_OWN_BEARER_TOKEN"
+	codexBearerTokenEnvVar(t, customVar)
+
+	cfg := DefaultConfig()
+	cfg.APIToken = "vibeflow-api-token"
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != customVar {
+		t.Fatalf("missing = %q, want %q — a custom bearer var must still report as unset", missing, customVar)
+	}
+	for k, v := range env {
+		if v == "vibeflow-api-token" {
+			t.Errorf("VibeFlow api_token leaked into %s for a custom bearer var: %v", k, env)
+		}
+	}
+}
+
+// Regression guard for the chosen fix position: the api_token fallback is
+// appended LAST, so every input that already resolved must resolve identically.
+func TestResolveProviderEnvVars_CodexSavedEnvVarStillWinsOverAPIToken(t *testing.T) {
+	codexBearerTokenEnvVar(t, mcpTokenEnvVar)
+
+	cfg := DefaultConfig()
+	cfg.SavedEnvVars = map[string]string{mcpTokenEnvVar: "saved-value"}
+	cfg.APIToken = "api-token-value"
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != "" {
+		t.Fatalf("missing = %q, want empty", missing)
+	}
+	if got := env[mcpTokenEnvVar]; got != "saved-value" {
+		t.Errorf("%s = %q, want saved-value — saved_env_vars must keep precedence over api_token", mcpTokenEnvVar, got)
+	}
+}
+
+// With no api_token configured the prompt is correct behaviour and must remain.
+func TestResolveProviderEnvVars_CodexMCPTokenStillMissingWithoutAPIToken(t *testing.T) {
+	codexBearerTokenEnvVar(t, mcpTokenEnvVar)
+
+	cfg := DefaultConfig()
+	cfg.APIToken = ""
+
+	_, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != mcpTokenEnvVar {
+		t.Fatalf("missing = %q, want %q — with no api_token there is nothing to fall back to", missing, mcpTokenEnvVar)
+	}
+}
+
 func TestCleanEnvToken(t *testing.T) {
 	tests := []struct {
 		input string

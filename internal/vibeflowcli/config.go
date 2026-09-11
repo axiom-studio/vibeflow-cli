@@ -679,6 +679,18 @@ func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]str
 			env[envVarName] = cleanEnvToken(val)
 			return env, ""
 		}
+		// MCP_TOKEN is the VibeFlow API token under another name. The launcher
+		// resolves it from cfg.APIToken via WithMCPTokenEnv and overwrites
+		// whatever this function returned, so reporting it missing prompts for
+		// a value that is then discarded. Guarded on the var name: a user who
+		// points bearer_token_env_var at their own variable must never be
+		// silently handed the VibeFlow token.
+		if envVarName == mcpTokenEnvVar {
+			if val := cleanEnvToken(cfg.APIToken); val != "" {
+				env[envVarName] = val
+				return env, ""
+			}
+		}
 		return env, envVarName
 	case "gemini":
 		const geminiKey = "GEMINI_API_KEY"
