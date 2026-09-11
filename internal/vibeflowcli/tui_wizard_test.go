@@ -24,6 +24,63 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+func TestWizardView_BreadcrumbMatchesCurrentStep(t *testing.T) {
+	for _, tt := range []struct {
+		step  WizardStep
+		label string
+	}{
+		{StepProvider, "Provider"},
+		{StepEnvToken, "Env"},
+		{StepLLMGateway, "Gateway"},
+		{StepQwenLaunchConfig, "Qwen"},
+		{StepBranch, "Branch"},
+		{StepWorktree, "Worktree"},
+		{StepPermissions, "Permissions"},
+		{StepConfirm, "Confirm"},
+	} {
+		t.Run(tt.label, func(t *testing.T) {
+			w := WizardModel{
+				step:            tt.step,
+				providers:       []providerEntry{{key: "qwen"}},
+				branches:        []string{"[+] Create new branch", "main"},
+				selectedBranch:  1,
+				sessionTypeOpts: []string{"Vanilla", "VibeFlow"},
+				permissionOpts:  []string{"Skip permissions"},
+			}
+			breadcrumb := strings.Split(w.View(), "\n")[2]
+			if want := "[" + tt.label + "]"; !strings.Contains(breadcrumb, want) {
+				t.Errorf("current step should highlight %s, got %q", want, breadcrumb)
+			}
+		})
+	}
+}
+
+func TestWizardView_BreadcrumbFitsNarrowTerminal(t *testing.T) {
+	m := Model{width: 80, activeView: ViewWizard, wizard: WizardModel{step: StepWorktree}}
+	content := m.View().Content
+	if got := lipgloss.Width(content); got > m.width {
+		t.Errorf("wizard width = %d, exceeds terminal width %d and clips the current step", got, m.width)
+	}
+	if !strings.Contains(content, "[Worktree]") || !strings.Contains(content, "Worktree mode:") {
+		t.Errorf("wizard must preserve both the current step and its prompt: %q", content)
+	}
+}
+
+func TestWizardView_TeamFitsTerminal(t *testing.T) {
+	for _, width := range []int{80, 100, 200} {
+		w := teamModeFixture(t)
+		w.step = StepTeam
+		m := Model{width: width, height: 24, activeView: ViewWizard, wizard: w}
+		content := m.View().Content
+		if got := lipgloss.Height(content); got > m.height {
+			t.Errorf("team view at width %d has %d rows, exceeds terminal height %d", width, got, m.height)
+		}
+		if !strings.Contains(content, "Customer") || !strings.Contains(content, "esc: back/cancel") {
+			t.Errorf("team view at width %d must retain the final persona and navigation hints", width)
+		}
+	}
+}
+
 func TestNewWizardModel_PreselectsDeveloper(t *testing.T) {
 	cfg := DefaultConfig()
 	reg := NewProviderRegistry(cfg)
