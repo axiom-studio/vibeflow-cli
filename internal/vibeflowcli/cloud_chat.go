@@ -18,12 +18,14 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // CloudPersona names the persona keys + display labels shown in the cloud chat
@@ -65,8 +67,9 @@ const (
 
 type cloudChatBackend interface {
 	ListPersonaSessions(projectID int64) (map[string]*Session, error)
-	GetSessionMessages(sessionID string, sinceISO string) ([]SessionMessage, error)
-	SendSessionPrompt(sessionID string, text string) (*SessionMessage, error)
+	GetSessionMessages(projectID int64, sessionID string) ([]SessionMessage, error)
+	SendSessionPrompt(projectID int64, sessionID string, text string) (*SessionMessage, error)
+	RespondSessionPrompt(projectID int64, promptID, text string) error
 }
 
 type cloudPersonaSessionsMsg struct {
@@ -75,13 +78,15 @@ type cloudPersonaSessionsMsg struct {
 }
 
 type cloudSessionMessagesMsg struct {
+	sessionID  string
 	personaKey string
 	messages   []SessionMessage
-	replace    bool
 	err        error
 }
 
 type cloudPromptSentMsg struct {
+	questionID string
+	sessionID  string
 	personaKey string
 	text       string
 	message    *SessionMessage
@@ -99,10 +104,13 @@ type cloudChatPollStartMsg struct{}
 
 // CloudChatMessage is one entry in the chat history pane.
 type CloudChatMessage struct {
-	Sender    string    // "you" or a persona display name
-	Text      string
-	Timestamp time.Time
-	Pending   bool // true when no backend has acknowledged the send yet
+	ReplyPromptID string
+	ID            string
+	Failed        bool
+	Sender        string // "you" or a persona display name
+	Text          string
+	Timestamp     time.Time
+	Pending       bool // true when no backend has acknowledged the send yet
 }
 
 // CloudChatModel is the sub-model rendered when Model.activeView == ViewCloudChat.
@@ -117,17 +125,20 @@ type CloudChatModel struct {
 	history           map[string][]CloudChatMessage
 	sessionsByPersona map[string]*Session
 	sessionsLoaded    bool
+	loading           map[string]string
+	sending           map[string]bool
+	drafts            map[string]string
 
 	focus CloudChatFocus
 	input string // current text in the composer
 	err   string
 
-	client   cloudChatBackend
+	client    cloudChatBackend
 	projectID int64
 
 	// polling is true while exactly one poll tick chain is live. active mirrors
 	// the parent's activeView == ViewCloudChat and is refreshed by the parent
-	// each time it forwards a tick, so no view-transition bookkeeping is needed.
+	// each time it forwards a tick.
 	polling bool
 	active  bool
 }
@@ -139,6 +150,9 @@ func NewCloudChatModel() CloudChatModel {
 		personas:          CloudPersonas,
 		cursor:            0,
 		history:           make(map[string][]CloudChatMessage),
+		loading:           make(map[string]string),
+		sending:           make(map[string]bool),
+		drafts:            make(map[string]string),
 		sessionsByPersona: make(map[string]*Session),
 		focus:             CloudFocusSidebar,
 	}
@@ -163,33 +177,78 @@ func (m CloudChatModel) SelectedPersona() CloudPersona {
 // here — the parent Model owns width/height and passes them to View().
 func (m CloudChatModel) Update(msg tea.Msg) (CloudChatModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.PasteMsg:
+		if m.focus == CloudFocusInput {
+			m.input = sanitizeCloudChatText(m.input+msg.Content, cloudChatMaxMessageRunes)
+		}
+		return m, nil
 	case cloudPersonaSessionsMsg:
+		delete(m.loading, "")
 		if msg.err != nil {
 			m.err = fmt.Sprintf("Cloud sessions unavailable: %v", msg.err)
 			return m, nil
 		}
 		m.err = ""
+		for key, old := range m.sessionsByPersona {
+			next := msg.sessions[key]
+			if next == nil || old.ID != next.ID {
+				delete(m.history, key)
+				delete(m.loading, key)
+			}
+		}
 		m.sessionsByPersona = msg.sessions
 		m.sessionsLoaded = true
 		return m, m.loadSelectedMessagesCmd()
 	case cloudSessionMessagesMsg:
+		if msg.sessionID != "" {
+			if m.loading[msg.personaKey] == msg.sessionID {
+				delete(m.loading, msg.personaKey)
+			}
+			session := m.sessionForPersona(msg.personaKey)
+			if session == nil || session.ID != msg.sessionID {
+				return m, nil
+			}
+		}
 		if msg.err != nil {
 			m.err = fmt.Sprintf("Messages unavailable: %v", msg.err)
 			return m, nil
 		}
 		m.err = ""
-		if msg.replace {
-			m.replaceMessages(msg.personaKey, msg.messages)
-		} else {
-			m.mergeMessages(msg.personaKey, msg.messages)
-		}
+		m.mergeMessages(msg.personaKey, msg.messages)
 		return m, nil
 	case cloudPromptSentMsg:
+		delete(m.sending, msg.personaKey)
+		session := m.sessionForPersona(msg.personaKey)
+		stale := msg.sessionID != "" && (session == nil || session.ID != msg.sessionID)
 		if msg.err != nil {
 			m.err = fmt.Sprintf("Send failed: %v", msg.err)
+			for i := range m.history[msg.personaKey] {
+				if m.history[msg.personaKey][i].Pending {
+					m.history[msg.personaKey][i].Pending = false
+					m.history[msg.personaKey][i].Failed = true
+				}
+			}
+			if m.SelectedPersona().Key == msg.personaKey {
+				if m.input == "" {
+					m.input = msg.text
+				}
+			} else if m.drafts[msg.personaKey] == "" {
+				m.drafts[msg.personaKey] = msg.text
+			}
+			if stale {
+				m.appendMessage(msg.personaKey, CloudChatMessage{Sender: "unsent to previous session", Text: msg.text, Timestamp: time.Now(), Failed: true})
+			}
+			return m, nil
+		}
+		if stale {
 			return m, nil
 		}
 		m.err = ""
+		for i := range m.history[msg.personaKey] {
+			if m.history[msg.personaKey][i].ID == msg.questionID {
+				m.history[msg.personaKey][i].ReplyPromptID = ""
+			}
+		}
 		m.replaceLastPendingUserMessage(msg.personaKey, msg.text, msg.message)
 		return m, m.loadMessagesCmd(msg.personaKey)
 	case cloudChatPollStartMsg:
@@ -210,23 +269,23 @@ func (m CloudChatModel) Update(msg tea.Msg) (CloudChatModel, tea.Cmd) {
 		}
 		m.polling = true
 		return m, tea.Batch(
-			m.loadMessagesSinceCmd(m.SelectedPersona().Key, m.latestMessageSinceISO(m.SelectedPersona().Key), false),
+			m.loadMessagesCmd(m.SelectedPersona().Key),
 			cloudChatPollCmd(),
 		)
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
 	return m, nil
 }
 
-func (m CloudChatModel) handleKey(msg tea.KeyMsg) (CloudChatModel, tea.Cmd) {
+func (m CloudChatModel) handleKey(msg tea.KeyPressMsg) (CloudChatModel, tea.Cmd) {
 	if m.focus == CloudFocusInput {
 		return m.handleInputKey(msg)
 	}
 	return m.handleSidebarKey(msg)
 }
 
-func (m CloudChatModel) handleSidebarKey(msg tea.KeyMsg) (CloudChatModel, tea.Cmd) {
+func (m CloudChatModel) handleSidebarKey(msg tea.KeyPressMsg) (CloudChatModel, tea.Cmd) {
 	before := m.SelectedPersona().Key
 	switch msg.String() {
 	case "up", "k":
@@ -248,26 +307,39 @@ func (m CloudChatModel) handleSidebarKey(msg tea.KeyMsg) (CloudChatModel, tea.Cm
 		}
 	}
 	if after := m.SelectedPersona().Key; after != "" && after != before {
+		m.drafts[before] = m.input
+		m.input = m.drafts[after]
 		return m, m.loadMessagesCmd(after)
 	}
 	return m, nil
 }
 
-func (m CloudChatModel) handleInputKey(msg tea.KeyMsg) (CloudChatModel, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+func (m CloudChatModel) handleInputKey(msg tea.KeyPressMsg) (CloudChatModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
 		m.focus = CloudFocusSidebar
 		return m, nil
-	case tea.KeyEnter:
+	case "enter", "ctrl+r":
 		text := strings.TrimSpace(m.input)
 		if text == "" {
 			return m, nil
 		}
 		persona := m.SelectedPersona()
+		if m.sending[persona.Key] {
+			return m, nil
+		}
 		session := m.sessionForPersona(persona.Key)
 		if session == nil {
 			m.err = fmt.Sprintf("No active %s session", persona.DisplayName)
 			return m, nil
+		}
+		var question CloudChatMessage
+		if msg.String() == "ctrl+r" {
+			question = m.oldestQuestion(persona.Key)
+			if question.ReplyPromptID == "" {
+				m.err = "No unanswered agent question"
+				return m, nil
+			}
 		}
 		m.appendMessage(persona.Key, CloudChatMessage{
 			Sender:    "you",
@@ -275,29 +347,32 @@ func (m CloudChatModel) handleInputKey(msg tea.KeyMsg) (CloudChatModel, tea.Cmd)
 			Timestamp: time.Now(),
 			Pending:   true,
 		})
+		m.sending[persona.Key] = true
 		m.input = ""
 		m.err = ""
-		return m, m.sendPromptCmd(persona.Key, session.ID, text)
-	case tea.KeyBackspace:
+		return m, m.sendPromptCmd(persona.Key, session.ID, text, question)
+	case "backspace":
 		if len(m.input) > 0 {
 			r := []rune(m.input)
 			m.input = string(r[:len(r)-1])
 		}
 		return m, nil
-	case tea.KeyRunes:
-		m.input += string(msg.Runes)
-		return m, nil
-	case tea.KeySpace:
-		m.input += " "
-		return m, nil
+	default:
+		m.input = sanitizeCloudChatText(m.input+msg.Text, cloudChatMaxMessageRunes)
 	}
 	return m, nil
 }
 
 func (m CloudChatModel) loadPersonaSessionsCmd() tea.Cmd {
-	if m.client == nil || m.projectID == 0 {
+	if m.projectID == 0 {
+		return func() tea.Msg {
+			return cloudPersonaSessionsMsg{err: fmt.Errorf("select a project with --project or config default_project")}
+		}
+	}
+	if m.client == nil || m.loading[""] != "" {
 		return nil
 	}
+	m.loading[""] = "sessions"
 	return func() tea.Msg {
 		sessions, err := m.client.ListPersonaSessions(m.projectID)
 		return cloudPersonaSessionsMsg{sessions: sessions, err: err}
@@ -310,27 +385,29 @@ func (m CloudChatModel) loadSelectedMessagesCmd() tea.Cmd {
 }
 
 func (m CloudChatModel) loadMessagesCmd(personaKey string) tea.Cmd {
-	return m.loadMessagesSinceCmd(personaKey, "", true)
-}
-
-func (m CloudChatModel) loadMessagesSinceCmd(personaKey string, sinceISO string, replace bool) tea.Cmd {
 	session := m.sessionForPersona(personaKey)
-	if m.client == nil || session == nil {
+	if m.client == nil || session == nil || m.loading[personaKey] == session.ID {
 		return nil
 	}
+	m.loading[personaKey] = session.ID
 	return func() tea.Msg {
-		messages, err := m.client.GetSessionMessages(session.ID, sinceISO)
-		return cloudSessionMessagesMsg{personaKey: personaKey, messages: messages, replace: replace, err: err}
+		messages, err := m.client.GetSessionMessages(m.projectID, session.ID)
+		return cloudSessionMessagesMsg{personaKey: personaKey, sessionID: session.ID, messages: messages, err: err}
 	}
 }
 
-func (m CloudChatModel) sendPromptCmd(personaKey string, sessionID string, text string) tea.Cmd {
+func (m CloudChatModel) sendPromptCmd(personaKey string, sessionID string, text string, question CloudChatMessage) tea.Cmd {
 	if m.client == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		message, err := m.client.SendSessionPrompt(sessionID, text)
-		return cloudPromptSentMsg{personaKey: personaKey, text: text, message: message, err: err}
+		if question.ReplyPromptID != "" {
+			err := m.client.RespondSessionPrompt(m.projectID, question.ReplyPromptID, text)
+			message := &SessionMessage{ID: strings.TrimSuffix(question.ID, ":prompt") + ":response", Kind: "user", Text: text, Timestamp: time.Now()}
+			return cloudPromptSentMsg{personaKey: personaKey, sessionID: sessionID, questionID: question.ID, text: text, message: message, err: err}
+		}
+		message, err := m.client.SendSessionPrompt(m.projectID, sessionID, text)
+		return cloudPromptSentMsg{personaKey: personaKey, sessionID: sessionID, text: text, message: message, err: err}
 	}
 }
 
@@ -364,22 +441,29 @@ func (m *CloudChatModel) appendMessage(personaKey string, msg CloudChatMessage) 
 	m.history[personaKey] = history
 }
 
-func (m *CloudChatModel) replaceMessages(personaKey string, messages []SessionMessage) {
-	m.history[personaKey] = nil
-	persona := cloudPersonaByKey(m.personas, personaKey)
-	for _, message := range messages {
-		m.appendMessage(personaKey, sessionMessageToCloudChatMessage(message, persona.DisplayName))
-	}
-}
-
 func (m *CloudChatModel) mergeMessages(personaKey string, messages []SessionMessage) {
 	persona := cloudPersonaByKey(m.personas, personaKey)
 	for _, message := range messages {
-		chatMessage := sessionMessageToCloudChatMessage(message, persona.DisplayName)
-		if !m.hasMessage(personaKey, chatMessage) {
-			m.appendMessage(personaKey, chatMessage)
+		converted := sessionMessageToCloudChatMessage(message, persona.DisplayName)
+		found := false
+		for i, old := range m.history[personaKey] {
+			if converted.ID != "" && old.ID == converted.ID {
+				// A stale poll must not reopen a question acknowledged by a newer reply.
+				if old.ReplyPromptID == "" {
+					converted.ReplyPromptID = ""
+				}
+				m.history[personaKey][i] = converted
+				found = true
+				break
+			}
+		}
+		if !found && !m.hasMessage(personaKey, converted) {
+			m.appendMessage(personaKey, converted)
 		}
 	}
+	sort.SliceStable(m.history[personaKey], func(i, j int) bool {
+		return m.history[personaKey][i].Timestamp.Before(m.history[personaKey][j].Timestamp)
+	})
 }
 
 func (m CloudChatModel) hasMessage(personaKey string, msg CloudChatMessage) bool {
@@ -394,27 +478,20 @@ func (m CloudChatModel) hasMessage(personaKey string, msg CloudChatMessage) bool
 	return false
 }
 
-func (m CloudChatModel) latestMessageSinceISO(personaKey string) string {
-	var latest time.Time
-	for _, msg := range m.history[personaKey] {
-		if msg.Pending || msg.Timestamp.IsZero() {
-			continue
-		}
-		if latest.IsZero() || msg.Timestamp.After(latest) {
-			latest = msg.Timestamp
-		}
-	}
-	if latest.IsZero() {
-		return ""
-	}
-	return latest.UTC().Format(time.RFC3339Nano)
-}
-
 func (m *CloudChatModel) replaceLastPendingUserMessage(personaKey string, text string, message *SessionMessage) {
 	history := m.history[personaKey]
 	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Sender == "you" && history[i].Pending && history[i].Text == text {
+		if history[i].Sender == "you" && history[i].Pending && history[i].Text == sanitizeCloudChatText(text, cloudChatMaxMessageRunes) {
 			if message != nil {
+				if message.ID != "" {
+					for j, existing := range history {
+						if j != i && existing.ID == message.ID {
+							m.history[personaKey] = append(history[:i], history[i+1:]...)
+							m.mergeMessages(personaKey, []SessionMessage{*message})
+							return
+						}
+					}
+				}
 				persona := cloudPersonaByKey(m.personas, personaKey)
 				history[i] = sessionMessageToCloudChatMessage(*message, persona.DisplayName)
 			} else {
@@ -447,15 +524,23 @@ func sessionMessageToCloudChatMessage(msg SessionMessage, personaDisplayName str
 		}
 	}
 	timestamp := msg.Timestamp
-	if timestamp.IsZero() {
-		timestamp = time.Now()
-	}
 	return CloudChatMessage{
-		Sender:    sanitizeCloudChatText(sender, cloudChatMaxSenderRunes),
-		Text:      sanitizeCloudChatText(msg.Text, cloudChatMaxMessageRunes),
-		Timestamp: timestamp,
-		Pending:   msg.Pending,
+		ID:            msg.ID,
+		ReplyPromptID: msg.ReplyPromptID,
+		Sender:        sanitizeCloudChatText(sender, cloudChatMaxSenderRunes),
+		Text:          sanitizeCloudChatText(msg.Text, cloudChatMaxMessageRunes),
+		Timestamp:     timestamp,
+		Pending:       msg.Pending,
 	}
+}
+
+func (m CloudChatModel) oldestQuestion(personaKey string) CloudChatMessage {
+	for _, message := range m.history[personaKey] {
+		if message.ReplyPromptID != "" {
+			return message
+		}
+	}
+	return CloudChatMessage{}
 }
 
 func cloudPersonaByKey(personas []CloudPersona, key string) CloudPersona {
@@ -539,14 +624,14 @@ func (m CloudChatModel) View(width, colHeight int) string {
 
 	borderStyle := lipgloss.RoundedBorder()
 	leftStyle := lipgloss.NewStyle().
-		Width(leftWidth).
-		Height(colHeight).
+		Width(leftWidth-2).
+		Height(colHeight-2).
 		Border(borderStyle).
 		BorderForeground(dimColor).
 		Padding(0, 1)
 	rightStyle := lipgloss.NewStyle().
-		Width(rightWidth).
-		Height(colHeight).
+		Width(rightWidth-2).
+		Height(colHeight-2).
 		Border(borderStyle).
 		BorderForeground(dimColor).
 		Padding(0, 1)
@@ -590,35 +675,24 @@ func (m CloudChatModel) renderPersonaList(width int) string {
 // history, and the input bar.
 func (m CloudChatModel) renderChatPane(width, height int) string {
 	p := m.SelectedPersona()
-
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(PersonaColor(p.Key))
-	header := headerStyle.Render(p.DisplayName)
-
-	iconStyle := lipgloss.NewStyle().Foreground(PersonaColor(p.Key))
-	iconBlock := iconStyle.Render(PersonaLargeIcon(p.Key))
-
-	history := m.renderHistory(p.Key, width)
+	header := lipgloss.NewStyle().Bold(true).Foreground(PersonaColor(p.Key)).Render(p.DisplayName)
+	parts := []string{header}
+	if question := m.oldestQuestion(p.Key); question.ReplyPromptID != "" {
+		preview := strings.NewReplacer("\n", " ", "\t", " ").Replace(question.Text)
+		parts = append(parts, helpStyle.Render(ansi.Truncate("Ctrl+R replies to: "+preview, width, "…")))
+	}
+	if height >= 20 {
+		parts = append(parts, "", lipgloss.NewStyle().Foreground(PersonaColor(p.Key)).Render(PersonaLargeIcon(p.Key)), "")
+	}
 	inputBar := m.renderInputBar(width)
+	historyHeight := height - lipgloss.Height(strings.Join(parts, "\n")) - lipgloss.Height(inputBar)
 	if m.err != "" {
-		warnStyle := lipgloss.NewStyle().Foreground(warningColor)
-		history = lipgloss.JoinVertical(lipgloss.Left, warnStyle.Render(m.err), history)
+		warning := ansi.Truncate(strings.ReplaceAll(sanitizeCloudChatText(m.err, cloudChatMaxMessageRunes), "\n", " "), width, "…")
+		parts = append(parts, lipgloss.NewStyle().Foreground(warningColor).Render(warning))
+		historyHeight--
 	}
-
-	// Reserve lines: header (1) + blank (1) + icon (5) + blank (1) + inputBar (2 incl. border).
-	historyHeight := height - (1 + 1 + 5 + 1 + 2)
-	if historyHeight < 2 {
-		historyHeight = 2
-	}
-	historyTrimmed := trimToHeight(history, historyHeight)
-
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		"",
-		iconBlock,
-		"",
-		historyTrimmed,
-		inputBar,
-	)
+	parts = append(parts, trimToHeight(m.renderHistory(p.Key, width), max(1, historyHeight)), inputBar)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m CloudChatModel) renderHistory(personaKey string, width int) string {
@@ -641,6 +715,12 @@ func (m CloudChatModel) renderHistory(personaKey string, width int) string {
 			senderStyle = senderStyle.Foreground(dimColor)
 		}
 		line := senderStyle.Render(msg.Sender+":") + " " + msg.Text
+		if msg.Pending {
+			line += " (sending)"
+		}
+		if msg.Failed {
+			line += " (failed)"
+		}
 		// Soft-wrap by lipgloss width — defensive against very wide messages.
 		b.WriteString(lipgloss.NewStyle().Width(width).Render(line))
 		b.WriteString("\n")
@@ -656,7 +736,9 @@ func (m CloudChatModel) renderInputBar(width int) string {
 		Width(width)
 	if m.focus == CloudFocusInput {
 		cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
-		return style.Render(prompt + m.input + cursor)
+		input := strings.NewReplacer("\n", " ", "\t", " ").Replace(sanitizeCloudChatText(m.input, cloudChatMaxMessageRunes))
+		input = ansi.Cut(input, max(0, lipgloss.Width(input)-(width-3)), lipgloss.Width(input))
+		return style.Render(prompt + input + cursor)
 	}
 	hint := helpStyle.Render("(press Enter to compose)")
 	return style.Render(prompt + hint)
@@ -679,9 +761,12 @@ func trimToHeight(s string, height int) string {
 // help bar at the bottom of the main TUI.
 func (m CloudChatModel) CloudChatHelpKeys() string {
 	if m.focus == CloudFocusInput {
+		if m.oldestQuestion(m.SelectedPersona().Key).ReplyPromptID != "" {
+			return "esc: back  enter: send new  ctrl+r: reply  ctrl+c: quit"
+		}
 		return "esc: back  enter: send  ctrl+c: quit"
 	}
-	return "↑/↓: persona  enter: compose  r: refresh  s: start hint  esc: back  q: quit"
+	return "↑/↓: persona  enter: compose  r: refresh  s: start  esc: back  q: quit"
 }
 
 // cloudChatPollStartCmd asks the cloud chat model to arm the poll tick chain if

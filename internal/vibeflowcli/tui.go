@@ -796,6 +796,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case cloudPersonaSessionsMsg, cloudSessionMessagesMsg, cloudPromptSentMsg:
+		var cmd tea.Cmd
+		m.cloudChat, cmd = m.cloudChat.Update(msg)
+		return m, cmd
 	case cloudChatPollTickMsg:
 		// Routed here rather than only from the ViewCloudChat branch below: a
 		// tick chain left over from a previous visit must still be delivered
@@ -1157,14 +1161,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // the sub-model handles Esc itself (unfocus the input).
 func (m Model) updateCloudChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Always honor global quit.
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if keyMsg.Type == tea.KeyCtrlC {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
+		if keyMsg.String() == "ctrl+c" {
 			m.quitting = true
 			return m, tea.Quit
 		}
 		// Esc from the sidebar returns to the sessions list. The sub-model's
 		// own Esc handler (unfocus input) wins when input is focused.
-		if keyMsg.Type == tea.KeyEsc && m.cloudChat.focus == CloudFocusSidebar {
+		if keyMsg.String() == "esc" && m.cloudChat.focus == CloudFocusSidebar {
 			m.activeView = ViewSessions
 			return m, nil
 		}
@@ -2587,6 +2591,7 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString(keyStyle.Render("  m") + descStyle.Render("Workbench: this project's sessions, native view") + "\n")
 	b.WriteString(keyStyle.Render("  M") + descStyle.Render("Workbench: all projects (Ctrl-b n/p to switch)") + "\n")
 	b.WriteString(keyStyle.Render("  g") + descStyle.Render("Toggle flat / grouped view") + "\n")
+	b.WriteString(keyStyle.Render("  c") + descStyle.Render("Open cloud persona chat") + "\n")
 	b.WriteString("\n")
 
 	b.WriteString(catStyle.Render("Session Management"))

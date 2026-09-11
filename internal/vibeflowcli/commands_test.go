@@ -35,6 +35,14 @@ func TestCloudCmd_RegistersUseAndShort(t *testing.T) {
 	if cmd.RunE == nil {
 		t.Errorf("RunE should be set")
 	}
+	if err := cmd.ParseFlags([]string{"--project", "review-project", "--server-url", "http://127.0.0.1:1234"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { flagProject = ""; flagServerURL = "" })
+	if flagProject != "review-project" || flagServerURL != "http://127.0.0.1:1234" {
+		t.Fatal("cloud flag overrides not wired")
+	}
+
 }
 
 // TestRestartCmd_SkipPermissionsFlag verifies that `vibeflow restart`

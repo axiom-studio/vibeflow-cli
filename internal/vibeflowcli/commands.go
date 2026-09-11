@@ -1184,15 +1184,19 @@ func projectsCmd() *cobra.Command {
 // one-keystroke shortcut for users who only want the cloud-agent chat.
 
 func cloudCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "cloud",
 		Short: "Open the cloud-agent persona chat (TUI shortcut)",
 		Long: `cloud launches the vibeflow TUI directly on the Cloud Chat view,
 where the left sidebar lists personas and the right pane shows the chat
 with the selected persona. Inside the main TUI, the same view is reachable
-by pressing 'c' from the sessions list.`,
+by pressing 'c' from the sessions list.
+Use --project NAME to select a project, or set default_project in config.`,
 		RunE: runCloudTUI,
 	}
+	cmd.Flags().StringVar(&flagProject, "project", "", "Project name (overrides config default)")
+	cmd.Flags().StringVar(&flagServerURL, "server-url", "", "VibeFlow server URL (overrides config)")
+	return cmd
 }
 
 // runCloudTUI mirrors runTUI but skips the local-session bootstrap (tmux
@@ -1219,7 +1223,7 @@ func runCloudTUI(cmd *cobra.Command, args []string) error {
 	if flagProject != "" {
 		cfg.DefaultProject = flagProject
 	}
-	cfg.TmuxSocket = TmuxSocketName()
+	cfg.TmuxSocket = ResolveTmuxSocket(flagTmuxSocket, cfg.TmuxSocket)
 
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
 	tmux := NewTmuxManager(cfg.TmuxSocket)
@@ -1248,7 +1252,7 @@ func runCloudTUI(cmd *cobra.Command, args []string) error {
 	}
 	defer model.logger.Close()
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
+	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		model.logger.Error("cloud TUI fatal: %v", err)
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)

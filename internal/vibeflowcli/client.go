@@ -23,7 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
+	"sort"
 	"time"
 )
 
@@ -59,6 +59,8 @@ type Session struct {
 	ID               string    `json:"session_id"`
 	ProjectID        int64     `json:"project_id"`
 	PersonaKey       string    `json:"persona_key"`
+	Active           bool      `json:"active"`
+	Stale            bool      `json:"stale"`
 	AgentType        string    `json:"agent_type"`
 	GitBranch        string    `json:"git_branch"`
 	WorkingDirectory string    `json:"working_directory"`
@@ -68,11 +70,13 @@ type Session struct {
 
 // SessionMessage is a chat/log entry returned for a cloud agent session.
 type SessionMessage struct {
-	Sender    string    `json:"sender"`
-	Text      string    `json:"text"`
-	Kind      string    `json:"kind"`
-	Timestamp time.Time `json:"timestamp"`
-	Pending   bool      `json:"pending,omitempty"`
+	ReplyPromptID string    `json:"-"`
+	ID            string    `json:"id"`
+	Sender        string    `json:"sender"`
+	Text          string    `json:"text"`
+	Kind          string    `json:"kind"`
+	Timestamp     time.Time `json:"timestamp"`
+	Pending       bool      `json:"pending,omitempty"`
 }
 
 // WorkItem represents a todo or issue from polling.
@@ -151,59 +155,96 @@ func (c *Client) ListSessions(projectID int64) ([]Session, error) {
 	return sessions, nil
 }
 
-// ListPersonaSessions returns the most recent active cloud session per persona.
+// ListPersonaSessions returns the most recent active session per persona.
 func (c *Client) ListPersonaSessions(projectID int64) (map[string]*Session, error) {
-	sessions, err := c.ListSessions(projectID)
-	if err != nil {
-		return nil, err
+	var result struct {
+		Sessions []struct {
+			Session
+			Heartbeat string `json:"last_heartbeat"`
+		} `json:"sessions"`
+	}
+	if err := c.get(fmt.Sprintf("/rest/v1/vibeflow/sessions/active?project_id=%d", projectID), &result); err != nil {
+		return nil, fmt.Errorf("list active sessions: %w", err)
 	}
 	byPersona := make(map[string]*Session)
-	for i := range sessions {
-		session := sessions[i]
-		if session.PersonaKey == "" || !isActiveSessionStatus(session.Status) {
+	for _, entry := range result.Sessions {
+		session := entry.Session
+		if session.ID == "" || session.ProjectID != projectID || session.PersonaKey == "" || !session.Active || session.Stale {
 			continue
 		}
+		// Stale sessions can contain malformed heartbeat strings; filter them before parsing.
+		session.LastHeartbeat, _ = time.Parse(time.RFC3339Nano, entry.Heartbeat)
 		current := byPersona[session.PersonaKey]
 		if current == nil || session.LastHeartbeat.After(current.LastHeartbeat) {
-			copied := session
-			byPersona[session.PersonaKey] = &copied
+			byPersona[session.PersonaKey] = &session
 		}
 	}
 	return byPersona, nil
 }
 
-func isActiveSessionStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "", "running", "active", "idle", "waiting", "implementing", "planning":
-		return true
-	case "done", "stopped", "exited", "error", "failed", "archived":
-		return false
-	default:
-		return true
-	}
+type sessionPrompt struct {
+	PromptID    string     `json:"prompt_id"`
+	Status      string     `json:"status"`
+	ID          int64      `json:"id"`
+	Text        string     `json:"prompt_text"`
+	Response    string     `json:"response_text"`
+	Source      string     `json:"source"`
+	CreatedAt   time.Time  `json:"created_at"`
+	RespondedAt *time.Time `json:"responded_at"`
 }
 
-// GetSessionMessages returns chat history for a cloud agent session.
-func (c *Client) GetSessionMessages(sessionID string, sinceISO string) ([]SessionMessage, error) {
-	path := fmt.Sprintf("/rest/v1/vibeflow/sessions/%s/messages", sessionID)
-	if sinceISO != "" {
-		path += "?since=" + url.QueryEscape(sinceISO)
+func (p sessionPrompt) messages() []SessionMessage {
+	kind, replyKind := "user", "agent"
+	if p.Source == "agent" {
+		kind, replyKind = "agent", "user"
 	}
-	var messages []SessionMessage
-	if err := c.get(path, &messages); err != nil {
+	messages := []SessionMessage{{ID: fmt.Sprintf("%d:prompt", p.ID), Text: p.Text, Kind: kind, Timestamp: p.CreatedAt}}
+	if p.Source == "agent" && p.Status == "pending" {
+		messages[0].ReplyPromptID = p.PromptID
+	}
+	if p.Response != "" {
+		timestamp := p.CreatedAt
+		if p.RespondedAt != nil {
+			timestamp = *p.RespondedAt
+		}
+		messages = append(messages, SessionMessage{ID: fmt.Sprintf("%d:response", p.ID), Text: p.Response, Kind: replyKind, Timestamp: timestamp})
+	}
+	return messages
+}
+
+// GetSessionMessages refreshes recent prompts, including responses added to existing records.
+func (c *Client) GetSessionMessages(projectID int64, sessionID string) ([]SessionMessage, error) {
+	// ponytail: retain the latest 200 prompts; add before_id pagination when older-history browsing is needed.
+	path := fmt.Sprintf("/rest/v1/vibeflow/projects/%d/prompts?session_id=%s&limit=200", projectID, url.QueryEscape(sessionID))
+	var result struct {
+		Prompts []sessionPrompt `json:"prompts"`
+	}
+	if err := c.get(path, &result); err != nil {
 		return nil, fmt.Errorf("get session messages: %w", err)
 	}
+	var messages []SessionMessage
+	for _, prompt := range result.Prompts {
+		messages = append(messages, prompt.messages()...)
+	}
+	sort.SliceStable(messages, func(i, j int) bool { return messages[i].Timestamp.Before(messages[j].Timestamp) })
 	return messages, nil
 }
 
-// SendSessionPrompt sends a user prompt to a cloud agent session.
-func (c *Client) SendSessionPrompt(sessionID string, text string) (*SessionMessage, error) {
-	body := map[string]string{"text": text}
-	var message SessionMessage
-	if err := c.post(fmt.Sprintf("/rest/v1/vibeflow/sessions/%s/prompts", sessionID), body, &message); err != nil {
+// SendSessionPrompt enqueues a user prompt on the project's existing prompt endpoint.
+func (c *Client) SendSessionPrompt(projectID int64, sessionID, text string) (*SessionMessage, error) {
+	body := map[string]string{"session_id": sessionID, "text": text}
+	var prompt sessionPrompt
+	if err := c.post(fmt.Sprintf("/rest/v1/vibeflow/projects/%d/prompts", projectID), body, &prompt); err != nil {
 		return nil, fmt.Errorf("send session prompt: %w", err)
 	}
+	message := prompt.messages()[0]
 	return &message, nil
+}
+
+// RespondSessionPrompt answers a specific agent question and wakes its waiting session.
+func (c *Client) RespondSessionPrompt(projectID int64, promptID, text string) error {
+	path := fmt.Sprintf("/rest/v1/vibeflow/projects/%d/prompts/%s/respond", projectID, url.PathEscape(promptID))
+	return c.writeJSON(http.MethodPut, path, map[string]string{"response_text": text}, nil)
 }
 
 // PollPendingWork returns ready and stuck work items for a project.
@@ -315,12 +356,16 @@ func (c *Client) get(path string, result interface{}) error {
 }
 
 func (c *Client) post(path string, body interface{}, result interface{}) error {
+	return c.writeJSON(http.MethodPost, path, body, result)
+}
+
+func (c *Client) writeJSON(method, path string, body interface{}, result interface{}) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+path, bytes.NewReader(data))
+	req, err := http.NewRequest(method, c.baseURL+path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
