@@ -1882,6 +1882,7 @@ func (m Model) viewContent() string {
 	// Delegate to sub-views if active.
 	switch m.activeView {
 	case ViewWizard:
+		m.wizard.width = m.width
 		return lipgloss.NewStyle().Width(m.width).Render(m.wizard.View())
 	case ViewConflict:
 		return m.conflictModal.View()
@@ -1970,7 +1971,7 @@ func (m Model) viewContent() string {
 		}
 	}
 
-	// Column widths (in lipgloss v1, Width includes border + padding).
+	// Column widths include borders; lipgloss Width includes only padding.
 	leftWidth := width * 35 / 100
 	rightWidth := width - leftWidth
 	if leftWidth < 20 {
@@ -2022,13 +2023,13 @@ func (m Model) viewContent() string {
 
 	borderStyle := oceanBorder()
 	leftStyle := lipgloss.NewStyle().
-		Width(leftWidth).
+		Width(leftWidth-2).
 		Height(colHeight).
 		Border(borderStyle).
 		BorderForeground(dimColor).
 		Padding(0, 1)
 	rightStyle := lipgloss.NewStyle().
-		Width(rightWidth).
+		Width(rightWidth-2).
 		Height(colHeight).
 		Border(borderStyle).
 		BorderForeground(dimColor).
