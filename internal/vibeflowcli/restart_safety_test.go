@@ -59,6 +59,19 @@ func TestLaunchAndRestartDirectorySafety(t *testing.T) {
 	if got := GetGitBranch(repo); got != "topic" {
 		t.Fatalf("launch without --branch changed checkout to %q", got)
 	}
+	// Metadata may point at a nested directory in the same git checkout.
+	subdir := filepath.Join(repo, "src")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := NewStore().List()
+	if err != nil || len(initial) != 1 {
+		t.Fatalf("launch metadata: %v, %v", initial, err)
+	}
+	initial[0].WorkingDir = subdir
+	if err := NewStore().Add(initial[0]); err != nil {
+		t.Fatal(err)
+	}
 	// A second launch must not move the first agent's checkout underneath it.
 	second := launchCmd()
 	second.SilenceErrors, second.SilenceUsage = true, true
@@ -189,6 +202,13 @@ func TestLaunchAndRestartDirectorySafety(t *testing.T) {
 	// Exact Codex IDs occupy SESSION_ID so the init prompt reaches PROMPT.
 	if err := os.WriteFile(cache.path, []byte("[]"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	cfg.Providers["codex"] = Provider{Binary: binary, LaunchTemplate: "{{ shellQuote .Binary }}"}
+	if _, err := RestartSession(codexMeta, cfg, tm, store, cache, NewProviderRegistry(cfg)); err == nil {
+		t.Fatal("quoted Codex template must fail before destroying pane")
+	}
+	if !tm.HasSession(codexMeta.TmuxSession) {
+		t.Fatal("unsupported resume template destroyed the old pane")
 	}
 	cfg.Providers["codex"] = Provider{Binary: binary, LaunchTemplate: "{{.Binary}}"}
 	codexMeta.SessionType = "vibeflow"

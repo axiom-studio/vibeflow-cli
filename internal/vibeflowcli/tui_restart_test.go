@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestRestartSelectModel_InitialState(t *testing.T) {
@@ -205,5 +206,28 @@ func TestRestartSelectModel_View(t *testing.T) {
 	}
 	if !strings.Contains(view, "space: toggle") {
 		t.Error("view should contain help text")
+	}
+}
+
+func TestRestartModesVisibleAt80Columns(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		meta := SessionMeta{Name: "session-20260911-010000-12345678", TmuxSession: "vibeflow_claude-test", Provider: "claude", Persona: "principal_engineer", Branch: "feature/very-long-branch", Project: "a-very-long-project"}
+		want := "fresh start (no exact conversation ID)"
+		if resume {
+			meta.ProviderConversationID = "7ae74319-242d-45d1-b251-0495f225448c"
+			want = "resumes conversation"
+		}
+		r := NewRestartSelectModel([]SessionMeta{meta}, nil)
+		visible := ""
+		model := Model{activeView: ViewRestart, width: 80, height: 24, restartSelect: r}
+		for i, line := range strings.Split(model.View().Content, "\n") {
+			if i >= 24 {
+				break
+			}
+			visible += ansi.Strip(ansi.Truncate(line, 80, "")) + "\n"
+		}
+		if !strings.Contains(visible, want) {
+			t.Errorf("restart mode %q hidden at 80x24: %s", want, visible)
+		}
 	}
 }

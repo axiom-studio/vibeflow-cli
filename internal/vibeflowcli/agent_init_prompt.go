@@ -143,7 +143,21 @@ func conversationIDFromExitHint(provider, output string) string {
 // variable so custom wrappers (for example env ... {{.Binary}}) remain valid.
 func renderResumeCommand(tmpl string, vars LaunchTemplateVars, provider, id string) (string, error) {
 	if supportsExactResume(provider, id) && provider == "codex" {
-		vars.Binary += " resume " + shellQuote(id)
+		// Inserting a subcommand into a quoted executable makes it part of the
+		// executable's filename. Support raw binary tokens; refuse other custom
+		// templates before the old pane is replaced.
+		if tmpl != "" {
+			const token = "{{.Binary}}"
+			i := strings.Index(tmpl, token)
+			if i < 0 || strings.Count(tmpl, token) != 1 {
+				return "", fmt.Errorf("exact Codex resume requires an unquoted {{.Binary}} token in the launch template")
+			}
+			before, after := tmpl[:i], tmpl[i+len(token):]
+			if (before != "" && strings.TrimRight(before, " \t\r\n") == before) || (after != "" && strings.TrimLeft(after, " \t\r\n") == after && !strings.HasPrefix(after, "{{")) {
+				return "", fmt.Errorf("exact Codex resume requires an unquoted {{.Binary}} token in the launch template")
+			}
+		}
+		vars.Binary = shellQuote(vars.Binary) + " resume " + shellQuote(id)
 	}
 	command, err := RenderLaunchCommand(tmpl, vars)
 	if err != nil {
