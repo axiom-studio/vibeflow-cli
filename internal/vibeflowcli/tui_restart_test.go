@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestRestartSelectModel_InitialState(t *testing.T) {
@@ -28,7 +29,7 @@ func TestRestartSelectModel_InitialState(t *testing.T) {
 		{Name: "session-a", Provider: "claude", Persona: "developer"},
 		{Name: "session-b", Provider: "codex", Persona: "architect"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, nil)
 
 	if r.cursor != 0 {
 		t.Errorf("cursor = %d, want 0", r.cursor)
@@ -46,7 +47,7 @@ func TestRestartSelectModel_ToggleSelection(t *testing.T) {
 		{Name: "session-a", Provider: "claude"},
 		{Name: "session-b", Provider: "codex"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, nil)
 
 	// Toggle first item.
 	r, _ = r.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
@@ -67,7 +68,7 @@ func TestRestartSelectModel_Navigation(t *testing.T) {
 		{Name: "session-b"},
 		{Name: "session-c"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, nil)
 
 	// Move down.
 	r, _ = r.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
@@ -99,7 +100,7 @@ func TestRestartSelectModel_SelectAll(t *testing.T) {
 		{Name: "session-a"},
 		{Name: "session-b"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, nil)
 
 	// Select all.
 	r, _ = r.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
@@ -119,7 +120,7 @@ func TestRestartSelectModel_EnterWithSelection(t *testing.T) {
 		{Name: "session-a", Provider: "claude"},
 		{Name: "session-b", Provider: "codex"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, nil)
 
 	// Select first item.
 	r, _ = r.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
@@ -151,7 +152,7 @@ func TestRestartSelectModel_EnterNoSelection(t *testing.T) {
 	dead := []SessionMeta{
 		{Name: "session-a"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, nil)
 
 	// Press enter without selecting anything → skip.
 	r, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -171,7 +172,7 @@ func TestRestartSelectModel_EscSkips(t *testing.T) {
 	dead := []SessionMeta{
 		{Name: "session-a"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, nil)
 
 	r, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if !r.skipped {
@@ -191,7 +192,7 @@ func TestRestartSelectModel_View(t *testing.T) {
 		{Name: "session-a", Provider: "claude", Persona: "developer", Branch: "main", Project: "myproj"},
 		{Name: "session-b", Provider: "codex", Branch: "feature"},
 	}
-	r := NewRestartSelectModel(dead)
+	r := NewRestartSelectModel(dead, nil)
 
 	view := r.View()
 	if !strings.Contains(view, "Dead sessions detected") {
@@ -205,5 +206,28 @@ func TestRestartSelectModel_View(t *testing.T) {
 	}
 	if !strings.Contains(view, "space: toggle") {
 		t.Error("view should contain help text")
+	}
+}
+
+func TestRestartModesVisibleAt80Columns(t *testing.T) {
+	for _, resume := range []bool{false, true} {
+		meta := SessionMeta{Name: "session-20260911-010000-12345678", TmuxSession: "vibeflow_claude-test", Provider: "claude", Persona: "principal_engineer", Branch: "feature/very-long-branch", Project: "a-very-long-project"}
+		want := "fresh start (no exact conversation ID)"
+		if resume {
+			meta.ProviderConversationID = "7ae74319-242d-45d1-b251-0495f225448c"
+			want = "resumes conversation"
+		}
+		r := NewRestartSelectModel([]SessionMeta{meta}, nil)
+		visible := ""
+		model := Model{activeView: ViewRestart, width: 80, height: 24, restartSelect: r}
+		for i, line := range strings.Split(model.View().Content, "\n") {
+			if i >= 24 {
+				break
+			}
+			visible += ansi.Strip(ansi.Truncate(line, 80, "")) + "\n"
+		}
+		if !strings.Contains(visible, want) {
+			t.Errorf("restart mode %q hidden at 80x24: %s", want, visible)
+		}
 	}
 }

@@ -27,25 +27,27 @@ import (
 // SessionMeta holds metadata for a vibeflow-cli session that tmux alone
 // cannot store (provider, worktree path, vibeflow session ID, etc.).
 type SessionMeta struct {
-	Name              string           `json:"name"`
-	TmuxSession       string           `json:"tmux_session"`
-	Provider          string           `json:"provider"`
-	Project           string           `json:"project"`
-	ProjectID         int64            `json:"project_id,omitempty"`
-	Persona           string           `json:"persona,omitempty"`
-	Branch            string           `json:"branch"`
-	WorktreePath      string           `json:"worktree_path,omitempty"`
-	WorkingDir        string           `json:"working_dir"`
-	VibeFlowSessionID string           `json:"vibeflow_session_id,omitempty"`
-	SessionType       string           `json:"session_type,omitempty"`
-	DispatchMode      string           `json:"dispatch_mode,omitempty"`
-	CloudDispatch     bool             `json:"cloud_dispatch,omitempty"`
-	SkipPermissions   bool             `json:"skip_permissions,omitempty"`
-	Model             string           `json:"model,omitempty"`
-	LLMGatewayEnabled bool             `json:"llm_gateway_enabled,omitempty"`
-	MCPToolName       string           `json:"mcp_tool_name,omitempty"`
-	OpenShell         *OpenShellConfig `json:"openshell,omitempty"`
-	CreatedAt         time.Time        `json:"created_at"`
+	Name                   string           `json:"name"`
+	TmuxSession            string           `json:"tmux_session"`
+	Provider               string           `json:"provider"`
+	Project                string           `json:"project"`
+	ProjectID              int64            `json:"project_id,omitempty"`
+	Persona                string           `json:"persona,omitempty"`
+	Branch                 string           `json:"branch"`
+	WorktreePath           string           `json:"worktree_path,omitempty"`
+	WorkingDir             string           `json:"working_dir"`
+	ProviderConversationID string           `json:"provider_conversation_id,omitempty"`
+	PreviousOutputPath     string           `json:"previous_output_path,omitempty"`
+	VibeFlowSessionID      string           `json:"vibeflow_session_id,omitempty"`
+	SessionType            string           `json:"session_type,omitempty"`
+	DispatchMode           string           `json:"dispatch_mode,omitempty"`
+	CloudDispatch          bool             `json:"cloud_dispatch,omitempty"`
+	SkipPermissions        bool             `json:"skip_permissions,omitempty"`
+	Model                  string           `json:"model,omitempty"`
+	LLMGatewayEnabled      bool             `json:"llm_gateway_enabled,omitempty"`
+	MCPToolName            string           `json:"mcp_tool_name,omitempty"`
+	OpenShell              *OpenShellConfig `json:"openshell,omitempty"`
+	CreatedAt              time.Time        `json:"created_at"`
 }
 
 // Store persists session metadata to a JSON file with file-level locking

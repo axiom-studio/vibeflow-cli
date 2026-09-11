@@ -28,16 +28,24 @@ import (
 // list of dead sessions the user can choose to restart on CLI startup.
 type RestartSelectModel struct {
 	sessions []SessionMeta
+	// The picker and restart execution both require an exact conversation ID.
+	resumes  []bool
 	selected map[int]bool
 	cursor   int
 	done     bool
 	skipped  bool
 }
 
-// NewRestartSelectModel creates a restart selector for the given dead sessions.
-func NewRestartSelectModel(dead []SessionMeta) RestartSelectModel {
+// NewRestartSelectModel labels exact resumes and fresh starts before selection.
+func NewRestartSelectModel(dead []SessionMeta, tmux *TmuxManager) RestartSelectModel {
+	resumes := make([]bool, len(dead))
+	for i, meta := range dead {
+		dead[i].ProviderConversationID = tmux.ResumeConversationID(meta)
+		resumes[i] = dead[i].ProviderConversationID != ""
+	}
 	return RestartSelectModel{
 		sessions: dead,
+		resumes:  resumes,
 		selected: make(map[int]bool),
 		cursor:   0,
 	}
@@ -119,7 +127,7 @@ func (r RestartSelectModel) View() string {
 			check = "[✓]"
 		}
 
-		// Format: [✓] session-name  provider | persona | branch | project
+		// Keep restart mode beside the short name, before long metadata.
 		name := s.Name
 		if len(name) > 30 {
 			name = name[:27] + "..."
@@ -135,12 +143,20 @@ func (r RestartSelectModel) View() string {
 		if s.Project != "" {
 			details += " | " + s.Project
 		}
+		// Say which of the two restarts this is, so the user is not guessing
+		// whether the agent comes back with its history (issue #4534).
+		mode := "fresh start (no exact conversation ID)"
+		if i < len(r.resumes) && r.resumes[i] {
+			mode = "resumes conversation"
+		}
 
-		line := fmt.Sprintf("%s%s %s  %s", cursor, check, name, lipgloss.NewStyle().Foreground(dimColor).Render(details))
+		line := fmt.Sprintf("%s%s %s  %s", cursor, check, name, mode)
 		if i == r.cursor {
 			line = selectedStyle.Render(line)
 		}
 		b.WriteString(line)
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("      " + details))
 		b.WriteString("\n")
 	}
 
