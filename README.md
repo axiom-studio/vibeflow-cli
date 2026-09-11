@@ -13,7 +13,7 @@
 
 # vibeflow-cli
 
-A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, and Qwen Code sessions from a single TUI - with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
+A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, Qwen Code, Kiro CLI, and GitHub Copilot CLI sessions from a single TUI - with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
 
 ## Supported Agents
 
@@ -24,8 +24,10 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | **Google Gemini CLI** | `gemini` | `--yolo` | `-p` flag |
 | **Cursor Agent** | `agent` | `--yolo --approve-mcps` | Positional argument |
 | **Qwen Code** | `qwen` | `--yolo` | `-i` flag (interactive after prompt) |
+| **Kiro CLI** | `kiro-cli` | `--trust-all-tools` | Positional argument (verified — see [Providers — Kiro CLI caveats](docs/VibeFlow-CLI/docs/providers.md#kiro-cli-caveats)) |
+| **GitHub Copilot CLI** | `copilot` | `--yolo` | `-i` flag (interactive after prompt) |
 
-All five agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
+All seven agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
 
 ### VibeFlow Terminal UI
 
@@ -57,6 +59,19 @@ All five agents support both **Vanilla** (standalone) and **VibeFlow** (server-c
 
 ## Installation
 
+### Quick setup (recommended)
+
+One command downloads vibeflow-cli, installs tmux, and configures the VibeFlow
+MCP server for all your agents:
+
+```bash
+npx @axiom-studio/vibeflow-setup --api-key <API_KEY>
+```
+
+See [`npx/`](npx/README.md) for details and options.
+
+### Manual
+
 ```bash
 go install vibeflow-cli/cmd/vibeflow@latest
 ```
@@ -73,8 +88,10 @@ go build -o vibeflow ./cmd/vibeflow
 
 - **Go 1.25+**
 - **tmux 3.2+** (for `-e` env var passthrough)
-- At least one supported agent CLI installed (`claude`, `codex`, `gemini`, `agent` (Cursor), or `qwen`)
+- At least one supported agent CLI installed (`claude`, `codex`, `gemini`, `agent` (Cursor), `qwen`, `kiro-cli`, or `copilot`)
   - Install Qwen Code: `npm install -g @qwen-code/qwen-code@latest`
+  - Install Kiro CLI: see [kiro.dev/docs/cli](https://kiro.dev/docs/cli/)
+  - Install GitHub Copilot CLI: `npm install -g @github/copilot`
 
 ## Usage
 
@@ -98,7 +115,29 @@ vibeflow restart <name>  # Restart a session using cached parameters
 vibeflow worktrees       # List git worktrees (alias: wt)
 vibeflow check [dir]     # Check for session conflicts
 vibeflow config          # Re-run interactive configuration setup
+vibeflow bootstrap       # Configure the VibeFlow MCP server for your coding agents
+vibeflow uninstall       # Remove the MCP server config that bootstrap installed
 vibeflow version         # Print version information
+```
+
+### Bootstrap
+
+`vibeflow bootstrap` writes the initial vibeflow-cli config and installs the
+VibeFlow MCP server into the config files of the coding agents you select
+(Codex, Gemini, Cursor, Claude CLI, Claude Desktop). Each agent config
+references the bearer token via the `MCP_TOKEN` environment variable, which
+vibeflow-cli injects when it launches an agent; the `--api-key` value is stored
+in the vibeflow-cli config. Before any config file is modified, the existing
+file is copied into `<vibeflow-root>/.backup/`. Every changed file's full path
+(and its backup) is printed. The MCP server name honors `--mcp` (default
+`vibeflow`).
+
+```bash
+vibeflow bootstrap --api-key <api-key>                       # interactive agent picker
+vibeflow bootstrap --api-key <api-key> --all                 # configure every agent
+vibeflow bootstrap --api-key <api-key> --agents codex,cursor # configure a subset
+vibeflow bootstrap --api-key <api-key> --base-url https://cloud.axiomstudio.ai --root /custom/root --mcp vibeflow
+vibeflow uninstall --all                                     # remove the MCP entry from every agent
 ```
 
 ### Launch Flags
@@ -107,6 +146,9 @@ vibeflow version         # Print version information
 vibeflow launch --provider claude --branch main
 vibeflow launch --worktree --new-branch --provider codex
 vibeflow launch --skip-permissions  # Autonomous mode
+vibeflow launch --personas developer,architect --model sonnet --models developer=gpt-5.1-codex,architect=opus
+vibeflow launch --project nimbus --personas developer,architect --reuse # Reconcile existing persona sessions
+vibeflow models codex              # Show valid built-in model ids
 ```
 
 ### TUI Keybindings
@@ -186,10 +228,10 @@ The interactive wizard walks through:
 2. **Session type** - VibeFlow (server-connected) or Vanilla (standalone)
 3. **Project** - Select VibeFlow project (VibeFlow mode only)
 4. **Persona** - Developer, Principal Engineer, Architect, UX Designer, QA Lead, Security Lead, Product Manager, Project Manager, or Customer (VibeFlow mode only)
-5. **Provider** - Choose agent (Claude, Codex, Gemini, Cursor, Qwen) with availability detection
+5. **Provider** - Choose agent (Claude, Codex, Gemini, Cursor, Qwen, Kiro CLI, GitHub Copilot CLI) with availability detection
 6. **Environment token** - Enter required API keys if not already saved (e.g. `OPENAI_API_KEY` for Qwen API-key mode)
 7. **LLM Gateway** - Optional: route LLM traffic via VibeFlow server gateway
-7a. **Qwen launch config** _(qwen-only, when LLM Gateway is **off**)_ - Pick a vendor preset (OpenAI / Qwen DashScope / z.ai / Custom) to auto-fill `OPENAI_BASE_URL` + `OPENAI_MODEL`; values are editable. See [Providers — Qwen launch config](docs/VibeFlow-CLI/docs/providers.md#qwen-launch-config-api-key-mode)
+7a. **Qwen launch config** _(qwen-only)_ - Pick a vendor preset (OpenAI / Qwen DashScope / z.ai / Custom) to auto-fill `OPENAI_BASE_URL` + `OPENAI_MODEL`; values are editable. With the LLM Gateway **on**, only the model is used (endpoint + key come from the gateway). See [Providers — Qwen launch config](docs/VibeFlow-CLI/docs/providers.md#qwen-launch-config-api-key-mode)
 8. **Branch** - Select git branch or create new
 9. **Worktree** - Use current directory, create new worktree, or specify custom path
 10. **Permissions** - Skip permission prompts for autonomous mode

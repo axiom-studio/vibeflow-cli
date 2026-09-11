@@ -21,7 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -107,7 +107,7 @@ func (wl WorktreeListModel) DeletedPath() string { return wl.deletedWt }
 // Update handles input for the worktree list.
 func (wl WorktreeListModel) Update(msg tea.Msg) (WorktreeListModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k":
 			if wl.cursor > 0 {
@@ -165,7 +165,7 @@ func (wl WorktreeListModel) View() string {
 
 			statusStyle := lipgloss.NewStyle().Foreground(dimColor)
 			if row.Status == "active" {
-				statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00"))
+				statusStyle = lipgloss.NewStyle().Foreground(oceanSuccess)
 			} else {
 				statusStyle = lipgloss.NewStyle().Foreground(warningColor)
 			}

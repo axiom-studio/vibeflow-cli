@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -93,7 +93,7 @@ func (cm ConflictModal) Conflict() ConflictResult { return cm.conflict }
 // Update handles input for the conflict modal.
 func (cm ConflictModal) Update(msg tea.Msg) (ConflictModal, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k":
 			if cm.cursor > 0 {

@@ -1,0 +1,361 @@
+/*
+ * Copyright (c) 2026. AXIOM STUDIO AI Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package vibeflowcli
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
+
+// readCopilotTestConfig parses the config file written by the helper.
+func readCopilotTestConfig(t *testing.T, home string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, ".copilot", "config.json"))
+	if err != nil {
+		t.Fatalf("read copilot config: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse copilot config: %v", err)
+	}
+	return root
+}
+
+func trustedFolderStrings(t *testing.T, root map[string]any) []string {
+	t.Helper()
+	raw, _ := root["trustedFolders"].([]any)
+	out := make([]string, 0, len(raw))
+	for _, f := range raw {
+		s, ok := f.(string)
+		if !ok {
+			t.Fatalf("trustedFolders contains non-string entry: %#v", f)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func TestEnsureCopilotFirstRunConfig_CreatesFileWhenMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := filepath.Join(home, "project")
+
+	changed, err := EnsureCopilotFirstRunConfig(workDir)
+	if err != nil {
+		t.Fatalf("EnsureCopilotFirstRunConfig: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true on first write")
+	}
+
+	root := readCopilotTestConfig(t, home)
+	if got := trustedFolderStrings(t, root); len(got) != 1 || got[0] != workDir {
+		t.Errorf("trustedFolders = %v, want [%s]", got, workDir)
+	}
+	if v, _ := root["appInstallNudgeResponded"].(bool); !v {
+		t.Error("appInstallNudgeResponded should be true (desktop-app nudge would stall an unattended launch)")
+	}
+	if v, _ := root["appTipShown"].(bool); !v {
+		t.Error("appTipShown should be true")
+	}
+	if _, ok := root["firstLaunchAt"].(string); !ok {
+		t.Error("firstLaunchAt should be seeded")
+	}
+}
+
+func TestEnsureCopilotFirstRunConfig_PreservesExistingKeysAndStripsComments(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := filepath.Join(home, "project")
+
+	// Simulate a config.json as copilot v1.0.79 writes it: // comment
+	// header, an already-trusted other folder, and an unrelated key that
+	// must survive the merge untouched.
+	dir := filepath.Join(home, ".copilot")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := `// User settings belong in settings.json.
+// This file is managed automatically.
+{
+  "firstLaunchAt": "2026-03-11T00:00:00.000Z",
+  "trustedFolders": ["/somewhere/else"],
+  "reasoningSummariesCleanupDone": true
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCopilotFirstRunConfig(workDir)
+	if err != nil {
+		t.Fatalf("EnsureCopilotFirstRunConfig: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true (workDir not yet trusted)")
+	}
+
+	root := readCopilotTestConfig(t, home)
+	got := trustedFolderStrings(t, root)
+	if len(got) != 2 || got[0] != "/somewhere/else" || got[1] != workDir {
+		t.Errorf("trustedFolders = %v, want [/somewhere/else %s]", got, workDir)
+	}
+	if root["firstLaunchAt"] != "2026-03-11T00:00:00.000Z" {
+		t.Errorf("firstLaunchAt = %v, want existing value preserved", root["firstLaunchAt"])
+	}
+	if v, _ := root["reasoningSummariesCleanupDone"].(bool); !v {
+		t.Error("unrelated sibling key should be preserved verbatim")
+	}
+	if v, _ := root["appInstallNudgeResponded"].(bool); !v {
+		t.Error("appInstallNudgeResponded should be forced true")
+	}
+}
+
+func TestEnsureCopilotFirstRunConfig_IdempotentSecondCall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := filepath.Join(home, "project")
+
+	if _, err := EnsureCopilotFirstRunConfig(workDir); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(home, ".copilot", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCopilotFirstRunConfig(workDir)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if changed {
+		t.Error("expected changed=false when workDir is already trusted and markers set")
+	}
+	after, err := os.ReadFile(filepath.Join(home, ".copilot", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("second call must not rewrite the file")
+	}
+}
+
+func TestEnsureCopilotFirstRunConfig_RelativeWorkDirStoredAbsolute(t *testing.T) {
+	// Launch paths pass "." when launching from the project directory;
+	// copilot matches trustedFolders against absolute paths, so a literal
+	// "." entry never matches and the trust dialog still fires. Regression
+	// caught live during feature #667 E2E.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	work := filepath.Join(home, "project")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCopilotFirstRunConfig("."); err != nil {
+		t.Fatalf("EnsureCopilotFirstRunConfig: %v", err)
+	}
+
+	root := readCopilotTestConfig(t, home)
+	got := trustedFolderStrings(t, root)
+	if len(got) != 1 || !filepath.IsAbs(got[0]) {
+		t.Fatalf("trustedFolders = %v, want a single absolute path", got)
+	}
+	// macOS: /tmp symlinks to /private/tmp, so compare resolved paths.
+	wantResolved, _ := filepath.EvalSymlinks(work)
+	gotResolved, _ := filepath.EvalSymlinks(got[0])
+	if gotResolved != wantResolved {
+		t.Errorf("trustedFolders[0] = %q, want path resolving to %q", got[0], work)
+	}
+}
+
+func TestEnsureCopilotFirstRunConfig_CorruptFileErrors(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := filepath.Join(home, ".copilot")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCopilotFirstRunConfig(filepath.Join(home, "project")); err == nil {
+		t.Fatal("expected error on corrupt config.json (must not silently clobber a file we cannot parse)")
+	}
+}
+
+// Regression test for issue #4539. The pre-seed is designed to run BEFORE
+// copilot has ever run, which is exactly the ordering where MkdirAll actually
+// creates ~/.copilot and therefore actually sets its mode. Copilot then writes
+// session-store.db (0644) and logs/ into that directory, so a 0755 directory
+// exposes complete agent session transcripts to every other local user.
+// None of the five original TestEnsureCopilotFirstRunConfig_* tests asserted
+// permissions, which is why the regression was invisible to CI.
+func TestEnsureCopilotFirstRunConfig_Permissions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	copilotDir := filepath.Join(home, ".copilot")
+	if _, err := os.Stat(copilotDir); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must not exist, stat err = %v", copilotDir, err)
+	}
+
+	if _, err := EnsureCopilotFirstRunConfig(filepath.Join(home, "project")); err != nil {
+		t.Fatalf("EnsureCopilotFirstRunConfig: %v", err)
+	}
+
+	if got := dirMode(t, copilotDir); got != 0o700 {
+		t.Errorf("~/.copilot mode = %04o, want 0700 (copilot writes session-store.db here)", got)
+	}
+	info, err := os.Stat(filepath.Join(copilotDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("config.json mode = %04o, want 0600", got)
+	}
+}
+
+// Issue #4539, second defect: the pre-seed used to truncate the user's existing
+// copilot config in place with no snapshot, so a merge bug or interrupted write
+// destroyed their settings with no recovery path. Every other agent-config
+// writer in this repo backs up first; this one now does too.
+func TestEnsureCopilotFirstRunConfig_BacksUpExistingConfig(t *testing.T) {
+	root := withTempRoot(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	configPath := filepath.Join(home, ".copilot", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := `{"trustedFolders":["/existing"],"userSetting":"must survive"}` + "\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCopilotFirstRunConfig(filepath.Join(home, "project")); err != nil {
+		t.Fatalf("EnsureCopilotFirstRunConfig: %v", err)
+	}
+
+	files := backupFiles(t, root)
+	if len(files) != 1 {
+		t.Fatalf("expected exactly 1 backup of the user's config, got %d: %v", len(files), files)
+	}
+	got, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Errorf("backup = %q, want the pre-write content %q", got, original)
+	}
+
+	// The merge itself must still be sibling-preserving.
+	if v, _ := readCopilotTestConfig(t, home)["userSetting"].(string); v != "must survive" {
+		t.Errorf("userSetting = %q, want %q", v, "must survive")
+	}
+}
+
+// Regression test for issue #4542. EnsureCopilotFirstRunConfig itself is well
+// covered, but nothing asserted that CreateSessionWithOpts still CALLS it. A
+// refactor that renames the provider key, moves the pre-seed above the
+// "session already exists" early return, or drops the block in a merge would
+// ship green - and the regression only surfaces as an unattended tmux pane
+// hung forever on copilot's folder-trust dialog, invisible to CI.
+//
+// Drives a real tmux server, no mocks, following the precedent in
+// TestCreateSessionWithOpts_ClaudeHardeningEnv.
+func TestCreateSessionWithOpts_CopilotFirstRunPreSeed(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	t.Run("copilot provider pre-seeds trust for the absolute workdir", func(t *testing.T) {
+		withTempRoot(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Chdir(t.TempDir())
+
+		tm := NewTmuxManager("vftest-copilot-preseed")
+		_, _ = tm.run("kill-server")
+		defer func() { _, _ = tm.run("kill-server") }()
+
+		// "." is what the real launch paths pass. Copilot matches trustedFolders
+		// against the absolute folder path, so a relative entry would never match
+		// and the trust dialog would still fire - the exact failure caught during
+		// feature #667 E2E.
+		if err := tm.CreateSessionWithOpts(SessionOpts{
+			Name:     "preseed",
+			Provider: "copilot",
+			WorkDir:  ".",
+			Command:  "sleep 300",
+		}); err != nil {
+			t.Fatalf("CreateSessionWithOpts(copilot) error = %v", err)
+		}
+
+		wantAbs, err := filepath.Abs(".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := trustedFolderStrings(t, readCopilotTestConfig(t, home))
+		if len(got) != 1 {
+			t.Fatalf("trustedFolders = %v, want exactly 1 entry", got)
+		}
+		if !filepath.IsAbs(got[0]) {
+			t.Errorf("trustedFolders[0] = %q, want an absolute path", got[0])
+		}
+		if got[0] != wantAbs {
+			t.Errorf("trustedFolders[0] = %q, want %q", got[0], wantAbs)
+		}
+	})
+
+	t.Run("non-copilot provider does not touch ~/.copilot", func(t *testing.T) {
+		withTempRoot(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		tm := NewTmuxManager("vftest-copilot-preseed-neg")
+		_, _ = tm.run("kill-server")
+		defer func() { _, _ = tm.run("kill-server") }()
+
+		if err := tm.CreateSessionWithOpts(SessionOpts{
+			Name:     "preseed",
+			Provider: "claude",
+			WorkDir:  t.TempDir(),
+			Command:  "sleep 300",
+		}); err != nil {
+			t.Fatalf("CreateSessionWithOpts(claude) error = %v", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(home, ".copilot")); !os.IsNotExist(err) {
+			t.Errorf("claude session created ~/.copilot (stat err = %v); the pre-seed must be copilot-only", err)
+		}
+	})
+}

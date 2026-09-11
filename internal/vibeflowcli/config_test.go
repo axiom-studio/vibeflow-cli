@@ -46,11 +46,11 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("MCPToolName = %q, want %q", cfg.MCPToolName, DefaultMCPToolName)
 	}
 
-	// Five built-in providers.
-	if len(cfg.Providers) != 5 {
-		t.Fatalf("expected 5 providers, got %d", len(cfg.Providers))
+	// Seven built-in providers.
+	if len(cfg.Providers) != 7 {
+		t.Fatalf("expected 7 providers, got %d", len(cfg.Providers))
 	}
-	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
+	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen", "kiro", "copilot"} {
 		if _, ok := cfg.Providers[key]; !ok {
 			t.Errorf("missing provider %q", key)
 		}
@@ -88,8 +88,8 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
-	if len(cfg.Providers) != 5 {
-		t.Errorf("expected 5 default providers, got %d", len(cfg.Providers))
+	if len(cfg.Providers) != 7 {
+		t.Errorf("expected 7 default providers, got %d", len(cfg.Providers))
 	}
 }
 
@@ -402,6 +402,205 @@ bearer_token_env_var = "ACTUAL"
 	})
 }
 
+func TestCodexConfigPath_UsesRootWhenCustomRootIsActive(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	home := t.TempDir()
+	customRoot := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+
+	SetRootDir(customRoot)
+
+	want := filepath.Join(customRoot, ".codex", "config.toml")
+	if got := CodexConfigPath(); got != want {
+		t.Errorf("CodexConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveProviderEnvVars_CodexUsesRootScopedMCPConfig(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	home := t.TempDir()
+	customRoot := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	SetRootDir(customRoot)
+
+	homeCodexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(homeCodexDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeCodexDir, "config.toml"), []byte(`[mcp_servers.vibeflow]
+bearer_token_env_var = "DEFAULT_ROOT_TOKEN"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rootCodexDir := filepath.Join(customRoot, ".codex")
+	if err := os.MkdirAll(rootCodexDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootCodexDir, "config.toml"), []byte(`[mcp_servers.vibeflow]
+bearer_token_env_var = "CUSTOM_ROOT_TOKEN"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.SavedEnvVars = map[string]string{
+		"DEFAULT_ROOT_TOKEN": "wrong-token",
+		"CUSTOM_ROOT_TOKEN":  "right-token",
+	}
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != "" {
+		t.Fatalf("missing = %q, want empty", missing)
+	}
+	if got := env["CUSTOM_ROOT_TOKEN"]; got != "right-token" {
+		t.Errorf("CUSTOM_ROOT_TOKEN = %q, want right-token", got)
+	}
+	if _, ok := env["DEFAULT_ROOT_TOKEN"]; ok {
+		t.Errorf("default-root token leaked into custom-root launch env: %v", env)
+	}
+}
+
+func TestResolveProviderEnvVars_CodexCustomRootDoesNotFallbackToHome(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	home := t.TempDir()
+	customRoot := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	SetRootDir(customRoot)
+
+	homeCodexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(homeCodexDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeCodexDir, "config.toml"), []byte(`[mcp_servers.vibeflow]
+bearer_token_env_var = "DEFAULT_ROOT_TOKEN"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.SavedEnvVars = map[string]string{
+		"DEFAULT_ROOT_TOKEN": "wrong-token",
+	}
+	t.Setenv("DEFAULT_ROOT_TOKEN", "wrong-env-token")
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != "" {
+		t.Fatalf("missing = %q, want empty because custom root has no Codex MCP config", missing)
+	}
+	if len(env) != 0 {
+		t.Errorf("env = %v, want empty; custom root must not read home Codex config", env)
+	}
+}
+
+// codexBearerTokenEnvVar isolates HOME and the vibeflow root, then points the
+// root-scoped Codex config at the named bearer token env var. It also clears
+// that var from the process env so the saved-config and api_token branches are
+// the only things under test.
+func codexBearerTokenEnvVar(t *testing.T, varName string) {
+	t.Helper()
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	t.Setenv(varName, "")
+	os.Unsetenv(varName)
+	SetRootDir(root)
+
+	dir := filepath.Join(root, ".codex")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	content := "[mcp_servers.vibeflow]\nbearer_token_env_var = \"" + varName + "\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The launcher resolves MCP_TOKEN from cfg.APIToken and overwrites whatever
+// this function returns, so reporting it missing prompts for a discarded value.
+func TestResolveProviderEnvVars_CodexMCPTokenFallsBackToAPIToken(t *testing.T) {
+	codexBearerTokenEnvVar(t, mcpTokenEnvVar)
+
+	cfg := DefaultConfig()
+	cfg.APIToken = "api-token-value"
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != "" {
+		t.Fatalf("missing = %q, want empty — api_token is set, so nothing should be prompted for", missing)
+	}
+	if got := env[mcpTokenEnvVar]; got != "api-token-value" {
+		t.Errorf("%s = %q, want api-token-value", mcpTokenEnvVar, got)
+	}
+}
+
+// The fallback is guarded on the var name: a user who points
+// bearer_token_env_var at their own variable must never receive the VibeFlow
+// API token, and must still be told the variable is unset.
+func TestResolveProviderEnvVars_CodexCustomBearerVarNeverGetsAPIToken(t *testing.T) {
+	const customVar = "MY_OWN_BEARER_TOKEN"
+	codexBearerTokenEnvVar(t, customVar)
+
+	cfg := DefaultConfig()
+	cfg.APIToken = "vibeflow-api-token"
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != customVar {
+		t.Fatalf("missing = %q, want %q — a custom bearer var must still report as unset", missing, customVar)
+	}
+	for k, v := range env {
+		if v == "vibeflow-api-token" {
+			t.Errorf("VibeFlow api_token leaked into %s for a custom bearer var: %v", k, env)
+		}
+	}
+}
+
+// Regression guard for the chosen fix position: the api_token fallback is
+// appended LAST, so every input that already resolved must resolve identically.
+func TestResolveProviderEnvVars_CodexSavedEnvVarStillWinsOverAPIToken(t *testing.T) {
+	codexBearerTokenEnvVar(t, mcpTokenEnvVar)
+
+	cfg := DefaultConfig()
+	cfg.SavedEnvVars = map[string]string{mcpTokenEnvVar: "saved-value"}
+	cfg.APIToken = "api-token-value"
+
+	env, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != "" {
+		t.Fatalf("missing = %q, want empty", missing)
+	}
+	if got := env[mcpTokenEnvVar]; got != "saved-value" {
+		t.Errorf("%s = %q, want saved-value — saved_env_vars must keep precedence over api_token", mcpTokenEnvVar, got)
+	}
+}
+
+// With no api_token configured the prompt is correct behaviour and must remain.
+func TestResolveProviderEnvVars_CodexMCPTokenStillMissingWithoutAPIToken(t *testing.T) {
+	codexBearerTokenEnvVar(t, mcpTokenEnvVar)
+
+	cfg := DefaultConfig()
+	cfg.APIToken = ""
+
+	_, missing := ResolveProviderEnvVars(cfg, "codex")
+	if missing != mcpTokenEnvVar {
+		t.Fatalf("missing = %q, want %q — with no api_token there is nothing to fall back to", missing, mcpTokenEnvVar)
+	}
+}
+
 func TestCleanEnvToken(t *testing.T) {
 	tests := []struct {
 		input string
@@ -573,6 +772,55 @@ func TestMigrateProviders_PreservesLaunchTemplates(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_CopilotAutonomyFlagsReachExistingUsers pins the delivery path
+// for the issue #4602 fix. A user whose config.yaml predates the copilot
+// provider has no `copilot:` block on disk, and LoadConfig merges the file over
+// DefaultConfig() rather than replacing its provider map — so the shipped
+// template is what actually launches, and the fix arrives on the next run with
+// no migration step. The inverse case (a config that DOES pin an old copilot
+// template keeps it, because migrateProviders never rewrites launch templates)
+// is covered by TestMigrateProviders_PreservesLaunchTemplates.
+func TestLoadConfig_CopilotAutonomyFlagsReachExistingUsers(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	// A pre-copilot config: claude only, no `copilot:` block anywhere.
+	if err := os.WriteFile(cfgPath, []byte(`server_url: https://cloud.axiomstudio.ai
+default_provider: claude
+providers:
+    claude:
+        name: Claude Code
+        binary: claude
+        launch_template: '{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}'
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, ok := cfg.Providers["copilot"]
+	if !ok {
+		t.Fatal("copilot provider missing after loading a pre-copilot config")
+	}
+	got, err := RenderLaunchCommand(p.LaunchTemplate, LaunchTemplateVars{
+		Binary:          p.Binary,
+		SkipPermissions: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "copilot --yolo --autopilot --no-ask-user --max-autopilot-continues 1000"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	// The user's own claude override must survive the merge untouched.
+	if cfg.Providers["claude"].LaunchTemplate != "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}" {
+		t.Errorf("user's claude template was clobbered: %q", cfg.Providers["claude"].LaunchTemplate)
+	}
+}
+
 func TestMigrateProviders_RemovesVibeflowEnvVars(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -691,10 +939,119 @@ func TestBuildLLMGatewayEnv_Qwen(t *testing.T) {
 	if env["OPENAI_BASE_URL"] != want {
 		t.Errorf("OPENAI_BASE_URL = %q, want %q", env["OPENAI_BASE_URL"], want)
 	}
-	// Must match codex/gemini shape exactly.
-	codex := BuildLLMGatewayEnv("codex", "https://server.example.com", "tok-123")
-	if env["OPENAI_API_KEY"] != codex["OPENAI_API_KEY"] || env["OPENAI_BASE_URL"] != codex["OPENAI_BASE_URL"] {
-		t.Error("qwen gateway env should match codex shape")
+	// Qwen also gets a custom-API-key var binding the gateway endpoint, whose
+	// value is the same bearer token.
+	customVar := "QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_SERVER_EXAMPLE_COM_REST_V1_LLM_GATEWAY_V1"
+	if env[customVar] != "tok-123" {
+		t.Errorf("%s = %q, want tok-123", customVar, env[customVar])
+	}
+	if len(env) != 3 {
+		t.Errorf("qwen gateway env has %d vars, want 3: %v", len(env), env)
+	}
+}
+
+func TestBuildLLMGatewayEnv_Gemini(t *testing.T) {
+	env := BuildLLMGatewayEnv("gemini", "https://server.example.com", "tok-123")
+	if env["GEMINI_API_KEY"] != "tok-123" {
+		t.Errorf("GEMINI_API_KEY = %q, want tok-123", env["GEMINI_API_KEY"])
+	}
+	want := "https://server.example.com/rest/v1/llm-gateway"
+	if env["GOOGLE_GEMINI_BASE_URL"] != want {
+		t.Errorf("GOOGLE_GEMINI_BASE_URL = %q, want %q", env["GOOGLE_GEMINI_BASE_URL"], want)
+	}
+	if _, ok := env["OPENAI_API_KEY"]; ok {
+		t.Errorf("gemini gateway env must not set OPENAI_API_KEY: %v", env)
+	}
+	if _, ok := env["OPENAI_BASE_URL"]; ok {
+		t.Errorf("gemini gateway env must not set OPENAI_BASE_URL: %v", env)
+	}
+	if len(env) != 2 {
+		t.Errorf("gemini gateway env has %d vars, want 2: %v", len(env), env)
+	}
+}
+
+func TestBuildLLMGatewayEnv_CodexAddsGatewayAPIKey(t *testing.T) {
+	env := BuildLLMGatewayEnv("codex", "https://server.example.com", "tok-123")
+	if env["OPENAI_API_KEY"] != "" {
+		t.Errorf("OPENAI_API_KEY = %q, want empty (Codex gateway auth uses GATEWAY_API_KEY)", env["OPENAI_API_KEY"])
+	}
+	if env["GATEWAY_API_KEY"] != "tok-123" {
+		t.Errorf("GATEWAY_API_KEY = %q, want tok-123", env["GATEWAY_API_KEY"])
+	}
+	if env["OPENAI_BASE_URL"] != "https://server.example.com/rest/v1/llm-gateway/v1" {
+		t.Errorf("OPENAI_BASE_URL = %q", env["OPENAI_BASE_URL"])
+	}
+}
+
+func TestQwenCustomAPIKeyEnvName(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol string
+		url      string
+		want     string
+	}{
+		// The z.ai example from the support requirements, verbatim.
+		{"zai_paas", "OPENAI", "https://api.z.ai/api/paas/v4",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4"},
+		{"zai_coding", "OPENAI", "https://api.z.ai/api/coding/paas/v4",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_CODING_PAAS_V4"},
+		{"gateway_endpoint", "OPENAI", "https://axiom.example.com/rest/v1/llm-gateway/v1",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_AXIOM_EXAMPLE_COM_REST_V1_LLM_GATEWAY_V1"},
+		// Trailing separators are trimmed, runs of separators collapse.
+		{"trailing_slash", "OPENAI", "https://api.z.ai/api/paas/v4/",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4"},
+		{"port_and_dash", "OPENAI", "http://my-host.local:8080/v1",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTP_MY_HOST_LOCAL_8080_V1"},
+		// Protocol is uppercased; empty URL contributes no segment.
+		{"lowercase_protocol", "openai", "https://api.z.ai/api/paas/v4",
+			"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4"},
+		{"empty_url", "OPENAI", "", "QWEN_CUSTOM_API_KEY_OPENAI"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := QwenCustomAPIKeyEnvName(tt.protocol, tt.url); got != tt.want {
+				t.Errorf("QwenCustomAPIKeyEnvName(%q, %q) = %q, want %q", tt.protocol, tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGatewayEnabledForProvider(t *testing.T) {
+	tests := []struct {
+		name        string
+		flag        bool
+		cfgEnabled  bool
+		provider    string
+		wantEnabled bool
+		wantWarn    bool
+	}{
+		// Gateway-capable providers: routing turns on when requested by flag or config.
+		{"claude_flag", true, false, "claude", true, false},
+		{"claude_config", false, true, "claude", true, false},
+		{"codex_flag", true, false, "codex", true, false},
+		{"gemini_config", false, true, "gemini", true, false},
+		// Not requested at all → disabled, never warns.
+		{"claude_none", false, false, "claude", false, false},
+		{"cursor_none", false, false, "cursor", false, false},
+		// Direct-only providers: never enabled even when requested. Warn ONLY when
+		// the user explicitly passed the flag; a config-only preference stays silent.
+		{"cursor_flag_warns", true, false, "cursor", false, true},
+		{"qwen_flag_warns", true, false, "qwen", false, true},
+		{"cursor_config_silent", false, true, "cursor", false, false},
+		{"qwen_config_silent", false, true, "qwen", false, false},
+		// Flag set AND config set for a direct-only provider still warns (flag is explicit).
+		{"cursor_flag_and_config", true, true, "cursor", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotEnabled, gotWarn := GatewayEnabledForProvider(tt.flag, tt.cfgEnabled, tt.provider)
+			if gotEnabled != tt.wantEnabled {
+				t.Errorf("enabled = %v, want %v", gotEnabled, tt.wantEnabled)
+			}
+			if gotWarn != tt.wantWarn {
+				t.Errorf("warnIgnored = %v, want %v", gotWarn, tt.wantWarn)
+			}
+		})
 	}
 }
 
@@ -713,6 +1070,34 @@ func TestBuildLLMGatewayEnv_QwenEmpty(t *testing.T) {
 	})
 }
 
+func TestBuildLLMGatewayEnv_GeminiEmpty(t *testing.T) {
+	t.Run("empty token", func(t *testing.T) {
+		env := BuildLLMGatewayEnv("gemini", "https://server.example.com", "")
+		if len(env) != 0 {
+			t.Errorf("expected empty env, got %v", env)
+		}
+	})
+	t.Run("empty url", func(t *testing.T) {
+		env := BuildLLMGatewayEnv("gemini", "", "tok")
+		if len(env) != 0 {
+			t.Errorf("expected empty env, got %v", env)
+		}
+	})
+}
+
+func TestClearLLMGatewayEnv_Gemini(t *testing.T) {
+	env := ClearLLMGatewayEnv("gemini")
+	if env["GOOGLE_GEMINI_BASE_URL"] != "" {
+		t.Errorf("GOOGLE_GEMINI_BASE_URL = %q, want empty clear marker", env["GOOGLE_GEMINI_BASE_URL"])
+	}
+	if _, ok := env["GEMINI_API_KEY"]; ok {
+		t.Error("gemini clear must not blank GEMINI_API_KEY")
+	}
+	if _, ok := env["OPENAI_BASE_URL"]; ok {
+		t.Error("gemini clear must not touch OPENAI_BASE_URL")
+	}
+}
+
 func TestClearLLMGatewayEnv_Qwen(t *testing.T) {
 	env := ClearLLMGatewayEnv("qwen")
 	// Qwen must NOT be cleared: qwen-code has no hardcoded fallback, so blanking
@@ -723,5 +1108,223 @@ func TestClearLLMGatewayEnv_Qwen(t *testing.T) {
 	}
 	if _, ok := env["ANTHROPIC_BASE_URL"]; ok {
 		t.Error("qwen clear should not touch ANTHROPIC_BASE_URL")
+	}
+	// User-exported QWEN_CUSTOM_API_KEY_* vars are the user's own auth wiring
+	// (an API key, not a base URL) — never blanked, same as every other key.
+	for k := range env {
+		if strings.HasPrefix(k, "QWEN_CUSTOM_API_KEY_") {
+			t.Errorf("qwen clear must not touch custom API key vars, got %q", k)
+		}
+	}
+}
+
+func TestWithMCPTokenEnv_FromConfig(t *testing.T) {
+	t.Setenv("MCP_TOKEN", "shell-token")
+	cfg := &Config{APIToken: "  [config-token]  "}
+	env := map[string]string{"EXISTING": "value"}
+
+	got := WithMCPTokenEnv(env, cfg)
+
+	if got["MCP_TOKEN"] != "config-token" {
+		t.Errorf("MCP_TOKEN = %q, want config-token", got["MCP_TOKEN"])
+	}
+	if got["EXISTING"] != "value" {
+		t.Errorf("EXISTING env was not preserved: %v", got)
+	}
+}
+
+func TestWithMCPTokenEnv_FromShellFallback(t *testing.T) {
+	t.Setenv("MCP_TOKEN", "  [shell-token]  ")
+
+	got := WithMCPTokenEnv(nil, &Config{})
+
+	if got["MCP_TOKEN"] != "shell-token" {
+		t.Errorf("MCP_TOKEN = %q, want shell-token", got["MCP_TOKEN"])
+	}
+}
+
+func TestWithMCPTokenEnv_EmptyTokenLeavesEnvUnchanged(t *testing.T) {
+	t.Setenv("MCP_TOKEN", "")
+	os.Unsetenv("MCP_TOKEN")
+	env := map[string]string{"EXISTING": "value"}
+
+	got := WithMCPTokenEnv(env, &Config{})
+
+	if _, ok := got["MCP_TOKEN"]; ok {
+		t.Errorf("MCP_TOKEN should not be set without a token: %v", got)
+	}
+	if got["EXISTING"] != "value" {
+		t.Errorf("EXISTING env was not preserved: %v", got)
+	}
+}
+
+func TestWithMCPTokenEnv_AllBuiltInProviders(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.APIToken = "api-token"
+
+	for providerKey, provider := range cfg.Providers {
+		t.Run(providerKey, func(t *testing.T) {
+			env := WithMCPTokenEnv(cloneStringMap(provider.Env), cfg)
+			if env["MCP_TOKEN"] != "api-token" {
+				t.Errorf("MCP_TOKEN = %q, want api-token", env["MCP_TOKEN"])
+			}
+		})
+	}
+}
+
+// --- OpenShell compatibility tests ---
+
+func TestRootDir_Priority(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	t.Run("flag wins over env and home", func(t *testing.T) {
+		t.Setenv("VIBEFLOW_ROOT", "/env/root")
+		SetRootDir("/flag/root")
+		if got := RootDir(); got != "/flag/root" {
+			t.Errorf("RootDir() = %q, want /flag/root (--root flag)", got)
+		}
+		SetRootDir("")
+	})
+
+	t.Run("env wins over home", func(t *testing.T) {
+		SetRootDir("")
+		t.Setenv("VIBEFLOW_ROOT", "/sandbox/state/.vibeflow-cli")
+		if got := RootDir(); got != "/sandbox/state/.vibeflow-cli" {
+			t.Errorf("RootDir() = %q, want /sandbox/state/.vibeflow-cli (VIBEFLOW_ROOT)", got)
+		}
+	})
+
+	t.Run("falls back to home", func(t *testing.T) {
+		SetRootDir("")
+		t.Setenv("VIBEFLOW_ROOT", "")
+		os.Unsetenv("VIBEFLOW_ROOT")
+		home, _ := os.UserHomeDir()
+		want := filepath.Join(home, ".vibeflow-cli")
+		if got := RootDir(); got != want {
+			t.Errorf("RootDir() = %q, want %q ($HOME fallback)", got, want)
+		}
+	})
+}
+
+func TestTmuxSocketName_CustomRoot(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+
+	t.Run("default root uses vibeflow", func(t *testing.T) {
+		SetRootDir("")
+		t.Setenv("VIBEFLOW_ROOT", "")
+		os.Unsetenv("VIBEFLOW_ROOT")
+		if got := TmuxSocketName(); got != "vibeflow" {
+			t.Errorf("TmuxSocketName() = %q, want vibeflow", got)
+		}
+	})
+
+	t.Run("custom root uses hashed name", func(t *testing.T) {
+		SetRootDir("/sandbox/state/.vibeflow-cli")
+		got := TmuxSocketName()
+		if got == "vibeflow" {
+			t.Error("custom root should not use default socket name")
+		}
+		if !strings.HasPrefix(got, "vibeflow-") {
+			t.Errorf("TmuxSocketName() = %q, want vibeflow-<hash> prefix", got)
+		}
+		SetRootDir("")
+	})
+}
+
+func TestResolveTmuxSocket(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+	SetRootDir("")
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+
+	t.Run("flag wins over config and derived", func(t *testing.T) {
+		if got := ResolveTmuxSocket("flagsock", "cfgsock"); got != "flagsock" {
+			t.Errorf("ResolveTmuxSocket = %q, want flagsock", got)
+		}
+	})
+
+	t.Run("config wins over derived when no flag", func(t *testing.T) {
+		if got := ResolveTmuxSocket("", "cfgsock"); got != "cfgsock" {
+			t.Errorf("ResolveTmuxSocket = %q, want cfgsock", got)
+		}
+	})
+
+	t.Run("derived default when neither set (default root)", func(t *testing.T) {
+		SetRootDir("")
+		if got := ResolveTmuxSocket("", ""); got != "vibeflow" {
+			t.Errorf("ResolveTmuxSocket = %q, want vibeflow", got)
+		}
+	})
+
+	t.Run("derived hash when neither set (custom root)", func(t *testing.T) {
+		SetRootDir("/sandbox/state/.vibeflow-cli")
+		got := ResolveTmuxSocket("", "")
+		if !strings.HasPrefix(got, "vibeflow-") || got == "vibeflow" {
+			t.Errorf("ResolveTmuxSocket = %q, want isolated vibeflow-<hash>", got)
+		}
+		SetRootDir("")
+	})
+}
+
+// TestLoadConfig_OmitsSocket verifies that a config file WITHOUT a tmux_socket
+// key yields an empty cfg.TmuxSocket (not the DefaultConfig "vibeflow"
+// placeholder), so ResolveTmuxSocket can fall through to the per-root derived
+// default and a fresh custom root keeps its isolated socket.
+func TestLoadConfig_OmitsSocket(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yaml := "server_url: https://my.server.com\napi_token: tok\n"
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TmuxSocket != "" {
+		t.Errorf("TmuxSocket = %q, want empty (not set in file)", cfg.TmuxSocket)
+	}
+}
+
+func TestNoHardcodedPaths(t *testing.T) {
+	goFiles, err := filepath.Glob(filepath.Join(".", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forbidden := []string{"/workspace", "/home/nimbus", "/usr/bin/python"}
+
+	for _, f := range goFiles {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("reading %s: %v", f, err)
+		}
+		content := string(data)
+		for _, pattern := range forbidden {
+			if strings.Contains(content, pattern) {
+				t.Errorf("%s contains forbidden hardcoded path %q", f, pattern)
+			}
+		}
+	}
+}
+
+func TestDefaultConfig_OutboundEndpoints(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
+		t.Errorf("ServerURL = %q; egress policy must allow this endpoint", cfg.ServerURL)
+	}
+
+	// Verify no provider has hardcoded outbound URLs in its launch template.
+	for name, p := range cfg.Providers {
+		if strings.Contains(p.LaunchTemplate, "http://") || strings.Contains(p.LaunchTemplate, "https://") {
+			t.Errorf("provider %q has hardcoded URL in LaunchTemplate: %s", name, p.LaunchTemplate)
+		}
 	}
 }

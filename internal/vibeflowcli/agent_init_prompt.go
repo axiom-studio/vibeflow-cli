@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -25,6 +26,8 @@ import (
 // running a renamed or forked MCP server can override it via the `--mcp`
 // CLI flag or the `mcp_tool_name` field in config.yaml.
 const DefaultMCPToolName = "vibeflow"
+const codexGatewayProviderID = "vibeflow_gateway"
+const codexGatewayProviderName = "VibeFlowGateway"
 
 // BuildVibeflowInitPrompt returns the prompt vibeflow-cli passes to a
 // vibecoding agent when launching a vibeflow-managed session. mcpName names
@@ -37,6 +40,16 @@ func BuildVibeflowInitPrompt(mcpName, projectName, persona string) string {
 	return fmt.Sprintf(
 		"Initialize a %s session for project %s with persona %q and follow the agent prompt.",
 		mcpName, projectName, persona,
+	)
+}
+
+func BuildVibeflowCloudDispatchInitPrompt(mcpName, projectName, persona, sessionID string) string {
+	if mcpName == "" {
+		mcpName = DefaultMCPToolName
+	}
+	return fmt.Sprintf(
+		"Initialize a %s session for project %s with persona %q using session_id %s. Pass dispatch_mode=\"cloud_queue\" to session_init. Do not call wait_for_work; vibeflow-cli will inject VIBEFLOW_DISPATCH handoffs when work is available.",
+		mcpName, projectName, persona, sessionID,
 	)
 }
 
@@ -57,21 +70,88 @@ func BuildVibeflowInitPrompt(mcpName, projectName, persona string) string {
 //     exits, which is wrong for autonomous sessions. The `-i` /
 //     `--prompt-interactive` flag is the documented way to seed an
 //     interactive run with an initial prompt.
+//   - kiro → falls through to default (positional argument). VERIFIED
+//     against the real `kiro-cli` binary (v2.15.2): `kiro-cli chat
+//     'prompt'` (no extra flags) processes the prompt, then returns to its
+//     interactive composer awaiting further input — the same shape as
+//     claude/codex/cursor. Confirmed via a scripted multi-turn session
+//     (first prompt answered, second distinct follow-up prompt answered in
+//     the same process) and cross-checked against live vibeflow-launched
+//     Kiro sessions using this exact command shape. `kiro-cli`'s documented
+//     `--no-interactive` flag is a separate ONE-SHOT mode (process prompt,
+//     print result, exit) — it is intentionally NOT added to the
+//     LaunchTemplate or to this switch, since a one-shot process can't back
+//     vibeflow's persistent tmux session that stays alive polling
+//     wait_for_work.
+//   - copilot → `-i 'prompt'` (start interactive mode and auto-execute the
+//     prompt). VERIFIED against the real `copilot` binary (v1.0.79): the
+//     seeded turn executes and the composer stays alive for follow-up
+//     turns (scripted tmux session, process liveness confirmed after the
+//     seeded response). Copilot's `-p/--prompt` is ONE-SHOT (documented
+//     "exits after completion") and there is NO positional prompt argument
+//     (usage is `copilot [options] [command]`, a positional would parse as
+//     a subcommand) — so copilot must NOT fall through to default.
 func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	escaped := strings.ReplaceAll(prompt, "'", `'\''`)
 	switch providerKey {
 	case "gemini":
 		return baseCommand + fmt.Sprintf(" -p '%s'", escaped)
-	case "qwen":
+	case "qwen", "copilot":
 		return baseCommand + fmt.Sprintf(" -i '%s'", escaped)
 	default:
 		return baseCommand + fmt.Sprintf(" '%s'", escaped)
 	}
 }
 
-// AppendQwenAPIFlags appends `--openai-api-key`, `--openai-base-url`, and
-// `--model` flags to the qwen launch command when the corresponding env vars
-// are present in env. Non-qwen providers are returned unchanged.
+// AppendCodexGatewayProviderFlags appends a temporary Codex CLI custom
+// provider definition when the launch env has a routed OpenAI-compatible
+// base URL.
+//
+// The built-in `openai` provider can still probe websocket transport even
+// when pointed at a gateway. Defining a dedicated provider with websocket
+// support disabled avoids that startup fallback noise while preserving the
+// gateway routing.
+func AppendCodexGatewayProviderFlags(baseCommand, providerKey string, env map[string]string) string {
+	if providerKey != "codex" || env == nil {
+		return baseCommand
+	}
+	if v := env["OPENAI_BASE_URL"]; v != "" {
+		flags := []string{
+			codexConfigStringArg("model_provider", codexGatewayProviderID),
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".name", codexGatewayProviderName),
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".base_url", v),
+			codexConfigBoolArg("model_providers."+codexGatewayProviderID+".requires_openai_auth", true),
+			// codex-cli >= 0.139 hard-removed the chat wire API (config-load
+			// error on wire_api="chat"), so Responses is the only wire API
+			// codex accepts. The gateway does not serve /v1/responses yet —
+			// until that route ships server-side (tracked on issue #2781),
+			// codex requests through the gateway fail with 404.
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".wire_api", "responses"),
+			codexConfigBoolArg("model_providers."+codexGatewayProviderID+".supports_websockets", false),
+			codexConfigStringArg("model_providers."+codexGatewayProviderID+".env_http_headers.x-axiom-api-key", "GATEWAY_API_KEY"),
+		}
+		for _, flag := range flags {
+			baseCommand += " -c " + flag
+		}
+	}
+	return baseCommand
+}
+
+func codexConfigStringArg(key, value string) string {
+	return shellQuote(fmt.Sprintf("%s=%q", key, value))
+}
+
+func codexConfigBoolArg(key string, value bool) string {
+	return shellQuote(fmt.Sprintf("%s=%t", key, value))
+}
+
+func codexConfigRawArg(value string) string {
+	return shellQuote(value)
+}
+
+// AppendQwenAPIFlags appends `--openai-base-url` and `--model` flags to the
+// qwen launch command when the corresponding env vars are present in env.
+// Non-qwen providers are returned unchanged.
 //
 // Why: qwen-code does not consistently honor `OPENAI_MODEL` env var for
 // model reporting in tool calls (observed: env says GLM-5-turbo, MCP tool
@@ -80,21 +160,25 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 // `StepQwenLaunchConfig`. The env vars are left in the session env as a
 // fallback for any qwen-code code path that still reads them.
 //
+// The API key is deliberately NOT passed as a `--openai-api-key` flag: a
+// flag value is world-readable via `ps aux` / `/proc/<pid>/cmdline` (issue
+// #1993, SOC2 CC6.1 / PCI-DSS 3.5 / GDPR Art.32). qwen-code reads
+// OPENAI_API_KEY from the process env on every auth path we ship, and the
+// env var is set on all launch paths, so the flag added no functionality —
+// only exposure.
+//
 // Ordering: flags are inserted after the base command (e.g. `qwen --yolo`)
 // and BEFORE `AppendVibeflowInitPrompt` appends `-i 'prompt'`, so qwen's
 // arg parser sees them as options rather than as part of the seed prompt.
 //
 // Sh-escaping mirrors `AppendVibeflowInitPrompt`: each value is wrapped in
-// single quotes with embedded `'` escaped as `'\''`, since the assembled
-// command is handed to `sh -c` via tmux send-keys.
+// single quotes and embedded single quotes use standard shell escaping, since
+// the assembled command is handed to `sh -c` via tmux send-keys.
 func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) string {
 	if providerKey != "qwen" {
 		return baseCommand
 	}
 	out := baseCommand
-	if v := env["OPENAI_API_KEY"]; v != "" {
-		out += fmt.Sprintf(" --openai-api-key '%s'", strings.ReplaceAll(v, "'", `'\''`))
-	}
 	if v := env["OPENAI_BASE_URL"]; v != "" {
 		out += fmt.Sprintf(" --openai-base-url '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
@@ -102,4 +186,19 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 		out += fmt.Sprintf(" --model '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
 	return out
+}
+
+// applyQwenModelPassthrough copies OPENAI_MODEL from the calling shell into
+// the session env for qwen launches when it isn't already set. Wizard-driven
+// launches carry the model via WizardResult.EnvVars, but headless launches
+// and restarts have no wizard state (wizard env vars are not persisted), so
+// the shell export is the only model source — copying it in lets
+// AppendQwenAPIFlags emit an explicit `--model` flag on those paths too.
+func applyQwenModelPassthrough(providerKey string, sessionEnv map[string]string) {
+	if providerKey != "qwen" || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
+		return
+	}
+	if v := os.Getenv("OPENAI_MODEL"); v != "" {
+		sessionEnv["OPENAI_MODEL"] = v
+	}
 }

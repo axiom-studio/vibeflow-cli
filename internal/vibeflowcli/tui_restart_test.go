@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestRestartSelectModel_InitialState(t *testing.T) {
@@ -49,13 +49,13 @@ func TestRestartSelectModel_ToggleSelection(t *testing.T) {
 	r := NewRestartSelectModel(dead)
 
 	// Toggle first item.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if !r.selected[0] {
 		t.Error("item 0 should be selected after space")
 	}
 
 	// Toggle again to deselect.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	if r.selected[0] {
 		t.Error("item 0 should be deselected after second space")
 	}
@@ -70,25 +70,25 @@ func TestRestartSelectModel_Navigation(t *testing.T) {
 	r := NewRestartSelectModel(dead)
 
 	// Move down.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if r.cursor != 1 {
 		t.Errorf("cursor = %d, want 1", r.cursor)
 	}
 
 	// Move down again.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if r.cursor != 2 {
 		t.Errorf("cursor = %d, want 2", r.cursor)
 	}
 
 	// Can't go past end.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	if r.cursor != 2 {
 		t.Errorf("cursor = %d, want 2 (clamped)", r.cursor)
 	}
 
 	// Move up.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	if r.cursor != 1 {
 		t.Errorf("cursor = %d, want 1", r.cursor)
 	}
@@ -102,13 +102,13 @@ func TestRestartSelectModel_SelectAll(t *testing.T) {
 	r := NewRestartSelectModel(dead)
 
 	// Select all.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if !r.selected[0] || !r.selected[1] {
 		t.Error("all items should be selected after 'a'")
 	}
 
 	// Toggle all off.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	if r.selected[0] || r.selected[1] {
 		t.Error("all items should be deselected after second 'a'")
 	}
@@ -122,10 +122,10 @@ func TestRestartSelectModel_EnterWithSelection(t *testing.T) {
 	r := NewRestartSelectModel(dead)
 
 	// Select first item.
-	r, _ = r.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	r, _ = r.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 
 	// Press enter.
-	r, cmd := r.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	r, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !r.done {
 		t.Error("should be done after enter with selection")
 	}
@@ -154,7 +154,7 @@ func TestRestartSelectModel_EnterNoSelection(t *testing.T) {
 	r := NewRestartSelectModel(dead)
 
 	// Press enter without selecting anything → skip.
-	r, cmd := r.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	r, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !r.skipped {
 		t.Error("should be skipped after enter with no selection")
 	}
@@ -173,7 +173,7 @@ func TestRestartSelectModel_EscSkips(t *testing.T) {
 	}
 	r := NewRestartSelectModel(dead)
 
-	r, cmd := r.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	r, cmd := r.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if !r.skipped {
 		t.Error("should be skipped after esc")
 	}

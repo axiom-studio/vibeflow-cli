@@ -54,6 +54,38 @@ func TestStore_ListEmpty(t *testing.T) {
 	}
 }
 
+func TestStore_HasSessions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	s := NewStoreWithPath(path)
+
+	// Fresh root: no file yet → HasSessions is false, and the probe must NOT
+	// create sessions.json as a side effect (List rewrites on read; HasSessions
+	// must not, or an empty root would gain state and stop showing the wizard).
+	has, err := s.HasSessions()
+	if err != nil {
+		t.Fatalf("HasSessions on empty root: %v", err)
+	}
+	if has {
+		t.Fatal("expected HasSessions=false for a fresh root")
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("HasSessions must not create sessions.json; stat err=%v", statErr)
+	}
+
+	// After adding a session, HasSessions reports true.
+	if err := s.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_claude-a", Provider: "claude"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	has, err = s.HasSessions()
+	if err != nil {
+		t.Fatalf("HasSessions after Add: %v", err)
+	}
+	if !has {
+		t.Fatal("expected HasSessions=true after Add")
+	}
+}
+
 func TestStore_AddAndList(t *testing.T) {
 	s := testStore(t)
 
@@ -405,7 +437,16 @@ func TestStore_SessionMetaFields(t *testing.T) {
 		WorktreePath:      "/worktree/path",
 		WorkingDir:        "/work/dir",
 		VibeFlowSessionID: "session-123",
-		CreatedAt:         now,
+		SessionType:       "vibeflow",
+		SkipPermissions:   true,
+		LLMGatewayEnabled: true,
+		MCPToolName:       "myvibeflow",
+		OpenShell: &OpenShellConfig{
+			Enabled: true,
+			Sandbox: "vf-main",
+			Policy:  "/sandbox/policy.yaml",
+		},
+		CreatedAt: now,
 	}
 	if err := s.Add(meta); err != nil {
 		t.Fatal(err)
@@ -430,6 +471,21 @@ func TestStore_SessionMetaFields(t *testing.T) {
 	if got.Persona != "developer" {
 		t.Errorf("Persona = %q", got.Persona)
 	}
+	if got.SessionType != "vibeflow" {
+		t.Errorf("SessionType = %q", got.SessionType)
+	}
+	if !got.SkipPermissions {
+		t.Error("SkipPermissions should be true")
+	}
+	if !got.LLMGatewayEnabled {
+		t.Error("LLMGatewayEnabled should be true")
+	}
+	if got.MCPToolName != "myvibeflow" {
+		t.Errorf("MCPToolName = %q", got.MCPToolName)
+	}
+	if got.OpenShell == nil || !got.OpenShell.Enabled || got.OpenShell.Sandbox != "vf-main" || got.OpenShell.Policy != "/sandbox/policy.yaml" {
+		t.Errorf("OpenShell metadata not preserved: %+v", got.OpenShell)
+	}
 	if got.Branch != "feature-branch" {
 		t.Errorf("Branch = %q", got.Branch)
 	}
@@ -441,5 +497,55 @@ func TestStore_SessionMetaFields(t *testing.T) {
 	}
 	if got.VibeFlowSessionID != "session-123" {
 		t.Errorf("VibeFlowSessionID = %q", got.VibeFlowSessionID)
+	}
+}
+
+func TestStore_Orphans(t *testing.T) {
+	s := testStore(t)
+	if err := s.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only "vibeflow_a" is live → "b" is the sole orphan.
+	orphans, err := s.Orphans([]string{"vibeflow_a"})
+	if err != nil {
+		t.Fatalf("Orphans failed: %v", err)
+	}
+	if len(orphans) != 1 || orphans[0].TmuxSession != "vibeflow_b" {
+		t.Fatalf("Orphans = %+v, want only vibeflow_b", orphans)
+	}
+}
+
+// TestStore_OrphansNonDestructive is the core safety guarantee: an empty live
+// list (a socket whose server isn't running) reports every entry as an orphan
+// but MUST NOT modify sessions.json. This is what prevents a socket mismatch
+// from silently wiping the store.
+func TestStore_OrphansNonDestructive(t *testing.T) {
+	s := testStore(t)
+	if err := s.Add(SessionMeta{Name: "a", TmuxSession: "vibeflow_a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Add(SessionMeta{Name: "b", TmuxSession: "vibeflow_b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	orphans, err := s.Orphans(nil)
+	if err != nil {
+		t.Fatalf("Orphans failed: %v", err)
+	}
+	if len(orphans) != 2 {
+		t.Fatalf("expected 2 orphans for empty live list, got %d", len(orphans))
+	}
+
+	// The store on disk must be untouched — Orphans only reports, never prunes.
+	sessions, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Errorf("Orphans must not modify the store: got %d sessions, want 2", len(sessions))
 	}
 }

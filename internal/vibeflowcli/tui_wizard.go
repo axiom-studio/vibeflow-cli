@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -62,62 +62,62 @@ const (
 
 // WizardResult holds the output of a completed wizard.
 type WizardResult struct {
-	SessionType          string // "vanilla" or "vibeflow"
-	ProjectID            int64  // VibeFlow project ID (vibeflow sessions only).
-	ProjectName          string // VibeFlow project name (vibeflow sessions only).
+	SessionType          string   // "vanilla" or "vibeflow"
+	ProjectID            int64    // VibeFlow project ID (vibeflow sessions only).
+	ProjectName          string   // VibeFlow project name (vibeflow sessions only).
 	Persona              string   // Persona key (vibeflow sessions only, e.g. "developer"). First selected persona for backward compat.
 	Personas             []string // All selected persona keys (vibeflow sessions only). Used for multi-session spawning.
 	Provider             Provider
 	ProviderKey          string
 	PersonaProviders     map[string]string // Optional persona key → provider key override for team mode. Missing/empty value means inherit ProviderKey.
 	Branch               string
-	NewBranch            bool   // True if user chose to create a new branch.
+	NewBranch            bool // True if user chose to create a new branch.
 	WorktreeChoice       WorktreeChoice
 	SkipPermissions      bool
-	WorktreeName         string // Custom worktree directory name, or "" for auto-generated.
-	CustomBinaryPath     string // User-provided absolute path if binary was not on PATH.
-	ExistingWorktreePath string // Path of existing worktree to reuse (when WorktreeExisting).
-	CustomBaseDir        string // Custom base directory for worktree (when WorktreeCustom).
-	SpecifiedWorkDir     string // User-specified working directory (when WorktreeSpecifyDir).
-	NewBranchBase        string // Start-point for new branch creation (e.g. "main"). Empty means git default.
-	ReuseSessionID       string // Session ID from a previous conflict to reuse via session_init.
-	WorkDir              string // Project root directory selected in StepWorkDir.
+	WorktreeName         string            // Custom worktree directory name, or "" for auto-generated.
+	CustomBinaryPath     string            // User-provided absolute path if binary was not on PATH.
+	ExistingWorktreePath string            // Path of existing worktree to reuse (when WorktreeExisting).
+	CustomBaseDir        string            // Custom base directory for worktree (when WorktreeCustom).
+	SpecifiedWorkDir     string            // User-specified working directory (when WorktreeSpecifyDir).
+	NewBranchBase        string            // Start-point for new branch creation (e.g. "main"). Empty means git default.
+	ReuseSessionID       string            // Session ID from a previous conflict to reuse via session_init.
+	WorkDir              string            // Project root directory selected in StepWorkDir.
 	EnvVars              map[string]string // Extra env vars to set on the tmux session.
-	LLMGatewayEnabled    bool   // True if user opted to route LLM requests through the gateway.
+	LLMGatewayEnabled    bool              // True if user opted to route LLM requests through the gateway.
 }
 
 // WizardModel is a Bubble Tea sub-model for multi-step session creation.
 type WizardModel struct {
-	step     WizardStep
-	cursor   int
-	done     bool
+	step      WizardStep
+	cursor    int
+	done      bool
 	cancelled bool
 
 	// Data sources.
-	sessionTypeOpts    []string
-	projects           []Project
-	filteredProjects   []int // indices into projects slice after filtering
-	providers          []providerEntry
-	branches           []string
-	worktreeOpts       []string
-	permissionOpts     []string
-	existingWorktrees  map[string]string // branch → existing worktree path
-	defaultProject     string            // pre-select from config
+	sessionTypeOpts   []string
+	projects          []Project
+	filteredProjects  []int // indices into projects slice after filtering
+	providers         []providerEntry
+	branches          []string
+	worktreeOpts      []string
+	permissionOpts    []string
+	existingWorktrees map[string]string // branch → existing worktree path
+	defaultProject    string            // pre-select from config
 
 	// Persona data.
-	personas         []personaEntry
+	personas []personaEntry
 
 	// Directory selection (StepWorkDir).
-	dirHistory       []string // Recent directories from config.
-	dirOpts          []string // Display options: "[+] Enter new path" + history entries.
-	selectedWorkDir  string   // Resolved working directory path.
-	editingWorkDir   bool     // True when text input for new directory is active.
-	workDirInput     string   // Text input for new directory.
-	workDirErr       string   // Validation error for directory.
-	repoRoot         string   // Initial repo root from caller.
-	registry         *ProviderRegistry // Provider registry for re-loading on dir change.
-	client           *Client           // API client (may be nil).
-	config           *Config           // Config for saved env vars and persisting.
+	dirHistory      []string          // Recent directories from config.
+	dirOpts         []string          // Display options: "[+] Enter new path" + history entries.
+	selectedWorkDir string            // Resolved working directory path.
+	editingWorkDir  bool              // True when text input for new directory is active.
+	workDirInput    string            // Text input for new directory.
+	workDirErr      string            // Validation error for directory.
+	repoRoot        string            // Initial repo root from caller.
+	registry        *ProviderRegistry // Provider registry for re-loading on dir change.
+	client          *Client           // API client (may be nil).
+	config          *Config           // Config for saved env vars and persisting.
 
 	// Selections.
 	selectedSessionType int
@@ -141,13 +141,13 @@ type WizardModel struct {
 	filteredBranches   []int // indices into branches slice (always includes index 0 = "[+] Create new")
 
 	// Text input state.
-	worktreeName    string // Custom name entered by user.
-	editingName     bool   // True when text input for worktree name is active.
-	newBranchName   string // New branch name entered by user.
-	editingBranch   bool   // True when text input for new branch name is active.
-	binaryPath      string // Custom binary path entered by user.
-	editingBinary   bool   // True when text input for binary path is active.
-	binaryPathErr   string // Validation error for binary path.
+	worktreeName        string // Custom name entered by user.
+	editingName         bool   // True when text input for worktree name is active.
+	newBranchName       string // New branch name entered by user.
+	editingBranch       bool   // True when text input for new branch name is active.
+	binaryPath          string // Custom binary path entered by user.
+	editingBinary       bool   // True when text input for binary path is active.
+	binaryPathErr       string // Validation error for binary path.
 	customBaseDir       string // Custom base directory for worktree.
 	editingCustomDir    bool   // True when text input for custom dir is active.
 	customDirErr        string // Validation error for custom dir.
@@ -156,17 +156,18 @@ type WizardModel struct {
 	specifiedWorkDirErr string // Validation error for specified work dir.
 
 	// Env token input (StepEnvToken).
-	envTokenVarName string // Name of the env var to prompt for (e.g. "MCP_TOKEN").
-	envTokenValue   string // User-entered value for the env var.
-	editingEnvToken bool   // True when text input for env token is active.
+	envTokenVarName string            // Name of the env var to prompt for (e.g. "MCP_TOKEN").
+	envTokenValue   string            // User-entered value for the env var.
+	editingEnvToken bool              // True when text input for env token is active.
 	envVars         map[string]string // Resolved env vars to pass to session.
 
 	// LLM Gateway (StepLLMGateway).
-	llmGatewayOpts    []string // Display options for gateway step.
-	selectedLLMGateway int     // 0 = Yes, 1 = No.
-	llmGatewayEnabled bool     // True if user chose to route through gateway.
+	llmGatewayOpts     []string // Display options for gateway step.
+	selectedLLMGateway int      // 0 = Yes, 1 = No.
+	llmGatewayEnabled  bool     // True if user chose to route through gateway.
 
-	// Qwen launch config (StepQwenLaunchConfig — qwen + non-gateway flow only).
+	// Qwen launch config (StepQwenLaunchConfig — all qwen flows; in gateway
+	// mode only the model selection is committed).
 	qwenVendorIdx    int    // index into qwenLaunchPresets()
 	qwenModelInput   string // OPENAI_MODEL value, auto-filled from preset, editable.
 	qwenBaseURLInput string // OPENAI_BASE_URL value, auto-filled from preset, editable.
@@ -182,6 +183,14 @@ type WizardModel struct {
 	// Quick branch switch mode.
 	quickSwitch  bool         // True when wizard is running as a 2-step branch switch.
 	switchSource *SessionMeta // Original session metadata for quick switch.
+
+	// Group edit mode (hotkey `e`): reshape a running group's persona lineup.
+	// Runs a reduced StepTeam → StepProvider → StepConfirm flow that inherits
+	// repo/branch/workdir/provider from the anchor session; only the persona set
+	// and per-persona providers are editable.
+	groupEdit    bool         // True when the wizard runs as a group edit.
+	groupAnchor  *SessionMeta // Anchor session whose repo+branch+settings the group shares.
+	groupRunning []string     // Persona keys already running in the group (for the confirm diff).
 
 	result WizardResult
 }
@@ -304,32 +313,32 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		personaProviderIdx[i] = -1 // -1 = inherit team default
 	}
 	return WizardModel{
-		step:              StepWorkDir,
-		sessionTypeOpts:   []string{"Vanilla", "VibeFlow"},
-		projects:          projects,
-		filteredProjects:  filtered,
-		defaultProject:    defaultProject,
-		projectErr:        projectErr,
-		personas:          personasList,
-		selectedPersonas:  map[int]bool{0: true}, // Pre-select "developer" (index 0).
+		step:               StepWorkDir,
+		sessionTypeOpts:    []string{"Vanilla", "VibeFlow"},
+		projects:           projects,
+		filteredProjects:   filtered,
+		defaultProject:     defaultProject,
+		projectErr:         projectErr,
+		personas:           personasList,
+		selectedPersonas:   map[int]bool{0: true}, // Pre-select "developer" (index 0).
 		personaProviderIdx: personaProviderIdx,
-		providers:         entries,
-		branches:          branches,
-		filteredBranches:  filteredBr,
-		existingWorktrees: existingWts,
-		worktreeOpts:      []string{"New worktree", "Specify directory", "Current directory"},
-		llmGatewayOpts:    []string{"Yes — Route through gateway", "No — Connect directly to provider"},
+		providers:          entries,
+		branches:           branches,
+		filteredBranches:   filteredBr,
+		existingWorktrees:  existingWts,
+		worktreeOpts:       []string{"New worktree", "Specify directory", "Current directory"},
+		llmGatewayOpts:     []string{"Yes — Route through gateway", "No — Connect directly to provider"},
 		selectedLLMGateway: savedGatewayChoice,
-		llmGatewayEnabled: cfg != nil && cfg.LLMGatewayEnabled,
-		permissionOpts:    []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
-		dirHistory:        dirHistory,
-		dirOpts:           dirOpts,
-		repoRoot:          repoRoot,
-		registry:          registry,
-		client:            client,
-		config:            cfg,
-		currentBranch:     GetGitBranch(repoRoot),
-		defaultBranch:     getDefaultBranch(repoRoot),
+		llmGatewayEnabled:  cfg != nil && cfg.LLMGatewayEnabled,
+		permissionOpts:     []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
+		dirHistory:         dirHistory,
+		dirOpts:            dirOpts,
+		repoRoot:           repoRoot,
+		registry:           registry,
+		client:             client,
+		config:             cfg,
+		currentBranch:      GetGitBranch(repoRoot),
+		defaultBranch:      getDefaultBranch(repoRoot),
 	}
 }
 
@@ -396,28 +405,28 @@ func NewQuickSwitchWizard(meta SessionMeta, registry *ProviderRegistry, repoRoot
 		personaProviderIdx[i] = -1
 	}
 	w := WizardModel{
-		step:               StepBranch,
-		personas:           personas,
-		selectedPersonas:   selectedPersonas,
-		selectedPersona:    selectedPersona,
+		step:                StepBranch,
+		personas:            personas,
+		selectedPersonas:    selectedPersonas,
+		selectedPersona:     selectedPersona,
 		selectedSessionType: sessionType,
-		providers:          entries,
-		selectedProvider:   selectedProvider,
-		personaProviderIdx: personaProviderIdx,
-		branches:           branches,
-		filteredBranches:   filteredBr,
-		existingWorktrees:  existingWts,
-		worktreeOpts:       []string{"New worktree", "Custom location", "Specify directory", "Current directory"},
-		permissionOpts:     []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
-		repoRoot:           repoRoot,
-		registry:           registry,
-		config:             cfg,
-		currentBranch:      GetGitBranch(repoRoot),
-		defaultBranch:      getDefaultBranch(repoRoot),
-		selectedWorkDir:    repoRoot,
-		llmGatewayEnabled:  meta.LLMGatewayEnabled,
-		quickSwitch:        true,
-		switchSource:       &meta,
+		providers:           entries,
+		selectedProvider:    selectedProvider,
+		personaProviderIdx:  personaProviderIdx,
+		branches:            branches,
+		filteredBranches:    filteredBr,
+		existingWorktrees:   existingWts,
+		worktreeOpts:        []string{"New worktree", "Custom location", "Specify directory", "Current directory"},
+		permissionOpts:      []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
+		repoRoot:            repoRoot,
+		registry:            registry,
+		config:              cfg,
+		currentBranch:       GetGitBranch(repoRoot),
+		defaultBranch:       getDefaultBranch(repoRoot),
+		selectedWorkDir:     repoRoot,
+		llmGatewayEnabled:   meta.LLMGatewayEnabled,
+		quickSwitch:         true,
+		switchSource:        &meta,
 	}
 	w.cursorToCurrentBranch()
 	return w
@@ -485,6 +494,266 @@ func (w WizardModel) buildQuickSwitchResult() (WizardModel, tea.Cmd) {
 	return w, nil
 }
 
+// NewGroupEditWizard creates a wizard pre-filled from a running group, starting
+// at StepTeam. Used by the 'e' keybinding to add/remove personas in a group
+// without re-entering the shared repo/branch/provider. `group` is the set of
+// running sessions that share the anchor's repo root and branch; `anchor` is the
+// selected session those settings are inherited from. The flow is
+// StepTeam → StepProvider → StepConfirm — every other step is inherited.
+func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, cfg *Config) WizardModel {
+	// Provider list from the registry (same shape as the other constructors).
+	entries := make([]providerEntry, 0)
+	for _, key := range providerKeys(registry) {
+		p, _ := registry.Get(key)
+		entries = append(entries, providerEntry{
+			key:       key,
+			provider:  p,
+			available: registry.IsAvailable(key),
+		})
+	}
+	providerIdxByKey := make(map[string]int, len(entries))
+	selectedProvider := 0
+	for i, pe := range entries {
+		providerIdxByKey[pe.key] = i
+		if pe.key == anchor.Provider {
+			selectedProvider = i
+		}
+	}
+
+	personas := defaultPersonas()
+	personaIdxByKey := make(map[string]int, len(personas))
+	for i, p := range personas {
+		personaIdxByKey[p.key] = i
+	}
+
+	selectedPersonas := make(map[int]bool)
+	personaProviderIdx := make([]int, len(personas))
+	for i := range personaProviderIdx {
+		personaProviderIdx[i] = -1 // -1 = inherit the team-default provider.
+	}
+
+	// Pre-check every persona currently running in the group and seed its
+	// per-persona provider override when it differs from the team default.
+	var running []string
+	for _, meta := range group {
+		pi, ok := personaIdxByKey[meta.Persona]
+		if !ok {
+			continue
+		}
+		if selectedPersonas[pi] {
+			continue // already recorded (defensive against duplicate metas)
+		}
+		selectedPersonas[pi] = true
+		running = append(running, meta.Persona)
+		if meta.Provider != "" && meta.Provider != anchor.Provider {
+			if idx, ok := providerIdxByKey[meta.Provider]; ok {
+				personaProviderIdx[pi] = idx
+			}
+		}
+	}
+	// Fallback: always have at least the anchor persona checked.
+	if len(selectedPersonas) == 0 {
+		if pi, ok := personaIdxByKey[anchor.Persona]; ok {
+			selectedPersonas[pi] = true
+			running = append(running, anchor.Persona)
+		}
+	}
+
+	sessionType := 0
+	if anchor.SessionType == "vibeflow" {
+		sessionType = 1
+	}
+	permission := 1 // Keep permissions (interactive).
+	if anchor.SkipPermissions {
+		permission = 0 // Skip permissions (autonomous).
+	}
+
+	a := anchor
+	w := WizardModel{
+		step:                StepTeam,
+		personas:            personas,
+		selectedPersonas:    selectedPersonas,
+		personaProviderIdx:  personaProviderIdx,
+		providers:           entries,
+		selectedProvider:    selectedProvider,
+		selectedSessionType: sessionType,
+		selectedPermission:  permission,
+		// Group edit reuses the anchor's directory — the worktree step is
+		// skipped, but a single "Current directory" option keeps any lookup by
+		// selectedWorktree well-defined.
+		worktreeOpts:      []string{"Current directory"},
+		selectedWorktree:  0,
+		permissionOpts:    []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
+		branches:          []string{anchor.Branch},
+		filteredBranches:  []int{0},
+		repoRoot:          repoRoot,
+		registry:          registry,
+		config:            cfg,
+		currentBranch:     anchor.Branch,
+		defaultBranch:     anchor.Branch,
+		selectedWorkDir:   anchor.WorkingDir,
+		llmGatewayEnabled: anchor.LLMGatewayEnabled,
+		groupEdit:         true,
+		groupAnchor:       &a,
+		groupRunning:      running,
+	}
+	return w
+}
+
+// buildGroupEditResult constructs a WizardResult for group edit, inheriting the
+// shared settings (repo/branch/workdir/session type/permissions/gateway) from the
+// anchor and carrying the desired persona set plus per-persona provider overrides.
+// The TUI diffs result.Personas against the running group to decide what to spawn
+// and what to kill.
+func (w WizardModel) buildGroupEditResult() (WizardModel, tea.Cmd) {
+	pe := w.providers[w.selectedProvider]
+
+	var persona string
+	var personas []string
+	for i := 0; i < len(w.personas); i++ {
+		if w.selectedPersonas[i] {
+			personas = append(personas, w.personas[i].key)
+		}
+	}
+	if len(personas) > 0 {
+		persona = personas[0]
+	}
+
+	// Per-persona provider overrides (same shape as team mode).
+	var personaProviders map[string]string
+	for _, personaIdx := range w.selectedPersonaIndices() {
+		idx := w.personaProviderIdx[personaIdx]
+		if idx < 0 || idx >= len(w.providers) {
+			continue
+		}
+		if w.providers[idx].key == pe.key {
+			continue // matches team default — no override needed.
+		}
+		if personaProviders == nil {
+			personaProviders = make(map[string]string)
+		}
+		personaProviders[w.personas[personaIdx].key] = w.providers[idx].key
+	}
+
+	env, _ := ResolveProviderEnvVars(w.config, pe.key)
+	a := w.groupAnchor
+	w.result = WizardResult{
+		SessionType:       a.SessionType,
+		ProjectName:       a.Project,
+		Persona:           persona,
+		Personas:          personas,
+		Provider:          pe.provider,
+		ProviderKey:       pe.key,
+		PersonaProviders:  personaProviders,
+		Branch:            a.Branch,
+		NewBranch:         false,
+		WorktreeChoice:    WorktreeCurrent,
+		SkipPermissions:   a.SkipPermissions,
+		WorkDir:           a.WorkingDir,
+		EnvVars:           env,
+		LLMGatewayEnabled: a.LLMGatewayEnabled,
+	}
+	w.done = true
+	return w, nil
+}
+
+// diffGroupPersonas computes which personas must be spawned (in desired but not
+// running) and which must be stopped (running but no longer desired). Adds keep
+// desired order; removes keep running order. Pure — unit tested directly.
+func diffGroupPersonas(running, desired []string) (toAdd, toRemove []string) {
+	runningSet := make(map[string]bool, len(running))
+	for _, p := range running {
+		runningSet[p] = true
+	}
+	desiredSet := make(map[string]bool, len(desired))
+	for _, p := range desired {
+		desiredSet[p] = true
+	}
+	for _, p := range desired {
+		if !runningSet[p] {
+			toAdd = append(toAdd, p)
+		}
+	}
+	for _, p := range running {
+		if !desiredSet[p] {
+			toRemove = append(toRemove, p)
+		}
+	}
+	return toAdd, toRemove
+}
+
+// groupEditConfirmView renders the group-edit confirmation: the shared repo/branch
+// header plus a keep/add/remove breakdown of the persona lineup with each
+// persona's resolved provider. It reuses diffGroupPersonas so the preview matches
+// exactly what the TUI will spawn and kill on confirm.
+func (w WizardModel) groupEditConfirmView() string {
+	var b strings.Builder
+	b.WriteString("Confirm group edit:\n\n")
+
+	if a := w.groupAnchor; a != nil {
+		repo := filepath.Base(a.WorkingDir)
+		if repo == "" || repo == "." || repo == "/" {
+			repo = a.Project
+		}
+		b.WriteString(fmt.Sprintf("  Repo/Branch:  %s @ %s\n", repo, a.Branch))
+	}
+	b.WriteString(fmt.Sprintf("  Provider:     %s\n\n", w.providers[w.selectedProvider].provider.Name))
+
+	// Desired set in persona display order.
+	var desired []string
+	for i := 0; i < len(w.personas); i++ {
+		if w.selectedPersonas[i] {
+			desired = append(desired, w.personas[i].key)
+		}
+	}
+	toAdd, toRemove := diffGroupPersonas(w.groupRunning, desired)
+	addSet := make(map[string]bool, len(toAdd))
+	for _, p := range toAdd {
+		addSet[p] = true
+	}
+
+	addStyle := lipgloss.NewStyle().Foreground(oceanSuccess)
+	removeStyle := lipgloss.NewStyle().Foreground(errorColor)
+	dim := lipgloss.NewStyle().Foreground(dimColor)
+
+	b.WriteString("  Personas:\n")
+	for i := 0; i < len(w.personas); i++ {
+		if !w.selectedPersonas[i] {
+			continue
+		}
+		name := w.personas[i].displayName
+		prov := w.providers[w.resolvedProviderForPersona(i)].provider.Name
+		if addSet[w.personas[i].key] {
+			b.WriteString(addStyle.Render(fmt.Sprintf("    + %-18s %s", name, prov)))
+			b.WriteString(dim.Render("  (new)") + "\n")
+		} else {
+			b.WriteString(fmt.Sprintf("      %-18s %s\n", name, prov))
+		}
+	}
+	for _, p := range toRemove {
+		b.WriteString(removeStyle.Render(fmt.Sprintf("    - %-18s", w.personaDisplayName(p))))
+		b.WriteString(dim.Render("  (stop)") + "\n")
+	}
+	if len(toAdd) == 0 && len(toRemove) == 0 {
+		b.WriteString(dim.Render("    (no changes)\n"))
+	}
+
+	b.WriteString("\n")
+	b.WriteString(helpStyle.Render("enter: apply  esc: back"))
+	return b.String()
+}
+
+// personaDisplayName maps a persona key to its display name, falling back to the
+// key when unknown (e.g. a persona no longer in defaultPersonas()).
+func (w WizardModel) personaDisplayName(key string) string {
+	for _, p := range w.personas {
+		if p.key == key {
+			return p.displayName
+		}
+	}
+	return key
+}
+
 // Done returns true when the wizard has completed.
 func (w WizardModel) Done() bool { return w.done }
 
@@ -496,8 +765,13 @@ func (w WizardModel) Result() WizardResult { return w.result }
 
 // Update handles input for the wizard.
 func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
+	// Bubble Tea v2 delivers bracketed paste as its own message type; route it
+	// through the key path so text inputs receive pasted characters (v1 parity).
+	if p, ok := msg.(tea.PasteMsg); ok {
+		msg = tea.KeyPressMsg{Text: p.Content}
+	}
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		// Text input mode for working directory path.
 		if w.editingWorkDir {
 			switch msg.String() {
@@ -542,8 +816,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.workDirErr = ""
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidPathChar(byte(r)) {
 							w.workDirInput += string(r)
 						}
@@ -575,8 +849,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.newBranchName = w.newBranchName[:len(w.newBranchName)-1]
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidBranchChar(byte(r)) {
 							w.newBranchName += string(r)
 						}
@@ -605,8 +879,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.newBranchBase = w.newBranchBase[:len(w.newBranchBase)-1]
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidBranchChar(byte(r)) {
 							w.newBranchBase += string(r)
 						}
@@ -648,8 +922,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.binaryPathErr = ""
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidPathChar(byte(r)) {
 							w.binaryPath += string(r)
 						}
@@ -692,8 +966,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.cursor = min(w.cursor+1, len(w.filteredProjects)-1)
 				return w, nil
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if r >= ' ' && r <= '~' {
 							w.projectFilter += string(r)
 						}
@@ -724,8 +998,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.worktreeName = w.worktreeName[:len(w.worktreeName)-1]
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidNameChar(byte(r)) {
 							w.worktreeName += string(r)
 						}
@@ -776,8 +1050,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.customDirErr = ""
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidPathChar(byte(r)) {
 							w.customBaseDir += string(r)
 						}
@@ -830,8 +1104,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				w.specifiedWorkDirErr = ""
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if isValidPathChar(byte(r)) {
 							w.specifiedWorkDir += string(r)
 						}
@@ -862,17 +1136,25 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.config.SavedEnvVars[w.envTokenVarName] = w.envTokenValue
 						_ = SaveConfig(w.config, ConfigPath())
 					}
-					// For vibeflow sessions, show gateway step; otherwise jump to
-					// the qwen launch config (qwen-only) or directly to branch.
-					if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+					// Gateway-eligible vibeflow sessions get the gateway step;
+					// otherwise jump to the qwen launch config (qwen-only) or
+					// directly to branch.
+					if w.shouldShowGatewayStep() {
 						w.step = StepLLMGateway
 						w.cursor = w.selectedLLMGateway
-					} else if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
-						w.enterQwenLaunchConfig()
 					} else {
-						w.step = StepBranch
-						w.cursor = 0
-						w.cursorToCurrentBranch()
+						// Gateway step skipped (non-vibeflow session, no API
+						// token, or a direct-only provider like qwen/cursor):
+						// force direct mode so a gateway preference saved by a
+						// previous provider can't leak in.
+						w.llmGatewayEnabled = false
+						if w.postProviderConfigStep() == StepQwenLaunchConfig {
+							w.enterQwenLaunchConfig()
+						} else {
+							w.step = StepBranch
+							w.cursor = 0
+							w.cursorToCurrentBranch()
+						}
 					}
 				}
 			case "esc":
@@ -885,8 +1167,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.envTokenValue = w.envTokenValue[:len(w.envTokenValue)-1]
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if r >= ' ' && r <= '~' {
 							w.envTokenValue += string(r)
 						}
@@ -928,8 +1210,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.cursor = min(w.cursor+1, len(w.filteredBranches)-1)
 				return w, nil
 			default:
-				if msg.Type == tea.KeyRunes {
-					for _, r := range msg.Runes {
+				if msg.Text != "" {
+					for _, r := range msg.Text {
 						if r >= ' ' && r <= '~' {
 							w.branchFilter += string(r)
 						}
@@ -994,8 +1276,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				}
 				return w, nil
 			default:
-				if isInputRow && msg.Type == tea.KeyRunes {
-					for _, ch := range msg.Runes {
+				if isInputRow && msg.Text != "" {
+					for _, ch := range msg.Text {
 						if ch >= ' ' && ch <= '~' {
 							if isModelRow {
 								w.qwenModelInput += string(ch)
@@ -1045,7 +1327,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.personaProviderIdx[order[rowIdx]] = -1
 				}
 			}
-		case " ":
+		case "space":
 			// Space toggles persona selection in team step.
 			if w.step == StepTeam && w.cursor >= 0 && w.cursor < len(w.personas) {
 				key := w.personas[w.cursor].key
@@ -1397,7 +1679,11 @@ func (w WizardModel) View() string {
 		cursorMark := accent.Render("█")
 
 		b.WriteString("Qwen launch config:\n")
-		b.WriteString(dim.Render("(API-key mode — sets OPENAI_BASE_URL + OPENAI_MODEL on the tmux session; OPENAI_API_KEY is captured by the env step)"))
+		if w.llmGatewayEnabled {
+			b.WriteString(dim.Render("(LLM Gateway mode — sets OPENAI_MODEL, the model the gateway routes to; endpoint + key come from the gateway)"))
+		} else {
+			b.WriteString(dim.Render("(API-key mode — sets OPENAI_BASE_URL + OPENAI_MODEL on the tmux session; OPENAI_API_KEY is captured by the env step)"))
+		}
 		b.WriteString("\n\nVendor:\n")
 		for i, p := range presets {
 			marker := "  "
@@ -1414,6 +1700,11 @@ func (w WizardModel) View() string {
 
 		modelLine := fmt.Sprintf("  Model:    %s", w.qwenModelInput)
 		baseLine := fmt.Sprintf("  Base URL: %s", w.qwenBaseURLInput)
+		if w.llmGatewayEnabled {
+			// Plain text (not dim.Render) — baseLine is itself re-rendered
+			// through dim below, and nested ANSI resets garble the output.
+			baseLine += " (ignored — gateway endpoint is used)"
+		}
 		if w.cursor == modelRowIdx {
 			b.WriteString("> " + strings.TrimPrefix(modelLine, "  "))
 			b.WriteString(cursorMark)
@@ -1590,6 +1881,9 @@ func (w WizardModel) View() string {
 		}
 
 	case StepConfirm:
+		if w.groupEdit {
+			return w.groupEditConfirmView()
+		}
 		b.WriteString("Confirm session:\n\n")
 		if w.selectedWorkDir != "" {
 			b.WriteString(fmt.Sprintf("  Directory:     %s\n", w.selectedWorkDir))
@@ -1664,8 +1958,9 @@ func (w WizardModel) View() string {
 			}
 			b.WriteString(fmt.Sprintf("  LLM Gateway:   %s\n", gw))
 		}
-		// Qwen launch config summary — only shown when the qwen step ran.
-		if pe.key == "qwen" && !w.llmGatewayEnabled {
+		// Qwen launch config summary — shown whenever the qwen step ran. In
+		// gateway mode the base URL is omitted (the gateway endpoint is used).
+		if pe.key == "qwen" {
 			presets := qwenLaunchPresets()
 			vendorLabel := "Custom"
 			if w.qwenVendorIdx >= 0 && w.qwenVendorIdx < len(presets) {
@@ -1675,7 +1970,7 @@ func (w WizardModel) View() string {
 			if w.qwenModelInput != "" {
 				b.WriteString(fmt.Sprintf("  Qwen Model:    %s\n", w.qwenModelInput))
 			}
-			if w.qwenBaseURLInput != "" {
+			if w.qwenBaseURLInput != "" && !w.llmGatewayEnabled {
 				b.WriteString(fmt.Sprintf("  Qwen Base URL: %s\n", w.qwenBaseURLInput))
 			}
 		}
@@ -1821,17 +2116,32 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			return w, nil
 		}
 		w.envVars = env
-		// For vibeflow sessions with API token, show gateway step. Otherwise
+		// Group edit inherits branch/worktree/permissions/gateway from the
+		// anchor — jump straight to confirm after the (per-persona) provider
+		// selection. The anchor's provider is already configured, so the
+		// missing-token branch above is unreachable here.
+		if w.groupEdit {
+			w.step = StepConfirm
+			w.cursor = 0
+			return w, nil
+		}
+		// Gateway-eligible vibeflow sessions get the gateway step; otherwise
 		// advance to the qwen launch config (qwen-only) or directly to branch.
-		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+		if w.shouldShowGatewayStep() {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
-		} else if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
-			w.enterQwenLaunchConfig()
 		} else {
-			w.step = StepBranch
-			w.cursor = 0
-			w.cursorToCurrentBranch()
+			// Gateway step skipped (non-vibeflow session, no API token, or a
+			// direct-only provider like qwen/cursor): force direct mode so a
+			// gateway preference saved by a previous provider can't leak in.
+			w.llmGatewayEnabled = false
+			if w.postProviderConfigStep() == StepQwenLaunchConfig {
+				w.enterQwenLaunchConfig()
+			} else {
+				w.step = StepBranch
+				w.cursor = 0
+				w.cursorToCurrentBranch()
+			}
 		}
 	case StepLLMGateway:
 		w.selectedLLMGateway = w.cursor
@@ -1854,11 +2164,13 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		return w, nil
 	case StepQwenLaunchConfig:
 		// Commit the qwen launch values into the env block that the result
-		// build later carries through to the tmux session.
+		// build later carries through to the tmux session. In gateway mode
+		// only the model is committed — the endpoint and key come from
+		// BuildLLMGatewayEnv (which would override OPENAI_BASE_URL anyway).
 		if w.envVars == nil {
 			w.envVars = make(map[string]string)
 		}
-		if w.qwenBaseURLInput != "" {
+		if w.qwenBaseURLInput != "" && !w.llmGatewayEnabled {
 			w.envVars["OPENAI_BASE_URL"] = w.qwenBaseURLInput
 		} else {
 			delete(w.envVars, "OPENAI_BASE_URL")
@@ -1936,6 +2248,9 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		w.step = StepConfirm
 		w.cursor = 0
 	case StepConfirm:
+		if w.groupEdit {
+			return w.buildGroupEditResult()
+		}
 		pe := w.providers[w.selectedProvider]
 		// Determine worktree choice from selected option text.
 		wtChoice := WorktreeCurrent
@@ -2129,6 +2444,11 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.step = StepSessionType
 		w.cursor = w.selectedSessionType
 	case StepTeam:
+		if w.groupEdit {
+			// StepTeam is the first group-edit step — esc cancels.
+			w.cancelled = true
+			return w, nil
+		}
 		w.step = StepProject
 		w.cursor = 0
 		w.projectFilterActive = true
@@ -2155,7 +2475,7 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		// else fall back to the provider step.
 		if w.postProviderConfigStep() == StepQwenLaunchConfig {
 			w.enterQwenLaunchConfig()
-		} else if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+		} else if w.shouldShowGatewayStep() {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
 		} else {
@@ -2165,7 +2485,7 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 	case StepQwenLaunchConfig:
 		// Reverse of advance(): if the user came from the gateway step, return
 		// there; otherwise jump back to the provider step.
-		if w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != "" {
+		if w.shouldShowGatewayStep() {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
 		} else {
@@ -2186,6 +2506,12 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.step = StepWorktree
 		w.cursor = w.selectedWorktree
 	case StepConfirm:
+		if w.groupEdit {
+			// Group edit skips the permissions step — go back to provider.
+			w.step = StepProvider
+			w.cursor = 0
+			return w, nil
+		}
 		w.step = StepPermissions
 		w.cursor = w.selectedPermission
 	}
@@ -2339,32 +2665,7 @@ func isGitRepo(dir string) bool {
 
 // providerKeys returns sorted provider keys from the registry.
 func providerKeys(r *ProviderRegistry) []string {
-	list := r.List()
-	keys := make([]string, 0, len(list))
-	// List() returns sorted by name; we need keys.
-	// Re-derive by matching names — or just iterate the map via a method.
-	// Since ProviderRegistry doesn't expose keys directly, we check known keys.
-	// Better approach: iterate all and collect.
-	seen := make(map[string]bool)
-	for _, p := range list {
-		for _, candidate := range []string{"claude", "codex", "cursor", "gemini", "qwen"} {
-			if got, ok := r.Get(candidate); ok && got.Name == p.Name && !seen[candidate] {
-				keys = append(keys, candidate)
-				seen[candidate] = true
-				break
-			}
-		}
-		// Fallback for custom providers — use name as key.
-		if !seen[p.Name] {
-			// Try lowercase name.
-			lower := strings.ToLower(p.Name)
-			if _, ok := r.Get(lower); ok && !seen[lower] {
-				keys = append(keys, lower)
-				seen[lower] = true
-			}
-		}
-	}
-	return keys
+	return r.Keys()
 }
 
 // listGitBranches returns local and unique remote branch names via git CLI.
@@ -2448,16 +2749,45 @@ func (w *WizardModel) applyQwenPreset() {
 	w.qwenUserEdited = false
 }
 
+// providerSupportsGateway reports whether a provider can route LLM requests
+// through the Axiom Cloud LLM Gateway. qwen, cursor, and copilot connect
+// directly to their own backend (copilot talks only to GitHub's model
+// routing), so the wizard never offers them the gateway routing choice.
+func providerSupportsGateway(providerKey string) bool {
+	switch providerKey {
+	case "qwen", "cursor", "copilot":
+		return false
+	default:
+		return true
+	}
+}
+
+// shouldShowGatewayStep reports whether the wizard should present the LLM
+// Gateway routing choice (StepLLMGateway). It is offered only for vibeflow
+// sessions that have an API token configured AND a selected provider that
+// supports gateway routing (see providerSupportsGateway).
+func (w WizardModel) shouldShowGatewayStep() bool {
+	if w.selectedSessionType != 1 || w.config == nil || w.config.APIToken == "" {
+		return false
+	}
+	if w.selectedProvider < 0 || w.selectedProvider >= len(w.providers) {
+		return false
+	}
+	return providerSupportsGateway(w.providers[w.selectedProvider].key)
+}
+
 // postProviderConfigStep returns the wizard step that should follow the
-// env-token / LLM-gateway flow. Inserts StepQwenLaunchConfig when the
-// selected provider is "qwen" AND the LLM gateway is NOT enabled (gateway
-// supplies its own OPENAI_BASE_URL/API_KEY, making the step redundant).
+// env-token / LLM-gateway flow. Inserts StepQwenLaunchConfig whenever the
+// selected provider is "qwen": in direct (non-gateway) mode the step captures
+// vendor + model + base URL; in gateway mode the endpoint and key come from
+// the gateway, but the step still runs so the user picks the model the
+// gateway routes to (OPENAI_MODEL, e.g. glm-4.6 for z.ai).
 func (w WizardModel) postProviderConfigStep() WizardStep {
 	if w.selectedProvider < 0 || w.selectedProvider >= len(w.providers) {
 		return StepBranch
 	}
 	pe := w.providers[w.selectedProvider]
-	if pe.key == "qwen" && !w.llmGatewayEnabled {
+	if pe.key == "qwen" {
 		return StepQwenLaunchConfig
 	}
 	return StepBranch

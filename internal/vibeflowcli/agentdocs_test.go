@@ -243,7 +243,7 @@ func TestEnsureAllAgentDocs_CreatesAllFiles(t *testing.T) {
 
 	updated := EnsureAllAgentDocs(dir)
 	// Unique template files: CLAUDE.md, AGENTS.md, GEMINI.md, QWEN.md
-	// (cursor shares AGENTS.md with codex).
+	// (cursor and copilot share AGENTS.md with codex).
 	const wantUnique = 4
 	if len(updated) != wantUnique {
 		t.Errorf("expected %d files created, got %d", wantUnique, len(updated))

@@ -30,7 +30,17 @@ Create and launch a session without the full wizard. Key flags:
 | `--new-branch` | Create a new git branch (used with `--worktree`) |
 | `--worktree-name` | Custom worktree directory name (default: auto-generated) |
 | `--skip-permissions` | Skip permission prompts (autonomous mode) |
+| `--model` | Model id to pass to each launched provider session |
+| `--models` | Comma-separated `persona=model` overrides for team launches |
+| `--reuse` | Relaunch matching project/work-directory personas with their existing durable session IDs; removes older duplicates |
+| `--replace` | Stop matching persona sessions and launch fresh sessions with new IDs |
 | `--llm-gateway` | Route LLM requests through the VibeFlow server's LLM Gateway |
+| `--openshell` | Run the agent command inside an NVIDIA OpenShell sandbox |
+| `--openshell-sandbox` | OpenShell sandbox name |
+| `--openshell-from` | OpenShell sandbox image/base |
+| `--openshell-policy` | OpenShell policy YAML path |
+| `--openshell-provider` | Comma-separated OpenShell provider names to attach |
+| `--openshell-no-auto-providers` | Disable OpenShell credential auto-provider discovery |
 
 Examples:
 
@@ -38,7 +48,21 @@ Examples:
 vibeflow launch --provider claude --branch main
 vibeflow launch --provider cursor --worktree --new-branch
 vibeflow launch --provider codex --skip-permissions --llm-gateway
+vibeflow launch --provider claude --personas developer,architect --model sonnet --models developer=gpt-5.1-codex,architect=opus
+vibeflow launch --provider codex --project nimbus --personas developer,architect --reuse
 vibeflow launch --provider qwen --skip-permissions
+vibeflow launch --provider codex --openshell --openshell-sandbox vf-main
+```
+
+Model flags apply when the provider process starts and are stored in session metadata so `vibeflow restart` reuses the same model. They do not rewrite a model inside an already-running provider process. The model catalog is advisory: use `vibeflow models` to discover known ids, but launch accepts explicit model strings so new provider models work before the catalog is updated.
+
+### `vibeflow models [provider]`
+
+List curated model ids for the built-in providers. Pass a provider key to show one provider:
+
+```bash
+vibeflow models
+vibeflow models codex
 ```
 
 ### `vibeflow list` (alias: `ls`)

@@ -69,6 +69,21 @@ func TestBuildVibeflowInitPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildVibeflowCloudDispatchInitPrompt(t *testing.T) {
+	got := BuildVibeflowCloudDispatchInitPrompt("", "demo", "developer", "session-20260626-120000-abcd1234")
+	for _, want := range []string{
+		"Initialize a vibeflow session",
+		`dispatch_mode="cloud_queue"`,
+		"Do not call wait_for_work",
+		"VIBEFLOW_DISPATCH",
+		"session-20260626-120000-abcd1234",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cloud dispatch prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestDefaultMCPToolName(t *testing.T) {
 	if DefaultMCPToolName != "vibeflow" {
 		t.Errorf("DefaultMCPToolName = %q, want %q (changing this is a breaking behavioral change — every existing session restart would receive a different init prompt)", DefaultMCPToolName, "vibeflow")
@@ -107,6 +122,16 @@ func TestAppendVibeflowInitPrompt(t *testing.T) {
 			name:        "qwen — -i (continue interactive after prompt) — regression test for issue #1981",
 			providerKey: "qwen",
 			want:        `qwen --dangerously-skip-permissions -i 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,
+		},
+		{
+			name:        "kiro — positional argument (verified interactive, see doc comment)",
+			providerKey: "kiro",
+			want:        `kiro --dangerously-skip-permissions 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,
+		},
+		{
+			name:        "copilot — -i (start interactive and auto-execute, verified v1.0.79)",
+			providerKey: "copilot",
+			want:        `copilot --dangerously-skip-permissions -i 'Initialize a vibeflow session for project demo with persona "developer" and follow the agent prompt.'`,
 		},
 		{
 			name:        "unknown provider — defaults to positional",
@@ -162,7 +187,7 @@ func TestAppendQwenAPIFlags(t *testing.T) {
 		want        string
 	}{
 		{
-			name:        "qwen with all three env vars — emits all flags in key/base-url/model order",
+			name:        "qwen with all three env vars — emits base-url/model flags, never the key (issue #1993)",
 			providerKey: "qwen",
 			base:        "qwen --yolo",
 			env: map[string]string{
@@ -170,7 +195,7 @@ func TestAppendQwenAPIFlags(t *testing.T) {
 				"OPENAI_BASE_URL": "https://api.z.ai/api/coding/paas/v4",
 				"OPENAI_MODEL":    "GLM-4.6",
 			},
-			want: `qwen --yolo --openai-api-key 'sk-test-123' --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6'`,
+			want: `qwen --yolo --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6'`,
 		},
 		{
 			name:        "qwen gateway mode — only key + base-url present (no OPENAI_MODEL)",
@@ -180,16 +205,16 @@ func TestAppendQwenAPIFlags(t *testing.T) {
 				"OPENAI_API_KEY":  "gateway-token",
 				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
 			},
-			want: `qwen --yolo --openai-api-key 'gateway-token' --openai-base-url 'https://gateway.example/rest/v1/llm-gateway/v1'`,
+			want: `qwen --yolo --openai-base-url 'https://gateway.example/rest/v1/llm-gateway/v1'`,
 		},
 		{
-			name:        "qwen with only OPENAI_API_KEY — emits only the key flag",
+			name:        "qwen with only OPENAI_API_KEY — no flags; key is env-only (ps-aux exposure, issue #1993)",
 			providerKey: "qwen",
 			base:        "qwen --yolo",
 			env: map[string]string{
 				"OPENAI_API_KEY": "sk-test-123",
 			},
-			want: `qwen --yolo --openai-api-key 'sk-test-123'`,
+			want: `qwen --yolo`,
 		},
 		{
 			name:        "qwen with empty env values — no flags emitted (empty != present)",
@@ -261,7 +286,7 @@ func TestAppendQwenAPIFlags_EscapesSingleQuotes(t *testing.T) {
 		"OPENAI_MODEL":    "model'name",
 	}
 	got := AppendQwenAPIFlags("qwen", "qwen", env)
-	const want = `qwen --openai-api-key 'weird'\''key' --openai-base-url 'https://host/api?q=it'\''s' --model 'model'\''name'`
+	const want = `qwen --openai-base-url 'https://host/api?q=it'\''s' --model 'model'\''name'`
 	if got != want {
 		t.Errorf("AppendQwenAPIFlags escape:\n got:  %q\n want: %q", got, want)
 	}
@@ -279,9 +304,149 @@ func TestAppendQwenAPIFlags_OrderingWithInitPrompt(t *testing.T) {
 	cmd := "qwen --yolo"
 	cmd = AppendQwenAPIFlags(cmd, "qwen", env)
 	cmd = AppendVibeflowInitPrompt(cmd, "qwen", "hello world")
-	const want = `qwen --yolo --openai-api-key 'sk-test' --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6' -i 'hello world'`
+	const want = `qwen --yolo --openai-base-url 'https://api.z.ai/api/coding/paas/v4' --model 'GLM-4.6' -i 'hello world'`
 	if cmd != want {
 		t.Errorf("Ordering integration:\n got:  %q\n want: %q", cmd, want)
 	}
 }
+func TestAppendCodexGatewayProviderFlags(t *testing.T) {
+	tests := []struct {
+		name        string
+		providerKey string
+		base        string
+		env         map[string]string
+		wantPieces  []string
+	}{
+		{
+			name:        "codex with routed base URL",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env: map[string]string{
+				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
+			},
+			wantPieces: []string{
+				`codex --yolo -c 'model_provider="vibeflow_gateway"'`,
+				`-c 'model_providers.vibeflow_gateway.name="VibeFlowGateway"'`,
+				`-c 'model_providers.vibeflow_gateway.base_url="https://gateway.example/rest/v1/llm-gateway/v1"'`,
+				`-c model_providers.vibeflow_gateway.requires_openai_auth=true`,
+				`-c 'model_providers.vibeflow_gateway.wire_api="responses"'`,
+				`-c model_providers.vibeflow_gateway.supports_websockets=false`,
+				`-c 'model_providers.vibeflow_gateway.env_http_headers.x-axiom-api-key="GATEWAY_API_KEY"'`,
+			},
+		},
+		{
+			name:        "codex with special characters escapes as one arg",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env: map[string]string{
+				"OPENAI_BASE_URL": "https://host/api?q=it's",
+			},
+			wantPieces: []string{
+				`-c 'model_providers.vibeflow_gateway.base_url="https://host/api?q=it'\''s"'`,
+			},
+		},
+		{
+			name:        "non-codex provider unchanged",
+			providerKey: "claude",
+			base:        "claude --dangerously-skip-permissions",
+			env: map[string]string{
+				"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
+			},
+			wantPieces: []string{`claude --dangerously-skip-permissions`},
+		},
+		{
+			name:        "empty env leaves command unchanged",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env: map[string]string{
+				"OPENAI_BASE_URL": "",
+			},
+			wantPieces: []string{`codex --yolo`},
+		},
+		{
+			name:        "nil env leaves command unchanged",
+			providerKey: "codex",
+			base:        "codex --yolo",
+			env:         nil,
+			wantPieces:  []string{`codex --yolo`},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AppendCodexGatewayProviderFlags(tc.base, tc.providerKey, tc.env)
+			prev := -1
+			for _, want := range tc.wantPieces {
+				idx := strings.Index(got, want)
+				if idx < 0 {
+					t.Fatalf("AppendCodexGatewayProviderFlags(%q, %q, env) missing piece %q in %q",
+						tc.base, tc.providerKey, want, got)
+				}
+				if idx < prev {
+					t.Fatalf("AppendCodexGatewayProviderFlags(%q, %q, env) out of order: %q appears before previous piece in %q",
+						tc.base, tc.providerKey, want, got)
+				}
+				prev = idx
+			}
+		})
+	}
+}
 
+func TestAppendCodexGatewayProviderFlags_OrderingWithInitPrompt(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_BASE_URL": "https://gateway.example/rest/v1/llm-gateway/v1",
+	}
+	cmd := "codex --yolo"
+	cmd = AppendCodexGatewayProviderFlags(cmd, "codex", env)
+	cmd = AppendVibeflowInitPrompt(cmd, "codex", "hello world")
+	if !strings.HasSuffix(cmd, ` 'hello world'`) {
+		t.Fatalf("ordering integration: init prompt must remain the last argument, got %q", cmd)
+	}
+	if !strings.Contains(cmd, `-c 'model_provider="vibeflow_gateway"'`) {
+		t.Fatalf("ordering integration: missing Codex gateway provider flags in %q", cmd)
+	}
+	if !strings.Contains(cmd, `-c 'model_providers.vibeflow_gateway.env_http_headers.x-axiom-api-key="GATEWAY_API_KEY"'`) {
+		t.Fatalf("ordering integration: missing Codex gateway env_http_headers flag in %q", cmd)
+	}
+	if strings.Contains(cmd, "env_key") {
+		t.Fatalf("ordering integration: Codex gateway auth must not use env_key, got %q", cmd)
+	}
+}
+
+func TestApplyQwenModelPassthrough(t *testing.T) {
+	t.Run("copies shell OPENAI_MODEL for qwen when unset", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "glm-4.6")
+		env := map[string]string{"OPENAI_API_KEY": "tok"}
+		applyQwenModelPassthrough("qwen", env)
+		if env["OPENAI_MODEL"] != "glm-4.6" {
+			t.Errorf("OPENAI_MODEL = %q, want glm-4.6", env["OPENAI_MODEL"])
+		}
+	})
+	t.Run("existing session value wins over shell", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "shell-model")
+		env := map[string]string{"OPENAI_MODEL": "wizard-model"}
+		applyQwenModelPassthrough("qwen", env)
+		if env["OPENAI_MODEL"] != "wizard-model" {
+			t.Errorf("OPENAI_MODEL = %q, want wizard-model (session env wins)", env["OPENAI_MODEL"])
+		}
+	})
+	t.Run("non-qwen providers untouched", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "glm-4.6")
+		env := map[string]string{}
+		applyQwenModelPassthrough("codex", env)
+		if _, ok := env["OPENAI_MODEL"]; ok {
+			t.Error("codex must not receive the qwen model passthrough")
+		}
+	})
+	t.Run("no shell var is a no-op", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "")
+		env := map[string]string{}
+		applyQwenModelPassthrough("qwen", env)
+		if _, ok := env["OPENAI_MODEL"]; ok {
+			t.Error("empty shell var must not be copied")
+		}
+	})
+	t.Run("nil env is safe", func(t *testing.T) {
+		t.Setenv("OPENAI_MODEL", "glm-4.6")
+		applyQwenModelPassthrough("qwen", nil) // must not panic
+	})
+}

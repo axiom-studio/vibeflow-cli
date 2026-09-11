@@ -32,7 +32,7 @@ type Provider struct {
 	Binary             string            `yaml:"binary"`
 	LaunchTemplate     string            `yaml:"launch_template"`
 	PromptTemplate     string            `yaml:"prompt_template"`
-	Env                map[string]string  `yaml:"env"`
+	Env                map[string]string `yaml:"env"`
 	VibeFlowIntegrated bool              `yaml:"vibeflow_integrated"`
 	SessionFile        string            `yaml:"session_file"`
 	Default            bool              `yaml:"default"`
