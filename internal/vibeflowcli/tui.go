@@ -1941,7 +1941,8 @@ func (m Model) viewContent() string {
 	// Delegate to sub-views if active.
 	switch m.activeView {
 	case ViewWizard:
-		return m.wizard.View()
+		m.wizard.width = m.width
+		return lipgloss.NewStyle().Width(m.width).Render(m.wizard.View())
 	case ViewConflict:
 		return m.conflictModal.View()
 	case ViewWorktrees:
@@ -2015,6 +2016,9 @@ func (m Model) viewContent() string {
 			}
 		}
 		keys := fmt.Sprintf("n: new  enter: %s  m: project wb  M: all wb  d: delete  b: switch  e: edit grp  D: detach  g: group  w: worktrees  c: cloud  ?: help  q: quit", enterHint)
+		if lipgloss.Width(keys) > width {
+			keys = fmt.Sprintf("n: new  enter: %s  d: delete  c: cloud  ?: help  q: quit", enterHint)
+		}
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -2022,13 +2026,13 @@ func (m Model) viewContent() string {
 		tmuxInfo := helpStyle.Render("tmux -L " + socket)
 		keysRendered := helpStyle.Render(keys)
 		pad := width - lipgloss.Width(keysRendered) - lipgloss.Width(tmuxInfo)
-		if pad < 2 {
-			pad = 2
+		helpBar = keysRendered
+		if pad >= 2 {
+			helpBar += strings.Repeat(" ", pad) + tmuxInfo
 		}
-		helpBar = keysRendered + strings.Repeat(" ", pad) + tmuxInfo
 	}
 
-	// Column widths (in lipgloss v1, Width includes border + padding).
+	// Column widths include borders; lipgloss Width includes only padding.
 	leftWidth := width * 35 / 100
 	rightWidth := width - leftWidth
 	if leftWidth < 20 {
@@ -2080,13 +2084,13 @@ func (m Model) viewContent() string {
 
 	borderStyle := oceanBorder()
 	leftStyle := lipgloss.NewStyle().
-		Width(leftWidth).
+		Width(leftWidth-2).
 		Height(colHeight).
 		Border(borderStyle).
 		BorderForeground(dimColor).
 		Padding(0, 1)
 	rightStyle := lipgloss.NewStyle().
-		Width(rightWidth).
+		Width(rightWidth-2).
 		Height(colHeight).
 		Border(borderStyle).
 		BorderForeground(dimColor).

@@ -32,28 +32,40 @@ func TestView_FitsTerminalHeight_HelpBarLastRow(t *testing.T) {
 	cases := []struct {
 		name    string
 		warning string
+		width   int
 	}{
-		{"no warning line", ""},
-		{"with server warning line", "Server unreachable (test)"},
+		{"no warning line", "", 100},
+		{"with server warning line", "Server unreachable (test)", 100},
+		{"narrow terminal", "", 80},
+		{"wide terminal", "", 200},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := Model{
 				config:        &Config{},
 				hitmap:        &listHitmap{},
-				width:         100,
+				width:         tc.width,
 				height:        30,
 				sessions:      []SessionRow{{Name: "alpha"}, {Name: "beta"}},
 				serverWarning: tc.warning,
 			}
 			content := m.View().Content
+			if got := lipgloss.Width(content); got > m.width {
+				t.Errorf("dashboard width = %d, exceeds terminal width %d", got, m.width)
+			}
 			if got := lipgloss.Height(content); got != m.height {
 				t.Fatalf("rendered view height = %d, want exactly %d (overflow is cropped at the bottom in Bubble Tea v2)", got, m.height)
 			}
 			lines := strings.Split(content, "\n")
 			last := lines[len(lines)-1]
-			if !strings.Contains(last, "q: quit") {
+			if got := lipgloss.Width(strings.TrimRight(last, " ")); got > m.width {
+				t.Errorf("footer width = %d, exceeds terminal width %d", got, m.width)
+			}
+			if !strings.Contains(last, "q: quit") || !strings.Contains(last, "?: help") || !strings.Contains(last, "c: cloud") {
 				t.Fatalf("last row must carry the keyboard shortcuts bar, got: %q", last)
+			}
+			if tc.width == 200 && (!strings.Contains(last, "w: worktrees") || !strings.Contains(last, "tmux -L vibeflow")) {
+				t.Errorf("wide footer should retain all shortcuts and socket information: %q", last)
 			}
 		})
 	}
