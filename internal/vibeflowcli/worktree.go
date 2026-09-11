@@ -374,7 +374,11 @@ func ensureBranchCheckedOut(dir, branch string, create bool, base string, store 
 		if err != nil {
 			return fmt.Errorf("check sessions before switching branch: %w", err)
 		}
-		dirInfo, err := os.Stat(dir)
+		worktree, err := NewWorktreeManager(dir, "")
+		if err != nil {
+			return err
+		}
+		dirInfo, err := os.Stat(worktree.RepoRoot())
 		if err != nil {
 			return err
 		}
@@ -382,8 +386,16 @@ func ensureBranchCheckedOut(dir, branch string, create bool, base string, store 
 			if !tmux.HasSession(peer.TmuxSession) {
 				continue
 			}
-			peerInfo, err := os.Stat(peer.WorkingDir)
-			if !filepath.IsAbs(peer.WorkingDir) || err != nil || os.SameFile(dirInfo, peerInfo) {
+			_, err := os.Stat(peer.WorkingDir)
+			if !filepath.IsAbs(peer.WorkingDir) || err != nil {
+				return fmt.Errorf("session %q has an unknown working directory - stop it before switching branches", peer.Name)
+			}
+			peerWorktree, err := NewWorktreeManager(peer.WorkingDir, "")
+			if err != nil {
+				continue
+			} // A directory outside git cannot share this checkout.
+			peerInfo, err := os.Stat(peerWorktree.RepoRoot())
+			if err != nil || os.SameFile(dirInfo, peerInfo) {
 				return fmt.Errorf("session %q may be using this working directory - stop it first or choose a new worktree", peer.Name)
 			}
 		}

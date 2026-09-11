@@ -127,7 +127,7 @@ func (r RestartSelectModel) View() string {
 			check = "[✓]"
 		}
 
-		// Format: [✓] session-name  provider | persona | branch | project
+		// Keep restart mode beside the short name, before long metadata.
 		name := s.Name
 		if len(name) > 30 {
 			name = name[:27] + "..."
@@ -145,17 +145,18 @@ func (r RestartSelectModel) View() string {
 		}
 		// Say which of the two restarts this is, so the user is not guessing
 		// whether the agent comes back with its history (issue #4534).
+		mode := "fresh start (no exact conversation ID)"
 		if i < len(r.resumes) && r.resumes[i] {
-			details += " | resumes conversation"
-		} else {
-			details += " | fresh start (no exact conversation ID)"
+			mode = "resumes conversation"
 		}
 
-		line := fmt.Sprintf("%s%s %s  %s", cursor, check, name, lipgloss.NewStyle().Foreground(dimColor).Render(details))
+		line := fmt.Sprintf("%s%s %s  %s", cursor, check, name, mode)
 		if i == r.cursor {
 			line = selectedStyle.Render(line)
 		}
 		b.WriteString(line)
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("      " + details))
 		b.WriteString("\n")
 	}
 
