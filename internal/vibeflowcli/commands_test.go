@@ -18,6 +18,9 @@ package vibeflowcli
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,6 +46,39 @@ func TestCloudCmd_RegistersUseAndShort(t *testing.T) {
 		t.Fatal("cloud flag overrides not wired")
 	}
 
+}
+
+func TestCloudTUIReportsConfiguredProjectLookupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body, want string
+	}{
+		{"forbidden", http.StatusForbidden, "denied", "HTTP 403"},
+		{"missing", http.StatusOK, `[]`, "not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempRoot(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/rest/v1/vibeflow/projects" {
+					t.Errorf("unexpected startup request: %s", r.URL)
+				}
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+			cfg := DefaultConfig()
+			cfg.ServerURL = srv.URL
+			cfg.DefaultProject = "configured-project"
+			if err := SaveConfig(cfg, ConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			err := runCloudTUI(nil, nil)
+			if err == nil || !strings.Contains(err.Error(), "configured-project") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("project startup error=%v; want project name and %q", err, tc.want)
+			}
+		})
+	}
 }
 
 // TestRestartCmd_SkipPermissionsFlag verifies that `vibeflow restart`
