@@ -54,7 +54,7 @@ func TestCloudTUIReportsConfiguredProjectLookupFailure(t *testing.T) {
 		status     int
 		body, want string
 	}{
-		{"forbidden", http.StatusForbidden, "denied", "HTTP 403"},
+		{"forbidden", http.StatusForbidden, "denied\x1b]52;c;cGF5bG9hZA==\x07", "HTTP 403"},
 		{"missing", http.StatusOK, `[]`, "not found"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,6 +76,9 @@ func TestCloudTUIReportsConfiguredProjectLookupFailure(t *testing.T) {
 			err := runCloudTUI(nil, nil)
 			if err == nil || !strings.Contains(err.Error(), "configured-project") || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("project startup error=%v; want project name and %q", err, tc.want)
+			}
+			if strings.ContainsAny(err.Error(), "\x1b\x07") {
+				t.Fatalf("startup error contains terminal controls: %q", err)
 			}
 		})
 	}
