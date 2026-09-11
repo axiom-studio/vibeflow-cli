@@ -353,21 +353,40 @@ func effectiveBranch(workDir, requested string) string {
 //
 // A dirty tree refuses rather than checking out over uncommitted work, matching
 // the guard the switch/edit path in updateWizard has always applied. No-ops when
-// the branch is empty, the directory is not a git repo (or is detached), or the
+// the branch is empty, the directory is not a git repo, or the
 // branch is already the current one - the last case matters because it must not
 // refuse a dirty tree that is already exactly where it should be.
-func ensureBranchCheckedOut(dir, branch string, create bool, base string) error {
+func ensureBranchCheckedOut(dir, branch string, create bool, base string, store *Store, tmux *TmuxManager) error {
 	if dir == "" || branch == "" {
 		return nil
 	}
 	current := GetGitBranch(dir)
-	if current == "" || current == branch {
+	if current == branch || !isGitRepo(dir) {
 		return nil
 	}
 	if isDirtyGit(dir) {
 		return fmt.Errorf(
 			"working tree at %s is on %q but this session asks for %q, and it has uncommitted changes - commit/stash first, or choose 'New worktree'",
 			dir, current, branch)
+	}
+	if store != nil && tmux != nil {
+		peers, err := store.List()
+		if err != nil {
+			return fmt.Errorf("check sessions before switching branch: %w", err)
+		}
+		dirInfo, err := os.Stat(dir)
+		if err != nil {
+			return err
+		}
+		for _, peer := range peers {
+			if !tmux.HasSession(peer.TmuxSession) {
+				continue
+			}
+			peerInfo, err := os.Stat(peer.WorkingDir)
+			if !filepath.IsAbs(peer.WorkingDir) || err != nil || os.SameFile(dirInfo, peerInfo) {
+				return fmt.Errorf("session %q may be using this working directory - stop it first or choose a new worktree", peer.Name)
+			}
+		}
 	}
 	return gitCheckoutBranch(dir, branch, create, base)
 }

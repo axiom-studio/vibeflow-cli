@@ -1596,11 +1596,12 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 	// a session could run on main while every UI surface said develop.
 	switch result.WorktreeChoice {
 	case WorktreeCurrent, WorktreeSpecifyDir, WorktreeExisting:
-		if err := ensureBranchCheckedOut(workDir, branch, result.NewBranch, result.NewBranchBase); err != nil {
+		if err := ensureBranchCheckedOut(workDir, branch, result.NewBranch, result.NewBranchBase, m.store, m.tmux); err != nil {
 			return "", "", err
 		}
 	}
-	return workDir, worktreePath, nil
+	workDir, err = filepath.Abs(workDir)
+	return workDir, worktreePath, err
 }
 
 // executeLaunch performs the actual session creation after conflict resolution.
