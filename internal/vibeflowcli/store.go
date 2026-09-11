@@ -27,20 +27,25 @@ import (
 // SessionMeta holds metadata for a vibeflow-cli session that tmux alone
 // cannot store (provider, worktree path, vibeflow session ID, etc.).
 type SessionMeta struct {
-	Name              string    `json:"name"`
-	TmuxSession       string    `json:"tmux_session"`
-	Provider          string    `json:"provider"`
-	Project           string    `json:"project"`
-	Persona           string    `json:"persona,omitempty"`
-	Branch            string    `json:"branch"`
-	WorktreePath      string    `json:"worktree_path,omitempty"`
-	WorkingDir        string    `json:"working_dir"`
-	VibeFlowSessionID string    `json:"vibeflow_session_id,omitempty"`
-	SessionType       string    `json:"session_type,omitempty"`
-	SkipPermissions   bool      `json:"skip_permissions,omitempty"`
-	LLMGatewayEnabled bool      `json:"llm_gateway_enabled,omitempty"`
-	MCPToolName       string    `json:"mcp_tool_name,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
+	Name              string           `json:"name"`
+	TmuxSession       string           `json:"tmux_session"`
+	Provider          string           `json:"provider"`
+	Project           string           `json:"project"`
+	ProjectID         int64            `json:"project_id,omitempty"`
+	Persona           string           `json:"persona,omitempty"`
+	Branch            string           `json:"branch"`
+	WorktreePath      string           `json:"worktree_path,omitempty"`
+	WorkingDir        string           `json:"working_dir"`
+	VibeFlowSessionID string           `json:"vibeflow_session_id,omitempty"`
+	SessionType       string           `json:"session_type,omitempty"`
+	DispatchMode      string           `json:"dispatch_mode,omitempty"`
+	CloudDispatch     bool             `json:"cloud_dispatch,omitempty"`
+	SkipPermissions   bool             `json:"skip_permissions,omitempty"`
+	Model             string           `json:"model,omitempty"`
+	LLMGatewayEnabled bool             `json:"llm_gateway_enabled,omitempty"`
+	MCPToolName       string           `json:"mcp_tool_name,omitempty"`
+	OpenShell         *OpenShellConfig `json:"openshell,omitempty"`
+	CreatedAt         time.Time        `json:"created_at"`
 }
 
 // Store persists session metadata to a JSON file with file-level locking
@@ -73,6 +78,20 @@ func (s *Store) List() ([]SessionMeta, error) {
 		return nil, err
 	}
 	return sessions, nil
+}
+
+// HasSessions reports whether the store currently holds at least one session
+// entry. Unlike List, it does not rewrite the file on read (List goes through
+// withLock, which always writes the result back) — so probing an empty root
+// never creates sessions.json as a side effect. A missing file counts as no
+// sessions. Safe to call lockless at startup: the TUI holds the singleton PID
+// lock by this point.
+func (s *Store) HasSessions() (bool, error) {
+	sessions, err := s.readFile()
+	if err != nil {
+		return false, err
+	}
+	return len(sessions) > 0, nil
 }
 
 // Get returns the session metadata for the given name and whether it was found.
@@ -138,6 +157,29 @@ func (s *Store) Sync(activeTmux []string) error {
 		return out, nil
 	})
 	return err
+}
+
+// Orphans returns the stored sessions whose TmuxSession is NOT in activeTmux.
+// Unlike Sync, it does not modify the store — it only reports which entries
+// look dead. Callers decide whether to purge (e.g. after user confirmation),
+// so a transient or empty tmux list (a socket whose server isn't running)
+// can never silently destroy session metadata.
+func (s *Store) Orphans(activeTmux []string) ([]SessionMeta, error) {
+	active := make(map[string]bool, len(activeTmux))
+	for _, name := range activeTmux {
+		active[name] = true
+	}
+	sessions, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var orphans []SessionMeta
+	for _, m := range sessions {
+		if !active[m.TmuxSession] {
+			orphans = append(orphans, m)
+		}
+	}
+	return orphans, nil
 }
 
 // Discover cross-references live tmux session names against the store and
@@ -233,4 +275,3 @@ func (s *Store) writeFile(sessions []SessionMeta) error {
 	}
 	return os.WriteFile(s.path, data, 0600)
 }
-

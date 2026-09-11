@@ -1,0 +1,50 @@
+/*
+ * Copyright (c) 2026. AXIOM STUDIO AI Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package vibeflowcli
+
+import "testing"
+
+func TestIsKnownModelForProvider(t *testing.T) {
+	if !IsKnownModelForProvider("claude", "sonnet") {
+		t.Fatal("expected sonnet to be known for claude")
+	}
+	if IsKnownModelForProvider("claude", "definitely-not-a-model") {
+		t.Fatal("expected unknown built-in provider model to be unknown")
+	}
+	if IsKnownModelForProvider("custom-provider", "whatever-model") {
+		t.Fatal("custom providers should not have a built-in catalog")
+	}
+	// copilot: "auto" is the only universally available slug (plan-gated
+	// slugs are added after E2E enumeration on an entitled account).
+	if !IsKnownModelForProvider("copilot", "auto") {
+		t.Fatal("expected auto to be known for copilot")
+	}
+	if IsKnownModelForProvider("copilot", "gpt-5.4") {
+		t.Fatal("plan-gated copilot slugs must not be in the catalog until E2E-verified")
+	}
+}
+
+func TestModelsForProviderReturnsCopy(t *testing.T) {
+	got := ModelsForProvider("codex")
+	if len(got) == 0 {
+		t.Fatal("expected codex models")
+	}
+	got[0].ID = "mutated"
+	if ModelsForProvider("codex")[0].ID == "mutated" {
+		t.Fatal("ModelsForProvider returned shared backing storage")
+	}
+}

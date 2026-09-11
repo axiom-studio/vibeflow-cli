@@ -1,0 +1,33 @@
+{
+  "name": "@axiom-studio/vibeflow-setup",
+  "version": "0.2.0",
+  "description": "One-command VibeFlow setup: downloads vibeflow-cli, installs tmux, and configures the VibeFlow MCP server for your coding agents.",
+  "bin": {
+    "vibeflow-setup": "index.js"
+  },
+  "files": [
+    "index.js"
+  ],
+  "scripts": {
+    "test": "node --test index.test.js signed-release.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "vibeflow",
+    "mcp",
+    "setup",
+    "bootstrap",
+    "ai-agents"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/axiom-studio/vibeflow-cli.git",
+    "directory": "npx"
+  }
+}

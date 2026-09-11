@@ -18,11 +18,13 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"vibeflow-cli/sessionid"
@@ -31,6 +33,7 @@ import (
 // initSubcommands registers all CLI subcommands on the root command.
 func initSubcommands(root *cobra.Command) {
 	root.AddCommand(launchCmd())
+	root.AddCommand(modelsCmd())
 	root.AddCommand(listCmd())
 	root.AddCommand(switchCmd())
 	root.AddCommand(killCmd())
@@ -42,6 +45,9 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(agentDocCmd())
 	root.AddCommand(projectsCmd())
 	root.AddCommand(cloudCmd())
+	root.AddCommand(bootstrapCmd())
+	root.AddCommand(uninstallCmd())
+	root.AddCommand(dispatchCmd())
 }
 
 // --- helpers shared by subcommands ---
@@ -55,7 +61,10 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("load config: %w", err)
 	}
-	cfg.TmuxSocket = TmuxSocketName()
+	// Resolve tmux socket: explicit flag > config tmux_socket > per-root derived.
+	// Uses the same precedence as the TUI so headless subcommands target the
+	// same socket the user's sessions actually live on.
+	cfg.TmuxSocket = ResolveTmuxSocket(flagTmuxSocket, cfg.TmuxSocket)
 	tmux := NewTmuxManager(cfg.TmuxSocket)
 	tmux.SetLogger(NewLogger())
 	store := NewStore()
@@ -70,8 +79,9 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 // --- launch ---
 
 func launchCmd() *cobra.Command {
-	var provider, branch, worktreeName, persona, personasRaw, project, sessionType string
-	var worktree, skipPermissions, newBranch, llmGateway bool
+	var provider, branch, worktreeName, persona, personasRaw, project, sessionType, model, modelsRaw string
+	var openshellSandbox, openshellFrom, openshellPolicy, openshellProvidersRaw string
+	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders, cloudDispatch, replace, reuse bool
 
 	cmd := &cobra.Command{
 		Use:   "launch",
@@ -144,15 +154,22 @@ func launchCmd() *cobra.Command {
 			if effectiveSessionType != "vanilla" && effectiveSessionType != "vibeflow" {
 				return fmt.Errorf("invalid session-type %q — must be 'vanilla' or 'vibeflow'", effectiveSessionType)
 			}
-
-			command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
-				WorkDir:         workDir,
-				ServerURL:       cfg.ServerURL,
-				SkipPermissions: skipPermissions,
-				Binary:          prov.Binary,
-			})
-			if err != nil || command == "" {
-				command = prov.Binary
+			if replace && (effectiveSessionType != "vibeflow" || sessionPersona == "") {
+				return fmt.Errorf("--replace requires a vibeflow launch with --persona or --personas")
+			}
+			if reuse && (effectiveSessionType != "vibeflow" || sessionPersona == "") {
+				return fmt.Errorf("--reuse requires a vibeflow launch with --persona or --personas")
+			}
+			if replace && reuse {
+				return fmt.Errorf("--replace and --reuse are mutually exclusive")
+			}
+			if cloudDispatch {
+				if effectiveSessionType != "vibeflow" {
+					return fmt.Errorf("--cloud-dispatch requires a vibeflow session")
+				}
+				if cfg.APIToken == "" {
+					return fmt.Errorf("--cloud-dispatch requires api_token in config or VIBEFLOW_TOKEN")
+				}
 			}
 
 			// Resolve provider env vars (e.g. codex bearer token).
@@ -160,37 +177,61 @@ func launchCmd() *cobra.Command {
 			if missingVar != "" {
 				return fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 			}
-			sessionEnv := prov.Env
+			baseEnv := cloneStringMap(prov.Env)
 			if len(envVars) > 0 {
-				if sessionEnv == nil {
-					sessionEnv = make(map[string]string)
+				if baseEnv == nil {
+					baseEnv = make(map[string]string)
 				}
 				for k, v := range envVars {
-					sessionEnv[k] = v
+					baseEnv[k] = v
 				}
 			}
 
-			// If LLM gateway is enabled (flag or saved config), inject gateway env vars.
-			// Otherwise, explicitly clear gateway-related vars to prevent inheritance
-			// from the parent shell environment.
-			if llmGateway || cfg.LLMGatewayEnabled {
-				if sessionEnv == nil {
-					sessionEnv = make(map[string]string)
+			// If LLM gateway is enabled (flag or saved config) AND the provider
+			// supports gateway routing, inject gateway env vars. Otherwise clear
+			// gateway-related vars to prevent inheritance from the parent shell.
+			// Providers that connect directly (qwen, cursor) never route through
+			// the gateway; warn if the user explicitly asked via --llm-gateway.
+			gatewayEnabled, warnGatewayIgnored := GatewayEnabledForProvider(llmGateway, cfg.LLMGatewayEnabled, provider)
+			if warnGatewayIgnored {
+				fmt.Fprintf(os.Stderr, "warning: --llm-gateway ignored for provider %q — it connects directly to the provider\n", provider)
+			}
+			if gatewayEnabled {
+				if baseEnv == nil {
+					baseEnv = make(map[string]string)
 				}
 				for k, v := range BuildLLMGatewayEnv(provider, cfg.ServerURL, cfg.APIToken) {
-					sessionEnv[k] = v
+					baseEnv[k] = v
 				}
 			} else {
-				if sessionEnv == nil {
-					sessionEnv = make(map[string]string)
+				if baseEnv == nil {
+					baseEnv = make(map[string]string)
 				}
 				for k, v := range ClearLLMGatewayEnv(provider) {
-					sessionEnv[k] = v
+					baseEnv[k] = v
 				}
 			}
+			baseEnv = WithMCPTokenEnv(baseEnv, cfg)
 
-			// Mirror qwen OPENAI_* env vars onto the CLI flags so qwen-code uses them.
-			command = AppendQwenAPIFlags(command, provider, sessionEnv)
+			openShellCfg := cfg.OpenShell
+			if openshell {
+				openShellCfg.Enabled = true
+			}
+			if openshellSandbox != "" {
+				openShellCfg.Sandbox = openshellSandbox
+			}
+			if openshellFrom != "" {
+				openShellCfg.From = openshellFrom
+			}
+			if openshellPolicy != "" {
+				openShellCfg.Policy = openshellPolicy
+			}
+			if openshellNoAutoProviders {
+				openShellCfg.NoAutoProviders = true
+			}
+			if openshellProvidersRaw != "" {
+				openShellCfg.Providers = splitCommaList(openshellProvidersRaw)
+			}
 
 			// Determine which personas to launch.
 			personasToLaunch := []string{""}
@@ -199,14 +240,66 @@ func launchCmd() *cobra.Command {
 			} else if sessionPersona != "" {
 				personasToLaunch = []string{sessionPersona}
 			}
+			personaModels, err := parsePersonaModels(modelsRaw)
+			if err != nil {
+				return err
+			}
+			if err := validatePersonaModels(personaModels, personasToLaunch); err != nil {
+				return err
+			}
+			var reuseSessionIDs map[string]string
+			if replace || reuse {
+				reuseSessionIDs, err = preparePersonaSessions(tmux, store, NewSessionCache(), workDir, sessionProject, personasToLaunch, reuse)
+				if err != nil {
+					return err
+				}
+			}
 
 			// Ensure all agent-specific markdown docs exist in the working directory.
 			if effectiveSessionType == "vibeflow" {
 				EnsureAllAgentDocs(workDir)
 			}
 
+			var dispatchProjectID int64
+			if cloudDispatch {
+				projectInfo, err := ensureCloudDispatchProject(cfg, sessionProject)
+				if err != nil {
+					return fmt.Errorf("resolve cloud-dispatch project: %w", err)
+				}
+				dispatchProjectID = projectInfo.ID
+			}
+
 			for _, p := range personasToLaunch {
 				sessionName := sessionid.GenerateSessionID(workDir)
+				if reusedID := reuseSessionIDs[p]; reusedID != "" {
+					sessionName = reusedID
+				}
+				sessionModel := modelForPersona(model, personaModels, p)
+				sessionEnv := cloneStringMap(baseEnv)
+				if provider == "qwen" && sessionModel != "" {
+					if sessionEnv == nil {
+						sessionEnv = make(map[string]string)
+					}
+					sessionEnv["OPENAI_MODEL"] = sessionModel
+				}
+				command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
+					WorkDir:         workDir,
+					ServerURL:       cfg.ServerURL,
+					SkipPermissions: skipPermissions,
+					Model:           sessionModel,
+					Binary:          prov.Binary,
+				})
+				if err != nil || command == "" {
+					command = prov.Binary
+				}
+
+				// Mirror Codex gateway config and qwen launch env vars onto CLI
+				// flags so the agents see the routed configuration explicitly on
+				// every launch path.
+				command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
+				applyQwenModelPassthrough(provider, sessionEnv)
+				command = AppendQwenAPIFlags(command, provider, sessionEnv)
+
 				sessionCommand := command
 
 				if effectiveSessionType == "vibeflow" && p != "" {
@@ -215,7 +308,24 @@ func launchCmd() *cobra.Command {
 						mcpName = DefaultMCPToolName
 					}
 					initPrompt := BuildVibeflowInitPrompt(mcpName, sessionProject, p)
+					if cloudDispatch {
+						initPrompt = BuildVibeflowCloudDispatchInitPrompt(mcpName, sessionProject, p, sessionName)
+					}
 					sessionCommand = AppendVibeflowInitPrompt(command, provider, initPrompt)
+				}
+				sessionCommand, err = WrapOpenShellCommand(sessionCommand, openShellCfg)
+				if err != nil {
+					return err
+				}
+
+				// Publish the new session ID before starting the provider. Reconcile
+				// flows may relaunch in a directory whose persona file still points at
+				// the session that just exited; writing after CreateSessionWithOpts
+				// lets the new agent race ahead and resume that stale API session.
+				if prov.SessionFile != "" {
+					if err := WriteSessionFileIfNeeded(workDir, p, sessionName); err != nil {
+						return fmt.Errorf("write session file for persona %q: %w", p, err)
+					}
 				}
 
 				if err := tmux.CreateSessionWithOpts(SessionOpts{
@@ -236,21 +346,23 @@ func launchCmd() *cobra.Command {
 				// Bind Ctrl+Q to open vibeflow TUI popup inside the session.
 				_ = tmux.BindSessionKeys(tmuxName)
 
-				if prov.SessionFile != "" {
-					_ = WriteSessionFileIfNeeded(workDir, p, sessionName)
-				}
-
 				sessionMeta := SessionMeta{
 					Name:              sessionName,
 					TmuxSession:       tmuxName,
 					Provider:          provider,
 					Project:           sessionProject,
+					ProjectID:         dispatchProjectID,
 					Persona:           p,
 					Branch:            branch,
 					WorkingDir:        workDir,
+					VibeFlowSessionID: sessionName,
 					SessionType:       effectiveSessionType,
+					DispatchMode:      mapCloudDispatchMode(cloudDispatch),
+					CloudDispatch:     cloudDispatch,
 					SkipPermissions:   skipPermissions,
-					LLMGatewayEnabled: llmGateway || cfg.LLMGatewayEnabled,
+					Model:             sessionModel,
+					LLMGatewayEnabled: gatewayEnabled,
+					OpenShell:         openShellMeta(openShellCfg),
 					CreatedAt:         time.Now(),
 				}
 				_ = store.Add(sessionMeta)
@@ -258,6 +370,11 @@ func launchCmd() *cobra.Command {
 				// Add to session cache for restart-without-intervention.
 				cache := NewSessionCache()
 				_ = cache.Add(sessionMeta)
+				if cloudDispatch {
+					if err := StartCloudDispatchProcess(cfgPath, sessionName); err != nil {
+						return fmt.Errorf("start cloud-dispatch loop: %w", err)
+					}
+				}
 
 				if p != "" {
 					fmt.Printf("Session %q launched (provider: %s, persona: %s, branch: %s)\n", sessionName, provider, p, branch)
@@ -268,26 +385,164 @@ func launchCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider key (claude, codex, cursor, gemini)")
+	// Derive the advertised key list from the built-in provider map so a new
+	// provider cannot leave this help text stale (same defect class as #4334:
+	// this string previously omitted kiro and copilot).
+	cmd.Flags().StringVar(&provider, "provider", "", "Provider key ("+strings.Join(NewProviderRegistry(DefaultConfig()).Keys(), ", ")+")")
 	cmd.Flags().StringVar(&branch, "branch", "", "Git branch (default: main)")
 	cmd.Flags().BoolVar(&worktree, "worktree", false, "Create a new git worktree for the session")
 	cmd.Flags().StringVar(&worktreeName, "worktree-name", "", "Custom worktree directory name (default: auto-generated)")
 	cmd.Flags().BoolVar(&newBranch, "new-branch", false, "Create a new git branch (used with --worktree)")
 	cmd.Flags().BoolVar(&skipPermissions, "skip-permissions", false, "Skip permission prompts (autonomous mode)")
 	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through Axiom Cloud Gateway")
+	cmd.Flags().BoolVar(&openshell, "openshell", false, "Run the agent inside an NVIDIA OpenShell sandbox")
+	cmd.Flags().StringVar(&openshellSandbox, "openshell-sandbox", "", "OpenShell sandbox name (sets --name for create mode)")
+	cmd.Flags().StringVar(&openshellFrom, "openshell-from", "", "OpenShell sandbox image/base to create from")
+	cmd.Flags().StringVar(&openshellPolicy, "openshell-policy", "", "OpenShell policy YAML path")
+	cmd.Flags().StringVar(&openshellProvidersRaw, "openshell-provider", "", "Comma-separated OpenShell provider names to attach")
+	cmd.Flags().BoolVar(&openshellNoAutoProviders, "openshell-no-auto-providers", false, "Disable OpenShell credential auto-provider discovery")
+	cmd.Flags().StringVar(&model, "model", "", "Model id to pass to each launched provider session")
+	cmd.Flags().StringVar(&modelsRaw, "models", "", "Comma-separated persona=model overrides for team launches")
 	cmd.Flags().StringVar(&persona, "persona", "", "Persona key for vibeflow sessions")
 	cmd.Flags().StringVar(&personasRaw, "personas", "", "Comma-separated persona keys for team mode")
 	cmd.Flags().StringVar(&project, "project", "", "Project name (overrides config default)")
 	cmd.Flags().StringVar(&sessionType, "session-type", "", "Session type: vanilla or vibeflow (default: inferred from persona)")
+	cmd.Flags().BoolVar(&cloudDispatch, "cloud-dispatch", false, "Let vibeflow-cli wait for AxiomCloud work and inject dispatch handoffs into the session")
+	cmd.Flags().BoolVar(&replace, "replace", false, "Stop and replace existing sessions for the selected personas")
+	cmd.Flags().BoolVar(&reuse, "reuse", false, "Relaunch selected personas using their existing session IDs")
 	return cmd
+}
+
+func preparePersonaSessions(tmux *TmuxManager, store *Store, cache *SessionCache, workDir, project string, personas []string, reuse bool) (map[string]string, error) {
+	sessions, err := store.List()
+	if err != nil {
+		return nil, fmt.Errorf("list sessions to reconcile: %w", err)
+	}
+	selected := make(map[string]struct{}, len(personas))
+	for _, persona := range personas {
+		selected[persona] = struct{}{}
+	}
+	keep := make(map[string]SessionMeta, len(personas))
+	if reuse {
+		for _, meta := range sessions {
+			if !matchesPersonaReplacement(meta, workDir, project, selected) {
+				continue
+			}
+			current, ok := keep[meta.Persona]
+			if !ok || meta.CreatedAt.After(current.CreatedAt) {
+				keep[meta.Persona] = meta
+			}
+		}
+	}
+	reusedIDs := make(map[string]string, len(keep))
+	for _, meta := range sessions {
+		if !matchesPersonaReplacement(meta, workDir, project, selected) {
+			continue
+		}
+		if tmux.HasSession(meta.TmuxSession) {
+			if err := tmux.KillSession(meta.TmuxSession); err != nil {
+				return nil, fmt.Errorf("stop existing session %q for persona %q: %w", meta.Name, meta.Persona, err)
+			}
+		}
+		retained := reuse && keep[meta.Persona].Name == meta.Name
+		if retained {
+			reusedIDs[meta.Persona] = meta.VibeFlowSessionID
+			if reusedIDs[meta.Persona] == "" {
+				reusedIDs[meta.Persona] = meta.Name
+			}
+			continue
+		}
+		if err := store.Remove(meta.Name); err != nil {
+			return nil, fmt.Errorf("remove existing session %q: %w", meta.Name, err)
+		}
+		if err := cache.Remove(meta.Name); err != nil {
+			return nil, fmt.Errorf("remove existing session %q from restart cache: %w", meta.Name, err)
+		}
+	}
+	for persona := range selected {
+		RemoveSessionFile(workDir, persona)
+	}
+	return reusedIDs, nil
+}
+
+func matchesPersonaReplacement(meta SessionMeta, workDir, project string, personas map[string]struct{}) bool {
+	if meta.SessionType != "vibeflow" || meta.Project != project {
+		return false
+	}
+	if _, ok := personas[meta.Persona]; !ok {
+		return false
+	}
+	return sameWorkingDirectory(meta.WorkingDir, workDir)
+}
+
+func sameWorkingDirectory(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		return filepath.Clean(absA) == filepath.Clean(absB)
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func mapCloudDispatchMode(enabled bool) string {
+	if enabled {
+		return "cloud_queue"
+	}
+	return ""
 }
 
 // --- list ---
 
+func modelsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "models [provider]",
+		Short: "List built-in provider model ids",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			if len(args) == 1 {
+				// An explicit request for a provider without a catalog should
+				// say so rather than print nothing.
+				return printProviderModels(out, args[0])
+			}
+			// Derived from the registry, not hardcoded: the previous literal
+			// list went stale on every provider addition (it omitted kiro and
+			// copilot). Providers with no curated catalog are skipped rather
+			// than erroring, which would break the whole listing.
+			for _, provider := range NewProviderRegistry(DefaultConfig()).Keys() {
+				if len(ModelsForProvider(provider)) == 0 {
+					continue
+				}
+				if err := printProviderModels(out, provider); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+func printProviderModels(out io.Writer, provider string) error {
+	options := ModelsForProvider(provider)
+	if len(options) == 0 {
+		return fmt.Errorf("no curated model list for provider %q", provider)
+	}
+	fmt.Fprintf(out, "%s:\n", provider)
+	for _, option := range options {
+		if option.Description != "" {
+			fmt.Fprintf(out, "  %-20s %s\n", option.ID, option.Description)
+		} else {
+			fmt.Fprintf(out, "  %s\n", option.ID)
+		}
+	}
+	return nil
+}
+
 func listCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List active sessions",
+		Use:     "list",
+		Short:   "List active sessions",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
@@ -401,10 +656,10 @@ func deleteCmd() *cobra.Command {
 	var cleanupWorktree bool
 
 	cmd := &cobra.Command{
-		Use:   "delete <session-name>",
-		Short: "Delete (kill) a session",
-		Long:  "Delete a session by name. This is an alias for the 'kill' command.",
-		Args:  cobra.ExactArgs(1),
+		Use:     "delete <session-name>",
+		Short:   "Delete (kill) a session",
+		Long:    "Delete a session by name. This is an alias for the 'kill' command.",
+		Args:    cobra.ExactArgs(1),
 		Aliases: []string{"rm"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
@@ -477,6 +732,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		WorkDir:         workDir,
 		ServerURL:       cfg.ServerURL,
 		SkipPermissions: meta.SkipPermissions,
+		Model:           meta.Model,
 		Binary:          prov.Binary,
 	})
 	if err != nil || command == "" {
@@ -488,7 +744,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	if missingVar != "" {
 		return SessionMeta{}, fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 	}
-	sessionEnv := prov.Env
+	sessionEnv := cloneStringMap(prov.Env)
 	if len(envVars) > 0 {
 		if sessionEnv == nil {
 			sessionEnv = make(map[string]string)
@@ -514,9 +770,18 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 			sessionEnv[k] = v
 		}
 	}
+	sessionEnv = WithMCPTokenEnv(sessionEnv, cfg)
 
-	// For qwen, mirror OPENAI_* env vars onto the command line so qwen-code
-	// honors them on restart too. Must run before the init-prompt append.
+	// Mirror Codex gateway config and qwen routed env vars onto CLI flags on
+	// restart too. Must run before the init-prompt append.
+	command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
+	if provider == "qwen" && meta.Model != "" {
+		if sessionEnv == nil {
+			sessionEnv = make(map[string]string)
+		}
+		sessionEnv["OPENAI_MODEL"] = meta.Model
+	}
+	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
 	// For vibeflow sessions, append the init prompt so the agent starts autonomously.
@@ -526,7 +791,18 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 	if meta.SessionType == "vibeflow" {
 		initPrompt := BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona)
+		if meta.CloudDispatch || meta.DispatchMode == "cloud_queue" {
+			sessionID := meta.VibeFlowSessionID
+			if sessionID == "" {
+				sessionID = meta.Name
+			}
+			initPrompt = BuildVibeflowCloudDispatchInitPrompt(meta.MCPToolName, projectName, meta.Persona, sessionID)
+		}
 		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
+	}
+	command, err = WrapOpenShellCommand(command, openShellValue(meta.OpenShell))
+	if err != nil {
+		return SessionMeta{}, err
 	}
 
 	// Ensure agent docs exist in the working directory.
@@ -552,7 +828,22 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	_ = tmux.BindSessionKeys(tmuxName)
 
 	if prov.SessionFile != "" {
-		_ = WriteSessionFileIfNeeded(workDir, meta.Persona, meta.Name)
+		sessionFileID := meta.Name
+		if meta.VibeFlowSessionID != "" {
+			sessionFileID = meta.VibeFlowSessionID
+		}
+		_ = WriteSessionFileIfNeeded(workDir, meta.Persona, sessionFileID)
+	}
+
+	if (meta.CloudDispatch || meta.DispatchMode == "cloud_queue") && meta.ProjectID == 0 {
+		projectInfo, err := ensureCloudDispatchProject(cfg, projectName)
+		if err != nil {
+			return SessionMeta{}, fmt.Errorf("resolve cloud-dispatch project: %w", err)
+		}
+		meta.ProjectID = projectInfo.ID
+	}
+	if (meta.CloudDispatch || meta.DispatchMode == "cloud_queue") && meta.VibeFlowSessionID == "" {
+		meta.VibeFlowSessionID = meta.Name
 	}
 
 	// Build updated metadata.
@@ -561,15 +852,20 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		TmuxSession:       tmuxName,
 		Provider:          provider,
 		Project:           projectName,
+		ProjectID:         meta.ProjectID,
 		Persona:           meta.Persona,
 		Branch:            branch,
 		WorktreePath:      meta.WorktreePath,
 		WorkingDir:        workDir,
 		VibeFlowSessionID: meta.VibeFlowSessionID,
 		SessionType:       meta.SessionType,
+		DispatchMode:      meta.DispatchMode,
+		CloudDispatch:     meta.CloudDispatch,
 		SkipPermissions:   meta.SkipPermissions,
+		Model:             meta.Model,
 		LLMGatewayEnabled: meta.LLMGatewayEnabled,
 		MCPToolName:       meta.MCPToolName,
+		OpenShell:         meta.OpenShell,
 		CreatedAt:         time.Now(),
 	}
 
@@ -580,8 +876,104 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	if cache != nil {
 		_ = cache.Add(updated)
 	}
+	if updated.CloudDispatch || updated.DispatchMode == "cloud_queue" {
+		if err := StartCloudDispatchProcess("", updated.Name); err != nil {
+			return SessionMeta{}, fmt.Errorf("start cloud-dispatch loop: %w", err)
+		}
+	}
 
 	return updated, nil
+}
+
+func splitCommaList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func parsePersonaModels(raw string) (map[string]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	out := make(map[string]string)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if !ok || key == "" || value == "" {
+			return nil, fmt.Errorf("invalid --models entry %q — expected persona=model", part)
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+
+func validatePersonaModels(models map[string]string, personas []string) error {
+	if len(models) == 0 {
+		return nil
+	}
+	allowed := make(map[string]bool, len(personas))
+	for _, p := range personas {
+		if p != "" {
+			allowed[p] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return fmt.Errorf("--models requires --persona or --personas")
+	}
+	for p := range models {
+		if !allowed[p] {
+			return fmt.Errorf("--models specifies persona %q, but launch personas are %s", p, strings.Join(personas, ","))
+		}
+	}
+	return nil
+}
+
+func modelForPersona(defaultModel string, personaModels map[string]string, persona string) string {
+	if personaModels != nil {
+		if m := personaModels[persona]; m != "" {
+			return m
+		}
+	}
+	return defaultModel
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func openShellMeta(cfg OpenShellConfig) *OpenShellConfig {
+	if !cfg.Enabled {
+		return nil
+	}
+	return &cfg
+}
+
+func openShellValue(cfg *OpenShellConfig) OpenShellConfig {
+	if cfg == nil {
+		return OpenShellConfig{}
+	}
+	return *cfg
 }
 
 func restartCmd() *cobra.Command {
@@ -648,8 +1040,8 @@ func restartCmd() *cobra.Command {
 
 func worktreesCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "worktrees",
-		Short: "List git worktrees",
+		Use:     "worktrees",
+		Short:   "List git worktrees",
 		Aliases: []string{"wt"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
@@ -743,7 +1135,7 @@ func configCmd() *cobra.Command {
 				return fmt.Errorf("load config: %w", err)
 			}
 			setup := NewSetupModel(cfg, cfgPath)
-			p := tea.NewProgram(setup, tea.WithAltScreen())
+			p := tea.NewProgram(setup)
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("setup wizard: %w", err)
 			}

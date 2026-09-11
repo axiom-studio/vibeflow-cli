@@ -97,7 +97,7 @@ func TestPersonaColor_AllKeysReturnDistinctColors(t *testing.T) {
 
 func TestPersonaColor_UnknownKeyReturnsFallback(t *testing.T) {
 	color := PersonaColor("nonexistent")
-	expected := lipgloss.Color("#888888")
+	expected := oceanMuted
 	if color != expected {
 		t.Errorf("PersonaColor(\"nonexistent\") = %v, want %v", color, expected)
 	}

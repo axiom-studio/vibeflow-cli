@@ -64,6 +64,22 @@ func TmuxSocketName() string {
 	return "vibeflow-" + hex.EncodeToString(h[:4])
 }
 
+// ResolveTmuxSocket picks the tmux socket name to use, with precedence:
+// explicit --tmux-socket flag > config `tmux_socket` > per-root derived default
+// (TmuxSocketName). This lets a socket travel with a relocated/copied config
+// (or be pinned explicitly) instead of being silently re-derived from the root
+// path — the root cause of sessions being invisible after a --root change.
+// An empty cfgVal means "not set in the config file" (see LoadConfig).
+func ResolveTmuxSocket(flagVal, cfgVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if cfgVal != "" {
+		return cfgVal
+	}
+	return TmuxSocketName()
+}
+
 // WorktreeConfig holds settings for git worktree management.
 type WorktreeConfig struct {
 	BaseDir       string `yaml:"base_dir"`
@@ -74,31 +90,47 @@ type WorktreeConfig struct {
 
 // ErrorRecoveryConfig holds settings for automatic error detection and recovery.
 type ErrorRecoveryConfig struct {
-	Enabled           bool   `yaml:"enabled"`
-	MaxRetries        int    `yaml:"max_retries"`
-	DebounceSeconds   int    `yaml:"debounce_seconds"`
-	BackoffMultiplier int    `yaml:"backoff_multiplier"`
-	MaxBackoffSeconds int    `yaml:"max_backoff_seconds"`
+	Enabled           bool `yaml:"enabled"`
+	MaxRetries        int  `yaml:"max_retries"`
+	DebounceSeconds   int  `yaml:"debounce_seconds"`
+	BackoffMultiplier int  `yaml:"backoff_multiplier"`
+	MaxBackoffSeconds int  `yaml:"max_backoff_seconds"`
+}
+
+// OpenShellConfig controls optional NVIDIA OpenShell sandbox wrapping for
+// launched agent commands.
+type OpenShellConfig struct {
+	Enabled         bool     `yaml:"enabled,omitempty"`
+	Binary          string   `yaml:"binary,omitempty"`
+	Mode            string   `yaml:"mode,omitempty"` // "create" or "use"
+	Sandbox         string   `yaml:"sandbox,omitempty"`
+	From            string   `yaml:"from,omitempty"`
+	Policy          string   `yaml:"policy,omitempty"`
+	Providers       []string `yaml:"providers,omitempty"`
+	NoAutoProviders bool     `yaml:"no_auto_providers,omitempty"`
+	Keep            bool     `yaml:"keep,omitempty"`
+	Args            []string `yaml:"args,omitempty"`
 }
 
 // Config holds all vibeflow-cli configuration.
 type Config struct {
-	ServerURL        string                `yaml:"server_url"`
-	APIToken         string                `yaml:"api_token"`
-	DefaultProject   string                `yaml:"default_project"`
-	DefaultWorkDir   string                `yaml:"default_work_dir"`
-	TmuxSocket       string                `yaml:"tmux_socket"`
-	PollInterval     int                   `yaml:"poll_interval_seconds"`
-	ClaudeBinary     string                `yaml:"claude_binary"`
-	Providers        map[string]Provider   `yaml:"providers"`
-	Worktree         WorktreeConfig        `yaml:"worktree"`
-	DefaultProvider  string                `yaml:"default_provider"`
-	ViewMode         string                `yaml:"view_mode"` // "flat" or "grouped" (default: flat)
-	ErrorRecovery    ErrorRecoveryConfig   `yaml:"error_recovery"`
-	DirectoryHistory []string              `yaml:"directory_history,omitempty"`
-	SavedEnvVars     map[string]string     `yaml:"saved_env_vars,omitempty"`
-	LLMGatewayEnabled bool                 `yaml:"llm_gateway_enabled,omitempty"`
-	MCPToolName      string                `yaml:"mcp_tool_name,omitempty"`
+	ServerURL         string              `yaml:"server_url"`
+	APIToken          string              `yaml:"api_token"`
+	DefaultProject    string              `yaml:"default_project"`
+	DefaultWorkDir    string              `yaml:"default_work_dir"`
+	TmuxSocket        string              `yaml:"tmux_socket"`
+	PollInterval      int                 `yaml:"poll_interval_seconds"`
+	ClaudeBinary      string              `yaml:"claude_binary"`
+	Providers         map[string]Provider `yaml:"providers"`
+	Worktree          WorktreeConfig      `yaml:"worktree"`
+	OpenShell         OpenShellConfig     `yaml:"openshell,omitempty"`
+	DefaultProvider   string              `yaml:"default_provider"`
+	ViewMode          string              `yaml:"view_mode"` // "flat" or "grouped" (default: flat)
+	ErrorRecovery     ErrorRecoveryConfig `yaml:"error_recovery"`
+	DirectoryHistory  []string            `yaml:"directory_history,omitempty"`
+	SavedEnvVars      map[string]string   `yaml:"saved_env_vars,omitempty"`
+	LLMGatewayEnabled bool                `yaml:"llm_gateway_enabled,omitempty"`
+	MCPToolName       string              `yaml:"mcp_tool_name,omitempty"`
 }
 
 // AddDirectoryToHistory adds a directory to the front of the history list,
@@ -173,11 +205,16 @@ func DefaultConfig() *Config {
 			BackoffMultiplier: 2,
 			MaxBackoffSeconds: 300,
 		},
+		OpenShell: OpenShellConfig{
+			Binary: "openshell",
+			Mode:   "create",
+			Keep:   true,
+		},
 		Providers: map[string]Provider{
 			"claude": {
 				Name:               "Claude Code",
 				Binary:             "claude",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: true,
@@ -187,7 +224,7 @@ func DefaultConfig() *Config {
 			"codex": {
 				Name:               "OpenAI Codex CLI",
 				Binary:             "codex",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}{{ if .Model }} -m {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: false,
@@ -196,7 +233,7 @@ func DefaultConfig() *Config {
 			"gemini": {
 				Name:               "Google Gemini CLI",
 				Binary:             "gemini",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}{{ if .Model }} -m {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: false,
@@ -207,7 +244,7 @@ func DefaultConfig() *Config {
 				Binary: "agent",
 				// Cursor CLI: https://cursor.com/docs/cli/overview — binary is `agent`.
 				// --yolo/--approve-mcps align with autonomous sessions (see CLI reference parameters).
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo --approve-mcps{{ end }}",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo --approve-mcps{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: true,
@@ -218,6 +255,70 @@ func DefaultConfig() *Config {
 				Name:               "Qwen Code",
 				Binary:             "qwen",
 				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
+				PromptTemplate:     "",
+				Env:                map[string]string{},
+				VibeFlowIntegrated: false,
+				SessionFile:        "",
+				Default:            false,
+			},
+			"copilot": {
+				Name:   "GitHub Copilot CLI",
+				Binary: "copilot",
+				// Copilot CLI: https://github.com/github/copilot-cli — binary is
+				// `copilot` (npm @github/copilot). --model accepts "auto" on every
+				// plan; concrete slugs are plan-gated and fail loudly at startup.
+				// COPILOT_AUTO_UPDATE=false mirrors the claude autoupdater
+				// hardening (issue #3493): a mid-session self-update restart
+				// would break the tmux session.
+				//
+				// Unlike every other provider in this map, copilot splits
+				// "don't ask permission" and "keep working" onto two independent
+				// axes, so an autonomous session needs BOTH (issue #4602):
+				//
+				//   --yolo      expands to --allow-all-tools --allow-all-paths
+				//               --allow-all-urls. Permissions ONLY — the docs are
+				//               explicit that "with --allow-all, you are still in
+				//               the normal interactive flow", i.e. the agent still
+				//               stops and idles at the prompt when it ends a turn.
+				//   --autopilot the continuation loop that makes the agent resume
+				//               after end-of-turn. Without it a vibeflow session
+				//               dies at its first natural stopping point instead
+				//               of returning to wait_for_work.
+				//   --no-ask-user
+				//               drops the ask_user tool. Nobody is watching an
+				//               unattended pane; the vibeflow protocol routes
+				//               questions through the prompt_user MCP tool.
+				//
+				// --max-autopilot-continues defaults to 5, which would cap a
+				// session that is supposed to poll indefinitely, so it is raised
+				// here. 1000 rather than 0 because "non-negative integer" is all
+				// the CLI validator documents — 0 as an unlimited sentinel is
+				// undocumented and could equally mean "no continuations at all".
+				// This is the cost knob: autopilot spends AI credits per
+				// continuation without a human in the loop, and migrateProviders
+				// never rewrites a user's launch_template, so lowering it in
+				// ~/.vibeflow-cli/config.yaml sticks.
+				//
+				// Verified against v1.0.80.
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo --autopilot --no-ask-user --max-autopilot-continues 1000{{ end }}{{ if .Model }} --model {{ shellQuote .Model }}{{ end }}",
+				PromptTemplate:     "",
+				Env:                map[string]string{"COPILOT_AUTO_UPDATE": "false"},
+				VibeFlowIntegrated: true,
+				SessionFile:        ".vibeflow-session",
+				Default:            false,
+			},
+			"kiro": {
+				Name:   "Kiro CLI",
+				Binary: "kiro-cli",
+				// Kiro CLI: https://kiro.dev/docs/cli/ — binary is `kiro-cli`, chat
+				// subcommand is `chat`. --trust-all-tools is Kiro's blanket tool
+				// pre-authorization flag (headless/non-interactive mode has no
+				// human available to approve individual tool calls, matching
+				// --dangerously-skip-permissions/--yolo elsewhere in this map).
+				// No documented model-select flag was found for `kiro-cli chat`,
+				// so unlike claude/codex/cursor no `--model` clause is included
+				// here — add one if Kiro ships that flag later.
+				LaunchTemplate:     "{{.Binary}} chat{{ if .SkipPermissions }} --trust-all-tools{{ end }}",
 				PromptTemplate:     "",
 				Env:                map[string]string{},
 				VibeFlowIntegrated: false,
@@ -236,6 +337,14 @@ func ConfigPath() string {
 // LoadConfig reads config from file, falling back to defaults.
 func LoadConfig(path string) (*Config, error) {
 	cfg := DefaultConfig()
+
+	// The tmux socket is resolved separately via ResolveTmuxSocket (flag >
+	// config > derived). Clear the DefaultConfig placeholder so cfg.TmuxSocket
+	// reflects ONLY what the file declares — empty means "not set", which lets
+	// the resolver fall through to the per-root derived default. Without this,
+	// a fresh custom root would inherit the "vibeflow" placeholder and lose its
+	// isolated socket.
+	cfg.TmuxSocket = ""
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -347,9 +456,12 @@ func CheckServerReachable(serverURL string) error {
 //
 // For Claude: uses ANTHROPIC_CUSTOM_HEADERS with x-axiom-api-key to keep
 // standard auth headers free for the user's own OAuth tokens.
-// For Codex/Gemini/Qwen: uses OPENAI_API_KEY + OPENAI_BASE_URL (these CLIs
-// share the OpenAI-compatible client surface; SDK does not support custom
-// header env vars).
+// For Gemini: uses GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL.
+// For Qwen: uses OPENAI_API_KEY + OPENAI_BASE_URL.
+// Qwen additionally gets a QWEN_CUSTOM_API_KEY_* var binding the gateway
+// endpoint via qwen-code's custom-API-key mechanism (the var NAME encodes
+// the protocol + endpoint URL; the VALUE is the bearer token), so gateway
+// routing works even where qwen-code ignores the OPENAI_* env pair.
 func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]string {
 	env := make(map[string]string)
 	if apiToken == "" || serverURL == "" {
@@ -360,11 +472,56 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	case "claude":
 		env["ANTHROPIC_CUSTOM_HEADERS"] = "x-axiom-api-key: " + apiToken
 		env["ANTHROPIC_BASE_URL"] = gatewayBaseURL
-	case "codex", "gemini", "qwen":
+	case "codex":
+		env["GATEWAY_API_KEY"] = apiToken
+		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
+	case "gemini":
+		env["GEMINI_API_KEY"] = apiToken
+		env["GOOGLE_GEMINI_BASE_URL"] = gatewayBaseURL
+	case "qwen":
 		env["OPENAI_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
+		env[QwenCustomAPIKeyEnvName("OPENAI", gatewayBaseURL+"/v1")] = apiToken
 	}
 	return env
+}
+
+// QwenCustomAPIKeyEnvName builds the env var name qwen-code uses to bind an
+// API key to a custom OpenAI-compatible endpoint:
+//
+//	QWEN_CUSTOM_API_KEY_{PROTOCOL}_{ENCODED_ENDPOINT}
+//
+// The endpoint URL is uppercased and every run of non-alphanumeric characters
+// collapses to a single underscore, e.g. protocol "OPENAI" with endpoint
+// "https://api.z.ai/api/paas/v4" yields
+// QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4. The var's VALUE is
+// the API key / bearer token for that endpoint.
+func QwenCustomAPIKeyEnvName(protocol, endpointURL string) string {
+	name := "QWEN_CUSTOM_API_KEY_" + strings.ToUpper(protocol)
+	if enc := encodeQwenEnvSegment(endpointURL); enc != "" {
+		name += "_" + enc
+	}
+	return name
+}
+
+// encodeQwenEnvSegment uppercases s and collapses each run of characters
+// outside [A-Z0-9] into a single underscore, trimming leading/trailing
+// underscores ("https://api.z.ai/api/paas/v4" → "HTTPS_API_Z_AI_API_PAAS_V4").
+func encodeQwenEnvSegment(s string) string {
+	var b strings.Builder
+	pendingSep := false
+	for _, ch := range strings.ToUpper(s) {
+		if (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') {
+			if pendingSep && b.Len() > 0 {
+				b.WriteByte('_')
+			}
+			pendingSep = false
+			b.WriteRune(ch)
+		} else {
+			pendingSep = true
+		}
+	}
+	return b.String()
 }
 
 // ClearLLMGatewayEnv returns environment variables set to empty strings to
@@ -376,28 +533,90 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 // so blanking OPENAI_BASE_URL pushes the OpenAI SDK to its default
 // (api.openai.com) and breaks users configured for DashScope or any other
 // OpenAI-compatible endpoint via their shell or `.qwen/.env`. Leave qwen's
-// base URL alone and let the user's existing auth work.
+// base URL alone and let the user's existing auth work. The same applies to
+// any QWEN_CUSTOM_API_KEY_* vars the user exports themselves — like API keys
+// (which this function never blanks for any provider), they are the user's
+// own auth wiring.
 func ClearLLMGatewayEnv(providerKey string) map[string]string {
 	env := make(map[string]string)
 	switch providerKey {
 	case "claude":
 		env["ANTHROPIC_CUSTOM_HEADERS"] = ""
 		env["ANTHROPIC_BASE_URL"] = ""
-	case "codex", "gemini":
+	case "codex":
 		env["OPENAI_BASE_URL"] = ""
+	case "gemini":
+		env["GOOGLE_GEMINI_BASE_URL"] = ""
 	}
 	return env
 }
 
-// ReadCodexBearerTokenEnvVar reads ~/.codex/config.toml and returns the
-// bearer_token_env_var value from the [mcp_servers.vibeflow] section.
-// Returns "" if the file or key is not found.
-func ReadCodexBearerTokenEnvVar() string {
+// GatewayEnabledForProvider resolves whether LLM-gateway routing should be
+// active for a launch, given the explicit --llm-gateway flag, the saved config
+// setting, and the selected provider. Providers that connect directly to their
+// backend (see providerSupportsGateway — currently qwen and cursor) never route
+// through the gateway, even when routing is requested.
+//
+// It mirrors the TUI wizard's gate (shouldShowGatewayStep), which never even
+// offers the gateway step for such providers, so the CLI flag path and the
+// wizard reach the same decision instead of the flag silently no-opping.
+//
+// warnIgnored is true only when the user EXPLICITLY passed --llm-gateway for a
+// provider that cannot use it, so the caller can surface a one-line notice. A
+// gateway preference coming solely from saved config stays silent.
+func GatewayEnabledForProvider(llmGatewayFlag, cfgEnabled bool, providerKey string) (enabled, warnIgnored bool) {
+	if !llmGatewayFlag && !cfgEnabled {
+		return false, false
+	}
+	if !providerSupportsGateway(providerKey) {
+		return false, llmGatewayFlag
+	}
+	return true, false
+}
+
+// WithMCPTokenEnv returns env with MCP_TOKEN populated from the resolved
+// VibeFlow API token. The loaded config already honors VIBEFLOW_TOKEN, so the
+// parent MCP_TOKEN is only a fallback for callers without a saved api_token.
+func WithMCPTokenEnv(env map[string]string, cfg *Config) map[string]string {
+	token := ""
+	if cfg != nil {
+		token = cleanEnvToken(cfg.APIToken)
+	}
+	if token == "" {
+		token = cleanEnvToken(os.Getenv("MCP_TOKEN"))
+	}
+	if token == "" {
+		return env
+	}
+	if env == nil {
+		env = make(map[string]string)
+	}
+	env["MCP_TOKEN"] = token
+	return env
+}
+
+// CodexConfigPath returns the Codex config path used for VibeFlow-managed
+// Codex sessions. Custom roots keep this lookup isolated under RootDir().
+func CodexConfigPath() string {
+	if rootDir != "" || os.Getenv("VIBEFLOW_ROOT") != "" {
+		return filepath.Join(RootDir(), ".codex", "config.toml")
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	return filepath.Join(home, ".codex", "config.toml")
+}
+
+// ReadCodexBearerTokenEnvVar reads the Codex config and returns the
+// bearer_token_env_var value from the [mcp_servers.vibeflow] section.
+// Returns "" if the file or key is not found.
+func ReadCodexBearerTokenEnvVar() string {
+	path := CodexConfigPath()
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
@@ -459,6 +678,18 @@ func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]str
 		if val := os.Getenv(envVarName); val != "" {
 			env[envVarName] = cleanEnvToken(val)
 			return env, ""
+		}
+		// MCP_TOKEN is the VibeFlow API token under another name. The launcher
+		// resolves it from cfg.APIToken via WithMCPTokenEnv and overwrites
+		// whatever this function returned, so reporting it missing prompts for
+		// a value that is then discarded. Guarded on the var name: a user who
+		// points bearer_token_env_var at their own variable must never be
+		// silently handed the VibeFlow token.
+		if envVarName == mcpTokenEnvVar {
+			if val := cleanEnvToken(cfg.APIToken); val != "" {
+				env[envVarName] = val
+				return env, ""
+			}
 		}
 		return env, envVarName
 	case "gemini":

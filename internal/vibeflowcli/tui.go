@@ -21,10 +21,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss"
 
 	"vibeflow-cli/sessionid"
@@ -32,24 +33,27 @@ import (
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
-// Colors for the vibeflow theme.
+// Colors for the vibeflow theme — semantic aliases onto the Ocean design
+// system palette (see theme.go / design_system doc #401). Downstream render
+// code references these names; the concrete values live in theme.go.
 var (
-	accentColor  = lipgloss.Color("#00d4aa")
-	dimColor     = lipgloss.Color("#555555")
-	errorColor   = lipgloss.Color("#ff5555")
-	warningColor = lipgloss.Color("#ffaa00")
+	accentColor  = oceanPrimary
+	dimColor     = oceanMuted
+	errorColor   = oceanError
+	warningColor = oceanWarning
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(accentColor).
 			MarginBottom(1)
 
+	// Selected: dark text on a sky-blue bar (Ocean primary).
 	selectedStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#ffffff")).
-			Background(lipgloss.Color("#333333"))
+			Foreground(oceanBackground).
+			Background(oceanPrimary)
 
-	statusRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00"))
+	statusRunning = lipgloss.NewStyle().Foreground(oceanSuccess)
 	statusIdle    = lipgloss.NewStyle().Foreground(dimColor)
 	statusWaiting = lipgloss.NewStyle().Foreground(warningColor)
 	statusError   = lipgloss.NewStyle().Foreground(errorColor)
@@ -85,6 +89,10 @@ type SessionRow struct {
 	LastHeartbeat time.Time
 	TmuxAttached  bool
 	Recovered     bool
+
+	// LLMGatewayEnabled mirrors SessionMeta.LLMGatewayEnabled so the detail
+	// panel can re-derive the gateway env wiring for the selected session.
+	LLMGatewayEnabled bool
 }
 
 // ViewState controls which sub-view is active.
@@ -102,36 +110,38 @@ const (
 
 // Model is the Bubble Tea model for vibeflow-cli.
 type Model struct {
-	sessions      []SessionRow
-	cursor        int
-	client        *Client
-	tmux          *TmuxManager
-	worktrees     *WorktreeManager
-	store         *Store
-	registry      *ProviderRegistry
-	config        *Config
-	width         int
-	height        int
-	err           error
-	quitting      bool
-	projectID     int64
-	activeView    ViewState
-	wizard        WizardModel
-	conflictModal ConflictModal
-	worktreeList  WorktreeListModel
-	pendingWizard *WizardResult      // wizard result waiting for conflict resolution
-	switchMeta    *SessionMeta       // non-nil during quick branch switch flow
-	captureOutput string             // last captured pane output for selected session
-	captureName   string             // tmux session name for current capture
-	confirmDelete bool               // showing delete confirmation
-	confirmQuit   bool               // showing quit confirmation
-	confirmDetach bool               // showing detach confirmation
-	serverWarning string             // non-empty if server unreachable at startup
-	healthMonitor *HealthMonitor     // session error detection and auto-recovery
-	logger        *Logger            // file-based logger
-	cache         *SessionCache      // session cache for restart-without-intervention
-	restartSelect RestartSelectModel // dead-session restart multiselect
-	cloudChat     CloudChatModel     // cloud-agent persona chat view (ViewCloudChat)
+	sessions         []SessionRow
+	cursor           int
+	client           *Client
+	tmux             *TmuxManager
+	worktrees        *WorktreeManager
+	store            *Store
+	registry         *ProviderRegistry
+	config           *Config
+	width            int
+	height           int
+	err              error
+	quitting         bool
+	projectID        int64
+	activeView       ViewState
+	wizard           WizardModel
+	conflictModal    ConflictModal
+	worktreeList     WorktreeListModel
+	pendingWizard    *WizardResult      // wizard result waiting for conflict resolution
+	switchMeta       *SessionMeta       // non-nil during quick branch switch flow
+	groupEditRunning []SessionMeta      // non-nil during group edit flow: the running group being reshaped
+	captureOutput    string             // last captured pane output for selected session
+	captureName      string             // tmux session name for current capture
+	confirmDelete    bool               // showing delete confirmation
+	confirmQuit      bool               // showing quit confirmation
+	confirmDetach    bool               // showing detach confirmation
+	workbenchActive  bool               // true while a pane-join workbench is composing/attached/restoring (pauses store prune)
+	serverWarning    string             // non-empty if server unreachable at startup
+	healthMonitor    *HealthMonitor     // session error detection and auto-recovery
+	logger           *Logger            // file-based logger
+	cache            *SessionCache      // session cache for restart-without-intervention
+	restartSelect    RestartSelectModel // dead-session restart multiselect
+	cloudChat        CloudChatModel     // cloud-agent persona chat view
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -139,6 +149,48 @@ type Model struct {
 	collapsedGroups map[string]bool   // repo root → collapsed state
 	groupOrder      []string          // ordered list of repo roots
 	groupedSessions map[string][]int  // repo root → indices into m.sessions
+
+	// hitmap maps rendered rows of the session list to selectable cursor
+	// positions so mouse clicks resolve to the row under the pointer. It is
+	// populated by renderSessionList during View and read by Update on a
+	// tea.MouseMsg. All its methods are nil-safe so a zero-value Model (used in
+	// tests) never panics.
+	hitmap *listHitmap
+}
+
+// listRowSpan records the vertical extent of one selectable row in the session
+// list, in lines relative to the list's first content line.
+type listRowSpan struct {
+	startY int // content-relative line of the row's first line (Sessions header = 0)
+	height int // number of terminal lines the row occupies (1 or 2)
+	pos    int // grouped-cursor position this row maps to (matches m.cursor)
+}
+
+// listHitmap holds the geometry needed to turn a mouse (x, y) into a list row.
+type listHitmap struct {
+	contentTop int           // absolute terminal row of the list's first content line
+	leftWidth  int           // width of the left column; x >= leftWidth is outside the list
+	spans      []listRowSpan // one entry per selectable row, in render order
+	top        int           // scroll offset: body line at the top of the visible window
+}
+
+func (h *listHitmap) resetSpans() {
+	if h != nil {
+		h.spans = h.spans[:0]
+	}
+}
+
+func (h *listHitmap) addSpan(startY, height, pos int) {
+	if h != nil {
+		h.spans = append(h.spans, listRowSpan{startY: startY, height: height, pos: pos})
+	}
+}
+
+func (h *listHitmap) setViewport(contentTop, leftWidth int) {
+	if h != nil {
+		h.contentTop = contentTop
+		h.leftWidth = leftWidth
+	}
 }
 
 // NewModel creates a new TUI model.
@@ -164,11 +216,32 @@ func NewModel(cfg *Config, client *Client, tmux *TmuxManager, worktrees *Worktre
 		repoRootCache:   make(map[string]string),
 		collapsedGroups: make(map[string]bool),
 		cloudChat:       NewCloudChatModelWithClient(client, projectID),
+		hitmap:          &listHitmap{},
 	}
 }
 
 // attachExitMsg is sent when a tmux attach-session process exits.
 type attachExitMsg struct{ err error }
+
+// workbenchReadyMsg carries the result of composing the pane-join workbench.
+// The composition (or the error) is produced off the Update goroutine so the
+// tmux calls do not block the UI.
+type workbenchReadyMsg struct {
+	comp  *WorkbenchComposition
+	err   error
+	metas []SessionMeta // store metadata of the composed sessions, re-applied on restore
+}
+
+// workbenchExitMsg is sent when the composed workbench attach process exits, so
+// the joined panes can be restored to their own sessions.
+type workbenchExitMsg struct {
+	comp  *WorkbenchComposition
+	metas []SessionMeta
+}
+
+// workbenchRestoredMsg is sent after the workbench panes have been restored to
+// their own sessions and their store metadata re-applied.
+type workbenchRestoredMsg struct{}
 
 // tickMsg triggers periodic refresh.
 type tickMsg time.Time
@@ -272,19 +345,25 @@ func (m Model) refreshSessions() tea.Msg {
 	// Re-bind vibeflow keys to ensure persistence across tmux reloads.
 	m.tmux.BindAllSessionKeys()
 
-	// Sync store with live tmux sessions to clean up orphans.
+	// Cross-reference stored sessions against live tmux. Sessions that are no
+	// longer live in tmux are NEVER pruned here — they are retained in
+	// sessions.json so they stay listed (and restartable) until the user
+	// explicitly removes one with 'd'. Silently pruning them would wipe the
+	// store whenever the queried socket had no server (e.g. after a
+	// --root/socket change, or with the tmux server down); any stale-entry
+	// cleanup is deferred to a later CLI restart.
 	tmuxNames := make([]string, len(tmuxSessions))
 	for i, ts := range tmuxSessions {
 		tmuxNames[i] = ts.Name
 	}
-	if m.store != nil {
-		_ = m.store.Sync(tmuxNames)
-	}
 
 	// Discover orphaned sessions (live in tmux but not in store) and
-	// reconstruct their metadata from tmux state.
+	// reconstruct their metadata from tmux state. Skipped while a workbench is
+	// composing/attached: its sessions are transiently moved into the holder
+	// (absent from tmux), and treating them as orphans would drop
+	// non-reconstructable metadata.
 	recoveredNames := make(map[string]bool)
-	if m.store != nil {
+	if m.store != nil && !m.workbenchActive {
 		discovered := m.store.Discover(tmuxNames)
 		for _, tmuxName := range discovered {
 			provider := ParseSessionProvider(tmuxName)
@@ -314,6 +393,12 @@ func (m Model) refreshSessions() tea.Msg {
 	}
 
 	for _, ts := range tmuxSessions {
+		// The workbench holder is an internal composition session, not a user
+		// agent — never list it, or it shows as "workbench" and (while a
+		// workbench is composed/orphaned) masks the agents joined into it (#3300).
+		if isWorkbenchHolder(ts.Name) {
+			continue
+		}
 		shortName := strings.TrimPrefix(ts.Name, sessionPrefix)
 		row := SessionRow{
 			Name:         shortName,
@@ -328,6 +413,7 @@ func (m Model) refreshSessions() tea.Msg {
 			row.Project = meta.Project
 			row.Persona = meta.Persona
 			row.WorkingDir = meta.WorkingDir
+			row.LLMGatewayEnabled = meta.LLMGatewayEnabled
 		}
 		if recoveredNames[ts.Name] {
 			row.Recovered = true
@@ -460,6 +546,179 @@ func (m Model) selectedSessionIdx() int {
 	return m.cursor
 }
 
+// rowForGroupEdit resolves the session-list row that the `e` group-edit hotkey
+// should anchor on. When the cursor is on an individual session, that row is
+// returned. When it is on a group HEADER (grouped mode), the group's first
+// session is returned so `e` edits the whole group rather than no-opping (#2846)
+// — mirroring how selectedRepoRoot lets m/M act on a header (#3293). Group
+// members share repo-root+branch (the group invariant), so any member is a valid
+// anchor. Returns false when no session/group resolves.
+func (m Model) rowForGroupEdit() (SessionRow, bool) {
+	if idx := m.selectedSessionIdx(); idx >= 0 && idx < len(m.sessions) {
+		return m.sessions[idx], true
+	}
+	if m.groupMode {
+		if _, root := m.groupedCursorToSession(); root != "" {
+			if indices := m.groupedSessions[root]; len(indices) > 0 {
+				if first := indices[0]; first >= 0 && first < len(m.sessions) {
+					return m.sessions[first], true
+				}
+			}
+		}
+	}
+	return SessionRow{}, false
+}
+
+// storeMetaForRow resolves the SessionMeta backing a session-list row. It matches
+// on the full tmux session name (sessionPrefix + row.Name) — the same reliable
+// join key refreshSessions uses to enrich rows — because SessionMeta.Name may be
+// the base name (e.g. "a") while SessionRow.Name is provider-prefixed ("claude-a"),
+// so a Name-based store.Get misses freshly-launched sessions. Returns false when
+// the store is unset, unreadable, or has no session for the row.
+func (m Model) storeMetaForRow(row SessionRow) (SessionMeta, bool) {
+	if m.store == nil {
+		return SessionMeta{}, false
+	}
+	tmuxName := sessionPrefix + row.Name
+	metas, err := m.store.List()
+	if err != nil {
+		return SessionMeta{}, false
+	}
+	for _, meta := range metas {
+		if meta.TmuxSession == tmuxName {
+			return meta, true
+		}
+	}
+	return SessionMeta{}, false
+}
+
+// projectLabel returns a short display label for a repo root (its basename), or
+// "(unknown)" when the root is unknown.
+func projectLabel(root string) string {
+	if root == "" || root == "(unknown)" {
+		return "(unknown)"
+	}
+	return filepath.Base(root)
+}
+
+// selectedProjectSessions returns the label and tmux names of the sessions that
+// share the selected session's project (repo root), in list order. Used by the
+// `m` (single-project) workbench.
+// selectedRepoRoot resolves the current cursor to a project's repo root. In
+// grouped mode groupedCursorToSession returns the group's root even when the
+// cursor is on a project HEADER (not a session), so the m/M workbench shortcuts
+// work with a project root selected (#3293) — previously selectedSessionIdx
+// returned -1 on a header and the shortcuts no-op'd.
+func (m Model) selectedRepoRoot() (root string, ok bool) {
+	if m.groupMode {
+		idx, groupRoot := m.groupedCursorToSession()
+		if idx < 0 && groupRoot == "" {
+			return "", false // cursor maps to no group
+		}
+		return groupRoot, true // group root for both a header and a session
+	}
+	idx := m.selectedSessionIdx()
+	if idx < 0 || idx >= len(m.sessions) {
+		return "", false
+	}
+	return m.getRepoRoot(m.sessions[idx].WorkingDir), true
+}
+
+func (m Model) selectedProjectSessions() (label string, names []string) {
+	selRoot, ok := m.selectedRepoRoot()
+	if !ok {
+		return "", nil
+	}
+	for _, s := range m.sessions {
+		if m.getRepoRoot(s.WorkingDir) == selRoot {
+			names = append(names, s.Name)
+		}
+	}
+	return projectLabel(selRoot), names
+}
+
+// projectGroups returns every project (repo-root group) with its session names,
+// in first-seen order. Used by the `M` (all-projects) workbench.
+func (m Model) projectGroups() []WorkbenchProject {
+	var order []string
+	byRoot := map[string][]string{}
+	for _, s := range m.sessions {
+		root := m.getRepoRoot(s.WorkingDir)
+		if _, ok := byRoot[root]; !ok {
+			order = append(order, root)
+		}
+		byRoot[root] = append(byRoot[root], s.Name)
+	}
+	out := make([]WorkbenchProject, 0, len(order))
+	for _, root := range order {
+		out = append(out, WorkbenchProject{Label: projectLabel(root), Sessions: byRoot[root]})
+	}
+	return out
+}
+
+// workbenchMetas returns the store SessionMeta for the given full tmux session
+// names, so the workbench can re-apply persona/project/etc. after restore (tmux
+// alone cannot hold those fields).
+func (m Model) workbenchMetas(fullNames []string) []SessionMeta {
+	if m.store == nil {
+		return nil
+	}
+	want := make(map[string]bool, len(fullNames))
+	for _, n := range fullNames {
+		want[n] = true
+	}
+	all, err := m.store.List()
+	if err != nil {
+		return nil
+	}
+	var out []SessionMeta
+	for _, meta := range all {
+		if want[meta.TmuxSession] {
+			out = append(out, meta)
+		}
+	}
+	return out
+}
+
+// workbenchTitles maps each session's full tmux name to its workbench pane
+// header ("persona · project · branch"), built from the currently listed rows
+// so the composed panes are self-labeled. Rows are what the user already sees
+// in the list, so they are the reliable header source even when the store meta
+// is absent.
+func (m Model) workbenchTitles() map[string]string {
+	titles := make(map[string]string, len(m.sessions))
+	for _, s := range m.sessions {
+		if h := workbenchHeader(s.Persona, s.Project, s.Branch); h != "" {
+			// Key by the FULL tmux name (with the vibeflow_ prefix): composeInto
+			// looks the header up via titles[ensurePrefix(name)], and s.Name has
+			// the prefix stripped. Keying by the short name made every lookup
+			// miss, so panes fell back to the session-name title (#3291).
+			titles[sessionPrefix+s.Name] = h
+		}
+	}
+	return titles
+}
+
+// composeWorkbenchCmd runs ComposeWorkbench off the Update goroutine (it issues
+// several tmux commands) and reports the result via workbenchReadyMsg.
+func (m Model) composeWorkbenchCmd(names []string, metas []SessionMeta, titles map[string]string) tea.Cmd {
+	tmux := m.tmux
+	return func() tea.Msg {
+		comp, err := tmux.ComposeWorkbench(names, titles)
+		return workbenchReadyMsg{comp: comp, err: err, metas: metas}
+	}
+}
+
+// composeProjectWorkbenchCmd runs ComposeProjectWorkbench off the Update
+// goroutine and reports the result via workbenchReadyMsg.
+func (m Model) composeProjectWorkbenchCmd(projects []WorkbenchProject, selectLabel string, metas []SessionMeta, titles map[string]string) tea.Cmd {
+	tmux := m.tmux
+	return func() tea.Msg {
+		comp, err := tmux.ComposeProjectWorkbench(projects, selectLabel, titles)
+		return workbenchReadyMsg{comp: comp, err: err, metas: metas}
+	}
+}
+
 // cacheGCTickCmd returns a command that fires a GC tick every 1 minute.
 func cacheGCTickCmd() tea.Cmd {
 	return tea.Tick(1*time.Minute, func(t time.Time) tea.Msg {
@@ -472,7 +731,7 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.refreshSessions,
 		captureTickCmd(),
-		tickCmd(time.Duration(m.config.PollInterval)*time.Second),
+		tickCmd(time.Duration(m.config.PollInterval) * time.Second),
 		cacheGCTickCmd(),
 	}
 	if m.activeView == ViewCloudChat {
@@ -579,6 +838,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// No ClearScreen needed: RestoreTerminal already re-enters alt screen
 		// which clears the screen and calls repaint() internally.
 		return m, m.refreshSessions
+	case workbenchReadyMsg:
+		// Composition finished off-goroutine. On success, attach natively to the
+		// holder; on failure, surface the error, auto-clear it, and end the
+		// workbench window so store sync resumes.
+		if msg.err != nil {
+			m.logger.Error("workbench compose: %v", msg.err)
+			m.err = msg.err
+			m.workbenchActive = false
+			return m, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return errClearMsg{} })
+		}
+		comp := msg.comp
+		metas := msg.metas
+		cmd := m.tmux.AttachSessionCmd(comp.HolderName())
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			if err != nil {
+				m.logger.Error("workbench attach: %v", err)
+			}
+			return workbenchExitMsg{comp: comp, metas: metas}
+		})
+	case workbenchExitMsg:
+		// Workbench attach exited — restore every joined pane to its own session
+		// and re-apply its captured store metadata (off-goroutine). workbenchActive
+		// stays true until this completes so a racing refresh cannot prune the
+		// transiently-absent sessions.
+		comp := msg.comp
+		metas := msg.metas
+		store := m.store
+		logger := m.logger
+		return m, func() tea.Msg {
+			if comp != nil {
+				if err := comp.Restore(); err != nil {
+					logger.Error("workbench restore: %v", err)
+				}
+			}
+			// Re-apply persona/project/etc. in case a refresh raced the compose
+			// and pruned it — Restore only recovers the tmux session, not the
+			// store fields that tmux cannot hold.
+			if store != nil {
+				for _, meta := range metas {
+					_ = store.Add(meta)
+				}
+			}
+			return workbenchRestoredMsg{}
+		}
+	case workbenchRestoredMsg:
+		// Restore complete — re-enable store sync and refresh the list.
+		m.workbenchActive = false
+		return m, m.refreshSessions
 	case autoAttachMsg:
 		// Auto-attach to a newly created session.
 		cmd := m.tmux.AttachSessionCmd(msg.name)
@@ -601,7 +908,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateWorktreeList(msg)
 	case ViewHelp:
 		// Any keypress closes the help popup.
-		if _, ok := msg.(tea.KeyMsg); ok {
+		if _, ok := msg.(tea.KeyPressMsg); ok {
 			m.activeView = ViewSessions
 			return m, nil
 		}
@@ -614,7 +921,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+	case tea.KeyPressMsg:
 		// Handle confirmation dialogs first.
 		if m.confirmDelete {
 			switch msg.String() {
@@ -626,26 +935,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					delIdx, _ = m.groupedCursorToSession()
 				}
 				if delIdx >= 0 && delIdx < len(m.sessions) {
-					row := m.sessions[delIdx]
-					if err := m.tmux.KillSession(row.Name); err != nil {
-						m.logger.Error("kill session %s: %v", row.Name, err)
-					} else {
-						m.logger.Info("session killed: %s", row.Name)
-					}
-					if m.store != nil {
-						if meta, found, _ := m.store.Get(row.Name); found {
-							// Session file is intentionally kept so the session
-							// ID can be reused on next launch. Stale conflict
-							// detection handles cleanup and ID preservation.
-							if m.config.Worktree.CleanupOnKill == "always" {
-								m.safeRemoveWorktree(meta.WorktreePath, meta.Name)
-							}
-						}
-						_ = m.store.Remove(row.Name)
-					}
-					if m.cache != nil {
-						_ = m.cache.Remove(row.Name)
-					}
+					m.killSessionByName(m.sessions[delIdx].Name)
 					return m, m.refreshSessions
 				}
 			default:
@@ -707,16 +997,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if sessionIdx >= 0 && sessionIdx < len(m.sessions) {
-					cmd := m.tmux.AttachSessionCmd(m.sessions[sessionIdx].Name)
-					return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-						return attachExitMsg{err: err}
-					})
+					return m, m.attachSessionCmd(m.sessions[sessionIdx].Name)
 				}
 			} else if m.cursor < len(m.sessions) {
-				cmd := m.tmux.AttachSessionCmd(m.sessions[m.cursor].Name)
-				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-					return attachExitMsg{err: err}
-				})
+				return m, m.attachSessionCmd(m.sessions[m.cursor].Name)
 			}
 		case "g":
 			m.groupMode = !m.groupMode
@@ -753,8 +1037,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx < 0 || idx >= len(m.sessions) || m.store == nil {
 				return m, nil
 			}
-			row := m.sessions[idx]
-			meta, found, _ := m.store.Get(row.Name)
+			meta, found := m.storeMetaForRow(m.sessions[idx])
 			if !found {
 				return m, nil
 			}
@@ -764,6 +1047,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.wizard = NewQuickSwitchWizard(meta, m.registry, repoRoot, m.worktrees, m.config)
 			m.switchMeta = &meta
+			m.activeView = ViewWizard
+			return m, nil
+		case "e":
+			// Edit the running group of the selected session — or, when a group
+			// header is selected, the whole group under it (#2846). Add/remove
+			// personas (with per-persona provider) reusing the group's shared
+			// repo+branch.
+			if m.store == nil {
+				return m, nil
+			}
+			anchorRow, ok := m.rowForGroupEdit()
+			if !ok {
+				return m, nil
+			}
+			anchor, found := m.storeMetaForRow(anchorRow)
+			if !found {
+				return m, nil
+			}
+			all, err := m.store.List()
+			if err != nil {
+				return m, nil
+			}
+			group := groupSessionsFor(anchor, all, m.getRepoRoot)
+			repoRoot := anchor.WorkingDir
+			if anchor.WorktreePath != "" && m.worktrees != nil {
+				repoRoot = m.worktrees.RepoRoot()
+			}
+			m.groupEditRunning = group
+			m.wizard = NewGroupEditWizard(group, anchor, m.registry, repoRoot, m.worktrees, m.config)
 			m.activeView = ViewWizard
 			return m, nil
 		case "r":
@@ -777,6 +1089,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, m.refreshSessions
+		case "m":
+			// Project workbench: compose the selected session's project (its
+			// repo-root group) into one natively interactive tmux view. One
+			// session → attach it directly; none → no-op.
+			_, names := m.selectedProjectSessions()
+			switch len(names) {
+			case 0:
+				return m, nil
+			case 1:
+				cmd := m.tmux.AttachSessionCmd(names[0])
+				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+					return attachExitMsg{err: err}
+				})
+			default:
+				m.workbenchActive = true
+				return m, m.composeWorkbenchCmd(names, m.workbenchMetas(names), m.workbenchTitles())
+			}
+		case "M":
+			// All-projects workbench: one tmux window per project, cycled with
+			// Ctrl-b n/p. Worth composing only with ≥2 sessions total.
+			projects := m.projectGroups()
+			var allNames []string
+			for _, p := range projects {
+				allNames = append(allNames, p.Sessions...)
+			}
+			if len(allNames) < 2 {
+				return m, nil
+			}
+			selLabel, _ := m.selectedProjectSessions()
+			m.workbenchActive = true
+			return m, m.composeProjectWorkbenchCmd(projects, selLabel, m.workbenchMetas(allNames), m.workbenchTitles())
 		case "w":
 			m.worktreeList = NewWorktreeListModel(m.worktrees, m.store)
 			m.activeView = ViewWorktrees
@@ -846,7 +1189,7 @@ func (m Model) updateCloudChat(msg tea.Msg) (tea.Model, tea.Cmd) {
 // updateWizard delegates to the wizard sub-model and handles completion.
 func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Allow global quit even in wizard.
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "ctrl+c" {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -856,6 +1199,7 @@ func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.wizard.Cancelled() {
 		m.switchMeta = nil
+		m.groupEditRunning = nil
 		m.activeView = ViewSessions
 		return m, nil
 	}
@@ -874,6 +1218,14 @@ func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.activeView = ViewSessions
+
+		// Group edit: diff the desired persona set against the running group,
+		// then spawn the additions and stop the removals.
+		if m.groupEditRunning != nil {
+			running := m.groupEditRunning
+			m.groupEditRunning = nil
+			return m, func() tea.Msg { return m.applyGroupEdit(running, result) }
+		}
 
 		// Quick branch switch: kill old session, then launch new one.
 		if m.switchMeta != nil {
@@ -930,7 +1282,7 @@ func (m Model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateConflict delegates to the conflict modal and handles the result.
 func (m Model) updateConflict(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "ctrl+c" {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -986,7 +1338,7 @@ func (m Model) updateConflict(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // updateWorktreeList delegates to the worktree list sub-model.
 func (m Model) updateWorktreeList(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "ctrl+c" {
+	if keyMsg, ok := msg.(tea.KeyPressMsg); ok && keyMsg.String() == "ctrl+c" {
 		m.quitting = true
 		return m, tea.Quit
 	}
@@ -1007,6 +1359,104 @@ func (m Model) updateWorktreeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+// killSessionByName stops a tmux session and removes it from the store and cache,
+// applying the configured worktree cleanup. The session file is intentionally
+// kept so the session ID can be reused on next launch (stale-conflict detection
+// handles cleanup and ID preservation). Shared by the `d` delete confirmation and
+// the group-edit remove path.
+func (m Model) killSessionByName(name string) {
+	if err := m.tmux.KillSession(name); err != nil {
+		m.logger.Error("kill session %s: %v", name, err)
+	} else {
+		m.logger.Info("session killed: %s", name)
+	}
+	if m.store != nil {
+		if meta, found, _ := m.store.Get(name); found {
+			if m.config.Worktree.CleanupOnKill == "always" {
+				m.safeRemoveWorktree(meta.WorktreePath, meta.Name)
+			}
+		}
+		_ = m.store.Remove(name)
+	}
+	if m.cache != nil {
+		_ = m.cache.Remove(name)
+	}
+}
+
+// killSessionMeta stops the tmux session described by meta and removes it from
+// the store and cache, applying the configured worktree cleanup. Unlike
+// killSessionByName — which takes a row's short tmux name and keys every step off
+// that one string — this keys the tmux kill off meta.TmuxSession and the
+// store/cache removal off meta.Name. That distinction matters for freshly
+// launched sessions, whose store Name is the base name (e.g. "a") while their
+// tmux session is provider-prefixed (e.g. "vibeflow_claude-a"): killing by Name
+// would target the wrong session and leave the real one running (issue #3438).
+// The on-disk session file is intentionally kept for ID reuse, matching
+// killSessionByName. Mirrors the quick-branch-switch teardown.
+func (m Model) killSessionMeta(meta SessionMeta) {
+	if err := m.tmux.KillSession(meta.TmuxSession); err != nil {
+		m.logger.Error("kill session %s: %v", meta.TmuxSession, err)
+	} else {
+		m.logger.Info("session killed: %s", meta.TmuxSession)
+	}
+	if m.store != nil {
+		if m.config.Worktree.CleanupOnKill == "always" {
+			m.safeRemoveWorktree(meta.WorktreePath, meta.Name)
+		}
+		_ = m.store.Remove(meta.Name)
+	}
+	if m.cache != nil {
+		_ = m.cache.Remove(meta.Name)
+	}
+}
+
+// groupSessionsFor returns the sessions that belong to the same group as anchor:
+// those sharing the anchor's repo root AND branch (the anchor itself included).
+// repoRoot normalizes a working directory to its git repo root. Pure (repoRoot is
+// injected) so group membership is unit-testable without a live TUI.
+func groupSessionsFor(anchor SessionMeta, all []SessionMeta, repoRoot func(string) string) []SessionMeta {
+	anchorRoot := repoRoot(anchor.WorkingDir)
+	var out []SessionMeta
+	for _, meta := range all {
+		if repoRoot(meta.WorkingDir) == anchorRoot && meta.Branch == anchor.Branch {
+			out = append(out, meta)
+		}
+	}
+	return out
+}
+
+// applyGroupEdit reconciles a running group with the desired persona set from a
+// group-edit wizard: it stops the sessions of removed personas and spawns the
+// added ones (with per-persona provider) on the group's shared repo+branch via
+// the existing multi-spawn launch path.
+func (m Model) applyGroupEdit(running []SessionMeta, result WizardResult) tea.Msg {
+	runningByPersona := make(map[string]SessionMeta, len(running))
+	runningKeys := make([]string, 0, len(running))
+	for _, meta := range running {
+		if _, seen := runningByPersona[meta.Persona]; seen {
+			continue
+		}
+		runningByPersona[meta.Persona] = meta
+		runningKeys = append(runningKeys, meta.Persona)
+	}
+
+	toAdd, toRemove := diffGroupPersonas(runningKeys, result.Personas)
+
+	for _, persona := range toRemove {
+		if meta, ok := runningByPersona[persona]; ok {
+			m.killSessionMeta(meta)
+		}
+	}
+
+	if len(toAdd) == 0 {
+		return m.refreshSessions()
+	}
+	r := result
+	r.Personas = toAdd
+	r.Persona = toAdd[0]
+	return m.launchFromWizard(r)
 }
 
 // launchFromWizard checks for conflicts and either launches or shows the conflict modal.
@@ -1278,9 +1728,13 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			result.Provider.Env[k] = v
 		}
 	}
+	result.Provider.Env = WithMCPTokenEnv(result.Provider.Env, m.config)
 
-	// For qwen, mirror OPENAI_* env vars onto the command line so qwen-code
-	// honors them (env vars alone don't always drive model reporting).
+	// Mirror Codex gateway config and qwen routed env vars onto the command
+	// line so each provider sees the explicit launch-time configuration it
+	// expects.
+	command = AppendCodexGatewayProviderFlags(command, provider, result.Provider.Env)
+	// For qwen, env vars alone don't always drive model reporting.
 	// Must run after env merging and before the init-prompt append so the
 	// flags land between the base command and the seed prompt argument.
 	command = AppendQwenAPIFlags(command, provider, result.Provider.Env)
@@ -1293,6 +1747,11 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	if result.SessionType == "vibeflow" {
 		initPrompt := BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona)
 		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
+	}
+	command, err = WrapOpenShellCommand(command, m.config.OpenShell)
+	if err != nil {
+		m.logger.Error("wrap openshell command (provider=%s): %v", provider, err)
+		return sessionsMsg{err: err}
 	}
 
 	// Ensure all agent-specific markdown docs exist in the working directory
@@ -1325,7 +1784,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		m.logger.Error("session %q not verified by has-session after create", tmuxName)
 		return sessionsMsg{err: fmt.Errorf("session %q was not created — tmux has-session check failed", tmuxName)}
 	}
-	m.logger.Info("session created: %s (provider=%s, workdir=%s, command=%q)", tmuxName, provider, workDir, command)
+	m.logger.Info("session created: %s (provider=%s, workdir=%s, command=%q)", tmuxName, provider, workDir, redactCommandSecrets(command))
 
 	// Bind Ctrl+Q to open vibeflow TUI popup inside the tmux session.
 	if bindErr := m.tmux.BindSessionKeys(tmuxName); bindErr != nil {
@@ -1357,6 +1816,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		SkipPermissions:   result.SkipPermissions,
 		LLMGatewayEnabled: result.LLMGatewayEnabled,
 		MCPToolName:       m.config.MCPToolName,
+		OpenShell:         openShellMeta(m.config.OpenShell),
 		CreatedAt:         time.Now(),
 	}
 	if m.store != nil {
@@ -1377,119 +1837,99 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	return m.refreshSessions()
 }
 
-func (m Model) createSession(_ tea.Msg) tea.Msg {
-	workDir := m.config.ResolveWorkDir("")
-
-	// Check for session conflicts before launching (non-wizard path uses empty persona).
-	conflict := CheckConflict(workDir, "", m.tmux)
-	switch conflict.Status {
-	case ActiveConflict:
-		// If worktrees are available, auto-create a worktree instead of blocking.
-		if m.worktrees != nil && m.config.Worktree.AutoCreate {
-			// Fall through — worktree creation below will give us a clean dir.
-		} else {
-			return sessionsMsg{err: fmt.Errorf("active session conflict in %s (session %s, provider %s) — switch to it or use a worktree",
-				workDir, conflict.SessionID, conflict.Provider)}
-		}
-	case ExternalConflict:
-		// External session (not managed by TUI) — treat as stale for non-wizard path.
-		_ = CleanupStaleSession(workDir, "")
-	case StaleConflict:
-		_ = CleanupStaleSession(workDir, "")
-	}
-
-	name := sessionid.GenerateSessionID(workDir)
-
-	// Use default provider from config.
-	provider := m.config.DefaultProvider
-	if provider == "" {
-		provider = "claude"
-	}
-
-	// Create worktree if configured and available.
-	var worktreePath string
-	branch := "main" // default; wizard (Todo #344) will let user pick
-	if m.worktrees != nil && m.config.Worktree.AutoCreate {
-		wtName := fmt.Sprintf("%s-%s-%d", provider, branch, time.Now().Unix())
-		wtPath, wtErr := m.worktrees.Create(wtName, branch)
-		if wtErr == nil {
-			workDir = wtPath
-			worktreePath = wtPath
-		} else {
-			m.logger.Warn("worktree creation failed, using current dir: %v", wtErr)
-		}
-	}
-
-	// Render launch command from provider config.
-	var command string
-	var provCfg Provider
-	if p, ok := m.config.Providers[provider]; ok {
-		provCfg = p
-		cmd, err := RenderLaunchCommand(p.LaunchTemplate, LaunchTemplateVars{
-			WorkDir:   workDir,
-			ServerURL: m.config.ServerURL,
-			Binary:    p.Binary,
-		})
-		if err == nil && cmd != "" {
-			command = cmd
-		} else {
-			command = p.Binary
-		}
-	} else {
-		command = fmt.Sprintf("%s --dangerously-skip-permissions", m.config.ClaudeBinary)
-	}
-
-	// Mirror qwen OPENAI_* env vars onto the CLI flags so qwen-code uses them.
-	command = AppendQwenAPIFlags(command, provider, provCfg.Env)
-
-	err := m.tmux.CreateSessionWithOpts(SessionOpts{
-		Name:     name,
-		Provider: provider,
-		WorkDir:  workDir,
-		Command:  command,
-		Env:      provCfg.Env,
-		Branch:   branch,
-		Project:  m.config.DefaultProject,
+// attachSessionCmd builds the command that attaches to (or, inside tmux,
+// switches to) the named session. Shared by the Enter key and mouse clicks so
+// both activate a session identically.
+func (m Model) attachSessionCmd(name string) tea.Cmd {
+	cmd := m.tmux.AttachSessionCmd(name)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return attachExitMsg{err: err}
 	})
-	if err != nil {
-		m.logger.Error("create session (provider=%s, workdir=%s): %v", provider, workDir, err)
-		return sessionsMsg{err: err}
-	}
+}
 
-	// Compute full tmux name for session file and metadata.
-	tmuxName := m.tmux.FullSessionName(provider, name)
-	m.logger.Info("session created: %s (provider=%s, workdir=%s)", tmuxName, provider, workDir)
+// handleMouse routes mouse events for the main session list: the wheel moves
+// the selection and a left click resolves to the row under the pointer. Mouse
+// input is ignored outside the session list (sub-views, confirmation dialogs).
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.activeView != ViewSessions || m.confirmDelete || m.confirmQuit || m.confirmDetach {
+		return m, nil
+	}
+	switch msg := msg.(type) {
+	case tea.MouseWheelMsg:
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case tea.MouseWheelDown:
+			maxIdx := len(m.sessions) - 1
+			if m.groupMode {
+				maxIdx = m.groupedListLen() - 1
+			}
+			if m.cursor < maxIdx {
+				m.cursor++
+			}
+		}
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			return m.handleListClick(msg.X, msg.Y)
+		}
+	}
+	return m, nil
+}
 
-	// Write session file if the provider uses one.
-	// Only write if the file doesn't already contain this session ID.
-	// Non-wizard path uses empty persona (legacy .vibeflow-session).
-	if provCfg.SessionFile != "" {
-		_ = WriteSessionFileIfNeeded(workDir, "", name)
+// handleListClick resolves a left click to a session-list row via the hitmap
+// populated during the last render. The first click on a row moves the
+// selection there; clicking the already-selected session attaches to it, and
+// clicking a group header toggles its collapsed state. Clicks outside the list
+// (the detail panel, borders, header/help rows) are ignored.
+func (m Model) handleListClick(x, y int) (tea.Model, tea.Cmd) {
+	h := m.hitmap
+	if h == nil || x < 0 || x >= h.leftWidth {
+		return m, nil
 	}
-
-	// Persist session metadata to store and cache.
-	meta := SessionMeta{
-		Name:         name,
-		TmuxSession:  tmuxName,
-		Provider:     provider,
-		Project:      m.config.DefaultProject,
-		Branch:       branch,
-		WorktreePath: worktreePath,
-		WorkingDir:   workDir,
-		CreatedAt:    time.Now(),
+	contentY := y - h.contentTop
+	for _, span := range h.spans {
+		if contentY < span.startY || contentY >= span.startY+span.height {
+			continue
+		}
+		alreadySelected := m.cursor == span.pos
+		m.cursor = span.pos
+		if m.groupMode {
+			sessionIdx, groupRoot := m.groupedCursorToSession()
+			if sessionIdx == -1 && groupRoot != "" {
+				m.collapsedGroups[groupRoot] = !m.collapsedGroups[groupRoot]
+				return m, nil
+			}
+			if alreadySelected && sessionIdx >= 0 && sessionIdx < len(m.sessions) {
+				return m, m.attachSessionCmd(m.sessions[sessionIdx].Name)
+			}
+			return m, nil
+		}
+		if alreadySelected && span.pos < len(m.sessions) {
+			return m, m.attachSessionCmd(m.sessions[span.pos].Name)
+		}
+		return m, nil
 	}
-	if m.store != nil {
-		_ = m.store.Add(meta)
-	}
-	if m.cache != nil {
-		_ = m.cache.Add(meta)
-	}
-
-	return m.refreshSessions()
+	return m, nil
 }
 
 // View renders the TUI with a two-column layout: session list (left) and detail panel (right).
-func (m Model) View() string {
+// Alt-screen, focus reporting, and mouse mode are set here — in Bubble Tea v2
+// these are View fields rather than program options. MouseModeCellMotion
+// enables mouse reporting so the main list responds to clicks and the scroll
+// wheel; plain drag-to-select falls back to Shift/Option-drag in most
+// terminals (the k9s/lazygit convention).
+func (m Model) View() tea.View {
+	v := tea.NewView(m.viewContent())
+	v.AltScreen = true
+	v.ReportFocus = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+// viewContent renders the full screen content as a styled string.
+func (m Model) viewContent() string {
 	if m.quitting {
 		return ""
 	}
@@ -1519,9 +1959,13 @@ func (m Model) View() string {
 		height = 24
 	}
 
-	// ASCII banner.
+	// ASCII banner. The raw-string const starts with a newline that must not
+	// reach the renderer: the layout below budgets the view to exactly the
+	// terminal height, and Bubble Tea v2 crops overflow at the BOTTOM (v1
+	// cropped at the top), so one stray leading line pushes the help bar
+	// off-screen.
 	bannerStyle := lipgloss.NewStyle().Foreground(asciiBanner).Bold(true)
-	title := bannerStyle.Render(bannerText) + "\n" + copyrightStyle.Render("  "+copyrightText)
+	title := bannerStyle.Render(strings.TrimPrefix(bannerText, "\n")) + "\n" + copyrightStyle.Render("  "+copyrightText)
 
 	// Error/warning line (optional).
 	var errLine string
@@ -1566,7 +2010,7 @@ func (m Model) View() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  d: delete  b: switch  D: detach  g: group  w: worktrees  c: cloud  ?: help  q: quit", enterHint)
+		keys := fmt.Sprintf("n: new  enter: %s  m: project wb  M: all wb  d: delete  b: switch  e: edit grp  D: detach  g: group  w: worktrees  c: cloud  ?: help  q: quit", enterHint)
 		socket := m.config.TmuxSocket
 		if socket == "" {
 			socket = "vibeflow"
@@ -1590,8 +2034,11 @@ func (m Model) View() string {
 		rightWidth = 20
 	}
 
-	// Available height for columns: total minus banner, copyright, gap, help.
-	usedLines := 10 // banner(7) + copyright(1) + gap(1) + help(1)
+	// Available height for columns: total minus banner+copyright title (7),
+	// help bar (1), and the columns' own top/bottom border (2). The sum of all
+	// rendered lines must equal the terminal height exactly — v2 crops any
+	// overflow at the bottom, where the help bar lives.
+	usedLines := 10 // title(7) + help(1) + column borders(2)
 	if errLine != "" {
 		usedLines++
 	}
@@ -1614,10 +2061,20 @@ func (m Model) View() string {
 		contentH = 4
 	}
 
+	// Record the list viewport for mouse hit-testing. The list's first content
+	// line sits below the title, the optional error/warning line, and the left
+	// column's top border. Deriving the offset from the rendered heights keeps
+	// it correct even if the banner changes size.
+	errHeight := 0
+	if errLine != "" {
+		errHeight = lipgloss.Height(errLine)
+	}
+	m.hitmap.setViewport(lipgloss.Height(title)+errHeight+1, leftWidth)
+
 	leftContent := m.renderSessionList(leftContentW, contentH)
 	rightContent := m.renderDetailPanel(rightContentW, contentH)
 
-	borderStyle := lipgloss.RoundedBorder()
+	borderStyle := oceanBorder()
 	leftStyle := lipgloss.NewStyle().
 		Width(leftWidth).
 		Height(colHeight).
@@ -1646,9 +2103,24 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// renderSessionList renders the left column with session entries.
+// listRow is one pre-rendered, selectable entry in the session list. Building
+// the full ordered set first lets windowRows scroll and hit-test uniformly for
+// both flat and grouped modes.
+type listRow struct {
+	text   string // rendered content, `height` lines joined by "\n" (no trailing "\n")
+	height int    // terminal lines occupied (1 or 2)
+	pos    int    // grouped-cursor position this row maps to (matches m.cursor)
+}
+
+// renderSessionList renders the left column with session entries. The "Sessions"
+// header is a fixed first line; the selectable rows below it scroll within a
+// viewport of `height` lines so a list longer than the box stays reachable.
 func (m Model) renderSessionList(width, height int) string {
 	var b strings.Builder
+
+	// Rebuild the click hitmap for this render. Line 0 is the "Sessions" header
+	// written just below; selectable rows start at line 1.
+	m.hitmap.resetSpans()
 
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	modeLabel := "flat"
@@ -1659,27 +2131,138 @@ func (m Model) renderSessionList(width, height int) string {
 	b.WriteString("\n")
 
 	if len(m.sessions) == 0 {
+		if m.hitmap != nil {
+			m.hitmap.top = 0
+		}
 		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("No active sessions."))
 		b.WriteString("\n")
 		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("Press 'n' to create one."))
 		return b.String()
 	}
 
+	var rows []listRow
 	if m.groupMode {
-		return m.renderGroupedList(width, &b)
+		rows = m.buildGroupedRows(width)
+	} else {
+		rows = m.buildFlatRows(width)
 	}
 
-	for i, s := range m.sessions {
-		m.renderSessionRow(&b, s, i, m.cursor, width, "")
+	// avail = body lines below the fixed "Sessions" header.
+	avail := height - 1
+	if avail < 1 {
+		avail = 1
 	}
+	b.WriteString(m.windowRows(rows, avail))
 
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderGroupedList renders the session list grouped by repo root.
-func (m Model) renderGroupedList(width int, b *strings.Builder) string {
+// buildFlatRows pre-renders every session as a listRow in flat (ungrouped) mode.
+func (m Model) buildFlatRows(width int) []listRow {
+	rows := make([]listRow, 0, len(m.sessions))
+	for i, s := range m.sessions {
+		var rb strings.Builder
+		m.renderSessionRow(&rb, s, i, m.cursor, width, "")
+		rows = append(rows, listRow{
+			text:   strings.TrimRight(rb.String(), "\n"),
+			height: sessionRowHeight(s),
+			pos:    i,
+		})
+	}
+	return rows
+}
+
+// windowRows renders the visible slice of `rows` into a viewport `avail` lines
+// tall, scrolling so the cursor row stays visible, and records a hitmap span for
+// the visible portion of each on-screen row. Because navigation is entirely
+// cursor-driven (j/k and the wheel both move m.cursor), keeping the cursor in
+// view is sufficient to reach every row. The scroll offset persists in the
+// hitmap (a pointer shared across value-receiver View renders), so it survives
+// between frames and stays in lockstep with what handleListClick tests against.
+func (m Model) windowRows(rows []listRow, avail int) string {
+	// Body-line start of each row, plus the cursor row's extent.
+	starts := make([]int, len(rows))
+	total := 0
+	cursorStart, cursorHeight := -1, 0
+	for i, r := range rows {
+		starts[i] = total
+		if r.pos == m.cursor {
+			cursorStart, cursorHeight = total, r.height
+		}
+		total += r.height
+	}
+
+	// Resolve the scroll offset: start from the persisted value, clamp to the
+	// content, then scroll the minimum needed to keep the cursor row visible.
+	top := 0
+	if m.hitmap != nil {
+		top = m.hitmap.top
+	}
+	if maxTop := total - avail; top > maxTop {
+		top = maxTop
+	}
+	if top < 0 {
+		top = 0
+	}
+	if cursorStart >= 0 {
+		if cursorStart < top {
+			top = cursorStart // cursor above the window → scroll up to it
+		} else if cursorStart+cursorHeight > top+avail {
+			top = cursorStart + cursorHeight - avail // cursor below → scroll down
+		}
+	}
+	if m.hitmap != nil {
+		m.hitmap.top = top
+	}
+
+	var b strings.Builder
+	for i, r := range rows {
+		rowStart := starts[i]
+		visStart, visEnd := rowStart, rowStart+r.height
+		if visStart < top {
+			visStart = top
+		}
+		if visEnd > top+avail {
+			visEnd = top + avail
+		}
+		if visStart >= visEnd {
+			continue // fully outside the window
+		}
+		// Span is content-relative: the "Sessions" header is line 0, so the first
+		// body line sits at 1. Clip to the visible portion so click geometry is exact.
+		m.hitmap.addSpan(1+(visStart-top), visEnd-visStart, r.pos)
+
+		lines := strings.Split(r.text, "\n")
+		from, to := visStart-rowStart, visEnd-rowStart
+		if to > len(lines) {
+			to = len(lines)
+		}
+		for _, ln := range lines[from:to] {
+			b.WriteString(ln)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// sessionRowHeight reports how many terminal lines renderSessionRow emits for a
+// row: one for the name, plus one for the subtitle when any of branch, persona,
+// or project is set. It MUST stay in sync with renderSessionRow's subtitle
+// condition so the click hitmap matches what is drawn.
+func sessionRowHeight(s SessionRow) int {
+	if s.Branch != "" || s.Persona != "" || s.Project != "" {
+		return 2
+	}
+	return 1
+}
+
+// buildGroupedRows pre-renders the session list grouped by repo root: one
+// listRow per group header followed by its (expanded) sessions. Positions
+// advance across headers and rows so they match m.cursor exactly.
+func (m Model) buildGroupedRows(width int) []listRow {
+	var rows []listRow
 	pos := 0
-	groupHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#888888"))
+	groupHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(oceanMuted)
 
 	for _, root := range m.groupOrder {
 		indices := m.groupedSessions[root]
@@ -1697,23 +2280,30 @@ func (m Model) renderGroupedList(width int, b *strings.Builder) string {
 		}
 		header := fmt.Sprintf("%s %s (%d)", arrow, displayRoot, len(indices))
 
+		var hb strings.Builder
 		if pos == m.cursor {
-			b.WriteString(selectedStyle.Width(width).Render("> " + header))
+			hb.WriteString(selectedStyle.Width(width).Render(iconActive + " " + header))
 		} else {
-			b.WriteString("  " + groupHeaderStyle.Render(header))
+			hb.WriteString("  " + groupHeaderStyle.Render(header))
 		}
-		b.WriteString("\n")
+		rows = append(rows, listRow{text: hb.String(), height: 1, pos: pos})
 		pos++
 
 		if !collapsed {
 			for _, idx := range indices {
-				m.renderSessionRow(b, m.sessions[idx], pos, m.cursor, width, "  ")
+				var rb strings.Builder
+				m.renderSessionRow(&rb, m.sessions[idx], pos, m.cursor, width, "  ")
+				rows = append(rows, listRow{
+					text:   strings.TrimRight(rb.String(), "\n"),
+					height: sessionRowHeight(m.sessions[idx]),
+					pos:    pos,
+				})
 				pos++
 			}
 		}
 	}
 
-	return strings.TrimRight(b.String(), "\n")
+	return rows
 }
 
 // renderSessionRow renders a single session row into the builder.
@@ -1777,7 +2367,7 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	line := fmt.Sprintf("%s %s%s%s%s", indStyle.Render(indicator), provDot, name, recoveredBadge, healthBadge)
 
 	if pos == cursor {
-		b.WriteString(selectedStyle.Width(width).Render("> " + indent + line))
+		b.WriteString(selectedStyle.Width(width).Render(iconActive + " " + indent + line))
 	} else {
 		b.WriteString("  " + indent + line)
 	}
@@ -1829,7 +2419,7 @@ func (m Model) renderDetailPanel(width, height int) string {
 	s := m.sessions[idx]
 
 	labelStyle := lipgloss.NewStyle().Foreground(dimColor).Width(14)
-	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff"))
+	valueStyle := lipgloss.NewStyle().Foreground(oceanForeground)
 
 	row := func(label, value string) {
 		b.WriteString(labelStyle.Render(label))
@@ -1890,6 +2480,29 @@ func (m Model) renderDetailPanel(width, height int) string {
 		row("Attached", "yes")
 	}
 
+	// Gateway env wiring (gateway mode only). Re-derived from current config
+	// rather than persisted — BuildLLMGatewayEnv is deterministic per provider.
+	// Secret-bearing values are masked with the same allowlist used for
+	// spawn-log redaction (isSecretEnvKey).
+	if s.LLMGatewayEnabled {
+		row("Gateway", "enabled")
+		env := BuildLLMGatewayEnv(s.Provider, m.config.ServerURL, m.config.APIToken)
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		envStyle := lipgloss.NewStyle().Foreground(dimColor)
+		for _, k := range keys {
+			v := env[k]
+			if isSecretEnvKey(k) {
+				v = "<redacted>"
+			}
+			b.WriteString(envStyle.Render(truncate("  "+k+"="+v, width)))
+			b.WriteString("\n")
+		}
+	}
+
 	// Health status banner.
 	if m.healthMonitor != nil {
 		if sh := m.healthMonitor.GetHealth(s.Name); sh != nil && sh.Status != HealthHealthy {
@@ -1937,7 +2550,7 @@ func (m Model) renderDetailPanel(width, height int) string {
 		if len(lines) > maxLines {
 			lines = lines[len(lines)-maxLines:]
 		}
-		outputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa"))
+		outputStyle := lipgloss.NewStyle().Foreground(oceanForeground)
 		for _, line := range lines {
 			b.WriteString(outputStyle.Render(truncate(line, width)))
 			b.WriteString("\n")
@@ -1962,8 +2575,8 @@ func (m Model) renderHelpPopup() string {
 	}
 
 	catStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Width(16)
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#aaaaaa"))
+	keyStyle := lipgloss.NewStyle().Foreground(oceanPrimary).Width(16)
+	descStyle := lipgloss.NewStyle().Foreground(oceanMuted)
 	dimStyle := lipgloss.NewStyle().Foreground(dimColor)
 
 	var b strings.Builder
@@ -1971,6 +2584,8 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString("\n")
 	b.WriteString(keyStyle.Render("  j / k") + descStyle.Render("Move down / up") + "\n")
 	b.WriteString(keyStyle.Render("  enter") + descStyle.Render("Attach to session") + "\n")
+	b.WriteString(keyStyle.Render("  m") + descStyle.Render("Workbench: this project's sessions, native view") + "\n")
+	b.WriteString(keyStyle.Render("  M") + descStyle.Render("Workbench: all projects (Ctrl-b n/p to switch)") + "\n")
 	b.WriteString(keyStyle.Render("  g") + descStyle.Render("Toggle flat / grouped view") + "\n")
 	b.WriteString("\n")
 
@@ -1979,6 +2594,7 @@ func (m Model) renderHelpPopup() string {
 	b.WriteString(keyStyle.Render("  n") + descStyle.Render("New session (wizard)") + "\n")
 	b.WriteString(keyStyle.Render("  d") + descStyle.Render("Delete session") + "\n")
 	b.WriteString(keyStyle.Render("  b") + descStyle.Render("Switch branch") + "\n")
+	b.WriteString(keyStyle.Render("  e") + descStyle.Render("Edit group (add/remove personas)") + "\n")
 	b.WriteString(keyStyle.Render("  D") + descStyle.Render("Detach (quit, sessions persist)") + "\n")
 	b.WriteString(keyStyle.Render("  w") + descStyle.Render("Manage worktrees") + "\n")
 	b.WriteString(keyStyle.Render("  r") + descStyle.Render("Retry recovery / refresh") + "\n")
@@ -2016,7 +2632,7 @@ func (m Model) renderHelpPopup() string {
 	popupWidth := 52
 	popupStyle := lipgloss.NewStyle().
 		Width(popupWidth).
-		Border(lipgloss.RoundedBorder()).
+		Border(oceanBorder()).
 		BorderForeground(accentColor).
 		Padding(1, 2)
 
@@ -2024,12 +2640,13 @@ func (m Model) renderHelpPopup() string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, popup)
 }
 
-// Provider color-coded dots.
+// Provider color-coded dots — distinct hues drawn from the Ocean palette
+// (theme.go). The provider glyph plus these keep providers distinguishable.
 var providerColors = map[string]lipgloss.Color{
-	"claude": lipgloss.Color("#cc785c"), // warm amber
-	"codex":  lipgloss.Color("#10a37f"), // OpenAI green
-	"cursor": lipgloss.Color("#a8b4ff"), // Cursor accent
-	"gemini": lipgloss.Color("#4285f4"), // Google blue
+	"claude": oceanWarning,   // sandy
+	"codex":  oceanAccent,    // seafoam
+	"cursor": oceanPrimary,   // sky
+	"gemini": oceanSecondary, // deep blue
 }
 
 func renderProvider(provider string) string {
