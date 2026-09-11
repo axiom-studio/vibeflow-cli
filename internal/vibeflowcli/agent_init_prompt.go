@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -101,6 +102,74 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	default:
 		return baseCommand + fmt.Sprintf(" '%s'", escaped)
 	}
+}
+
+var conversationUUID = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+
+func supportsExactResume(provider, id string) bool {
+	return (provider == "claude" || provider == "codex") && conversationUUID.MatchString(id)
+}
+
+// conversationIDFromExitHint accepts only a provider's final exit hint, never
+// a directory's latest conversation or an ID embedded in arbitrary output.
+func conversationIDFromExitHint(provider, output string) string {
+	output = strings.TrimSpace(output)
+	// tmux appends its remain-on-exit footer below the captured process output.
+	if i := strings.LastIndex(output, "\nPane is dead ("); i >= 0 && strings.HasSuffix(output, ")") {
+		output = strings.TrimSpace(output[:i])
+	}
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	var id string
+	switch provider {
+	case "claude":
+		if len(lines) < 2 || strings.TrimSpace(lines[len(lines)-2]) != "Resume this session with:" || !strings.HasPrefix(last, "claude --resume ") {
+			return ""
+		}
+		id = strings.TrimPrefix(last, "claude --resume ")
+	case "codex":
+		if !strings.HasPrefix(last, "To continue this session, run codex resume ") {
+			return ""
+		}
+		id = strings.TrimPrefix(last, "To continue this session, run codex resume ")
+	}
+	if supportsExactResume(provider, id) {
+		return id
+	}
+	return ""
+}
+
+// renderResumeCommand supplies Codex's subcommand through the binary template
+// variable so custom wrappers (for example env ... {{.Binary}}) remain valid.
+func renderResumeCommand(tmpl string, vars LaunchTemplateVars, provider, id string) (string, error) {
+	if supportsExactResume(provider, id) && provider == "codex" {
+		// Inserting a subcommand into a quoted executable makes it part of the
+		// executable's filename. Support raw binary tokens; refuse other custom
+		// templates before the old pane is replaced.
+		if tmpl != "" {
+			const token = "{{.Binary}}"
+			i := strings.Index(tmpl, token)
+			if i < 0 || strings.Count(tmpl, token) != 1 {
+				return "", fmt.Errorf("exact Codex resume requires an unquoted {{.Binary}} token in the launch template")
+			}
+			before, after := tmpl[:i], tmpl[i+len(token):]
+			if (before != "" && strings.TrimRight(before, " \t\r\n") == before) || (after != "" && strings.TrimLeft(after, " \t\r\n") == after && !strings.HasPrefix(after, "{{")) {
+				return "", fmt.Errorf("exact Codex resume requires an unquoted {{.Binary}} token in the launch template")
+			}
+		}
+		vars.Binary = shellQuote(vars.Binary) + " resume " + shellQuote(id)
+	}
+	command, err := RenderLaunchCommand(tmpl, vars)
+	if err != nil {
+		return "", err
+	}
+	if command == "" {
+		command = vars.Binary
+	}
+	if supportsExactResume(provider, id) && provider == "claude" {
+		command += " --resume " + shellQuote(id)
+	}
+	return command, nil
 }
 
 // AppendCodexGatewayProviderFlags appends a temporary Codex CLI custom

@@ -450,3 +450,38 @@ func TestApplyQwenModelPassthrough(t *testing.T) {
 		applyQwenModelPassthrough("qwen", nil) // must not panic
 	})
 }
+
+func TestExactConversationResume(t *testing.T) {
+	const id = "7ae74319-242d-45d1-b251-0495f225448c"
+	claudeHint := "Resume this session with:\nclaude --resume " + id
+	codexHint := "To continue this session, run codex resume " + id
+	for _, tc := range []struct{ provider, output, want string }{
+		{"claude", claudeHint, id},
+		{"codex", codexHint, id},
+		{"claude", claudeHint + "\nnew conversation", ""},
+		{"claude", "chat mentioned claude --resume " + id, ""},
+		{"claude", "Resume this session with:\n" + id, ""},
+		{"codex", id, ""},
+		{"claude", claudeHint + "; touch /tmp/not-allowed", ""},
+		{"copilot", claudeHint, ""},
+	} {
+		if got := conversationIDFromExitHint(tc.provider, tc.output); got != tc.want {
+			t.Errorf("%s hint %q: got %q, want %q", tc.provider, tc.output, got, tc.want)
+		}
+	}
+	for _, tc := range []struct{ provider, binary, id, want string }{
+		{"claude", "claude", id, "env TEST=1 claude --model test --resume " + id},
+		{"codex", "codex", id, "env TEST=1 codex resume " + id + " --model test"},
+		{"claude", "claude", "", "env TEST=1 claude --model test"},
+		{"copilot", "copilot", id, "env TEST=1 copilot --model test"},
+		{"claude", "claude", "$(touch /tmp/not-allowed)", "env TEST=1 claude --model test"},
+	} {
+		got, err := renderResumeCommand("env TEST=1 {{.Binary}} --model test", LaunchTemplateVars{Binary: tc.binary}, tc.provider, tc.id)
+		if err != nil || got != tc.want {
+			t.Errorf("%s resume = %q, %v; want %q", tc.provider, got, err, tc.want)
+		}
+		if strings.Contains(got, "--continue") || strings.Contains(got, "--last") {
+			t.Error("restart may not select a directory's latest conversation")
+		}
+	}
+}
