@@ -1237,7 +1237,7 @@ func runCloudTUI(cmd *cobra.Command, args []string) error {
 	if cfg.DefaultProject != "" {
 		projects, err := client.ListProjects()
 		if err != nil {
-			return fmt.Errorf("resolve cloud project %q: %w", cfg.DefaultProject, err)
+			return fmt.Errorf("resolve cloud project %q: %s", cfg.DefaultProject, sanitizeCloudChatText(err.Error(), cloudChatMaxMessageRunes))
 		}
 		for _, p := range projects {
 			if p.Name == cfg.DefaultProject {
