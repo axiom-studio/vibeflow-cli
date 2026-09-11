@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestCloudPersonas_CompleteAndOrdered(t *testing.T) {
@@ -75,12 +75,12 @@ func TestCloudChatModel_NavigationDownWraps(t *testing.T) {
 	m := NewCloudChatModel()
 	last := len(CloudPersonas) - 1
 	for i := 0; i < last; i++ {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	if m.cursor != last {
 		t.Fatalf("after %d ↓ presses cursor = %d, want %d", last, m.cursor, last)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if m.cursor != 0 {
 		t.Errorf("↓ at last persona did not wrap to 0 (got %d)", m.cursor)
 	}
@@ -88,7 +88,7 @@ func TestCloudChatModel_NavigationDownWraps(t *testing.T) {
 
 func TestCloudChatModel_NavigationUpWraps(t *testing.T) {
 	m := NewCloudChatModel()
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	want := len(CloudPersonas) - 1
 	if m.cursor != want {
 		t.Errorf("↑ at first persona did not wrap to %d (got %d)", want, m.cursor)
@@ -97,11 +97,11 @@ func TestCloudChatModel_NavigationUpWraps(t *testing.T) {
 
 func TestCloudChatModel_EnterFocusesInputAndEscReturns(t *testing.T) {
 	m := NewCloudChatModel()
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.focus != CloudFocusInput {
 		t.Fatalf("Enter from sidebar should focus input (got focus=%v)", m.focus)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.focus != CloudFocusSidebar {
 		t.Errorf("Esc from input should return to sidebar (got focus=%v)", m.focus)
 	}
@@ -110,7 +110,7 @@ func TestCloudChatModel_EnterFocusesInputAndEscReturns(t *testing.T) {
 func TestCloudChatModel_TypingAppendsToInputBuffer(t *testing.T) {
 	m := focusInput(NewCloudChatModel())
 	for _, r := range "hello" {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = m.Update(tea.KeyPressMsg{Text: string(r)})
 	}
 	if m.input != "hello" {
 		t.Errorf("input = %q, want \"hello\"", m.input)
@@ -120,9 +120,9 @@ func TestCloudChatModel_TypingAppendsToInputBuffer(t *testing.T) {
 func TestCloudChatModel_BackspaceTrimsLastRune(t *testing.T) {
 	m := focusInput(NewCloudChatModel())
 	for _, r := range "ab" {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = m.Update(tea.KeyPressMsg{Text: string(r)})
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	if m.input != "a" {
 		t.Errorf("after backspace input = %q, want %q", m.input, "a")
 	}
@@ -134,10 +134,10 @@ func TestCloudChatModel_EnterWithActiveSessionAppendsPendingUserMessage(t *testi
 		"principal_engineer": {ID: "session-pe", PersonaKey: "principal_engineer"},
 	}
 	for _, r := range "hi" {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = m.Update(tea.KeyPressMsg{Text: string(r)})
 	}
 	var cmd tea.Cmd
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatalf("expected backend send command")
 	}
@@ -159,7 +159,7 @@ func TestCloudChatModel_EnterWithActiveSessionAppendsPendingUserMessage(t *testi
 
 func TestCloudChatModel_EnterOnEmptyInputDoesNotSend(t *testing.T) {
 	m := focusInput(NewCloudChatModel())
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if len(m.Messages("principal_engineer")) != 0 {
 		t.Errorf("blank input should not produce a message")
 	}
@@ -214,9 +214,7 @@ func TestCloudChatModel_LoadPersonaSessionsFetchesSelectedHistory(t *testing.T) 
 	if fake.messagesSessionID != "session-pe" {
 		t.Errorf("GetSessionMessages sessionID = %q, want session-pe", fake.messagesSessionID)
 	}
-	if fake.messagesSinceISO != "" {
-		t.Errorf("initial GetSessionMessages since = %q, want empty", fake.messagesSinceISO)
-	}
+
 	msgs := m.Messages("principal_engineer")
 	if len(msgs) != 1 {
 		t.Fatalf("history len = %d, want 1", len(msgs))
@@ -236,11 +234,11 @@ func TestCloudChatModel_SendPromptUsesBackendSession(t *testing.T) {
 	}
 	m = focusInput(m)
 	for _, r := range "hello" {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = m.Update(tea.KeyPressMsg{Text: string(r)})
 	}
 
 	var cmd tea.Cmd
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("expected send command")
 	}
@@ -267,7 +265,7 @@ func TestCloudChatModel_SendPromptUsesBackendSession(t *testing.T) {
 	}
 }
 
-func TestCloudChatModel_PollTickFetchesMessagesSinceLatestStoredMessage(t *testing.T) {
+func TestCloudChatModel_PollTickRefreshesRecentMessages(t *testing.T) {
 	latest := time.Date(2026, 6, 14, 13, 0, 0, 123, time.UTC)
 	fake := &fakeCloudChatBackend{
 		messages: []SessionMessage{
@@ -313,22 +311,18 @@ func TestCloudChatModel_PollTickFetchesMessagesSinceLatestStoredMessage(t *testi
 	if !ok {
 		t.Fatalf("poll history command returned %T, want cloudSessionMessagesMsg", rawMsg)
 	}
-	if msg.replace {
-		t.Fatal("poll history should merge incremental messages, not replace history")
-	}
+
 	m, _ = m.Update(msg)
 
 	if fake.messagesSessionID != "session-pe" {
 		t.Errorf("GetSessionMessages sessionID = %q, want session-pe", fake.messagesSessionID)
 	}
-	if want := latest.UTC().Format(time.RFC3339Nano); fake.messagesSinceISO != want {
-		t.Errorf("GetSessionMessages since = %q, want %q", fake.messagesSinceISO, want)
-	}
+
 	msgs := m.Messages("principal_engineer")
 	if len(msgs) != 3 {
 		t.Fatalf("history len after merge = %d, want 3", len(msgs))
 	}
-	if got := msgs[len(msgs)-1].Text; got != "new update" {
+	if got := msgs[1].Text; got != "new update" {
 		t.Errorf("last merged message = %q, want new update", got)
 	}
 }
@@ -390,11 +384,11 @@ func TestCloudChatModel_PollRestartsAfterInactiveTickStoppedTheChain(t *testing.
 func TestCloudChatModel_SendPromptWithoutActiveSessionShowsError(t *testing.T) {
 	m := focusInput(NewCloudChatModel())
 	for _, r := range "hello" {
-		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m, _ = m.Update(tea.KeyPressMsg{Text: string(r)})
 	}
 
 	var cmd tea.Cmd
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Fatal("expected no command without an active session")
 	}
@@ -424,7 +418,7 @@ func TestCloudChatModel_NoActiveSessionStartHintSetsGuidance(t *testing.T) {
 	m.sessionsLoaded = true
 
 	var cmd tea.Cmd
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m, cmd = m.Update(tea.KeyPressMsg{Text: string('s')})
 	if cmd != nil {
 		t.Fatal("start hint should not spawn a backend command")
 	}
@@ -438,7 +432,7 @@ func TestCloudChatModel_RefreshKeyReloadsPersonaSessions(t *testing.T) {
 	m := NewCloudChatModelWithClient(fake, 13)
 
 	var cmd tea.Cmd
-	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, cmd = m.Update(tea.KeyPressMsg{Text: string('r')})
 	if cmd == nil {
 		t.Fatal("refresh key should return load sessions command")
 	}
@@ -606,7 +600,7 @@ func TestCloudChatModel_HelpKeysSwitchByFocus(t *testing.T) {
 	if !strings.Contains(sidebarHelp, "persona") {
 		t.Errorf("sidebar help keys missing 'persona'; got: %q", sidebarHelp)
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	inputHelp := m.CloudChatHelpKeys()
 	if !strings.Contains(inputHelp, "send") {
 		t.Errorf("input-focus help keys missing 'send'; got: %q", inputHelp)
@@ -650,7 +644,7 @@ func pollingCloudChatModel(client cloudChatBackend) CloudChatModel {
 }
 
 func focusInput(m CloudChatModel) CloudChatModel {
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	return next
 }
 
@@ -661,7 +655,6 @@ type fakeCloudChatBackend struct {
 
 	listProjectID     int64
 	messagesSessionID string
-	messagesSinceISO  string
 	sentSessionID     string
 	sentText          string
 }
@@ -671,14 +664,17 @@ func (f *fakeCloudChatBackend) ListPersonaSessions(projectID int64) (map[string]
 	return f.sessions, nil
 }
 
-func (f *fakeCloudChatBackend) GetSessionMessages(sessionID string, sinceISO string) ([]SessionMessage, error) {
+func (f *fakeCloudChatBackend) GetSessionMessages(projectID int64, sessionID string) ([]SessionMessage, error) {
 	f.messagesSessionID = sessionID
-	f.messagesSinceISO = sinceISO
 	return f.messages, nil
 }
 
-func (f *fakeCloudChatBackend) SendSessionPrompt(sessionID string, text string) (*SessionMessage, error) {
+func (f *fakeCloudChatBackend) SendSessionPrompt(projectID int64, sessionID string, text string) (*SessionMessage, error) {
 	f.sentSessionID = sessionID
 	f.sentText = text
 	return f.sentMessage, nil
+}
+
+func (f *fakeCloudChatBackend) RespondSessionPrompt(projectID int64, promptID, text string) error {
+	return nil
 }
