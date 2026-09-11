@@ -1235,13 +1235,18 @@ func runCloudTUI(cmd *cobra.Command, args []string) error {
 
 	var projectID int64
 	if cfg.DefaultProject != "" {
-		if projects, err := client.ListProjects(); err == nil {
-			for _, p := range projects {
-				if p.Name == cfg.DefaultProject {
-					projectID = p.ID
-					break
-				}
+		projects, err := client.ListProjects()
+		if err != nil {
+			return fmt.Errorf("resolve cloud project %q: %w", cfg.DefaultProject, err)
+		}
+		for _, p := range projects {
+			if p.Name == cfg.DefaultProject {
+				projectID = p.ID
+				break
 			}
+		}
+		if projectID == 0 {
+			return fmt.Errorf("cloud project %q not found; choose an available project with --project", cfg.DefaultProject)
 		}
 	}
 
