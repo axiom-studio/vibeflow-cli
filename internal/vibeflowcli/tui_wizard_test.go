@@ -66,6 +66,21 @@ func TestWizardView_BreadcrumbFitsNarrowTerminal(t *testing.T) {
 	}
 }
 
+func TestWizardView_TeamFitsTerminal(t *testing.T) {
+	for _, width := range []int{80, 100, 200} {
+		w := teamModeFixture(t)
+		w.step = StepTeam
+		m := Model{width: width, height: 24, activeView: ViewWizard, wizard: w}
+		content := m.View().Content
+		if got := lipgloss.Height(content); got > m.height {
+			t.Errorf("team view at width %d has %d rows, exceeds terminal height %d", width, got, m.height)
+		}
+		if !strings.Contains(content, "Customer") || !strings.Contains(content, "esc: back/cancel") {
+			t.Errorf("team view at width %d must retain the final persona and navigation hints", width)
+		}
+	}
+}
+
 func TestNewWizardModel_PreselectsDeveloper(t *testing.T) {
 	cfg := DefaultConfig()
 	reg := NewProviderRegistry(cfg)

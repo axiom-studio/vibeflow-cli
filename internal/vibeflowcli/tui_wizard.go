@@ -88,6 +88,7 @@ type WizardResult struct {
 type WizardModel struct {
 	step      WizardStep
 	cursor    int
+	width     int
 	done      bool
 	cancelled bool
 
@@ -1588,7 +1589,7 @@ func (w WizardModel) View() string {
 
 		// Join columns side-by-side with the icon to the right.
 		leftCol := strings.Join(leftLines, "\n")
-		if rightCol != "" {
+		if rightCol != "" && (w.width <= 0 || lipgloss.Width(leftCol)+4+lipgloss.Width(rightCol) <= w.width) {
 			b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, "    ", rightCol))
 		} else {
 			b.WriteString(leftCol)

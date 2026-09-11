@@ -50,6 +50,9 @@ func TestView_FitsTerminalHeight_HelpBarLastRow(t *testing.T) {
 				serverWarning: tc.warning,
 			}
 			content := m.View().Content
+			if got := lipgloss.Width(content); got > m.width {
+				t.Errorf("dashboard width = %d, exceeds terminal width %d", got, m.width)
+			}
 			if got := lipgloss.Height(content); got != m.height {
 				t.Fatalf("rendered view height = %d, want exactly %d (overflow is cropped at the bottom in Bubble Tea v2)", got, m.height)
 			}
