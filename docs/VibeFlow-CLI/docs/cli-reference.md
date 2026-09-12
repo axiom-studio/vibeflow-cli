@@ -2,15 +2,17 @@
 
 The binary name is **`vibeflow`**. Root command with no subcommand runs the **TUI**.
 
-## Global flags (root)
+## Global flags
 
 | Flag | Description |
 |------|-------------|
 | `--config` | Path to config file (default `<root>/config.yaml`) |
 | `--root` | Root directory for config, sessions, and logs (default `~/.vibeflow-cli`). Also settable via `VIBEFLOW_ROOT` env var. Enables isolated parallel instances. |
-| `--server-url` | Override VibeFlow server URL |
-| `--project` | Default project name for VibeFlow |
 | `--mcp` | MCP server tool name used in the agent init prompt (default: `vibeflow`). Override if you run a renamed or forked MCP server. |
+
+The root TUI additionally accepts `--server-url` to override its backend URL and `--project` to set its default project.
+Subcommands read `server_url` from configuration; set it during setup with bootstrap's `--base-url`, or override it with `VIBEFLOW_URL` once a configuration file exists.
+`launch` and `review-watch` each define their own `--project` flag.
 
 ## Commands
 
@@ -86,8 +88,9 @@ Use a current Claude Code or Codex CLI on macOS or Linux.
 Startup checks required isolation flags and Codex's native sandbox before claiming work.
 Claude uses its existing local login or configured model API key/OAuth token with restricted read tools and empty MCP configuration.
 Codex copies only model authentication into a private temporary home and uses a native read-only filesystem profile with tool networking disabled.
-The validated runtime versions are Claude Code `2.1.268` and Codex `0.154.0` on macOS.
-Linux requires the installed Codex native sandbox to work on that host.
+Claude Code `2.1.268` passed native review acceptance on macOS.
+The installed Codex `0.154.0` on this macOS host allows shared `/tmp` reads and is now rejected by the capability probe before new review discovery or claim.
+Use Claude or a Codex runtime that passes the native capability probe on its host; Linux also requires a working native sandbox.
 Custom launch templates, ambient MCP servers, repository agent rules, and ordinary session restart caches are excluded from review execution.
 Custom authentication helpers or non-file Codex logins need a configured model-only API key; the runner does not copy general user configuration to make them work.
 
@@ -95,7 +98,7 @@ Gateway mode uses an attempt-local model relay, pins `--model`, and exposes only
 The VibeFlow API token stays in the supervisor.
 Provider-hosted tools, remote MCP, and saved provider conversations are rejected by the relay.
 Native model authentication and the relay transport are separate from the child's source-access boundary.
-Native subscription inference has been verified with both providers.
+Earlier native subscription inference succeeded with both providers, before the Codex shared `/tmp` read allowance was identified.
 Relay restrictions have real HTTP coverage, but an actual model call through the configured VibeFlow gateway remains unverified because the available credential returned HTTP 403 from its model catalog.
 
 Reviews inspect source and the complete diff; they do not execute project tests or code.
