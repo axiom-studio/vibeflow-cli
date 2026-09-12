@@ -116,7 +116,9 @@ func exportReviewTree(ctx context.Context, objects, sha, dest string) error {
 			return fmt.Errorf("unexpected git object")
 		}
 		n, err := strconv.ParseInt(meta[2], 10, 64)
-		if err != nil || n < 0 || n > 16<<20 || total+n > 128<<20 {
+		// Preserve checked-in dependencies in full. At most three snapshots are
+		// exported per attempt, each bounded to 512 MiB and streamed to disk.
+		if err != nil || n < 0 || n > 16<<20 || total+n > 512<<20 {
 			return fmt.Errorf("review tree exceeds bounded input size")
 		}
 		total += n
