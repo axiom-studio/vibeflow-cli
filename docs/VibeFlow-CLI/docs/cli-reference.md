@@ -104,7 +104,8 @@ The PR diff uses the unique merge base, while the exact target tip remains separ
 `revisions.json` identifies both baselines; missing or ambiguous history fails visibly instead of producing a misleading diff.
 Exact missing commits are fetched using the host's existing Git credentials; a missing credential fails the attempt visibly.
 Symlinks are exported as literal target text, submodules are recorded without downloading, and oversized input fails explicitly.
-Each snapshot is limited to 20,000 files and 128 MiB, with a 16 MiB per-file limit.
+Each snapshot is limited to 20,000 files and 512 MiB, with a 16 MiB per-file limit.
+Up to three snapshots use at most 1.5 GiB of exported source, plus private Git objects and review inputs.
 Prior finding evidence is bounded to 20 additional pages and 2 MiB; up to 100 relevant findings can be reconciled per result, with omitted states retained by the server.
 
 Ctrl-C or SIGTERM stops the child process group and reports cancellation.
