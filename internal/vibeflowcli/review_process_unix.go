@@ -25,6 +25,9 @@ func lockReviewFile(path string) (*os.File, error) {
 }
 
 func runReviewProcess(ctx context.Context, cmd *exec.Cmd) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Descendants can inherit stdout after the provider itself exits. Bound the
 	// copier wait so they cannot keep a completed review alive until its deadline.
@@ -52,10 +55,9 @@ func runReviewProcess(ctx context.Context, cmd *exec.Cmd) error {
 		}
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		if !waited {
-			select {
-			case <-done:
-			case <-time.After(3 * time.Second):
-			}
+			// Reap before the guard releases its lock. WaitDelay bounds inherited
+			// output pipes; returning on a timer would falsely release ownership.
+			<-done
 		}
 		return ctx.Err()
 	}
