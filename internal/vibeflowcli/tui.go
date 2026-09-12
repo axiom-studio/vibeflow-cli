@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -792,6 +793,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.reviewReadStarted = msg.started
 		if msg.err != nil {
+			var response *reviewHTTPError
+			if errors.As(msg.err, &response) && (response.Status == 401 || response.Status == 403 || response.Status == 404) {
+				var rows []SessionRow
+				for _, row := range m.sessions {
+					if row.ManagedReview == nil {
+						rows = append(rows, row)
+					}
+				}
+				m.replaceSessionRows(rows)
+				m.reviewAfter = ""
+				m.reviewNext = ""
+				m.reviewWarning = "Managed reviews unavailable: " + msg.err.Error()
+				return m, nil
+			}
 			m.reviewWarning = "Managed reviews unavailable; displayed history may be stale: " + msg.err.Error()
 			return m, nil
 		}
@@ -1001,7 +1016,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "q":
-			if len(m.sessions) > 0 {
+			if m.localSessionCount() > 0 {
 				m.confirmQuit = true
 				return m, nil
 			}
@@ -1174,7 +1189,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "D":
 			// Detach: quit TUI while sessions continue running.
-			if len(m.sessions) > 0 {
+			if m.localSessionCount() > 0 {
 				m.confirmDetach = true
 			} else {
 				m.quitting = true
@@ -2017,8 +2032,6 @@ func (m Model) viewContent() string {
 	var helpBar string
 	warnStyle := lipgloss.NewStyle().Foreground(warningColor)
 	switch {
-	case m.reviewSelection():
-		helpBar = helpStyle.Render("Read-only review  r: refresh  ]: older  [: latest  g: group  q: quit")
 	case m.confirmDelete:
 		delName := ""
 		if m.groupMode {
@@ -2032,9 +2045,11 @@ func (m Model) viewContent() string {
 			helpBar = warnStyle.Render(fmt.Sprintf("Delete '%s'? (y/n)", delName))
 		}
 	case m.confirmQuit:
-		helpBar = warnStyle.Render(fmt.Sprintf("%d session(s) still running (will continue in background). Quit? (y/n)", len(m.sessions)))
+		helpBar = warnStyle.Render(fmt.Sprintf("%d local session(s) remain open. Quit? (y/n)", m.localSessionCount()))
 	case m.confirmDetach:
-		helpBar = warnStyle.Render(fmt.Sprintf("Detach? %d session(s) will continue running in background. (y/n)", len(m.sessions)))
+		helpBar = warnStyle.Render(fmt.Sprintf("Detach? %d local session(s) remain open. (y/n)", m.localSessionCount()))
+	case m.reviewSelection():
+		helpBar = helpStyle.Render("Read-only review  r: refresh  ]: older  [: latest  g: group  q: quit")
 	default:
 		enterHint := "attach"
 		if m.groupMode {

@@ -265,3 +265,48 @@ func TestReviewSessionsDelayedHTTPPageCannotWin(t *testing.T) {
 		t.Fatalf("delayed HTTP page replaced current selection: %+v", m.sessions)
 	}
 }
+
+func TestReviewManagedQuitAndDetachConfirmations(t *testing.T) {
+	for _, key := range []string{"q", "D"} {
+		t.Run(key, func(t *testing.T) {
+			m := Model{config: DefaultConfig(), width: 100, height: 32, repoRootCache: map[string]string{}, collapsedGroups: map[string]bool{}, sessions: []SessionRow{{Name: "ordinary", WorkingDir: "/repo"}, (reviewSession{SessionID: "review-history", ProjectID: 13, State: "completed"}).row()}, cursor: 1}
+			next, _ := m.Update(tea.KeyPressMsg{Code: []rune(key)[0], Text: key})
+			got := next.(Model)
+			view := stripANSI(got.viewContent())
+			if !strings.Contains(view, "(y/n)") || !strings.Contains(view, "1 local session") || strings.Contains(view, "2 session") || strings.Contains(view, "Read-only review  r:") {
+				t.Fatalf("confirmation hidden or counts history: %s", view)
+			}
+			next, cmd := got.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+			if !next.(Model).quitting || cmd == nil {
+				t.Fatal("visible confirmation did not quit")
+			}
+			m.sessions = m.sessions[1:]
+			m.cursor = 0
+			next, cmd = m.Update(tea.KeyPressMsg{Code: []rune(key)[0], Text: key})
+			if !next.(Model).quitting || cmd == nil {
+				t.Fatal("completed managed history blocks exit")
+			}
+		})
+	}
+}
+
+func TestReviewManagedAuthorityFailureClearsHistory(t *testing.T) {
+	for _, status := range []int{401, 403, 404} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				fmt.Fprint(w, "private provider error")
+			}))
+			defer server.Close()
+			m := Model{client: NewClient(server.URL, "fixture-token"), projectID: 13, config: DefaultConfig(), reviewAfter: "old-cursor", reviewNext: "next-cursor", repoRootCache: map[string]string{}, collapsedGroups: map[string]bool{}, sessions: []SessionRow{{Name: "ordinary"}, (reviewSession{SessionID: "review-history", ProjectID: 13, State: "completed", RepositoryName: "private-repo"}).row()}, cursor: 1}
+			next, _ := m.Update(m.refreshReviewSessions())
+			got := next.(Model)
+			if len(got.sessions) != 1 || got.sessions[0].Name != "ordinary" || got.selectedReview() != nil || got.reviewAfter != "" || got.reviewNext != "" {
+				t.Fatalf("authority failure retained review data: rows=%d selected=%v after=%q next=%q", len(got.sessions), got.selectedReview() != nil, got.reviewAfter, got.reviewNext)
+			}
+			if strings.Contains(got.reviewWarning, "stale") || strings.Contains(got.reviewWarning, "private") {
+				t.Fatalf("incorrect authority warning: %s", got.reviewWarning)
+			}
+		})
+	}
+}

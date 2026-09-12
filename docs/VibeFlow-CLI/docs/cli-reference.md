@@ -148,7 +148,8 @@ The output includes repository/PR, head SHA, runner, state, round and attempt.
 An unavailable local tmux server does not hide shared reviews; an unavailable review API produces an explicit error.
 The TUI shows the same reviews alongside local agents, with `]` for older reviews and `[` for the latest page.
 `r` refreshes the selected review page.
-Failed refreshes retain the previous page with a stale-data warning.
+Transient failed refreshes retain the previous page with a stale-data warning.
+Authentication, authorization or missing-endpoint responses clear managed history and details.
 Managed reviewers have no attach, resume, chat, delete, branch, group-edit or workbench controls and never enter the ordinary restart cache.
 Use AxiomCloud for review controls and findings.
 

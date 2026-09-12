@@ -103,6 +103,16 @@ func (s reviewSession) progress() string {
 func (s reviewSession) row() SessionRow {
 	return SessionRow{Name: "review:" + s.SessionID, Persona: reviewSessionLabel, Project: s.pullRequest(), Status: reviewDisplay(s.State), ManagedReview: &s}
 }
+func (m Model) localSessionCount() int {
+	n := 0
+	for _, s := range m.sessions {
+		if s.ManagedReview == nil {
+			n++
+		}
+	}
+	return n
+}
+
 func (m Model) managedReview(name string) *reviewSession {
 	for _, s := range m.sessions {
 		if s.Name == name {
