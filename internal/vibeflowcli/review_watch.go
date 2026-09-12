@@ -593,6 +593,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 		return nil, err
 	}
 	guard := exec.Command(executable, "review-child", filepath.Join(root, "child.json"))
+	guard.WaitDelay = 250 * time.Millisecond
 	guard.Env = []string{"PATH=" + os.Getenv("PATH")}
 	guard.Dir = root
 	var stdout, stderr limitedReviewBuffer
@@ -688,13 +689,36 @@ func reviewChildCmd() *cobra.Command {
 		if json.Unmarshal(data, &spec) != nil {
 			return fmt.Errorf("invalid review child spec")
 		}
-		ctx, cancel := context.WithDeadline(cmd.Context(), time.UnixMilli(spec.DeadlineAt))
+		signalCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		defer stopSignals()
+		ctx, cancel := context.WithDeadline(signalCtx, time.UnixMilli(spec.DeadlineAt))
 		defer cancel()
-		first := make([]byte, 1)
-		if _, err = io.ReadFull(cmd.InOrStdin(), first); err != nil || first[0] != 'R' {
-			return fmt.Errorf("review supervisor is unavailable")
+		supervisor := cmd.InOrStdin()
+		if closer, ok := supervisor.(io.Closer); ok {
+			defer closer.Close()
 		}
-		go func() { io.Copy(io.Discard, cmd.InOrStdin()); cancel() }()
+		ready := make(chan error, 1)
+		go func() {
+			first := make([]byte, 1)
+			if _, err := io.ReadFull(supervisor, first); err != nil || first[0] != 'R' {
+				ready <- fmt.Errorf("review supervisor is unavailable")
+				return
+			}
+			ready <- nil
+			io.Copy(io.Discard, supervisor)
+			cancel()
+		}()
+		select {
+		case err := <-ready:
+			if err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		input, err := os.Open(spec.InputFile)
 		if err != nil {
 			return err
