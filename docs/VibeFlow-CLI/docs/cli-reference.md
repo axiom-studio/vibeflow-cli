@@ -56,6 +56,66 @@ vibeflow launch --provider codex --openshell --openshell-sandbox vf-main
 
 Model flags apply when the provider process starts and are stored in session metadata so `vibeflow restart` reuses the same model. They do not rewrite a model inside an already-running provider process. The model catalog is advisory: use `vibeflow models` to discover known ids, but launch accepts explicit model strings so new provider models work before the catalog is updated.
 
+### `vibeflow review-watch`
+
+Keep one local or shared PR review runner online without using a model while idle.
+Each claimed attempt starts a fresh Principal Engineer process with the server's finite review prompt, exact base/head snapshots, project brief, and prior finding IDs.
+The server controls automatic and comment-triggered reviews, local priority, shared grants, cycle limits, repair tickets, and PR publication.
+
+```bash
+vibeflow review-watch --project my-project --repo /path/to/repo --repository-link 123 --provider claude
+vibeflow review-watch --project 42 --repo /srv/repo --repository-link 123 --provider codex --runner-kind shared --name team-runner
+vibeflow review-watch --project 42 --repository-link 123 --provider claude --model anthropic/claude-sonnet --once
+```
+
+| Flag | Description |
+|------|-------------|
+| `--project` | Project name or numeric ID; defaults to the configured project |
+| `--repo` | Existing checkout of the linked base repository; defaults to the current directory |
+| `--repository-link` | Required VibeFlow repository link ID |
+| `--git-provider` | `github` (including Enterprise) or `bitbucket` |
+| `--provider` | `claude` or `codex`; defaults to the configured provider |
+| `--model` | Provider model; required when `llm_gateway_enabled` is configured |
+| `--runner-kind` | `local` or `shared`; shared execution requires an existing server grant |
+| `--name` | Stable runner name; defaults to hostname |
+| `--interval` | Idle polling interval, at least `1s`; default `5s` |
+| `--timeout` | Per-attempt maximum, `1m` to `1h`; default `15m`, also bounded by the server deadline |
+| `--once` | Check one work page, process at most one review, then exit |
+
+Use a current Claude Code or Codex CLI on macOS or Linux.
+Startup checks required isolation flags and Codex's native sandbox before claiming work.
+Claude uses its existing local login or configured model API key/OAuth token with restricted read tools and empty MCP configuration.
+Codex copies only model authentication into a private temporary home and uses a native read-only filesystem profile with tool networking disabled.
+The validated runtime versions are Claude Code `2.1.268` and Codex `0.154.0` on macOS.
+Linux requires the installed Codex native sandbox to work on that host.
+Custom launch templates, ambient MCP servers, repository agent rules, and ordinary session restart caches are excluded from review execution.
+Custom authentication helpers or non-file Codex logins need a configured model-only API key; the runner does not copy general user configuration to make them work.
+
+Gateway mode uses an attempt-local model relay, pins `--model`, and exposes only the selected provider's inference endpoints to the child.
+The VibeFlow API token stays in the supervisor.
+Provider-hosted tools, remote MCP, and saved provider conversations are rejected by the relay.
+Native model authentication and the relay transport are separate from the child's source-access boundary.
+Native subscription inference has been verified with both providers.
+Relay restrictions have real HTTP coverage, but an actual model call through the configured VibeFlow gateway remains unverified because the available credential returned HTTP 403 from its model catalog.
+
+Reviews inspect source and the complete diff; they do not execute project tests or code.
+The developer checkout stays untouched.
+The PR diff uses the unique merge base, while the exact target tip remains separate integration context.
+`revisions.json` identifies both baselines; missing or ambiguous history fails visibly instead of producing a misleading diff.
+Exact missing commits are fetched using the host's existing Git credentials; a missing credential fails the attempt visibly.
+Symlinks are exported as literal target text, submodules are recorded without downloading, and oversized input fails explicitly.
+Each snapshot is limited to 20,000 files and 128 MiB, with a 16 MiB per-file limit.
+Prior finding evidence is bounded to 20 additional pages and 2 MiB; up to 100 relevant findings can be reconciled per result, with omitted states retained by the server.
+
+Ctrl-C or SIGTERM stops the child process group and reports cancellation.
+A parent crash, expired lease, server cancellation, or deadline also stops the child.
+Owned input and temporary model credentials are removed before result publication.
+Private receipts under `<root>/review-runners/` preserve exact submissions across lost HTTP responses; restart with the same root, server, project, repository, kind, and name to recover.
+An interrupted conversation is never resumed.
+Saved result/failure submissions can recover even after the provider CLI is removed or logged out.
+Active reviews refresh both runner presence and the attempt lease.
+A provider's bounded failure explanation is saved in the runner's private `last-provider-diagnostic.json` when available.
+
 ### `vibeflow models [provider]`
 
 List curated model ids for the built-in providers. Pass a provider key to show one provider:
