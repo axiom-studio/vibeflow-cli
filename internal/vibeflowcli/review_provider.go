@@ -248,11 +248,32 @@ func preflightReviewProvider(ctx context.Context, cfg *Config, provider, model s
 		}
 	}
 	if provider == "codex" {
-		cmd = exec.Command(spec.Binary, "sandbox", "-P", "review", "-C", spec.Dir, "--", "/usr/bin/true")
+		// Starting a sandbox does not prove it enforces read isolation. Some
+		// runtimes allow shared /tmp reads even when the input lives elsewhere.
+		// Probe only owned harmless files, never credentials or repository code.
+		visible := filepath.Join(spec.Dir, "read-boundary-probe")
+		if err = os.WriteFile(visible, []byte("review capability probe\n"), 0600); err != nil {
+			return err
+		}
+		outside, err := os.CreateTemp("/tmp", "vibeflow-review-read-boundary-")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(outside.Name())
+		_, writeErr := outside.WriteString("review capability probe\n")
+		closeErr := outside.Close()
+		if writeErr != nil {
+			return writeErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		probe := `/bin/cat "$1" >/dev/null || exit 1; if /bin/cat "$2" >/dev/null 2>&1; then exit 2; fi`
+		cmd = exec.Command(spec.Binary, "sandbox", "-P", "review", "-C", spec.Dir, "--", "/bin/sh", "-c", probe, "review-read-boundary", visible, outside.Name())
 		cmd.Env = spec.Env
 		cmd.Dir = spec.Dir
 		if err = runReviewProcess(callCtx, cmd); err != nil {
-			return fmt.Errorf("Codex native review sandbox is unavailable on this machine")
+			return fmt.Errorf("Codex cannot enforce source-only review reads on this machine; select --provider claude or update Codex to a runtime with a working filesystem sandbox")
 		}
 	}
 	return nil

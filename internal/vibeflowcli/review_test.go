@@ -287,6 +287,9 @@ func TestReviewInstalledProviderAcceptance(t *testing.T) {
 	if provider == "claude" {
 		model = "haiku"
 	}
+	if err := preflightReviewProvider(context.Background(), cfg, provider, model); err != nil {
+		t.Fatal(err)
+	}
 	spec, err := prepareReviewProvider(context.Background(), cfg, provider, model, root, execution, &reviewBrief{Digest: strings.Repeat("a", 64)}, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +370,10 @@ func TestReviewInstalledCapabilityPreflight(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Providers[provider] = Provider{Binary: provider, Env: map[string]string{"OPENAI_API_KEY": "unused-model-only-key"}}
 			if err := preflightReviewProvider(context.Background(), cfg, provider, ""); err != nil {
-				t.Fatal(err)
+				if provider != "codex" || !strings.Contains(err.Error(), "cannot enforce source-only review reads") {
+					t.Fatal(err)
+				}
+				t.Log(err)
 			}
 			cfg.LLMGatewayEnabled = true
 			if err := preflightReviewProvider(context.Background(), cfg, provider, ""); err == nil {
