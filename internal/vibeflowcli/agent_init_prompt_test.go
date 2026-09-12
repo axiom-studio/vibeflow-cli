@@ -462,6 +462,16 @@ func TestExactConversationResume(t *testing.T) {
 	// AFTER it, so the id is not on the last line at all.
 	codexHint := "To continue this session, run:\n  codex resume " + id
 	codexHintWithTrailer := codexHint + "\nOr run codex resume and select Initialize Vibeflow session."
+	// Both captures from #5176, byte for byte: the noise codex prints above its
+	// hint, the real ids, and each pane's real tmux footer.
+	codexCapture := `Token usage: total=51,447 input=50,483 (+ 200,064 cached) output=964 (reasoning 136)
+To continue this session, run:
+  codex resume 01a08e18-da02-7401-97c0-a77f0eecb388
+Or run codex resume and select Initialize Vibeflow session.
+Pane is dead (status 0, Fri Sep 11 07:04:08 2026)`
+	claudeCapture := `Resume this session with:
+claude --resume aee506f9-70b1-42c1-824a-483977ad08de
+Pane is dead (status 143, Mon Sep  7 18:19:42 2026)`
 	for _, tc := range []struct{ provider, output, want string }{
 		{"claude", claudeHint, id},
 		{"codex", codexHint, id},
@@ -469,6 +479,8 @@ func TestExactConversationResume(t *testing.T) {
 		// The exact bytes a user hits: tmux appends its own footer below.
 		{"codex", codexHintWithTrailer + "\nPane is dead (status 0, Fri Sep 11 07:04:08 2026)", id},
 		{"claude", claudeHint + "\nPane is dead (status 143, Mon Sep  7 18:19:42 2026)", id},
+		{"codex", codexCapture, "01a08e18-da02-7401-97c0-a77f0eecb388"},
+		{"claude", claudeCapture, "aee506f9-70b1-42c1-824a-483977ad08de"},
 		// Still anchored: a bare command line without the "To continue" line
 		// above it is arbitrary output, not codex's exit hint.
 		{"codex", "  codex resume " + id, ""},
