@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -572,24 +573,23 @@ func printProviderModels(out io.Writer, provider string) error {
 }
 
 func listCmd() *cobra.Command {
-	return &cobra.Command{
+	var project, after string
+	cmd := &cobra.Command{
 		Use:     "list",
-		Short:   "List active sessions",
+		Short:   "List local agents and managed PR review history",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
-			_, tmux, store, _, _, err := loadComponents(cfgPath)
+			cfg, tmux, store, _, _, err := loadComponents(cfgPath)
 			if err != nil {
 				return err
 			}
 
 			sessions, err := tmux.ListSessions()
 			if err != nil {
-				return err
-			}
-			if len(sessions) == 0 {
-				fmt.Println("No active sessions.")
-				return nil
+				fmt.Fprintf(cmd.OutOrStdout(), "Local sessions unavailable: %v\n", err)
+			} else if len(sessions) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No active local sessions.")
 			}
 
 			// Load store metadata.
@@ -601,25 +601,32 @@ func listCmd() *cobra.Command {
 			}
 
 			// Print table.
-			fmt.Printf("%-24s %-12s %-16s %-10s\n", "NAME", "PROVIDER", "BRANCH", "STATUS")
-			fmt.Println(strings.Repeat("-", 66))
-			for _, s := range sessions {
-				shortName := strings.TrimPrefix(s.Name, sessionPrefix)
-				prov := "-"
-				branch := "-"
-				if meta, ok := storeMeta[s.Name]; ok {
-					prov = meta.Provider
-					branch = meta.Branch
+			if len(sessions) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "%-24s %-12s %-16s %-10s\n", "NAME", "PROVIDER", "BRANCH", "STATUS")
+				fmt.Fprintln(cmd.OutOrStdout(), strings.Repeat("-", 66))
+				for _, s := range sessions {
+					shortName := strings.TrimPrefix(s.Name, sessionPrefix)
+					prov := "-"
+					branch := "-"
+					if meta, ok := storeMeta[s.Name]; ok {
+						prov = meta.Provider
+						branch = meta.Branch
+					}
+					status := "idle"
+					if s.Attached {
+						status = "attached"
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "%-24s %-12s %-16s %-10s\n", shortName, prov, branch, status)
 				}
-				status := "idle"
-				if s.Attached {
-					status = "attached"
-				}
-				fmt.Printf("%-24s %-12s %-16s %-10s\n", shortName, prov, branch, status)
 			}
-			return nil
+			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+			defer cancel()
+			return printReviewSessions(ctx, cmd.OutOrStdout(), cfg, project, after)
 		},
 	}
+	cmd.Flags().StringVar(&project, "project", "", "Project ID or name for managed reviews (default: configured project)")
+	cmd.Flags().StringVar(&after, "reviews-after", "", "Continue managed review history from the returned cursor")
+	return cmd
 }
 
 // --- switch ---

@@ -99,7 +99,13 @@ func TestReviewCommandRecoversWithoutProviderInstallation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/rest/v1/vibeflow/projects/1/pr-review-runners":
-			json.NewEncoder(w).Encode(map[string]any{"id": execution.Attempt.RunnerID, "user_id": 1})
+			var registration map[string]any
+			json.NewDecoder(r.Body).Decode(&registration)
+			if registration["provider"] != "github" || registration["repository_link_id"] != float64(7) {
+				t.Errorf("registration omitted exact repository scope: %v", registration)
+			}
+			registration["user_id"] = 1
+			json.NewEncoder(w).Encode(registration)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			w.WriteHeader(204)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/result"):
