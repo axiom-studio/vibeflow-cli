@@ -181,11 +181,15 @@ func TestLaunchAndRestartDirectorySafety(t *testing.T) {
 
 	// Codex hints wrap at 80 columns; tmux must join them before parsing.
 	codexMeta := SessionMeta{Name: "cx", Provider: "codex", TmuxSession: tm.FullSessionName("codex", "cx"), WorkingDir: repo}
-	codexHint := "To continue this session, run codex resume " + id + "\n"
+	// VERBATIM shape from a real dead codex pane (codex-cli 0.154.0): colon,
+	// command indented on its own line, then a trailing "Or run ..." line.
+	// The old fixture was a single hand-written line codex never emits (#5176).
+	codexHint := "To continue this session, run:\n  codex resume " + id +
+		"\nOr run codex resume and select Initialize Vibeflow session.\n"
 	if err := tm.CreateSessionWithOpts(SessionOpts{Name: "cx", Provider: "codex", WorkDir: repo, Command: "sleep 300"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tm.run("resize-window", "-t", codexMeta.TmuxSession, "-x", "60", "-y", "24"); err != nil {
+	if _, err := tm.run("resize-window", "-t", codexMeta.TmuxSession, "-x", "40", "-y", "24"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tm.run("respawn-pane", "-k", "-t", codexMeta.TmuxSession, "printf %s "+shellQuote(codexHint)); err != nil {
