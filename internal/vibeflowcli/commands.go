@@ -47,6 +47,8 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(bootstrapCmd())
 	root.AddCommand(uninstallCmd())
 	root.AddCommand(dispatchCmd())
+	root.AddCommand(reviewWatchCmd())
+	root.AddCommand(reviewChildCmd())
 }
 
 // --- helpers shared by subcommands ---
