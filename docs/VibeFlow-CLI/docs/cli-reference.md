@@ -12,7 +12,7 @@ The binary name is **`vibeflow`**. Root command with no subcommand runs the **TU
 
 The root TUI additionally accepts `--server-url` to override its backend URL and `--project` to set its default project.
 Subcommands read `server_url` from configuration; set it during setup with bootstrap's `--base-url`, or override it with `VIBEFLOW_URL` once a configuration file exists.
-`launch` and `review-watch` each define their own `--project` flag.
+`launch`, `review-watch`, and `list` each define their own `--project` flag.
 
 ## Commands
 
@@ -118,6 +118,9 @@ Private receipts under `<root>/review-runners/` preserve exact submissions acros
 An interrupted conversation is never resumed.
 Saved result/failure submissions can recover even after the provider CLI is removed or logged out.
 Active reviews refresh both runner presence and the attempt lease.
+Runner registration binds the selected Git provider and repository link; the CLI verifies the server echoes both before continuing.
+Upgrade the server and re-register if scope confirmation fails.
+Legacy unscoped registrations are disabled by the server.
 A provider's bounded failure explanation is saved in the runner's private `last-provider-diagnostic.json` when available.
 
 ### `vibeflow models [provider]`
@@ -131,7 +134,23 @@ vibeflow models codex
 
 ### `vibeflow list` (alias: `ls`)
 
-List active sessions.
+List local agents and managed Principal Engineer review sessions for the selected project.
+Use `--project <id-or-name>` or the configured default project.
+Managed reviews are read-only and include retained completed, failed, cancelled and expired attempts.
+
+```bash
+vibeflow list --project my-project
+vibeflow list --project 42 --reviews-after <returned-cursor>
+```
+
+Each page contains at most 25 managed reviews, newest first.
+The output includes repository/PR, head SHA, runner, state, round and attempt.
+An unavailable local tmux server does not hide shared reviews; an unavailable review API produces an explicit error.
+The TUI shows the same reviews alongside local agents, with `]` for older reviews and `[` for the latest page.
+`r` refreshes the selected review page.
+Failed refreshes retain the previous page with a stale-data warning.
+Managed reviewers have no attach, resume, chat, delete, branch, group-edit or workbench controls and never enter the ordinary restart cache.
+Use AxiomCloud for review controls and findings.
 
 ### `vibeflow switch <session-name>`
 

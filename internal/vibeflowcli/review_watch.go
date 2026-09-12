@@ -233,14 +233,19 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 	}
 	var registered struct {
-		ID     string `json:"id"`
-		UserID int64  `json:"user_id"`
+		ID               string `json:"id"`
+		UserID           int64  `json:"user_id"`
+		Provider         string `json:"provider"`
+		RepositoryLinkID int64  `json:"repository_link_id"`
 	}
-	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), map[string]string{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name}, &registered); err != nil {
+	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID}, &registered); err != nil {
 		return err
 	}
 	if registered.ID != w.state.ID || registered.UserID <= 0 || (w.state.OwnerID != 0 && w.state.OwnerID != registered.UserID) {
 		return fmt.Errorf("review runner owner changed; use a separate runner name")
+	}
+	if registered.Provider != w.options.GitProvider || registered.RepositoryLinkID != w.options.RepositoryLinkID {
+		return fmt.Errorf("review runner repository scope was not confirmed; upgrade the server and re-register this runner")
 	}
 	w.state.OwnerID = registered.UserID
 	if err = w.save(); err != nil {
