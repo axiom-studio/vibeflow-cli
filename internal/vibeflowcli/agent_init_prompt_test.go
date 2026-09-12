@@ -454,10 +454,32 @@ func TestApplyQwenModelPassthrough(t *testing.T) {
 func TestExactConversationResume(t *testing.T) {
 	const id = "7ae74319-242d-45d1-b251-0495f225448c"
 	claudeHint := "Resume this session with:\nclaude --resume " + id
-	codexHint := "To continue this session, run codex resume " + id
+	// VERBATIM from a real dead codex pane (codex-cli 0.154.0). The previous
+	// fixture here was hand-written as a single line with no colon, a format
+	// codex has never emitted, so the parser and the test agreed with each other
+	// and neither agreed with reality (#5176). Codex prints a colon, puts the
+	// command on its own INDENTED line, and adds a trailing "Or run ..." line
+	// AFTER it, so the id is not on the last line at all.
+	codexHint := "To continue this session, run:\n  codex resume " + id
+	codexHintWithTrailer := codexHint + "\nOr run codex resume and select Initialize Vibeflow session."
 	for _, tc := range []struct{ provider, output, want string }{
 		{"claude", claudeHint, id},
 		{"codex", codexHint, id},
+		{"codex", codexHintWithTrailer, id},
+		// The exact bytes a user hits: tmux appends its own footer below.
+		{"codex", codexHintWithTrailer + "\nPane is dead (status 0, Fri Sep 11 07:04:08 2026)", id},
+		{"claude", claudeHint + "\nPane is dead (status 143, Mon Sep  7 18:19:42 2026)", id},
+		// Still anchored: a bare command line without the "To continue" line
+		// above it is arbitrary output, not codex's exit hint.
+		{"codex", "  codex resume " + id, ""},
+		{"codex", "chat mentioned codex resume " + id + "\nOr run codex resume and select x.", ""},
+		// The trailer alone carries no id.
+		{"codex", "To continue this session, run:\nOr run codex resume and select x.", ""},
+		// tmux TRUNCATES its footer to the pane width, so on a narrow pane it
+		// ends mid-timestamp with no closing paren. Stripping it by suffix left
+		// it in place and broke resume for every provider (#5176).
+		{"codex", codexHintWithTrailer + "\nPane is dead (status 0, Sat Sep 12 06:30", id},
+		{"claude", claudeHint + "\nPane is dead (status 143, Mon Sep  7 18:1", id},
 		{"claude", claudeHint + "\nnew conversation", ""},
 		{"claude", "chat mentioned claude --resume " + id, ""},
 		{"claude", "Resume this session with:\n" + id, ""},
