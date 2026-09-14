@@ -3,6 +3,7 @@ package vibeflowcli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"fmt"
@@ -179,5 +180,27 @@ func TestReviewCheckoutLargeTrackedDependenciesRemainBounded(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReviewFetchRejectsOversizedHistoryBeforeExport(t *testing.T) {
+	source, _ := reviewTestRepo(t)
+	data := make([]byte, 128<<10)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(source, "deleted-history.bin")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	reviewTestGit(t, source, "add", ".")
+	reviewTestGit(t, source, "commit", "-m", "historical large object")
+	reviewTestGit(t, source, "rm", "deleted-history.bin")
+	reviewTestGit(t, source, "commit", "-m", "small current snapshot")
+	head := reviewTestGit(t, source, "rev-parse", "HEAD")
+	objects := t.TempDir()
+	reviewTestGit(t, objects, "init", "--bare")
+	if err := fetchReviewObjects(context.Background(), objects, source, head, 64<<10); err == nil || !strings.Contains(err.Error(), "Git objects exceed") {
+		t.Fatalf("unbounded historical objects acquired: %v", err)
 	}
 }
