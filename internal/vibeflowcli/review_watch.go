@@ -138,8 +138,13 @@ func reviewWatchCmd() *cobra.Command {
 		if o.Name == "" {
 			o.Name, _ = os.Hostname()
 		}
-		if o.RepositoryLinkID <= 0 || o.Project == "" || (o.Kind != "local" && o.Kind != "shared") || o.PollInterval < time.Second || o.Timeout < time.Minute || o.Timeout > time.Hour {
-			return fmt.Errorf("provide --project and --repository-link; interval must be at least 1s and timeout 1m to 1h")
+		if o.RepositoryLinkID <= 0 || o.Project == "" || (o.Kind != "local" && o.Kind != "shared") || o.Timeout < time.Minute || o.Timeout > time.Hour {
+			return fmt.Errorf("provide --project and --repository-link; timeout must be 1m to 1h")
+		}
+		// Heartbeats ride on each idle poll, so a long interval makes the server
+		// mark this runner offline and route its work to shared runners.
+		if o.PollInterval < time.Second || o.PollInterval > time.Minute {
+			return fmt.Errorf("interval must be between 1s and 60s; the server treats a runner as offline after 2 minutes")
 		}
 		if o.GitProvider != "github" && o.GitProvider != "bitbucket" {
 			return fmt.Errorf("review repository integration must be github or bitbucket")
@@ -183,11 +188,11 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Repository, "repo", "", "Local checkout for the linked repository (default: current directory)")
 	cmd.Flags().Int64Var(&o.RepositoryLinkID, "repository-link", 0, "VibeFlow repository link ID")
 	cmd.Flags().StringVar(&o.GitProvider, "git-provider", "github", "Repository integration: github or bitbucket")
-	cmd.Flags().StringVar(&o.Provider, "provider", "", "Model provider: claude or codex (default: configured provider)")
+	cmd.Flags().StringVar(&o.Provider, "provider", "", "Model provider: claude or codex (default: configured provider); codex needs an OpenAI API key, not a ChatGPT login")
 	cmd.Flags().StringVar(&o.Model, "model", "", "Model selection; required for gateway reviews")
 	cmd.Flags().StringVar(&o.Kind, "runner-kind", "local", "local or explicitly authorized shared runner")
 	cmd.Flags().StringVar(&o.Name, "name", "", "Runner name (default: hostname)")
-	cmd.Flags().DurationVar(&o.PollInterval, "interval", o.PollInterval, "Idle API polling interval; no LLM runs while idle")
+	cmd.Flags().DurationVar(&o.PollInterval, "interval", o.PollInterval, "Idle API polling interval, 1s to 60s; each poll also heartbeats the runner, no LLM runs while idle")
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Maximum time per attempt, also bounded by the server deadline")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
 	return cmd

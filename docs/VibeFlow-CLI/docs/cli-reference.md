@@ -80,7 +80,7 @@ vibeflow review-watch --project 42 --repository-link 123 --provider claude --mod
 | `--model` | Provider model; required when `llm_gateway_enabled` is configured |
 | `--runner-kind` | `local` or `shared`; shared execution requires an existing server grant |
 | `--name` | Stable runner name; defaults to hostname |
-| `--interval` | Idle polling interval, at least `1s`; default `5s` |
+| `--interval` | Idle polling interval, `1s` to `60s`; default `5s`. Each poll also sends the runner heartbeat, and the server marks a runner offline after 2 minutes without one |
 | `--timeout` | Per-attempt maximum, `1m` to `1h`; default `15m`, also bounded by the server deadline |
 | `--once` | Check one work page, process at most one review, then exit |
 
@@ -93,6 +93,8 @@ The installed Codex `0.154.0` on this macOS host allows shared `/tmp` reads and 
 Use Claude or a Codex runtime that passes the native capability probe on its host; Linux also requires a working native sandbox.
 Custom launch templates, ambient MCP servers, repository agent rules, and ordinary session restart caches are excluded from review execution.
 Custom authentication helpers or non-file Codex logins need a configured model-only API key; the runner does not copy general user configuration to make them work.
+Codex subscription (ChatGPT login) credentials are rejected before any work is claimed: the child would rotate the refresh token inside its discarded private home and leave the real login revoked.
+Use an OpenAI API key (`OPENAI_API_KEY`, the provider `env` config, or `codex login --with-api-key`) or `--provider claude`.
 
 Gateway mode uses an attempt-local model relay, pins `--model`, and exposes only the selected provider's inference endpoints to the child.
 The VibeFlow API token stays in the supervisor.
@@ -145,7 +147,9 @@ vibeflow list --project 42 --reviews-after <returned-cursor>
 
 Each page contains at most 25 managed reviews, newest first.
 The output includes repository/PR, head SHA, runner, state, round and attempt.
-An unavailable local tmux server does not hide shared reviews; an unavailable review API produces an explicit error.
+An unavailable local tmux server does not hide shared reviews.
+An unreachable or refusing review API prints one `managed reviews unavailable: ...` warning on stderr after at most 3 seconds; the local listing stands and the command still exits 0.
+The TUI shows `PR reviews: no project selected (use --project or set default_project)` when no project resolves instead of a stale-history warning.
 The TUI shows the same reviews alongside local agents, with `]` for older reviews and `[` for the latest page.
 `r` refreshes the selected review page.
 Transient failed refreshes retain the previous page with a stale-data warning.
