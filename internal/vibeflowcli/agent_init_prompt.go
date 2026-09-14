@@ -113,12 +113,24 @@ func supportsExactResume(provider, id string) bool {
 // conversationIDFromExitHint accepts only a provider's final exit hint, never
 // a directory's latest conversation or an ID embedded in arbitrary output.
 func conversationIDFromExitHint(provider, output string) string {
-	output = strings.TrimSpace(output)
-	// tmux appends its remain-on-exit footer below the captured process output.
-	if i := strings.LastIndex(output, "\nPane is dead ("); i >= 0 && strings.HasSuffix(output, ")") {
-		output = strings.TrimSpace(output[:i])
-	}
 	lines := strings.Split(strings.TrimSpace(output), "\n")
+	// tmux appends its remain-on-exit footer below the captured process output.
+	// Match it by LINE PREFIX rather than requiring the whole capture to end in
+	// ")": tmux truncates that footer to the pane width, so on a narrow pane it
+	// ends mid-timestamp ("Pane is dead (status 0, Sat Sep 12 06:30") and a
+	// suffix check silently leaves it in place. The footer then occupies the
+	// last line, every anchor check below looks at the wrong line, and NO
+	// provider resumes. Measured at 40 columns; it survived review because the
+	// footer happens to fit on a wide pane (#5176).
+	for len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "Pane is dead (") {
+		lines = lines[:len(lines)-1]
+	}
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return ""
+	}
 	last := strings.TrimSpace(lines[len(lines)-1])
 	var id string
 	switch provider {
@@ -128,10 +140,35 @@ func conversationIDFromExitHint(provider, output string) string {
 		}
 		id = strings.TrimPrefix(last, "claude --resume ")
 	case "codex":
-		if !strings.HasPrefix(last, "To continue this session, run codex resume ") {
+		// Codex closes with THREE lines, not one (verified against codex-cli
+		// 0.154.0 by capturing a real dead pane):
+		//
+		//	To continue this session, run:
+		//	  codex resume <uuid>
+		//	Or run codex resume and select <thread title>.
+		//
+		// So the id is not on the last line, and the first line ends in a colon
+		// with the command indented beneath it. This previously looked for a
+		// single line "To continue this session, run codex resume <uuid>", which
+		// codex has never emitted, so codex panes never resumed (#5176).
+		//
+		// The trailing "Or run" line is optional (it names the thread), so it is
+		// dropped before looking for the command. Both anchor lines must still be
+		// adjacent at the tail: that is what keeps this the provider's own exit
+		// hint rather than any UUID that happened to appear in the output.
+		tail := lines
+		if strings.HasPrefix(strings.TrimSpace(tail[len(tail)-1]), "Or run codex resume and select ") {
+			tail = tail[:len(tail)-1]
+		}
+		if len(tail) < 2 {
 			return ""
 		}
-		id = strings.TrimPrefix(last, "To continue this session, run codex resume ")
+		command := strings.TrimSpace(tail[len(tail)-1])
+		if strings.TrimSpace(tail[len(tail)-2]) != "To continue this session, run:" ||
+			!strings.HasPrefix(command, "codex resume ") {
+			return ""
+		}
+		id = strings.TrimPrefix(command, "codex resume ")
 	}
 	if supportsExactResume(provider, id) {
 		return id
