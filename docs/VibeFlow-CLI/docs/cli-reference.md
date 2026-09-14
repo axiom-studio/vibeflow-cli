@@ -79,7 +79,7 @@ vibeflow review-watch --project 42 --repository-link 123 --provider claude --mod
 | `--provider` | `claude` or `codex`; defaults to the configured provider |
 | `--model` | Provider model; required when `llm_gateway_enabled` is configured |
 | `--runner-kind` | `local` or `shared`; shared execution requires an existing server grant |
-| `--name` | Stable runner name; defaults to hostname |
+| `--name` | Stable runner name, 1 to 100 bytes; defaults to hostname |
 | `--interval` | Idle polling interval, `1s` to `60s`; default `5s`. Each poll also sends the runner heartbeat, and the server marks a runner offline after 2 minutes without one |
 | `--timeout` | Per-attempt maximum, `1m` to `1h`; default `15m`, also bounded by the server deadline |
 | `--once` | Check one work page, process at most one review, then exit |
@@ -108,9 +108,14 @@ The developer checkout stays untouched.
 The PR diff uses the unique merge base, while the exact target tip remains separate integration context.
 `revisions.json` identifies both baselines; missing or ambiguous history fails visibly instead of producing a misleading diff.
 Exact missing commits are fetched using the host's existing Git credentials; a missing credential fails the attempt visibly.
+SSH checkouts retain their SSH authentication transport when fetching missing commits, including forks on the same verified provider host.
+GHE.com accepts both `TENANT@TENANT.ghe.com:OWNER/REPO.git` and `ssh://TENANT@TENANT.ghe.com/OWNER/REPO.git`; the username must match the tenant, and embedded passwords remain forbidden.
 Symlinks are exported as literal target text, submodules are recorded without downloading, and oversized input fails explicitly.
 Each snapshot is limited to 20,000 files and 512 MiB, with a 16 MiB per-file limit.
 Up to three snapshots use at most 1.5 GiB of exported source, plus private Git objects and review inputs.
+Private Git acquisition has a 2 GiB aggregate budget checked before and after each fetch and every 100 ms while fetching, including historical objects absent from the reviewed snapshots.
+Exceeding that budget stops the Git process group and fails the attempt before source export; ordinary receipt cleanup removes its private directory.
+This sampled guard can overshoot between checks and is not a hard disk quota; shared runner deployments that require a strict ceiling must also apply a filesystem or container storage quota.
 Prior finding evidence is bounded to 20 additional pages and 2 MiB; up to 100 relevant findings can be reconciled per result, with omitted states retained by the server.
 
 Ctrl-C or SIGTERM stops the child process group and reports cancellation.
@@ -124,6 +129,8 @@ Runner registration binds the selected Git provider and repository link; the CLI
 Upgrade the server and re-register if scope confirmation fails.
 Legacy unscoped registrations are disabled by the server.
 A provider's bounded failure explanation is saved in the runner's private `last-provider-diagnostic.json` when available.
+Claude API failures retain a sanitized category and HTTP status in that diagnostic, even when the provider process exits unsuccessfully.
+For example, `rate_limited` with status `429` identifies a quota or throttling failure without saving the provider's raw error text.
 
 ### `vibeflow models [provider]`
 

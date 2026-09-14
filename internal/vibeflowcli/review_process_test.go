@@ -127,3 +127,44 @@ func TestReviewProcessStopsDescendantsAfterNaturalExit(t *testing.T) {
 		t.Fatal("background child survived natural parent exit")
 	}
 }
+
+func TestReviewFetchBudgetStopsWriterAndDescendants(t *testing.T) {
+	root := t.TempDir()
+	watch := &reviewWatch{root: root}
+	receipt := &reviewReceipt{RequestID: reviewUUID()}
+	objects := filepath.Join(watch.workDir(receipt), "objects.git")
+	if err := os.MkdirAll(objects, 0700); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(root, "pid")
+	git := filepath.Join(root, "git")
+	script := "#!/bin/sh\nsleep 60 &\necho $! > " + shellQuote(pidPath) + "\ndd if=/dev/zero of=" + shellQuote(filepath.Join(objects, "incoming.pack")) + " bs=1024 count=128 2>/dev/null\nwait\n"
+	if err := os.WriteFile(git, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := fetchReviewObjects(ctx, objects, "owned-fixture", strings.Repeat("a", 40), 64<<10)
+	data, _ := os.ReadFile(pidPath)
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	if pid > 0 {
+		defer syscall.Kill(pid, syscall.SIGKILL)
+	}
+	if err == nil || !strings.Contains(err.Error(), "Git objects exceed") || ctx.Err() != nil {
+		t.Fatalf("growing acquisition did not stop at its budget: %v", err)
+	}
+	until := time.Now().Add(time.Second)
+	for time.Now().Before(until) && pid > 0 && syscall.Kill(pid, 0) == nil {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid <= 0 || syscall.Kill(pid, 0) == nil {
+		t.Fatalf("fetch descendant survived budget cancellation: %d", pid)
+	}
+	if err := watch.cleanup(receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(watch.workDir(receipt)); !os.IsNotExist(err) {
+		t.Fatalf("oversized acquisition remains after cleanup: %v", err)
+	}
+}

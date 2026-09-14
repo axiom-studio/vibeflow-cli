@@ -149,8 +149,8 @@ func reviewWatchCmd() *cobra.Command {
 		if o.GitProvider != "github" && o.GitProvider != "bitbucket" {
 			return fmt.Errorf("review repository integration must be github or bitbucket")
 		}
-		if strings.ContainsAny(o.Name+o.Model, "\x00\r\n\t") || len(o.Name) > 200 || len(o.Model) > 200 {
-			return fmt.Errorf("invalid runner name or model")
+		if strings.TrimSpace(o.Name) == "" || strings.ContainsAny(o.Name+o.Model, "\x00\r\n\t") || len(o.Name) > 100 || len(o.Model) > 200 {
+			return fmt.Errorf("invalid runner name or model; runner names must be 1 to 100 bytes")
 		}
 		if o.Provider != "claude" && o.Provider != "codex" {
 			return fmt.Errorf("review-watch supports --provider claude or codex")
@@ -635,6 +635,38 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 		pipe.Close()
 		err = <-done
 	}
+	// Claude returns structured API failures even when its process exits 1.
+	// Keep only a numeric HTTP status and our category, never provider text.
+	if ctx.Err() == nil && w.options.Provider == "claude" {
+		var failure struct {
+			Error  bool `json:"is_error"`
+			Status int  `json:"api_error_status"`
+		}
+		if json.Unmarshal(stdout.Bytes(), &failure) == nil && failure.Error {
+			category := "provider_error"
+			switch failure.Status {
+			case 400:
+				category = "invalid_request"
+			case 401:
+				category = "authentication_required"
+			case 403:
+				category = "access_denied"
+			case 429:
+				category = "rate_limited"
+			default:
+				if failure.Status >= 500 && failure.Status <= 599 {
+					category = "provider_unavailable"
+				}
+			}
+			if failure.Status < 400 || failure.Status > 599 {
+				failure.Status = 0
+			}
+			if err := saveReviewJSON(filepath.Join(w.root, "last-provider-diagnostic.json"), map[string]any{"attempt_id": p.Execution.Attempt.ID, "category": category, "api_error_status": failure.Status}); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("review provider failed (%s, HTTP status %d); see private last-provider-diagnostic.json", category, failure.Status)
+		}
+	}
 	if err != nil || ctx.Err() != nil {
 		return nil, fmt.Errorf("review provider stopped before completion (failure, cancellation, lease loss or deadline)")
 	}
@@ -643,13 +675,9 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 		output, err = os.ReadFile(filepath.Join(root, "provider-result.json"))
 	} else {
 		var envelope struct {
-			Error      bool            `json:"is_error"`
 			Structured json.RawMessage `json:"structured_output"`
 		}
 		err = json.Unmarshal(stdout.Bytes(), &envelope)
-		if envelope.Error {
-			return nil, fmt.Errorf("review provider reported failure")
-		}
 		output = envelope.Structured
 	}
 	if err != nil || len(output) > 256<<10 {
