@@ -26,7 +26,7 @@ func TestReviewCommandTerminalShutdown(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v: %s", err, out)
 	}
-	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
 		t.Run(sig.String(), func(t *testing.T) {
 			repo, execution := reviewTestRepo(t)
 			root := t.TempDir()
@@ -149,7 +149,7 @@ func TestReviewCommandTerminalShutdown(t *testing.T) {
 		})
 	}
 
-	for _, sig := range []syscall.Signal{0, syscall.SIGINT, syscall.SIGTERM} {
+	for _, sig := range []syscall.Signal{0, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
 		t.Run("startup_"+sig.String(), func(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, "child.json")

@@ -179,7 +179,7 @@ func reviewWatchCmd() *cobra.Command {
 		if o.ProjectID <= 0 {
 			return fmt.Errorf("review project not found")
 		}
-		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer cancel()
 		watch := &reviewWatch{client: client, cfg: cfg, options: o, output: cmd.OutOrStdout()}
 		return watch.run(ctx)
@@ -699,7 +699,7 @@ func reviewChildCmd() *cobra.Command {
 		if json.Unmarshal(data, &spec) != nil {
 			return fmt.Errorf("invalid review child spec")
 		}
-		signalCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		signalCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer stopSignals()
 		ctx, cancel := context.WithDeadline(signalCtx, time.UnixMilli(spec.DeadlineAt))
 		defer cancel()
