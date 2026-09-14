@@ -2,6 +2,7 @@ package vibeflowcli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -148,14 +149,14 @@ func printReviewSessions(ctx context.Context, out io.Writer, cfg *Config, projec
 		return nil
 	}
 	if cfg.APIToken == "" {
-		return fmt.Errorf("managed reviews unavailable: configure authentication first")
+		return fmt.Errorf("configure authentication first")
 	}
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
 	id, err := strconv.ParseInt(project, 10, 64)
 	if err != nil {
 		var projects []Project
 		if err = client.reviewRequest(ctx, "GET", "/projects", nil, &projects); err != nil {
-			return fmt.Errorf("managed reviews unavailable: %w", err)
+			return err
 		}
 		for _, p := range projects {
 			if p.Name == project {
@@ -165,11 +166,11 @@ func printReviewSessions(ctx context.Context, out io.Writer, cfg *Config, projec
 		}
 	}
 	if id <= 0 {
-		return fmt.Errorf("managed reviews unavailable: project not found")
+		return fmt.Errorf("project not found")
 	}
 	page, err := client.listReviewSessions(ctx, id, after)
 	if err != nil {
-		return fmt.Errorf("managed reviews unavailable: %w", err)
+		return err
 	}
 	fmt.Fprintln(out, "\n"+reviewSessionLabel+" (read-only)")
 	if len(page.Sessions) == 0 {
@@ -191,10 +192,19 @@ type reviewSessionsMsg struct {
 	err     error
 }
 
+// errReviewProjectUnconfigured means no project resolved for the TUI; it is a
+// configuration state, not an outage, so it never produces a stale warning.
+var errReviewProjectUnconfigured = errors.New("no project selected")
+
+const reviewUnconfiguredHint = "PR reviews: no project selected (use --project or set default_project)"
+
 func (m Model) refreshReviewSessions() tea.Msg {
 	started := time.Now()
-	if m.client == nil || m.projectID <= 0 {
-		return reviewSessionsMsg{after: m.reviewAfter, started: started, err: fmt.Errorf("select a project and configure authentication to view managed reviews")}
+	if m.projectID <= 0 {
+		return reviewSessionsMsg{after: m.reviewAfter, started: started, err: errReviewProjectUnconfigured}
+	}
+	if m.client == nil {
+		return reviewSessionsMsg{after: m.reviewAfter, started: started, err: fmt.Errorf("configure authentication to view managed reviews")}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

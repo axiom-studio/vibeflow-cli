@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -619,9 +620,17 @@ func listCmd() *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "%-24s %-12s %-16s %-10s\n", shortName, prov, branch, status)
 				}
 			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+			// Best-effort: the local listing above stands even when the review
+			// API is offline or refuses this user, so warn and keep exit 0.
+			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()
-			return printReviewSessions(ctx, cmd.OutOrStdout(), cfg, project, after)
+			if err := printReviewSessions(ctx, cmd.OutOrStdout(), cfg, project, after); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					err = errors.New("review API did not respond within 3s")
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "managed reviews unavailable: %v\n", err)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&project, "project", "", "Project ID or name for managed reviews (default: configured project)")

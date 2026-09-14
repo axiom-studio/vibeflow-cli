@@ -154,8 +154,17 @@ func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, ro
 			if json.Unmarshal(auth, &values) != nil {
 				return nil, fmt.Errorf("invalid Codex authentication file")
 			}
+			// A ChatGPT login rotates its refresh token inside the child's
+			// throwaway home; that copy is discarded, leaving the user's real
+			// login revoked. Never copy the OAuth bundle.
+			if _, oauth := values["tokens"]; oauth {
+				return nil, fmt.Errorf("Codex subscription (ChatGPT login) credentials are not supported for review-watch because token refresh cannot be persisted safely; set an OpenAI API key or use --provider claude")
+			}
+			if len(values["OPENAI_API_KEY"]) == 0 {
+				return nil, fmt.Errorf("Codex review needs a model API key; set OPENAI_API_KEY or run codex login --with-api-key")
+			}
 			clean := map[string]json.RawMessage{}
-			for _, k := range []string{"auth_mode", "OPENAI_API_KEY", "tokens", "last_refresh"} {
+			for _, k := range []string{"auth_mode", "OPENAI_API_KEY"} {
 				if v, ok := values[k]; ok {
 					clean[k] = v
 				}

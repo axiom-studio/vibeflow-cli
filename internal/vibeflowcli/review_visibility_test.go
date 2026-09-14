@@ -310,3 +310,83 @@ func TestReviewManagedAuthorityFailureClearsHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewWatchIntervalBounds(t *testing.T) {
+	previousRoot, previousConfig := rootDir, flagConfigPath
+	t.Cleanup(func() { rootDir = previousRoot; flagConfigPath = previousConfig })
+	SetRootDir(t.TempDir())
+	flagConfigPath = filepath.Join(RootDir(), "config.yaml")
+	for _, tc := range []struct {
+		interval string
+		ok       bool
+	}{{"1s", true}, {"60s", true}, {"61s", false}, {"5m", false}} {
+		t.Run(tc.interval, func(t *testing.T) {
+			cmd := reviewWatchCmd()
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs([]string{"--project", "1", "--repository-link", "7", "--interval", tc.interval})
+			err := cmd.ExecuteContext(context.Background())
+			// Accepted intervals proceed to the later "connect VibeFlow" check.
+			rejected := err != nil && strings.Contains(err.Error(), "interval must be between 1s and 60s")
+			if rejected == tc.ok {
+				t.Fatalf("interval %s ok=%v: %v", tc.interval, tc.ok, err)
+			}
+		})
+	}
+}
+
+func TestReviewListCommandSurvivesReviewAPIFailure(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	binary := filepath.Join(t.TempDir(), "vibeflow")
+	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/vibeflow").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v %s", err, out)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "private provider error", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	for _, tc := range []struct{ name, url, want string }{
+		{"http_503", server.URL, "managed reviews unavailable: review API returned HTTP 503"},
+		{"unreachable", "http://127.0.0.1:1", "managed reviews unavailable: review API connection failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.ServerURL = tc.url
+			cfg.APIToken = "fixture-token"
+			cfg.DefaultProject = "13"
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := SaveConfig(cfg, path); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			if err != nil || !strings.Contains(stdout.String(), "sessions") || !strings.Contains(stderr.String(), tc.want) || strings.Contains(stderr.String(), "private") {
+				t.Fatalf("review outage broke local listing: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestReviewUnconfiguredProjectShowsHintNotStaleWarning(t *testing.T) {
+	m := Model{client: NewClient("http://127.0.0.1:1", "fixture-token"), config: DefaultConfig(), width: 120, height: 32, serverWarning: "Server unreachable (http://127.0.0.1:1)", repoRootCache: map[string]string{}, collapsedGroups: map[string]bool{}, sessions: []SessionRow{{Name: "ordinary", WorkingDir: "/repo"}}}
+	for i := 0; i < 2; i++ { // the refresh re-fires every tick
+		next, _ := m.Update(m.refreshReviewSessions())
+		m = next.(Model)
+	}
+	for _, sessions := range [][]SessionRow{m.sessions, nil} {
+		m.sessions = sessions
+		view := stripANSI(m.viewContent())
+		if m.reviewWarning != "" || strings.Contains(view, "stale") || strings.Contains(view, "Managed reviews unavailable") {
+			t.Fatalf("unconfigured project reported as outage: %q\n%s", m.reviewWarning, view)
+		}
+		if strings.Count(view, "no project selected") != 1 || !strings.Contains(view, "Server unreachable") {
+			t.Fatalf("missing hint or server warning outranked:\n%s", view)
+		}
+	}
+}

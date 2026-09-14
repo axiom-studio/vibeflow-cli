@@ -144,10 +144,11 @@ type Model struct {
 	cache            *SessionCache      // session cache for restart-without-intervention
 	restartSelect    RestartSelectModel // dead-session restart multiselect
 
-	reviewAfter       string
-	reviewNext        string
-	reviewWarning     string
-	reviewReadStarted time.Time
+	reviewAfter        string
+	reviewNext         string
+	reviewWarning      string
+	reviewUnconfigured bool // no project resolved; managed reviews cannot load
+	reviewReadStarted  time.Time
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -792,6 +793,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.reviewReadStarted = msg.started
+		if errors.Is(msg.err, errReviewProjectUnconfigured) {
+			m.reviewUnconfigured = true
+			m.reviewWarning = ""
+			return m, nil
+		}
 		if msg.err != nil {
 			var response *reviewHTTPError
 			if errors.As(msg.err, &response) && (response.Status == 401 || response.Status == 403 || response.Status == 404) {
@@ -2180,6 +2186,12 @@ func (m Model) renderSessionList(width, height int) string {
 	b.WriteString(headerStyle.Render(fmt.Sprintf("Sessions (%s)", modeLabel)))
 	b.WriteString("\n")
 
+	// One dim line in place of the managed section when no project resolved.
+	hint := ""
+	if m.reviewUnconfigured {
+		hint = "\n" + lipgloss.NewStyle().Foreground(dimColor).Render(truncate(reviewUnconfiguredHint, width))
+	}
+
 	if len(m.sessions) == 0 {
 		if m.hitmap != nil {
 			m.hitmap.top = 0
@@ -2187,6 +2199,7 @@ func (m Model) renderSessionList(width, height int) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("No active sessions."))
 		b.WriteString("\n")
 		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("Press 'n' to create one."))
+		b.WriteString(hint)
 		return b.String()
 	}
 
@@ -2197,14 +2210,17 @@ func (m Model) renderSessionList(width, height int) string {
 		rows = m.buildFlatRows(width)
 	}
 
-	// avail = body lines below the fixed "Sessions" header.
+	// avail = body lines below the fixed "Sessions" header (and the hint).
 	avail := height - 1
+	if hint != "" {
+		avail--
+	}
 	if avail < 1 {
 		avail = 1
 	}
 	b.WriteString(m.windowRows(rows, avail))
 
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n") + hint
 }
 
 // buildFlatRows pre-renders every session as a listRow in flat (ungrouped) mode.
