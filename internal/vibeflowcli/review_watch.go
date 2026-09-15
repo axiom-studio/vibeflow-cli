@@ -111,9 +111,12 @@ func saveReviewJSON(path string, value any) error {
 
 func reviewWatchCmd() *cobra.Command {
 	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
-	var background, status bool
+	var background, status, owned bool
 	var stop, managed, serverURL string
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh, isolated PR reviews while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if owned {
+			return runReviewOwned(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout())
+		}
 		if managed != "" {
 			return runReviewBackground(cmd.Context(), managed)
 		}
@@ -228,13 +231,15 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&o.PollInterval, "interval", o.PollInterval, "Idle API polling interval, 1s to 60s; each poll also heartbeats the runner, no LLM runs while idle")
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Maximum time per attempt, also bounded by the server deadline")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
-	cmd.Flags().BoolVar(&background, "background", false, "Enable TUI autostart and run this explicit binding in the background")
+	cmd.Flags().BoolVar(&background, "background", false, "Run this explicit binding in the background independently of the TUI")
 	cmd.Flags().BoolVar(&status, "status", false, "Show managed review runners in this root")
-	cmd.Flags().StringVar(&stop, "stop", "", "Stop a managed runner ID and disable its autostart")
+	cmd.Flags().StringVar(&stop, "stop", "", "Stop and disable a detached runner ID")
 	cmd.Flags().StringVar(&managed, "managed-runner", "", "Internal managed runner binding ID")
+	cmd.Flags().BoolVar(&owned, "owned-runner", false, "Internal runner owned by this CLI's liveness pipe")
 	cmd.Flags().StringVar(&serverURL, "server-url", "", "VibeFlow server URL (pinned for background runners)")
 	_ = cmd.Flags().MarkHidden("managed-runner")
-	cmd.MarkFlagsMutuallyExclusive("background", "status", "stop", "managed-runner")
+	_ = cmd.Flags().MarkHidden("owned-runner")
+	cmd.MarkFlagsMutuallyExclusive("background", "status", "stop", "managed-runner", "owned-runner")
 	return cmd
 }
 
