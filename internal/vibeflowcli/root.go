@@ -142,6 +142,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		cfg.MCPToolName = flagMCPToolName
 	}
 
+	// Only explicitly enabled bindings are started. Their pinned config and
+	// server remain independent of this TUI's ambient credential overrides.
+	autostartReviewBackground(cmd.Context(), cfgPath, os.Stderr)
+
 	// Initialize components
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
 	registry := NewProviderRegistry(cfg)

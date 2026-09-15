@@ -36,12 +36,22 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/vibeflow").CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v %s", err, out)
 	}
-	for _, exit := range []string{"0", "1"} {
-		t.Run("provider_exit_"+exit, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, exit, category string
+		httpStatus                     string
+	}{
+		{"api_exit_0", `{"is_error":true,"api_error_status":429,"terminal_reason":"untrusted-secret","result":"untrusted-secret"}`, "exit 0", "rate_limited", "429"},
+		{"api_exit_1", `{"is_error":true,"api_error_status":429,"terminal_reason":"untrusted-secret","result":"untrusted-secret"}`, "exit 1", "rate_limited", "429"},
+		{"exit_17", "untrusted-secret", "exit 17", "provider_exit", ""},
+		{"signal", "untrusted-secret", "kill -TERM $$", "provider_signal", ""},
+		{"invalid_result", "untrusted-secret", "exit 0", "invalid_result", ""},
+		{"reported_failure", `{"structured_output":{"result":null,"failure_reason":"untrusted-secret"}}`, "exit 0", "provider_reported_failure", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			repo, execution := reviewTestRepo(t)
 			root := t.TempDir()
 			provider := filepath.Join(root, "provider")
-			script := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\nprintf '%s\\n' '{\"is_error\":true,\"api_error_status\":429,\"terminal_reason\":\"untrusted-secret\",\"result\":\"untrusted-secret\"}'\nexit " + exit + "\n"
+			script := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\nprintf '%s\\n' " + shellQuote(tc.response) + "\necho stderr-untrusted-secret >&2\n" + tc.exit + "\n"
 			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -85,7 +95,7 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, binary, "--root", root, "--config", config, "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "diagnostic", "--once")
 			output, err := cmd.CombinedOutput()
-			if err != nil || !strings.Contains(reason, "rate_limited") || !strings.Contains(reason, "429") {
+			if err != nil || !strings.Contains(reason, tc.category) || !strings.Contains(reason, tc.httpStatus) {
 				t.Errorf("provider cause lost: %v reason=%q output=%s", err, reason, output)
 			}
 			paths, _ := filepath.Glob(filepath.Join(root, "review-runners", "*", "last-provider-diagnostic.json"))
@@ -93,8 +103,22 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 				t.Fatalf("missing private diagnostic: %v", paths)
 			}
 			data, err := os.ReadFile(paths[0])
-			if err != nil || !bytes.Contains(data, []byte("rate_limited")) || !bytes.Contains(data, []byte("429")) || bytes.Contains(data, []byte("secret")) || bytes.Contains(output, []byte("secret")) {
+			if err != nil || !bytes.Contains(data, []byte(tc.category)) || !bytes.Contains(data, []byte(tc.httpStatus)) || bytes.Contains(data, []byte("secret")) || bytes.Contains(output, []byte("secret")) || strings.Contains(reason, "secret") {
 				t.Fatalf("unsafe or incomplete diagnostic: %s %v", data, err)
+			}
+			var diagnostic struct {
+				Stage    string `json:"stage"`
+				ExitCode *int   `json:"exit_code"`
+				Signal   int    `json:"signal"`
+			}
+			if err := json.Unmarshal(data, &diagnostic); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "exit_17" && (diagnostic.Stage != "provider" || diagnostic.ExitCode == nil || *diagnostic.ExitCode != 17) {
+				t.Fatalf("actual provider exit was replaced by guard exit: %s", data)
+			}
+			if tc.name == "signal" && diagnostic.Signal != 15 {
+				t.Fatalf("provider signal was discarded: %s", data)
 			}
 			if info, err := os.Stat(paths[0]); err != nil || info.Mode().Perm() != 0600 {
 				t.Fatalf("diagnostic not private: %v", err)
