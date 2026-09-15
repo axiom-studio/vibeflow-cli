@@ -16,6 +16,26 @@ Subcommands read `server_url` from configuration; set it during setup with boots
 
 ## Commands
 
+### `vibeflow` (interactive TUI)
+
+Server and API-key setup runs only for a new, uninitialized root and remains saved in `config.yaml`.
+Separately, every interactive launch asks **Launch PR review runner for this session?**
+The default is No; this choice is never saved.
+
+Choose Yes to start one local runner owned by this TUI.
+It uses the saved project, `default_work_dir` (or the current working directory), and configured model provider.
+The checkout's origin is matched against the project's existing GitHub, GitHub Enterprise, or Bitbucket repository links.
+Only missing, unsupported, or ambiguous details require another question.
+Native reviews use the provider's default model; gateway reviews require an explicit model.
+There is no persona or model question when a PR arrives: each review starts a fresh Principal Engineer automatically.
+
+The TUI displays runner status and retained review attempts.
+Normal exit, Ctrl-C, termination, or loss of the TUI process closes its runner and active review processes, preserving pending receipts and history.
+An independently started runner is never adopted or stopped by this TUI.
+Separate `--root` instances remain independent, and `--root` is not the repository checkout.
+If startup fails, Enter opens the normal CLI without a runner; `r` retries startup.
+Headless subcommands do not show this prompt.
+
 ### `vibeflow version`
 
 Prints build version, commit, and build date.
@@ -84,14 +104,15 @@ vibeflow review-watch --project 42 --repository-link 123 --provider claude --mod
 | `--timeout` | Per-attempt maximum, `1m` to `1h`; default `15m`, also bounded by the server deadline |
 | `--once` | Check one work page, process at most one review, then exit |
 | `--server-url` | Explicit VibeFlow server URL; overrides configuration and `VIBEFLOW_URL`, and is pinned for a background runner |
-| `--background` | Save an explicit repository binding, start a detached runner, and enable autostart on later TUI launches; requires explicit `--project`, `--repo`, and `--repository-link`; incompatible with `--once` |
+| `--background` | Save an explicit repository binding and start a detached runner; requires explicit `--project`, `--repo`, and `--repository-link`; incompatible with `--once` |
 | `--status` | Show this root's managed runner IDs, pinned scope, lifecycle state, and safe last-failure metadata |
-| `--stop <ID>` | Request graceful shutdown of one managed runner and disable its TUI autostart; retains pending receipts and review history |
+| `--stop <ID>` | Request graceful shutdown of one explicitly detached runner; retains pending receipts and review history |
 
 #### Background runner management
 
 Ordinary persona sessions do not start a review runner implicitly.
-Opt in once for each repository, using the same root and config that contain your VibeFlow credentials.
+For ordinary interactive use, choose Yes at TUI startup instead of running this command.
+Use explicit detached mode only when the runner must outlive the TUI, using the same root and config that contain your VibeFlow credentials.
 Stop an existing foreground watcher with Ctrl-C before enabling its background replacement.
 
 ```bash
@@ -117,8 +138,7 @@ An existing absolute `SSH_AUTH_SOCK` is pinned for supervisor-only Git fetches a
 If the socket changes after login or reboot, explicitly enable the runner again with the new socket.
 After rotating the VibeFlow token, explicitly enable the runner again to approve its new credential binding.
 
-Launching the TUI with the same root and config restarts only opted-in runners that previously stopped cleanly.
-Failed, stale, missing-status, and explicitly stopped runners do not autostart, preventing silent crash loops.
+Launching the TUI never restarts saved detached bindings or treats them as consent.
 To restart one, rerun its full `--background` command.
 The stop command waits up to 10 seconds, then reports if shutdown is still pending; it never signals an unverified saved PID.
 `background.log` contains fixed lifecycle messages only, while `last-provider-diagnostic.json` contains sanitized failure metadata.

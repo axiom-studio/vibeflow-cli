@@ -81,20 +81,6 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 	if err := SaveConfig(cfg, configPath); err != nil {
 		t.Fatal(err)
 	}
-	tmuxDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmuxDir, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	launchTUI := func() {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, binary, "--root", ".", "--config", configPath)
-		cmd.Dir = root
-		cmd.Env = []string{"PATH=" + tmuxDir + ":" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "VIBEFLOW_URL=" + foreign.URL, "VIBEFLOW_TOKEN=ambient-token-canary", "ANTHROPIC_API_KEY=ambient-model-canary", "TERM=dumb"}
-		// TUI startup attempts autostart before the expected non-terminal error.
-		_, _ = cmd.CombinedOutput()
-	}
 	run := func(extraEnv []string, args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -185,15 +171,15 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 	if err != nil || !strings.Contains(status, "running") || !strings.Contains(status, id) || !strings.Contains(status, server.URL) || !strings.Contains(status, "test-runner") {
 		t.Fatalf("live status: %v %s", err, status)
 	}
-	// Graceful process termination keeps the prior opt-in; a subsequent TUI
-	// launch reloads that binding despite unrelated shell credentials/origin.
+	// A detached runner is restarted only by an explicit command.
 	if err := syscall.Kill(managedPID(), syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
 	wait(func() bool { out, _ := run(nil, "--status"); return strings.Contains(out, "stopped") }, "graceful process exit did not stop")
-	launchTUI()
-	wait(func() bool { return registrations.Load() == 2 }, "TUI did not start the previously opted-in runner")
-	wait(func() bool { out, _ := run(nil, "--status"); return strings.Contains(out, "running") }, "TUI launch used ambient model credentials")
+	if out, err := run([]string{"VIBEFLOW_URL=" + server.URL}, start...); err != nil {
+		t.Fatalf("explicit restart: %v %s", err, out)
+	}
+	wait(func() bool { return registrations.Load() == 2 }, "explicit detached restart did not register")
 	for i := 0; i < 2; i++ {
 		if out, err := run(nil, "--stop", id); err != nil {
 			t.Fatalf("idempotent stop: %v %s", err, out)
@@ -202,10 +188,6 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 	status, err = run(nil, "--status")
 	if err != nil || strings.Contains(status, "running") || !strings.Contains(status, "disabled") {
 		t.Fatalf("stopped status: %v %s", err, status)
-	}
-	launchTUI()
-	if registrations.Load() != 2 {
-		t.Fatal("TUI restarted a disabled runner")
 	}
 	if out, err := run([]string{"VIBEFLOW_URL=" + server.URL}, start...); err != nil {
 		t.Fatalf("restart: %v %s", err, out)
@@ -219,11 +201,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 		out, err := run(nil, "--status")
 		return err == nil && strings.Contains(out, "stale") && !strings.Contains(out, "running")
 	}, "stale process was reported running")
-	launchTUI()
-	if registrations.Load() != 3 {
-		t.Fatal("TUI respawned a stale runner")
-	}
-	// Changed file credentials cannot rebind the existing opt-in on TUI launch.
+	// Restarting the saved binding cannot silently change its account.
 	if out, err := run([]string{"VIBEFLOW_URL=" + server.URL}, start...); err != nil {
 		t.Fatalf("explicit stale restart: %v %s", err, out)
 	}
@@ -235,14 +213,12 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 	if err := SaveConfig(cfg, configPath); err != nil {
 		t.Fatal(err)
 	}
-	launchTUI()
+	if out, err := run(nil, "--managed-runner", id); err == nil || strings.Contains(out, "rotated-api-canary") {
+		t.Fatalf("saved account binding was accepted or leaked: %v", err)
+	}
 	status, _ = run(nil, "--status")
 	if !strings.Contains(status, "failed") || strings.Contains(status, "running") || registrations.Load() != 4 {
 		t.Fatalf("changed account was silently used: %s", status)
-	}
-	launchTUI()
-	if registrations.Load() != 4 {
-		t.Fatal("TUI respawned a failed runner")
 	}
 	statusPath := filepath.Join(filepath.Dir(dirs[0]), "background-status.json")
 	for _, invalid := range []string{"", "not-json", `{}`, `{"phase":"unknown"}`} {
@@ -253,10 +229,9 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 		} else if err := os.WriteFile(statusPath, []byte(invalid), 0600); err != nil {
 			t.Fatal(err)
 		}
-		launchTUI()
 		data, err := os.ReadFile(statusPath)
 		if (invalid == "" && !os.IsNotExist(err)) || (invalid != "" && string(data) != invalid) {
-			t.Fatal("TUI respawned a runner with missing or invalid process status")
+			t.Fatal("invalid process status changed unexpectedly")
 		}
 		status, _ = run(nil, "--status")
 		if !strings.Contains(status, "stale") {

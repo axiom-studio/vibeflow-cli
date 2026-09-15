@@ -149,6 +149,7 @@ type Model struct {
 	reviewWarning      string
 	reviewUnconfigured bool // no project resolved; managed reviews cannot load
 	reviewReadStarted  time.Time
+	reviewRunner       *reviewOwnedRunner // owned by this TUI; nil when declined
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -2032,6 +2033,17 @@ func (m Model) viewContent() string {
 	} else if m.serverWarning != "" {
 		warnBannerStyle := lipgloss.NewStyle().Foreground(warningColor)
 		errLine = warnBannerStyle.Render("⚠ " + m.serverWarning + " — local sessions still available")
+	} else if m.reviewRunner != nil {
+		status := "PR review runner online - fresh Principal Engineer per review"
+		select {
+		case <-m.reviewRunner.Done():
+			status = "PR review runner stopped - reopen the CLI to retry"
+			if err := m.reviewRunner.Err(); err != nil {
+				status = "PR review runner: " + err.Error()
+			}
+		default:
+		}
+		errLine = lipgloss.NewStyle().Foreground(dimColor).Render(truncate(status, width))
 	}
 
 	// Help bar — context-sensitive based on confirmation state.

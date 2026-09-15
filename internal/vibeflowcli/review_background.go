@@ -387,7 +387,7 @@ func stopReviewBackground(ctx context.Context, id string, out io.Writer) error {
 	}
 	binding.Enabled = false
 	if saveReviewJSON(filepath.Join(dir, "background.json"), binding) != nil {
-		return fmt.Errorf("could not disable managed runner autostart")
+		return fmt.Errorf("could not disable detached runner")
 	}
 	if os.WriteFile(filepath.Join(dir, "background.stop"), nil, 0600) != nil {
 		return fmt.Errorf("could not request managed runner stop")
@@ -400,14 +400,14 @@ func stopReviewBackground(ctx context.Context, id string, out io.Writer) error {
 			return err
 		}
 		if !active {
-			fmt.Fprintf(out, "Managed review runner %s stopped; autostart disabled.\n", id)
+			fmt.Fprintf(out, "Managed review runner %s stopped; detached runner disabled.\n", id)
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			fmt.Fprintf(out, "Managed review runner %s is stopping; autostart disabled. Pending receipts are preserved.\n", id)
+			fmt.Fprintf(out, "Managed review runner %s is stopping; detached runner disabled. Pending receipts are preserved.\n", id)
 			return nil
 		case <-time.After(50 * time.Millisecond):
 		}
@@ -428,7 +428,7 @@ func reviewBackgroundState(dir string) (string, error) {
 	valid := readErr == nil && len(data) <= 4096 && json.Unmarshal(data, &status) == nil
 	if active {
 		if !binding.Enabled {
-			return "stopping (autostart disabled)", nil
+			return "stopping (detached runner disabled)", nil
 		}
 		if valid && status.Phase == "running" {
 			return "running", nil
@@ -436,7 +436,7 @@ func reviewBackgroundState(dir string) (string, error) {
 		return "starting", nil
 	}
 	if !binding.Enabled {
-		return "stopped (autostart disabled)", nil
+		return "stopped (detached runner disabled)", nil
 	}
 	if !valid {
 		return "stale (explicit restart required)", nil
@@ -450,7 +450,7 @@ func reviewBackgroundState(dir string) (string, error) {
 		}
 	}
 	if status.Phase == "stopped" && status.PID > 0 {
-		return "stopped (autostart enabled)", nil
+		return "stopped (explicit restart required)", nil
 	}
 	return "stale (explicit restart required)", nil
 }
@@ -480,36 +480,4 @@ func reviewBackgroundStatusList(out io.Writer) error {
 		fmt.Fprintf(out, "  stop: vibeflow --root %s review-watch --stop %s\n", shellQuote(root), filepath.Base(dir))
 	}
 	return nil
-}
-
-// A TUI launch makes one attempt per previously enabled runner. Failed or
-// orphaned state needs explicit restart, never a crash respawn loop.
-func autostartReviewBackground(ctx context.Context, configPath string, out io.Writer) {
-	root, err := filepath.Abs(RootDir())
-	if err != nil {
-		return
-	}
-	configPath, err = filepath.Abs(configPath)
-	if err != nil {
-		return
-	}
-	paths, _ := filepath.Glob(filepath.Join(root, "review-runners", "*", "background.json"))
-	for _, path := range paths {
-		dir := filepath.Dir(path)
-		binding, err := readReviewBackground(dir)
-		if err != nil || !binding.Enabled || binding.ConfigPath != configPath {
-			continue
-		}
-		lock, err := lockReviewBackgroundControl(ctx, dir)
-		if err != nil {
-			continue
-		}
-		state, err := reviewBackgroundState(dir)
-		if err == nil && state == "stopped (autostart enabled)" {
-			if launchReviewBackground(ctx, dir, binding, out) != nil {
-				fmt.Fprintf(out, "Managed review runner %s could not start; use review-watch --status.\n", filepath.Base(dir))
-			}
-		}
-		lock.Close()
-	}
 }
