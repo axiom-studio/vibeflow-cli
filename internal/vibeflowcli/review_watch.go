@@ -62,6 +62,7 @@ type reviewWatch struct {
 	state         reviewRunnerState
 	output        io.Writer
 	providerReady bool
+	onReady       func()
 }
 
 func reviewUUID() string {
@@ -110,14 +111,43 @@ func saveReviewJSON(path string, value any) error {
 
 func reviewWatchCmd() *cobra.Command {
 	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
+	var background, status bool
+	var stop, managed, serverURL string
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh, isolated PR reviews while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if managed != "" {
+			return runReviewBackground(cmd.Context(), managed)
+		}
+		if status {
+			return reviewBackgroundStatusList(cmd.OutOrStdout())
+		}
+		if stop != "" {
+			return stopReviewBackground(cmd.Context(), stop, cmd.OutOrStdout())
+		}
+		if background && (!cmd.Flags().Changed("repo") || !cmd.Flags().Changed("project") || !cmd.Flags().Changed("repository-link")) {
+			return fmt.Errorf("background runners require explicit --repo, --project, and --repository-link")
+		}
 		path := flagConfigPath
 		if path == "" {
 			path = ConfigPath()
 		}
-		cfg, err := LoadConfig(path)
+		load := LoadConfig
+		if background {
+			load = loadReviewBackgroundConfig
+		}
+		cfg, err := load(path)
 		if err != nil {
 			return err
+		}
+		if background {
+			if token := os.Getenv("VIBEFLOW_TOKEN"); token != "" && token != cfg.APIToken {
+				return fmt.Errorf("background runner credentials must come from the selected config file")
+			}
+			if origin := os.Getenv("VIBEFLOW_URL"); origin != "" {
+				cfg.ServerURL = origin
+			}
+		}
+		if serverURL != "" {
+			cfg.ServerURL = serverURL
 		}
 		if o.Provider == "" {
 			o.Provider = cfg.DefaultProvider
@@ -179,6 +209,9 @@ func reviewWatchCmd() *cobra.Command {
 		if o.ProjectID <= 0 {
 			return fmt.Errorf("review project not found")
 		}
+		if background {
+			return startReviewBackground(cmd.Context(), cfg, path, o, cmd.OutOrStdout())
+		}
 		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer cancel()
 		watch := &reviewWatch{client: client, cfg: cfg, options: o, output: cmd.OutOrStdout()}
@@ -195,6 +228,13 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&o.PollInterval, "interval", o.PollInterval, "Idle API polling interval, 1s to 60s; each poll also heartbeats the runner, no LLM runs while idle")
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Maximum time per attempt, also bounded by the server deadline")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
+	cmd.Flags().BoolVar(&background, "background", false, "Enable TUI autostart and run this explicit binding in the background")
+	cmd.Flags().BoolVar(&status, "status", false, "Show managed review runners in this root")
+	cmd.Flags().StringVar(&stop, "stop", "", "Stop a managed runner ID and disable its autostart")
+	cmd.Flags().StringVar(&managed, "managed-runner", "", "Internal managed runner binding ID")
+	cmd.Flags().StringVar(&serverURL, "server-url", "", "VibeFlow server URL (pinned for background runners)")
+	_ = cmd.Flags().MarkHidden("managed-runner")
+	cmd.MarkFlagsMutuallyExclusive("background", "status", "stop", "managed-runner")
 	return cmd
 }
 
@@ -214,7 +254,13 @@ func (w *reviewWatch) workDir(p *reviewReceipt) string {
 func (w *reviewWatch) run(ctx context.Context) error {
 	identity := fmt.Sprintf("%s\n%d\n%d\n%s\n%s\n%s", w.client.baseURL, w.options.ProjectID, w.options.RepositoryLinkID, w.options.GitProvider, w.options.Kind, w.options.Name)
 	digest := sha256.Sum256([]byte(identity))
-	w.root = filepath.Join(RootDir(), "review-runners", hex.EncodeToString(digest[:16]))
+	// The guard and provider both change cwd. Their private paths must keep
+	// referring to the supervisor's root even when the user passed --root .
+	var err error
+	w.root, err = filepath.Abs(filepath.Join(RootDir(), "review-runners", hex.EncodeToString(digest[:16])))
+	if err != nil {
+		return fmt.Errorf("could not resolve the review runner directory")
+	}
 	if err := os.MkdirAll(filepath.Join(w.root, "work"), 0700); err != nil {
 		return err
 	}
@@ -324,6 +370,10 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 
 	if err := w.client.reviewRequest(ctx, "POST", w.prefix()+"/heartbeat", struct{}{}, nil); err != nil {
 		return err
+	}
+	if w.onReady != nil {
+		w.onReady()
+		w.onReady = nil
 	}
 	if w.state.Pending == nil {
 		var page struct {
@@ -468,17 +518,26 @@ func (w *reviewWatch) cleanup(p *reviewReceipt) error {
 	}
 }
 
-func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.RawMessage, error) {
+func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.RawMessage, failureErr error) {
+	started := time.Now()
+	stageStarted := started
+	diagnostic := reviewExecutionDiagnostic{Version: 1, AttemptID: p.Execution.Attempt.ID, Provider: w.options.Provider, Stage: "brief"}
+	setStage := func(stage string) {
+		diagnostic.Stage = stage
+		stageStarted = time.Now()
+	}
 	deadline := time.UnixMilli(p.Execution.Attempt.Round.DeadlineAt)
 	if local := time.Now().Add(w.options.Timeout); local.Before(deadline) {
 		deadline = local
 	}
-	ctx, cancel := context.WithDeadline(parent, deadline)
-	defer cancel()
+	deadlineCtx, cancelDeadline := context.WithDeadline(parent, deadline)
+	defer cancelDeadline()
+	ctx, cancel := context.WithCancelCause(deadlineCtx)
+	defer cancel(nil)
 	// This loop cancels the child at the last acknowledged lease expiry, even
 	// when renewal fails because the network is offline.
 	renewDone := make(chan struct{})
-	defer func() { cancel(); <-renewDone }()
+	defer func() { cancel(nil); <-renewDone }()
 	go func() {
 		defer close(renewDone)
 		expiry := time.UnixMilli(p.Execution.Attempt.LeaseExpiresAt)
@@ -488,7 +547,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 				delay = left
 			}
 			if delay <= 0 {
-				cancel()
+				cancel(errReviewLeaseExpired)
 				return
 			}
 			select {
@@ -504,18 +563,49 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 			}
 			stop()
 			if err != nil {
-				if reviewPermanent(err) || !time.Now().Before(expiry) {
-					cancel()
+				if reviewPermanent(err) {
+					cancel(errReviewLeaseRejected)
+					return
+				}
+				if !time.Now().Before(expiry) {
+					cancel(errReviewLeaseExpired)
 					return
 				}
 				continue
 			}
 			if renewed.Attempt.ID != p.Execution.Attempt.ID || renewed.Attempt.Round.ID != p.Execution.Attempt.Round.ID {
-				cancel()
+				cancel(errReviewLeaseIdentity)
 				return
 			}
 			expiry = time.UnixMilli(renewed.Attempt.LeaseExpiresAt)
 		}
+	}()
+	// Capture the cause before our cleanup defers cancel the execution context.
+	// Raw errors and child output are deliberately never persisted or relayed.
+	defer func() {
+		if failureErr == nil {
+			return
+		}
+		if category := reviewCancellationCategory(ctx); category != "" {
+			diagnostic.Category = category
+		} else if diagnostic.Category == "" {
+			diagnostic.Category = "execution_failed"
+			var response *reviewHTTPError
+			if errors.As(failureErr, &response) {
+				diagnostic.Category = "review_api_error"
+				diagnostic.APIErrorStatus = response.Status
+			} else if errors.Is(failureErr, errReviewConnection) {
+				diagnostic.Category = "review_api_unavailable"
+			}
+		}
+		diagnostic.DurationMS = time.Since(started).Milliseconds()
+		diagnostic.StageDurationMS = time.Since(stageStarted).Milliseconds()
+		diagnostic.RecordedAt = time.Now().UnixMilli()
+		if err := saveReviewJSON(filepath.Join(w.root, "last-provider-diagnostic.json"), diagnostic); err != nil {
+			failureErr = fmt.Errorf("review failed at %s (%s); private diagnostic could not be saved", diagnostic.Stage, diagnostic.Category)
+			return
+		}
+		failureErr = diagnostic.failure()
 	}()
 	root := w.workDir(p)
 	if err := os.MkdirAll(root, 0700); err != nil {
@@ -543,6 +633,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 	if brief.Digest != hex.EncodeToString(digest[:]) {
 		return nil, fmt.Errorf("review brief digest does not match its content")
 	}
+	setStage("checkout")
 	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution); err != nil {
 		return nil, err
 	}
@@ -550,6 +641,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 		return nil, err
 	}
 	var findings []json.RawMessage
+	setStage("findings")
 	json.Unmarshal(content["findings"], &findings)
 	var after string
 	json.Unmarshal(content["findings_after_id"], &after)
@@ -580,6 +672,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 	if err := saveReviewJSON(filepath.Join(root, "input", "prior-findings.json"), findings); err != nil {
 		return nil, err
 	}
+	setStage("provider_setup")
 	relayURL, relayToken := "", ""
 	if w.cfg.LLMGatewayEnabled {
 		var closeRelay func()
@@ -603,6 +696,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 		return nil, err
 	}
 	guard := exec.Command(executable, "review-child", filepath.Join(root, "child.json"))
+	setStage("child_guard")
 	guard.WaitDelay = 250 * time.Millisecond
 	guard.Env = []string{"PATH=" + os.Getenv("PATH")}
 	guard.Dir = root
@@ -635,6 +729,21 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 		pipe.Close()
 		err = <-done
 	}
+	diagnostic.StdoutBytes, diagnostic.StderrBytes = stdout.Len(), stderr.Len()
+	if report, ok := readReviewProcessReport(filepath.Join(root, "child-diagnostic.json")); ok {
+		diagnostic.Stage = "provider"
+		stageStarted = time.Now().Add(-time.Duration(report.DurationMS) * time.Millisecond)
+		diagnostic.ExitCode, diagnostic.Signal = report.ExitCode, report.Signal
+		diagnostic.ProviderDurationMS = report.DurationMS
+		if report.Category != "completed" {
+			diagnostic.Category = report.Category
+		}
+	} else if guard.ProcessState != nil {
+		code := guard.ProcessState.ExitCode()
+		diagnostic.ExitCode = &code
+		diagnostic.Signal = reviewProcessSignal(guard.ProcessState)
+		diagnostic.Category = "child_guard_failed"
+	}
 	// Claude returns structured API failures even when its process exits 1.
 	// Keep only a numeric HTTP status and our category, never provider text.
 	if ctx.Err() == nil && w.options.Provider == "claude" {
@@ -661,15 +770,15 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 			if failure.Status < 400 || failure.Status > 599 {
 				failure.Status = 0
 			}
-			if err := saveReviewJSON(filepath.Join(w.root, "last-provider-diagnostic.json"), map[string]any{"attempt_id": p.Execution.Attempt.ID, "category": category, "api_error_status": failure.Status}); err != nil {
-				return nil, err
-			}
-			return nil, fmt.Errorf("review provider failed (%s, HTTP status %d); see private last-provider-diagnostic.json", category, failure.Status)
+			diagnostic.Category, diagnostic.APIErrorStatus = category, failure.Status
+			return nil, diagnostic.failure()
 		}
 	}
 	if err != nil || ctx.Err() != nil {
-		return nil, fmt.Errorf("review provider stopped before completion (failure, cancellation, lease loss or deadline)")
+		return nil, diagnostic.failure()
 	}
+	setStage("result")
+	diagnostic.Category = "invalid_result"
 	var output []byte
 	if w.options.Provider == "codex" {
 		output, err = os.ReadFile(filepath.Join(root, "provider-result.json"))
@@ -691,10 +800,10 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (json.Ra
 		return nil, fmt.Errorf("review provider returned invalid JSON")
 	}
 	if envelope.Failure != "" || len(envelope.Result) == 0 || bytes.Equal(envelope.Result, []byte("null")) {
-		if err := saveReviewJSON(filepath.Join(w.root, "last-provider-diagnostic.json"), map[string]string{"attempt_id": p.Execution.Attempt.ID, "failure_reason": envelope.Failure}); err != nil {
-			return nil, err
+		if envelope.Failure != "" {
+			diagnostic.Category = "provider_reported_failure"
 		}
-		return nil, fmt.Errorf("reviewer could not complete the review; see private last-provider-diagnostic.json")
+		return nil, diagnostic.failure()
 	}
 	var result struct {
 		Version int    `json:"schema_version"`
@@ -768,6 +877,15 @@ func reviewChildCmd() *cobra.Command {
 		child.Stdin = input
 		child.Stdout = cmd.OutOrStdout()
 		child.Stderr = cmd.ErrOrStderr()
-		return runReviewProcess(ctx, child)
+		started := time.Now()
+		err = runReviewProcess(ctx, child)
+		report := describeReviewProcess(ctx, child, err, started)
+		if saveErr := saveReviewJSON(filepath.Join(filepath.Dir(path), "child-diagnostic.json"), report); saveErr != nil {
+			return fmt.Errorf("could not retain private review process diagnostic")
+		}
+		if err != nil {
+			return fmt.Errorf("review child stopped (%s)", report.Category)
+		}
+		return nil
 	}}
 }

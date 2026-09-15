@@ -83,6 +83,46 @@ vibeflow review-watch --project 42 --repository-link 123 --provider claude --mod
 | `--interval` | Idle polling interval, `1s` to `60s`; default `5s`. Each poll also sends the runner heartbeat, and the server marks a runner offline after 2 minutes without one |
 | `--timeout` | Per-attempt maximum, `1m` to `1h`; default `15m`, also bounded by the server deadline |
 | `--once` | Check one work page, process at most one review, then exit |
+| `--server-url` | Explicit VibeFlow server URL; overrides configuration and `VIBEFLOW_URL`, and is pinned for a background runner |
+| `--background` | Save an explicit repository binding, start a detached runner, and enable autostart on later TUI launches; requires explicit `--project`, `--repo`, and `--repository-link`; incompatible with `--once` |
+| `--status` | Show this root's managed runner IDs, pinned scope, lifecycle state, and safe last-failure metadata |
+| `--stop <ID>` | Request graceful shutdown of one managed runner and disable its TUI autostart; retains pending receipts and review history |
+
+#### Background runner management
+
+Ordinary persona sessions do not start a review runner implicitly.
+Opt in once for each repository, using the same root and config that contain your VibeFlow credentials.
+Stop an existing foreground watcher with Ctrl-C before enabling its background replacement.
+
+```bash
+vibeflow --root /path/to/cli-root review-watch --background \
+  --server-url https://cloud-uat.axiomstudio.ai \
+  --project 12 --repository-link 7 --git-provider github \
+  --provider claude --repo /path/to/axiomcloud
+vibeflow --root /path/to/cli-root review-watch --status
+vibeflow --root /path/to/cli-root review-watch --stop <runner-ID-from-status>
+```
+
+The start command waits up to 20 seconds for provider preflight and a successful server heartbeat before reporting that the runner is running.
+It stays alive after the terminal or TUI exits; idle polling makes no model calls.
+Each claimed review is still a fresh isolated Principal Engineer process, not an interactive tmux persona.
+Use the TUI's retained review sessions or `vibeflow list --project 12` to see attempts, and `review-watch --status` to see the local background supervisor.
+Repeated starts of the same binding do not launch another supervisor; changing an active binding requires stopping it first.
+
+The private binding under `<root>/review-runners/<ID>/background.json` saves absolute root/config/repository paths, the exact server URL, provider/model, local login sources, and a one-way VibeFlow credential fingerprint, not credential values.
+Background credentials must already exist in the selected config; ambient-only `VIBEFLOW_TOKEN` is refused.
+An explicit `VIBEFLOW_URL` at opt-in is pinned, so a later shell's production URL or token cannot redirect that runner.
+Literal model credentials can come from `provider.env` or `saved_env_vars`, or from the provider's existing local login; ambient-only model secrets and interpolated provider credentials are refused.
+An existing absolute `SSH_AUTH_SOCK` is pinned for supervisor-only Git fetches and is never passed to the model process.
+If the socket changes after login or reboot, explicitly enable the runner again with the new socket.
+After rotating the VibeFlow token, explicitly enable the runner again to approve its new credential binding.
+
+Launching the TUI with the same root and config restarts only opted-in runners that previously stopped cleanly.
+Failed, stale, missing-status, and explicitly stopped runners do not autostart, preventing silent crash loops.
+To restart one, rerun its full `--background` command.
+The stop command waits up to 10 seconds, then reports if shutdown is still pending; it never signals an unverified saved PID.
+`background.log` contains fixed lifecycle messages only, while `last-provider-diagnostic.json` contains sanitized failure metadata.
+No service manager, login item, deployment, or machine-boot autostart is installed.
 
 Use a current Claude Code or Codex CLI on macOS or Linux.
 Startup checks required isolation flags and Codex's native sandbox before claiming work.
@@ -128,9 +168,14 @@ Active reviews refresh both runner presence and the attempt lease.
 Runner registration binds the selected Git provider and repository link; the CLI verifies the server echoes both before continuing.
 Upgrade the server and re-register if scope confirmation fails.
 Legacy unscoped registrations are disabled by the server.
-A provider's bounded failure explanation is saved in the runner's private `last-provider-diagnostic.json` when available.
-Claude API failures retain a sanitized category and HTTP status in that diagnostic, even when the provider process exits unsuccessfully.
+A failed execution saves versioned metadata in the runner's private mode-0600 `last-provider-diagnostic.json` before temporary inputs are removed.
+It records the attempt ID, stage, fixed category, actual provider exit code or signal when available, durations, captured stdout/stderr byte counts, and numeric HTTP status when available.
+It never retains raw provider output, free-form failure explanations, prompts, command arguments, environment values, or credential paths.
+Stages distinguish checkout, provider setup, child-guard startup, provider execution, and result validation; categories distinguish cancellation, deadline, lease expiry/rejection, process failure, and invalid results.
+Relative roots such as `--root .` are anchored to their absolute location before the child guard changes directory.
+Claude API failures retain a sanitized category and HTTP status even when the provider process exits unsuccessfully.
 For example, `rate_limited` with status `429` identifies a quota or throttling failure without saving the provider's raw error text.
+Failed executions remain failed; richer diagnostics do not retry a finished server round or reset its repair-cycle budget.
 
 ### `vibeflow models [provider]`
 

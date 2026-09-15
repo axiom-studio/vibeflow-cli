@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+func reviewProcessSignal(state *os.ProcessState) int {
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return int(status.Signal())
+	}
+	return 0
+}
+
 func lockReviewFile(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
