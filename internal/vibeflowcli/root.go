@@ -19,6 +19,8 @@ package vibeflowcli
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
@@ -86,6 +88,8 @@ func Execute() error {
 }
 
 func runTUI(cmd *cobra.Command, args []string) error {
+	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer cancel()
 	// Enforce singleton — only one TUI instance at a time.
 	if err := AcquirePIDLock(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -121,13 +125,15 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// setup screen instead of attaching. See issue #3484.
 	if !ConfigFileExists(cfgPath) && !hasExistingSessionState(store, tmux) {
 		setup := NewSetupModel(cfg, cfgPath)
-		p := tea.NewProgram(setup)
+		p := tea.NewProgram(setup, tea.WithContext(ctx), tea.WithoutSignalHandler())
 		result, err := p.Run()
 		if err != nil {
 			return fmt.Errorf("setup wizard: %w", err)
 		}
 		if s, ok := result.(SetupModel); ok && s.Done() {
 			cfg = s.Config()
+		} else {
+			return nil
 		}
 	}
 
@@ -142,22 +148,44 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		cfg.MCPToolName = flagMCPToolName
 	}
 
+	// Unlike the first-run authentication wizard, consent is requested on
+	// every interactive launch. No detached runner is adopted or auto-started.
+	cwd, _ := os.Getwd()
+	startup := newReviewStartupModel(ctx, cfg, cfgPath, reviewStartupOptions(cfg, cfgPath, cwd))
+	startProgram := tea.NewProgram(startup, tea.WithContext(ctx), tea.WithoutSignalHandler())
+	startResult, err := startProgram.Run()
+	if err != nil {
+		return fmt.Errorf("review runner setup: %w", err)
+	}
+	reviewSetup, ok := startResult.(reviewStartupModel)
+	if !ok || reviewSetup.quit || !reviewSetup.done {
+		return nil
+	}
+	if reviewSetup.runner != nil {
+		defer func() {
+			if err := reviewSetup.runner.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "PR review runner: %v\n", err)
+			}
+		}()
+	}
+
 	// Initialize components
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
 	registry := NewProviderRegistry(cfg)
 
 	// Initialize worktree manager (best-effort — non-fatal if not in a git repo).
-	cwd, _ := os.Getwd()
 	worktrees, _ := NewWorktreeManager(cwd, cfg.Worktree.BaseDir)
 	cache := NewSessionCache()
 
 	// Resolve project ID if project name is set
 	var projectID int64
-	if cfg.DefaultProject != "" {
+	if reviewSetup.runner != nil {
+		projectID = reviewSetup.options.ProjectID
+	} else if cfg.DefaultProject != "" {
 		projects, err := client.ListProjects()
 		if err == nil {
 			for _, p := range projects {
-				if p.Name == cfg.DefaultProject {
+				if reviewProjectMatches(p, cfg.DefaultProject) {
 					projectID = p.ID
 					break
 				}
@@ -174,6 +202,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Run TUI
 	model := NewModel(cfg, client, tmux, worktrees, store, cache, registry, projectID)
 	model.serverWarning = serverWarning
+	model.reviewRunner = reviewSetup.runner
 
 	// Detect dead sessions from cache and show restart popup if any.
 	if sessions, err := tmux.ListSessions(); err == nil {
@@ -191,7 +220,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	defer model.logger.Close()
 	// Alt-screen, focus reporting, and mouse mode are set on the View in
 	// Bubble Tea v2 (see Model.View) rather than as program options here.
-	p := tea.NewProgram(model)
+	p := tea.NewProgram(model, tea.WithContext(ctx), tea.WithoutSignalHandler())
 	if _, err := p.Run(); err != nil {
 		model.logger.Error("TUI fatal: %v", err)
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
