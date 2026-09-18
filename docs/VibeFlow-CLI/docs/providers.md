@@ -135,6 +135,10 @@ The **OpenAI Compatible** provider (`openai-compatible`) connects a session to a
 
 **API key storage.** The key is stored per vendor, in `saved_env_vars` under `OPENAI_COMPAT_API_KEY_<VENDOR>` — the vendor uppercased, each run of other characters turned into `_` (`my-proxy.local` → `OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL`). An exported shell variable of that name takes precedence over the saved value. The provider deliberately never uses the shared `OPENAI_API_KEY` slot (often a real OpenAI key), and every session sets `OPENAI_API_KEY` explicitly, so a key exported in your shell is never sent to the endpoint. The key is passed through the environment only, never on the command line, and is redacted in logs.
 
+Keys entered in the wizard are saved in plaintext in `~/.vibeflow-cli/config.yaml` (file mode `0600`). To keep a key off disk, leave the wizard field blank and export `OPENAI_COMPAT_API_KEY_<VENDOR>` from your shell or secrets manager instead; exported keys are never written to the config.
+
+**Base URL rules.** The base URL must not contain credentials (`user:password@host`), a query string or a fragment — it appears on the agent's command line, which other local users can read, and in logs and saved metadata. Put credentials in the API key field or `OPENAI_COMPAT_API_KEY_<VENDOR>`.
+
 **Endpoints without a key.** Qwen Code refuses to start with an empty `OPENAI_API_KEY`, so keyless sessions send the placeholder `no-key` (the request carries `Authorization: Bearer no-key`, which servers without authentication ignore). Set `OPENAI_COMPAT_API_KEY_<VENDOR>` if your endpoint does require a key.
 
 **Launch shape.** Each launch runs `qwen [--yolo] --auth-type openai --openai-base-url '<url>' --model '<model>' -i '<prompt>'` with `OPENAI_BASE_URL`, `OPENAI_MODEL` and `OPENAI_API_KEY` set on the tmux session. `--auth-type openai` stops a fresh Qwen Code install from opening its interactive sign-in picker, which would otherwise hang an unattended session.
