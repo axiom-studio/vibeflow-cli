@@ -52,6 +52,9 @@ type ProviderRegistry struct {
 func NewProviderRegistry(cfg *Config) *ProviderRegistry {
 	providers := make(map[string]Provider, len(cfg.Providers))
 	for k, v := range cfg.Providers {
+		// Copy the Env map too: a struct copy would share it with cfg, so
+		// any caller mutating a provider's env would silently edit config.
+		v.Env = cloneStringMap(v.Env)
 		providers[k] = v
 	}
 
