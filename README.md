@@ -124,7 +124,7 @@ vibeflow version         # Print version information
 
 `vibeflow bootstrap` writes the initial vibeflow-cli config and installs the
 VibeFlow MCP server into the config files of the coding agents you select
-(Codex, Gemini, Cursor, Claude CLI, Claude Desktop). Each agent config
+(Codex, Gemini, Cursor, Claude CLI, Claude Desktop, Kiro, GitHub Copilot, Qwen Code). Each agent config
 references the bearer token via the `MCP_TOKEN` environment variable, which
 vibeflow-cli injects when it launches an agent; the `--api-key` value is stored
 in the vibeflow-cli config. Before any config file is modified, the existing

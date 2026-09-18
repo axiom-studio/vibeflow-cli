@@ -145,6 +145,8 @@ Keys entered in the wizard are saved in plaintext in `~/.vibeflow-cli/config.yam
 
 **No LLM Gateway.** The provider always connects directly to the endpoint you entered; the wizard never offers the gateway step and `--llm-gateway` is ignored with a warning.
 
+**VibeFlow sessions.** The agent reaches VibeFlow through the VibeFlow MCP server, which must be in Qwen Code's config (`~/.qwen/settings.json`). Run `vibeflow bootstrap --agents qwen --api-key <key>` once per machine (or `--all`); `qwen mcp list` should then show `vibeflow … Connected`. The same entry serves the Qwen provider. Without it, a VibeFlow-mode session starts but the agent has no VibeFlow tools. Vanilla sessions don't need it.
+
 **Restart.** Vendor, base URL and model are stored in the session metadata (`vendor`, `base_url`, `model` in `sessions.json`; never the key), so kill/restart reconnects to the same endpoint and re-reads the vendor's key.
 
 ### Use with LiteLLM / vLLM

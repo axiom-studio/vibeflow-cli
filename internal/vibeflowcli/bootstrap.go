@@ -78,6 +78,8 @@ func bootstrapAgents() []bootstrapAgent {
 		{key: "claude-desktop", label: "Claude Desktop", path: claudeDesktopConfigPath, entry: claudeDesktopEntry},
 		{key: "kiro", label: "Kiro CLI", path: kiroConfigPath, entry: jsonHTTPEntry("http", true)},
 		{key: "copilot", label: "GitHub Copilot CLI", path: copilotConfigPath, entry: copilotEntry},
+		// Qwen Code — also the agent behind the openai-compatible provider.
+		{key: "qwen", label: "Qwen Code", path: qwenConfigPath, entry: qwenEntry},
 	}
 }
 
@@ -95,6 +97,7 @@ var agentAliases = map[string]string{
 	"kiro-cli":       "kiro",
 	"copilot-cli":    "copilot",
 	"github-copilot": "copilot",
+	"qwen-code":      "qwen",
 }
 
 func normalizeAgentKey(key string) string {
@@ -239,6 +242,33 @@ func copilotEntry(url, apiKey string) map[string]any {
 	entry := jsonHTTPEntry("http", true)(url, apiKey)
 	entry["tools"] = []any{"*"}
 	return entry
+}
+
+// qwenConfigPath returns Qwen Code's user-level settings file
+// (~/.qwen/settings.json), the file `qwen mcp add -s user` writes. Like the
+// other resolvers, bootstrap writes user-level config so one run covers every
+// project. The file also holds unrelated qwen settings; the shared JSON writer
+// only touches mcpServers[name].
+func qwenConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".qwen", "settings.json"), nil
+}
+
+// qwenEntry builds the mcpServers entry for Qwen Code in its own format:
+// streamable HTTP is declared with `httpUrl` (a plain `url` means SSE), exactly
+// as `qwen mcp add -t http` writes it — verified on qwen 0.24.0, where
+// `qwen mcp list` reports the server Connected and ${MCP_TOKEN} expands from
+// the session env. The timeout matches the other agents so a long
+// wait_for_work poll is never cut short.
+func qwenEntry(url, _ string) map[string]any {
+	return map[string]any{
+		"httpUrl": url,
+		"headers": map[string]any{"Authorization": mcpBearerRef},
+		"timeout": mcpClientTimeoutMS,
+	}
 }
 
 // codexBootstrapConfigPath reuses CodexConfigPath so a custom --root keeps the
