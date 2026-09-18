@@ -11,6 +11,7 @@ A **provider** is a configured AI agent CLI: display name, binary name, launch t
 | `gemini` | Google Gemini CLI | `gemini` | `--yolo` |
 | `cursor` | Cursor Agent | `agent` | `--yolo --approve-mcps` |
 | `qwen` | Qwen Code | `qwen` | `--yolo` |
+| `openai-compatible` | OpenAI Compatible | `qwen` | `--yolo` (plus `--auth-type openai` on every launch) |
 | `kiro` | Kiro CLI | `kiro-cli` | `--trust-all-tools` |
 | `copilot` | GitHub Copilot CLI | `copilot` | `--yolo --autopilot --no-ask-user --max-autopilot-continues 1000` |
 
@@ -34,7 +35,7 @@ The customer's Copilot org policy must allow Copilot CLI and MCP servers; every 
 
 ## VibeFlow-integrated providers
 
-**Claude**, **Cursor**, and **Copilot** are marked VibeFlow-integrated in the default config (session file templates align with autonomous flows). **Codex**, **Gemini**, **Qwen**, and **Kiro** remain available with their own launch templates; gateway and env behavior may differ by product.
+**Claude**, **Cursor**, and **Copilot** are marked VibeFlow-integrated in the default config (session file templates align with autonomous flows). **Codex**, **Gemini**, **Qwen**, **OpenAI Compatible**, and **Kiro** remain available with their own launch templates; gateway and env behavior may differ by product.
 
 ## Prompt passing
 
@@ -42,7 +43,7 @@ VibeFlow init prompts are passed in the argument shape each CLI expects so the a
 
 - **Claude / Codex / Cursor / Kiro** — positional argument (`claude '<prompt>'`). These CLIs treat a positional prompt as the initial input and stay interactive. Kiro's shape is verified — see [Kiro CLI caveats](#kiro-cli-caveats).
 - **Gemini** — `-p '<prompt>'` (non-interactive headless mode).
-- **Qwen** — `-i '<prompt>'` (`--prompt-interactive`: execute the prompt and continue in interactive mode). Qwen's positional argument is **one-shot mode** (process the prompt, then exit) — wrong for vibeflow autonomous sessions, which need the agent to remain running.
+- **Qwen / OpenAI Compatible** — `-i '<prompt>'` (`--prompt-interactive`: execute the prompt and continue in interactive mode). Qwen's positional argument is **one-shot mode** (process the prompt, then exit) — wrong for vibeflow autonomous sessions, which need the agent to remain running.
 - **Copilot** — `-i '<prompt>'` (`--interactive`: start interactive mode and auto-execute the prompt; verified on v1.0.79). Copilot's `-p/--prompt` is **one-shot mode** (exits after completion) and there is no positional prompt argument, so copilot must not use the default positional shape.
 
 ## Kiro CLI caveats
@@ -120,6 +121,49 @@ The step is **skipped** for any other provider. For qwen it also runs when the L
 6. Pick a branch / worktree / permissions, confirm, and the tmux session starts with `qwen --yolo` (when skip-permissions is selected) and the three OpenAI-compatible env vars exported.
 
 On the **LLM Gateway** path, `BuildLLMGatewayEnv("qwen", …)` injects the gateway-derived `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and the `QWEN_CUSTOM_API_KEY_*` endpoint binding instead; the launch-config step still runs there, but only to capture the model (see [LLM Gateway](#llm-gateway)).
+
+## OpenAI Compatible
+
+The **OpenAI Compatible** provider (`openai-compatible`) connects a session to any server that exposes the OpenAI chat API: a hosted vendor endpoint, or a self-hosted proxy or inference server such as LiteLLM or vLLM. It runs the Qwen Code binary (`qwen`) underneath, so install it the same way as the Qwen provider. Nothing about the endpoint is preset: you supply it per session.
+
+| Input | Required | Notes |
+|---|---|---|
+| Base URL | yes | Absolute `http://` or `https://` URL of the API, usually ending in `/v1`. |
+| Vendor | yes | Free-text label (e.g. `my-proxy`). Selects where the API key is stored. |
+| Model | yes | Model id exactly as the endpoint expects it. No curated list — `vibeflow models openai-compatible` reports none. |
+| API key | no | Leave blank for endpoints without authentication. |
+
+**API key storage.** The key is stored per vendor, in `saved_env_vars` under `OPENAI_COMPAT_API_KEY_<VENDOR>` — the vendor uppercased, each run of other characters turned into `_` (`my-proxy.local` → `OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL`). An exported shell variable of that name takes precedence over the saved value. The provider deliberately never uses the shared `OPENAI_API_KEY` slot (often a real OpenAI key), and every session sets `OPENAI_API_KEY` explicitly, so a key exported in your shell is never sent to the endpoint. The key is passed through the environment only, never on the command line, and is redacted in logs.
+
+**Endpoints without a key.** Qwen Code refuses to start with an empty `OPENAI_API_KEY`, so keyless sessions send the placeholder `no-key` (the request carries `Authorization: Bearer no-key`, which servers without authentication ignore). Set `OPENAI_COMPAT_API_KEY_<VENDOR>` if your endpoint does require a key.
+
+**Launch shape.** Each launch runs `qwen [--yolo] --auth-type openai --openai-base-url '<url>' --model '<model>' -i '<prompt>'` with `OPENAI_BASE_URL`, `OPENAI_MODEL` and `OPENAI_API_KEY` set on the tmux session. `--auth-type openai` stops a fresh Qwen Code install from opening its interactive sign-in picker, which would otherwise hang an unattended session.
+
+**No LLM Gateway.** The provider always connects directly to the endpoint you entered; the wizard never offers the gateway step and `--llm-gateway` is ignored with a warning.
+
+**Restart.** Vendor, base URL and model are stored in the session metadata (`vendor`, `base_url`, `model` in `sessions.json`; never the key), so kill/restart reconnects to the same endpoint and re-reads the vendor's key.
+
+### Use with LiteLLM / vLLM
+
+Point the provider at the proxy's OpenAI-compatible route. Headless:
+
+```bash
+vibeflow launch --provider openai-compatible \
+  --base-url http://<host>:4000/v1 \
+  --vendor litellm \
+  --model <model-name> \
+  --skip-permissions
+```
+
+If the proxy has a master key, export it first (or enter it once in the wizard, which saves it):
+
+```bash
+export OPENAI_COMPAT_API_KEY_LITELLM=<proxy-key>
+```
+
+vLLM works the same way — use its server URL (commonly `http://<host>:8000/v1`) and the served model name. In the TUI wizard, pick **OpenAI Compatible** in the provider step and enter the same values in the **Endpoint** step.
+
+`vibeflow launch` rejects `--provider openai-compatible` without `--base-url`, `--vendor` and `--model` (all missing flags are listed), and rejects `--base-url` / `--vendor` for other providers.
 
 ## Custom providers
 
