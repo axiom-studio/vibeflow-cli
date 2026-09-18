@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -131,6 +132,16 @@ type Config struct {
 	SavedEnvVars      map[string]string   `yaml:"saved_env_vars,omitempty"`
 	LLMGatewayEnabled bool                `yaml:"llm_gateway_enabled,omitempty"`
 	MCPToolName       string              `yaml:"mcp_tool_name,omitempty"`
+	OpenAICompat      OpenAICompatConfig  `yaml:"openai_compatible,omitempty"`
+}
+
+// OpenAICompatConfig remembers the last endpoint entered for the
+// openai-compatible provider so the wizard can prefill it. API keys are not
+// kept here — they live in SavedEnvVars under OPENAI_COMPAT_API_KEY_<VENDOR>.
+type OpenAICompatConfig struct {
+	LastBaseURL string `yaml:"last_base_url,omitempty"`
+	LastVendor  string `yaml:"last_vendor,omitempty"`
+	LastModel   string `yaml:"last_model,omitempty"`
 }
 
 // AddDirectoryToHistory adds a directory to the front of the history list,
@@ -724,6 +735,26 @@ func (c *Config) SaveOpenAICompatKey(vendor, key string) {
 		c.SavedEnvVars = make(map[string]string)
 	}
 	c.SavedEnvVars[name] = key
+}
+
+// ValidateOpenAICompatEndpoint checks the inputs of an openai-compatible
+// session (wizard step and `vibeflow launch` flags share it). It returns the
+// first problem as a user-facing message, or nil when all three are usable.
+func ValidateOpenAICompatEndpoint(baseURL, vendor, model string) error {
+	// The base URL must be an absolute http(s) URL with a host.
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("base URL must be an http(s) URL, e.g. http://localhost:4000/v1")
+	}
+	// The vendor names the key slot, so it needs at least one letter or digit.
+	if OpenAICompatKeyEnvName(vendor) == "" {
+		return fmt.Errorf("vendor is required (letters or digits, e.g. my-proxy)")
+	}
+	// The model id is passed verbatim to the endpoint.
+	if strings.TrimSpace(model) == "" {
+		return fmt.Errorf("model is required")
+	}
+	return nil
 }
 
 // openAICompatNoKey is sent as the API key to keyless endpoints (e.g. a local

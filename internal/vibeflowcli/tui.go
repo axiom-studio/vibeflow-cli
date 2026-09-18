@@ -1606,6 +1606,14 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 
 // executeLaunch performs the actual session creation after conflict resolution.
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
+	// An openai-compatible launch without an endpoint (e.g. a quick switch or
+	// team override from a session of another provider) cannot start. Fail
+	// before creating any worktree or session.
+	if result.ProviderKey == "openai-compatible" {
+		if err := ValidateOpenAICompatEndpoint(result.BaseURL, result.Vendor, result.Model); err != nil {
+			return sessionsMsg{err: fmt.Errorf("openai-compatible session needs an endpoint — use New Session to enter it: %w", err)}
+		}
+	}
 	workDir, worktreePath, err := m.resolveSessionWorkDir(result)
 	if err != nil {
 		return sessionsMsg{err: err}
