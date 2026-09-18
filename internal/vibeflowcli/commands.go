@@ -79,6 +79,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 
 func launchCmd() *cobra.Command {
 	var provider, branch, worktreeName, persona, personasRaw, project, sessionType, model, modelsRaw string
+	var baseURL, vendor string // openai-compatible endpoint (--base-url / --vendor)
 	var openshellSandbox, openshellFrom, openshellPolicy, openshellProvidersRaw string
 	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders, cloudDispatch, replace, reuse bool
 
@@ -100,6 +101,9 @@ func launchCmd() *cobra.Command {
 			}
 			if provider == "" {
 				provider = "claude"
+			}
+			if err := validateOpenAICompatLaunchFlags(provider, baseURL, vendor, model); err != nil {
+				return err
 			}
 			branchRequested := cmd.Flags().Changed("branch")
 			if branch == "" {
@@ -313,6 +317,11 @@ func launchCmd() *cobra.Command {
 					}
 					sessionEnv["OPENAI_MODEL"] = sessionModel
 				}
+				// openai-compatible: point the session at --base-url with this
+				// persona's model and the vendor's key (or the keyless placeholder).
+				if provider == "openai-compatible" {
+					applyOpenAICompatEnv(sessionEnv, cfg, vendor, baseURL, sessionModel)
+				}
 				command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
 					WorkDir:         workDir,
 					ServerURL:       cfg.ServerURL,
@@ -393,6 +402,8 @@ func launchCmd() *cobra.Command {
 					CloudDispatch:     cloudDispatch,
 					SkipPermissions:   skipPermissions,
 					Model:             sessionModel,
+					Vendor:            vendor,  // openai-compatible only; restart re-resolves the key
+					BaseURL:           baseURL, // openai-compatible only; restart reconnects here
 					LLMGatewayEnabled: gatewayEnabled,
 					OpenShell:         openShellMeta(openShellCfg),
 					CreatedAt:         time.Now(),
@@ -434,6 +445,8 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&openshellProvidersRaw, "openshell-provider", "", "Comma-separated OpenShell provider names to attach")
 	cmd.Flags().BoolVar(&openshellNoAutoProviders, "openshell-no-auto-providers", false, "Disable OpenShell credential auto-provider discovery")
 	cmd.Flags().StringVar(&model, "model", "", "Model id to pass to each launched provider session")
+	cmd.Flags().StringVar(&baseURL, "base-url", "", "OpenAI-compatible API base URL, e.g. http://localhost:4000/v1 (--provider openai-compatible only)")
+	cmd.Flags().StringVar(&vendor, "vendor", "", "Vendor label; the API key is read from OPENAI_COMPAT_API_KEY_<VENDOR> (--provider openai-compatible only)")
 	cmd.Flags().StringVar(&modelsRaw, "models", "", "Comma-separated persona=model overrides for team launches")
 	cmd.Flags().StringVar(&persona, "persona", "", "Persona key for vibeflow sessions")
 	cmd.Flags().StringVar(&personasRaw, "personas", "", "Comma-separated persona keys for team mode")
@@ -443,6 +456,34 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&replace, "replace", false, "Stop and replace existing sessions for the selected personas")
 	cmd.Flags().BoolVar(&reuse, "reuse", false, "Relaunch selected personas using their existing session IDs")
 	return cmd
+}
+
+// validateOpenAICompatLaunchFlags checks the endpoint flags of `vibeflow
+// launch`. openai-compatible needs --base-url, --vendor and --model (all
+// missing ones are named in one error); other providers must not receive
+// --base-url / --vendor, which they would silently ignore.
+func validateOpenAICompatLaunchFlags(provider, baseURL, vendor, model string) error {
+	if provider != "openai-compatible" {
+		if baseURL != "" || vendor != "" {
+			return fmt.Errorf("--base-url and --vendor are only valid with --provider openai-compatible (got %q)", provider)
+		}
+		return nil
+	}
+	// Collect every missing flag so the user fixes them in one go.
+	var missing []string
+	for _, f := range []struct{ name, value string }{{"--base-url", baseURL}, {"--vendor", vendor}, {"--model", model}} {
+		if strings.TrimSpace(f.value) == "" {
+			missing = append(missing, f.name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("--provider openai-compatible requires %s", strings.Join(missing, ", "))
+	}
+	// Same rules as the wizard's endpoint step.
+	if err := ValidateOpenAICompatEndpoint(baseURL, vendor, model); err != nil {
+		return fmt.Errorf("--provider openai-compatible: %w", err)
+	}
+	return nil
 }
 
 func preparePersonaSessions(tmux *TmuxManager, store *Store, cache *SessionCache, workDir, project string, personas []string, reuse bool) (map[string]string, error) {

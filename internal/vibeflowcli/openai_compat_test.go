@@ -428,3 +428,122 @@ func TestWizard_OpenAICompatConfirmCarriesEndpointIntoResult(t *testing.T) {
 		t.Errorf("result endpoint = %q %q %q (base URL must be trimmed)", w.result.Vendor, w.result.BaseURL, w.result.Model)
 	}
 }
+
+func TestValidateOpenAICompatLaunchFlags(t *testing.T) {
+	const url, vendor, model = "http://llm-proxy.local:4000/v1", "example-vendor", "some-model"
+	tests := []struct {
+		name, provider, baseURL, vendor, model string
+		wantErr                                []string // substrings; nil = no error
+	}{
+		{"complete", "openai-compatible", url, vendor, model, nil},
+		{"all missing named at once", "openai-compatible", "", "", "", []string{"--base-url", "--vendor", "--model"}},
+		{"missing base url", "openai-compatible", "", vendor, model, []string{"requires --base-url"}},
+		{"missing vendor", "openai-compatible", url, "", model, []string{"requires --vendor"}},
+		{"missing model", "openai-compatible", url, vendor, "", []string{"requires --model"}},
+		{"invalid url", "openai-compatible", "localhost:4000", vendor, model, []string{"http(s) URL"}},
+		{"other provider without endpoint flags", "claude", "", "", model, nil},
+		{"other provider rejects --base-url", "claude", url, "", "", []string{"only valid with --provider openai-compatible"}},
+		{"other provider rejects --vendor", "qwen", "", vendor, "", []string{"only valid with --provider openai-compatible"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateOpenAICompatLaunchFlags(tt.provider, tt.baseURL, tt.vendor, tt.model)
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error mentioning %v", tt.wantErr)
+			}
+			for _, want := range tt.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q missing %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestLaunchCmd_OpenAICompat runs `vibeflow launch --provider openai-compatible`
+// end to end on a real tmux server with a fake agent recording argv and env.
+func TestLaunchCmd_OpenAICompat(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	repo := newTestRepo(t, "")
+	t.Chdir(repo)
+	state := t.TempDir()
+	t.Setenv("VIBEFLOW_ROOT", state)
+	t.Setenv("OPENAI_API_KEY", "sk-shell-openai") // must never reach the pane
+	t.Setenv("OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR", "sk-vendor-from-shell")
+
+	socket := fmt.Sprintf("vftest-oacompat-launch-%d-%d", os.Getpid(), time.Now().UnixNano())
+	tm := NewTmuxManager(socket)
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+
+	record := filepath.Join(state, "agent-record")
+	binary := filepath.Join(state, "fake-qwen")
+	script := "#!/bin/sh\n{ printf 'ARG=%s\\n' \"$@\"; printf 'KEY=%s\\nURL=%s\\nMODEL=%s\\n' \"$OPENAI_API_KEY\" \"$OPENAI_BASE_URL\" \"$OPENAI_MODEL\"; } > " + shellQuote(record) + "\nsleep 300\n"
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.TmuxSocket = socket
+	prov := cfg.Providers["openai-compatible"]
+	prov.Binary = binary
+	cfg.Providers["openai-compatible"] = prov
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := launchCmd()
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	cmd.SetArgs([]string{"--provider", "openai-compatible", "--base-url", "http://llm-proxy.local:4000/v1", "--vendor", "example-vendor", "--model", "some-model"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(record); err == nil && strings.Contains(string(data), "MODEL=") {
+			got = string(data)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, want := range []string{
+		"ARG=--auth-type\nARG=openai\n",
+		"ARG=--openai-base-url\nARG=http://llm-proxy.local:4000/v1\n",
+		"ARG=--model\nARG=some-model\n",
+		"KEY=sk-vendor-from-shell\n",
+		"URL=http://llm-proxy.local:4000/v1\n",
+		"MODEL=some-model\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("agent record missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "sk-shell-openai") {
+		t.Errorf("shell OPENAI_API_KEY reached the session:\n%s", got)
+	}
+
+	// Metadata keeps the endpoint for restart; the key is never stored.
+	metas, err := NewStore().List()
+	if err != nil || len(metas) != 1 {
+		t.Fatalf("stored sessions = %v, %v", metas, err)
+	}
+	m := metas[0]
+	if m.Vendor != "example-vendor" || m.BaseURL != "http://llm-proxy.local:4000/v1" || m.Model != "some-model" {
+		t.Errorf("meta endpoint = %q %q %q", m.Vendor, m.BaseURL, m.Model)
+	}
+	raw, err := os.ReadFile(DefaultStorePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sk-vendor-from-shell") {
+		t.Error("API key written to sessions.json")
+	}
+}
