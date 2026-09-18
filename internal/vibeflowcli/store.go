@@ -44,6 +44,8 @@ type SessionMeta struct {
 	CloudDispatch          bool             `json:"cloud_dispatch,omitempty"`
 	SkipPermissions        bool             `json:"skip_permissions,omitempty"`
 	Model                  string           `json:"model,omitempty"`
+	Vendor                 string           `json:"vendor,omitempty"`   // openai-compatible: selects the OPENAI_COMPAT_API_KEY_<VENDOR> slot on restart (the key itself is never stored)
+	BaseURL                string           `json:"base_url,omitempty"` // openai-compatible: endpoint a restart reconnects to
 	LLMGatewayEnabled      bool             `json:"llm_gateway_enabled,omitempty"`
 	MCPToolName            string           `json:"mcp_tool_name,omitempty"`
 	OpenShell              *OpenShellConfig `json:"openshell,omitempty"`

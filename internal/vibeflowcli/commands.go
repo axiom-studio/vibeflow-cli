@@ -740,6 +740,13 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		provider = "claude"
 	}
 
+	// An openai-compatible session can only be relaunched against the
+	// endpoint and model it was created with. Fail before touching the old
+	// pane rather than start qwen pointed at a default endpoint.
+	if provider == "openai-compatible" && (meta.BaseURL == "" || meta.Model == "") {
+		return SessionMeta{}, fmt.Errorf("restart openai-compatible session %q: session metadata is missing the base URL or model — launch a new session instead", meta.Name)
+	}
+
 	prov, ok := registry.Get(provider)
 	if !ok {
 		return SessionMeta{}, fmt.Errorf("unknown provider %q", provider)
@@ -812,6 +819,11 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 			sessionEnv = make(map[string]string)
 		}
 		sessionEnv["OPENAI_MODEL"] = meta.Model
+	}
+	// Reconnect openai-compatible sessions to their stored endpoint/model and
+	// re-resolve the vendor's key (never stored in metadata).
+	if provider == "openai-compatible" {
+		applyOpenAICompatEnv(sessionEnv, cfg, meta.Vendor, meta.BaseURL, meta.Model)
 	}
 	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
@@ -942,6 +954,8 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		CloudDispatch:          meta.CloudDispatch,
 		SkipPermissions:        meta.SkipPermissions,
 		Model:                  meta.Model,
+		Vendor:                 meta.Vendor,  // keep the endpoint for the next restart
+		BaseURL:                meta.BaseURL, // keep the endpoint for the next restart
 		LLMGatewayEnabled:      meta.LLMGatewayEnabled,
 		MCPToolName:            meta.MCPToolName,
 		OpenShell:              meta.OpenShell,
