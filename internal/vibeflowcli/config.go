@@ -671,6 +671,61 @@ func cleanEnvToken(val string) string {
 	return strings.Trim(val, "[]\"' \t\n\r")
 }
 
+// openAICompatKeyPrefix names the per-vendor API key slots of the
+// openai-compatible provider, e.g. OPENAI_COMPAT_API_KEY_MY_PROXY.
+const openAICompatKeyPrefix = "OPENAI_COMPAT_API_KEY_"
+
+// OpenAICompatKeyEnvName returns the env var / saved-config name holding the
+// openai-compatible API key for vendor. The vendor is encoded like qwen's
+// endpoint segment: uppercased, each run of non-alphanumerics becomes one
+// underscore ("my-proxy.local" → OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL).
+// Returns "" when the vendor has no letters or digits, so a key is never
+// stored under the bare prefix.
+func OpenAICompatKeyEnvName(vendor string) string {
+	// Encode the vendor into an env-var-safe suffix.
+	enc := encodeQwenEnvSegment(vendor)
+	// No usable suffix → no slot.
+	if enc == "" {
+		return ""
+	}
+	return openAICompatKeyPrefix + enc
+}
+
+// ResolveOpenAICompatKey returns the API key for vendor: the shell env var
+// wins over the saved config value. Returns "" when neither is set (keyless
+// endpoint). It never reads the shared OPENAI_API_KEY slot.
+func ResolveOpenAICompatKey(cfg *Config, vendor string) string {
+	name := OpenAICompatKeyEnvName(vendor)
+	if name == "" {
+		return ""
+	}
+	// 1. Shell export, e.g. OPENAI_COMPAT_API_KEY_MY_PROXY=... vibeflow launch.
+	if val := cleanEnvToken(os.Getenv(name)); val != "" {
+		return val
+	}
+	// 2. Value saved by the wizard in config.yaml.
+	if cfg != nil {
+		return cleanEnvToken(cfg.SavedEnvVars[name])
+	}
+	return ""
+}
+
+// SaveOpenAICompatKey stores key in vendor's own SavedEnvVars slot. An empty
+// key or unusable vendor is a no-op, so a keyless endpoint never overwrites
+// a key saved earlier. The caller persists the config (SaveConfig).
+func (c *Config) SaveOpenAICompatKey(vendor, key string) {
+	name := OpenAICompatKeyEnvName(vendor)
+	key = cleanEnvToken(key)
+	if name == "" || key == "" {
+		return
+	}
+	// Lazily create the map for configs that have never saved an env var.
+	if c.SavedEnvVars == nil {
+		c.SavedEnvVars = make(map[string]string)
+	}
+	c.SavedEnvVars[name] = key
+}
+
 // ResolveProviderEnvVars returns the environment variables needed for the
 // given provider, reading from saved config and codex config as needed.
 // Returns the env var map and the name of any env var that still needs a

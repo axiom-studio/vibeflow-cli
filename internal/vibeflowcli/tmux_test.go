@@ -895,6 +895,7 @@ func TestIsSecretEnvKey(t *testing.T) {
 		{"ANTHROPIC_AUTH_TOKEN", true},
 		{"ANTHROPIC_API_KEY", true},
 		{"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4", true},
+		{"OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR", true}, // openai-compatible per-vendor key
 		{"OPENAI_BASE_URL", false},
 		{"ANTHROPIC_BASE_URL", false},
 		{"OPENAI_MODEL", false},
@@ -1212,5 +1213,16 @@ func TestStatusBar_StructuralCharactersAreLiteral(t *testing.T) {
 	// swallowed comma would take the rest of the bar with it.
 	if !strings.Contains(got, "claude") {
 		t.Errorf("a structural character truncated the bar: %q", got)
+	}
+}
+
+func TestRedactSpawnArg_OpenAICompatKey(t *testing.T) {
+	// Both the per-vendor slot and the OPENAI_API_KEY it is mapped to at spawn
+	// must be masked in the spawn log.
+	for _, arg := range []string{"OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR=sk-vendor", "OPENAI_API_KEY=sk-vendor"} {
+		got := redactSpawnArg(arg)
+		if strings.Contains(got, "sk-vendor") || !strings.HasSuffix(got, "=<redacted>") {
+			t.Errorf("redactSpawnArg(%q) = %q, want value redacted", arg, got)
+		}
 	}
 }
