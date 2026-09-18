@@ -1666,6 +1666,11 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		command = result.Provider.Binary
 	}
 
+	// Work on a private copy of the provider env: the map is shared with
+	// m.config.Providers, and the config is saved after launch, so writing
+	// session values (keys, tokens, endpoints) into it would persist them.
+	result.Provider.Env = cloneStringMap(result.Provider.Env)
+
 	// Merge wizard-resolved env vars (e.g. codex bearer token) into provider env.
 	if result.EnvVars != nil {
 		if result.Provider.Env == nil {

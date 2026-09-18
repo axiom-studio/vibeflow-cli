@@ -426,6 +426,18 @@ func migrateProviders(cfg *Config, path string) {
 			}
 		}
 
+		// openai-compatible session values are resolved per launch and must
+		// never live in the provider's static env. Earlier development builds
+		// could persist them here; drop them so a stored key is not reused.
+		if key == "openai-compatible" {
+			for _, k := range []string{"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "MCP_TOKEN"} {
+				if _, ok := prov.Env[k]; ok {
+					delete(prov.Env, k)
+					dirty = true
+				}
+			}
+		}
+
 		cfg.Providers[key] = prov
 	}
 

@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -592,5 +593,121 @@ func TestWizard_OpenAICompatCredentialedURLIsNotSaved(t *testing.T) {
 		if data, _ := os.ReadFile(ConfigPath()); strings.Contains(string(data), "S3cret") {
 			t.Error("credential written to config.yaml")
 		}
+	}
+}
+
+// TestExecuteLaunch_OpenAICompatDoesNotPersistSessionEnv reproduces the
+// config-persistence path: load config → registry → TUI launch → SaveConfig.
+// The shell-only vendor key must not end up in config.yaml, and a second
+// launch with another vendor must not inherit the first launch's values.
+func TestExecuteLaunch_OpenAICompatDoesNotPersistSessionEnv(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	repo := newTestRepo(t, "")
+	state := t.TempDir()
+	t.Setenv("VIBEFLOW_ROOT", state)
+	t.Setenv("OPENAI_COMPAT_API_KEY_VENDOR_ONE", "sk-shell-only-one")
+	t.Setenv("OPENAI_COMPAT_API_KEY_VENDOR_TWO", "sk-shell-only-two")
+	t.Setenv("MCP_TOKEN", "") // keep any real token out of the test
+
+	socket := fmt.Sprintf("vftest-oacompat-persist-%d-%d", os.Getpid(), time.Now().UnixNano())
+	tm := NewTmuxManager(socket)
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	binary := filepath.Join(state, "fake-qwen")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nsleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := DefaultConfig()
+	prov := seed.Providers["openai-compatible"]
+	prov.Binary = binary
+	seed.Providers["openai-compatible"] = prov
+	if err := SaveConfig(seed, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := Model{config: cfg, tmux: tm, logger: NewLogger(), store: NewStore(), cache: NewSessionCache()}
+
+	launch := func(vendor string) string {
+		t.Helper()
+		p, _ := NewProviderRegistry(cfg).Get("openai-compatible")
+		msg := m.executeLaunch(WizardResult{
+			SessionType: "vanilla", ProviderKey: "openai-compatible", Provider: p,
+			WorkDir: repo, WorktreeChoice: WorktreeCurrent, Branch: "main",
+			Vendor: vendor, BaseURL: "http://llm-proxy.local/v1", Model: "some-model",
+		})
+		if sm, ok := msg.(sessionsMsg); ok && sm.err != nil {
+			t.Fatalf("launch %s: %v", vendor, sm.err)
+		}
+		// Newest session for this vendor → its pane env.
+		metas, _ := NewStore().List()
+		for i := len(metas) - 1; i >= 0; i-- {
+			if metas[i].Vendor == vendor {
+				out, err := tm.run("show-environment", "-t", metas[i].TmuxSession, "OPENAI_API_KEY")
+				if err != nil {
+					t.Fatal(err)
+				}
+				return strings.TrimSpace(out)
+			}
+		}
+		t.Fatalf("no session recorded for %s", vendor)
+		return ""
+	}
+
+	if got := launch("vendor-one"); got != "OPENAI_API_KEY=sk-shell-only-one" {
+		t.Errorf("first session env = %q", got)
+	}
+	if got := launch("vendor-two"); got != "OPENAI_API_KEY=sk-shell-only-two" {
+		t.Errorf("second session env = %q, want only the second vendor's key", got)
+	}
+
+	// Nothing session-specific may reach the saved config.
+	data, err := os.ReadFile(ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leaked := range []string{"sk-shell-only-one", "sk-shell-only-two", "llm-proxy.local"} {
+		if strings.Contains(string(data), leaked) {
+			t.Errorf("config.yaml contains %q after launch", leaked)
+		}
+	}
+	if env := cfg.Providers["openai-compatible"].Env; len(env) != 0 {
+		// Report key names only — values may be secrets.
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		t.Errorf("in-memory provider env mutated by launch (keys: %v)", keys)
+	}
+}
+
+func TestNewProviderRegistry_EnvIsNotSharedWithConfig(t *testing.T) {
+	cfg := &Config{Providers: map[string]Provider{"p": {Binary: "sh", Env: map[string]string{"A": "1"}}}}
+	p, _ := NewProviderRegistry(cfg).Get("p")
+	p.Env["SECRET"] = "x"
+	if _, leaked := cfg.Providers["p"].Env["SECRET"]; leaked {
+		t.Error("mutating a registry provider's env changed the config")
+	}
+}
+
+func TestMigrateProviders_StripsOpenAICompatSessionEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := DefaultConfig()
+	cfg.Providers["openai-compatible"] = Provider{Binary: "qwen", Env: map[string]string{
+		"OPENAI_API_KEY": "sk-leaked", "OPENAI_BASE_URL": "http://h/v1", "OPENAI_MODEL": "m", "MCP_TOKEN": "t", "KEEP_ME": "1",
+	}}
+	migrateProviders(cfg, path)
+	if env := cfg.Providers["openai-compatible"].Env; !reflect.DeepEqual(env, map[string]string{"KEEP_ME": "1"}) {
+		t.Errorf("env after migration has %d keys, want only KEEP_ME", len(env))
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("migration did not save the cleaned config: %v", err)
+	}
+	if strings.Contains(string(data), "sk-leaked") {
+		t.Error("saved config still contains the leaked key")
 	}
 }
