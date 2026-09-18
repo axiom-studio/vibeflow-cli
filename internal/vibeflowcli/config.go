@@ -726,6 +726,31 @@ func (c *Config) SaveOpenAICompatKey(vendor, key string) {
 	c.SavedEnvVars[name] = key
 }
 
+// openAICompatNoKey is sent as the API key to keyless endpoints (e.g. a local
+// proxy with no auth). qwen 0.24.0 refuses to start with OPENAI_API_KEY unset
+// or empty, and a keyless server ignores the bearer value. Session env only;
+// it is never saved to config.
+const openAICompatNoKey = "no-key"
+
+// applyOpenAICompatEnv writes the endpoint, model and API key of an
+// openai-compatible session into sessionEnv. All three are ALWAYS set: a pane
+// inherits the tmux server's global env, so leaving one unset would let a
+// shell-exported OPENAI_API_KEY (often a real OpenAI key) or OPENAI_BASE_URL
+// reach the session. Callers pass the base URL / vendor / model captured by
+// the wizard, --base-url/--vendor/--model, or stored session metadata.
+func applyOpenAICompatEnv(sessionEnv map[string]string, cfg *Config, vendor, baseURL, model string) {
+	// Endpoint and model the user chose for this session.
+	sessionEnv["OPENAI_BASE_URL"] = baseURL
+	sessionEnv["OPENAI_MODEL"] = model
+	// The vendor's own key when one is saved/exported, otherwise the
+	// placeholder so qwen starts and no inherited key is sent.
+	key := ResolveOpenAICompatKey(cfg, vendor)
+	if key == "" {
+		key = openAICompatNoKey
+	}
+	sessionEnv["OPENAI_API_KEY"] = key
+}
+
 // ResolveProviderEnvVars returns the environment variables needed for the
 // given provider, reading from saved config and codex config as needed.
 // Returns the env var map and the name of any env var that still needs a

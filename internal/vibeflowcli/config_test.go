@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1450,6 +1451,54 @@ func TestResolveOpenAICompatKey(t *testing.T) {
 		}
 		if got := ResolveOpenAICompatKey(saved, ""); got != "" {
 			t.Errorf("empty vendor got %q", got)
+		}
+	})
+}
+
+func TestApplyOpenAICompatEnv(t *testing.T) {
+	const keyVar = "OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR"
+
+	t.Run("sets endpoint, model and vendor key", func(t *testing.T) {
+		t.Setenv(keyVar, "")
+		cfg := &Config{SavedEnvVars: map[string]string{keyVar: "sk-vendor"}}
+		env := map[string]string{}
+		applyOpenAICompatEnv(env, cfg, "example-vendor", "http://llm-proxy.local/v1", "some-model")
+		want := map[string]string{
+			"OPENAI_BASE_URL": "http://llm-proxy.local/v1",
+			"OPENAI_MODEL":    "some-model",
+			"OPENAI_API_KEY":  "sk-vendor",
+		}
+		if !reflect.DeepEqual(env, want) {
+			t.Errorf("env = %v, want %v", env, want)
+		}
+	})
+
+	t.Run("keyless vendor gets the placeholder, never persisted", func(t *testing.T) {
+		t.Setenv(keyVar, "")
+		cfg := &Config{}
+		env := map[string]string{}
+		applyOpenAICompatEnv(env, cfg, "example-vendor", "http://llm-proxy.local/v1", "some-model")
+		if env["OPENAI_API_KEY"] != openAICompatNoKey {
+			t.Errorf("OPENAI_API_KEY = %q, want %q", env["OPENAI_API_KEY"], openAICompatNoKey)
+		}
+		if len(cfg.SavedEnvVars) != 0 {
+			t.Errorf("placeholder leaked into SavedEnvVars: %v", cfg.SavedEnvVars)
+		}
+	})
+
+	t.Run("inherited shell OPENAI_* values are overridden", func(t *testing.T) {
+		// A pane inherits the tmux server env; the explicit values must win
+		// over a real OpenAI key and base URL exported in the user's shell.
+		t.Setenv(keyVar, "")
+		t.Setenv("OPENAI_API_KEY", "sk-shell-openai")
+		t.Setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+		env := map[string]string{"OPENAI_API_KEY": "sk-shell-openai"}
+		applyOpenAICompatEnv(env, &Config{}, "example-vendor", "http://llm-proxy.local/v1", "some-model")
+		if env["OPENAI_API_KEY"] == "sk-shell-openai" {
+			t.Error("shell OPENAI_API_KEY reached the openai-compatible session")
+		}
+		if env["OPENAI_BASE_URL"] != "http://llm-proxy.local/v1" {
+			t.Errorf("OPENAI_BASE_URL = %q, want the session's endpoint", env["OPENAI_BASE_URL"])
 		}
 	})
 }
