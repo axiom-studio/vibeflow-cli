@@ -1688,6 +1688,12 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 	result.Provider.Env = WithMCPTokenEnv(result.Provider.Env, m.config)
 
+	// Point openai-compatible sessions at the endpoint/model chosen in the
+	// wizard and inject the vendor's key (or the keyless placeholder).
+	if provider == "openai-compatible" {
+		applyOpenAICompatEnv(result.Provider.Env, m.config, result.Vendor, result.BaseURL, result.Model)
+	}
+
 	// Mirror Codex gateway config and qwen routed env vars onto the command
 	// line so each provider sees the explicit launch-time configuration it
 	// expects.
@@ -1774,6 +1780,9 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		VibeFlowSessionID: vibeflowSessionID,
 		SessionType:       result.SessionType,
 		SkipPermissions:   result.SkipPermissions,
+		Model:             result.Model,   // openai-compatible: restored on restart
+		Vendor:            result.Vendor,  // openai-compatible: selects the key slot on restart
+		BaseURL:           result.BaseURL, // openai-compatible: restored on restart
 		LLMGatewayEnabled: result.LLMGatewayEnabled,
 		MCPToolName:       m.config.MCPToolName,
 		OpenShell:         openShellMeta(m.config.OpenShell),
