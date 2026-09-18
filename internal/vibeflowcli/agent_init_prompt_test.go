@@ -519,3 +519,29 @@ Pane is dead (status 143, Mon Sep  7 18:19:42 2026)`
 		}
 	}
 }
+
+func TestOpenAICompatibleUsesQwenLaunchShape(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY":  "sk-vendor",
+		"OPENAI_BASE_URL": "http://llm-proxy.local:4000/v1",
+		"OPENAI_MODEL":    "qwen3-coder",
+	}
+	cmd := AppendQwenAPIFlags("qwen --yolo", "openai-compatible", env)
+	cmd = AppendVibeflowInitPrompt(cmd, "openai-compatible", "hi")
+	const want = `qwen --yolo --openai-base-url 'http://llm-proxy.local:4000/v1' --model 'qwen3-coder' -i 'hi'`
+	if cmd != want {
+		t.Errorf("command:\n got:  %q\n want: %q", cmd, want)
+	}
+	if strings.Contains(cmd, "sk-vendor") {
+		t.Error("API key must never appear on the command line (issue #1993)")
+	}
+}
+
+func TestApplyQwenModelPassthrough_OpenAICompatible(t *testing.T) {
+	t.Setenv("OPENAI_MODEL", "glm-4.6")
+	env := map[string]string{}
+	applyQwenModelPassthrough("openai-compatible", env)
+	if env["OPENAI_MODEL"] != "glm-4.6" {
+		t.Errorf("OPENAI_MODEL = %q, want glm-4.6", env["OPENAI_MODEL"])
+	}
+}

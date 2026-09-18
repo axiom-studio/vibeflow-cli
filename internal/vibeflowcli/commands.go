@@ -305,7 +305,9 @@ func launchCmd() *cobra.Command {
 				}
 				sessionModel := modelForPersona(model, personaModels, p)
 				sessionEnv := cloneStringMap(baseEnv)
-				if provider == "qwen" && sessionModel != "" {
+				// qwen-binary providers read the model from OPENAI_MODEL; seed it
+				// from --model / --models so AppendQwenAPIFlags emits --model.
+				if usesQwenHarness(provider) && sessionModel != "" {
 					if sessionEnv == nil {
 						sessionEnv = make(map[string]string)
 					}
@@ -803,7 +805,9 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	// Mirror Codex gateway config and qwen routed env vars onto CLI flags on
 	// restart too. Must run before the init-prompt append.
 	command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
-	if provider == "qwen" && meta.Model != "" {
+	// Restore the stored model for qwen-binary providers so the restarted
+	// session runs the same model it was launched with.
+	if usesQwenHarness(provider) && meta.Model != "" {
 		if sessionEnv == nil {
 			sessionEnv = make(map[string]string)
 		}

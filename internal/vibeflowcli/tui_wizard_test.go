@@ -856,6 +856,7 @@ func TestProviderSupportsGateway(t *testing.T) {
 		{"codex", true},
 		{"gemini", true},
 		{"qwen", false},
+		{"openai-compatible", false}, // connects directly to the user's endpoint
 		{"cursor", false},
 		{"copilot", false},                    // talks only to GitHub's model routing
 		{"some-future-custom-provider", true}, // default: gateway-eligible
