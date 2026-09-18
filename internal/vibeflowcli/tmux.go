@@ -278,6 +278,7 @@ var secretEnvPrefixes = []string{
 	"GATEWAY_API_KEY=",
 	"OPENAI_API_KEY=",
 	"QWEN_CUSTOM_API_KEY",       // dynamic suffix encodes the endpoint; value is the key
+	"OPENAI_COMPAT_API_KEY_",    // openai-compatible per-vendor key; suffix encodes the vendor
 	"ANTHROPIC_CUSTOM_HEADERS=", // gateway mode embeds the API token as "x-axiom-api-key: <token>"
 	"ANTHROPIC_AUTH_TOKEN=",
 	"ANTHROPIC_API_KEY=",

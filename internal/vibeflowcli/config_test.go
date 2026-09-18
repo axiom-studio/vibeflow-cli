@@ -1367,3 +1367,89 @@ func TestGatewayEnabledForProvider_OpenAICompatibleIsDirectOnly(t *testing.T) {
 		t.Errorf("enabled/warn = %v/%v, want false/true", enabled, warn)
 	}
 }
+
+func TestOpenAICompatKeyEnvName(t *testing.T) {
+	tests := []struct {
+		vendor string
+		want   string
+	}{
+		{"example", "OPENAI_COMPAT_API_KEY_EXAMPLE"},                // lowercase is uppercased
+		{"ExampleVendor", "OPENAI_COMPAT_API_KEY_EXAMPLEVENDOR"},    // mixed case
+		{"my-proxy.local", "OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL"},  // punctuation → underscore
+		{"  my  proxy -- v2 ", "OPENAI_COMPAT_API_KEY_MY_PROXY_V2"}, // runs collapse, ends trimmed
+		{"", ""},   // empty vendor → no slot
+		{"--", ""}, // no letters/digits → no slot
+	}
+	for _, tt := range tests {
+		if got := OpenAICompatKeyEnvName(tt.vendor); got != tt.want {
+			t.Errorf("OpenAICompatKeyEnvName(%q) = %q, want %q", tt.vendor, got, tt.want)
+		}
+	}
+}
+
+func TestSaveOpenAICompatKey_UsesVendorSlotNotSharedKey(t *testing.T) {
+	cfg := &Config{SavedEnvVars: map[string]string{"OPENAI_API_KEY": "sk-shared"}}
+	cfg.SaveOpenAICompatKey("example-vendor", " sk-vendor ")
+	if got := cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR"]; got != "sk-vendor" {
+		t.Errorf("vendor slot = %q, want sk-vendor (trimmed)", got)
+	}
+	if got := cfg.SavedEnvVars["OPENAI_API_KEY"]; got != "sk-shared" {
+		t.Errorf("shared OPENAI_API_KEY slot changed to %q", got)
+	}
+}
+
+func TestSaveOpenAICompatKey_EmptyInputsAreNoOps(t *testing.T) {
+	cfg := &Config{}
+	cfg.SaveOpenAICompatKey("example-vendor", "")
+	cfg.SaveOpenAICompatKey("", "sk-vendor")
+	if len(cfg.SavedEnvVars) != 0 {
+		t.Errorf("SavedEnvVars = %v, want empty", cfg.SavedEnvVars)
+	}
+
+	// A keyless relaunch must not wipe a key saved earlier.
+	cfg.SaveOpenAICompatKey("example-vendor", "sk-vendor")
+	cfg.SaveOpenAICompatKey("example-vendor", "")
+	if got := cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR"]; got != "sk-vendor" {
+		t.Errorf("vendor slot = %q after empty save, want sk-vendor", got)
+	}
+}
+
+func TestResolveOpenAICompatKey(t *testing.T) {
+	const name = "OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR"
+	saved := &Config{SavedEnvVars: map[string]string{name: "sk-saved"}}
+
+	t.Run("shell env wins over saved config", func(t *testing.T) {
+		t.Setenv(name, "sk-shell")
+		if got := ResolveOpenAICompatKey(saved, "example-vendor"); got != "sk-shell" {
+			t.Errorf("got %q, want sk-shell", got)
+		}
+	})
+	t.Run("falls back to saved config", func(t *testing.T) {
+		t.Setenv(name, "")
+		if got := ResolveOpenAICompatKey(saved, "example-vendor"); got != "sk-saved" {
+			t.Errorf("got %q, want sk-saved", got)
+		}
+	})
+	t.Run("never reads the shared OPENAI_API_KEY", func(t *testing.T) {
+		t.Setenv(name, "")
+		t.Setenv("OPENAI_API_KEY", "sk-shared")
+		cfg := &Config{SavedEnvVars: map[string]string{"OPENAI_API_KEY": "sk-shared"}}
+		if got := ResolveOpenAICompatKey(cfg, "example-vendor"); got != "" {
+			t.Errorf("got %q, want empty (keyless)", got)
+		}
+	})
+	t.Run("keys are isolated per vendor", func(t *testing.T) {
+		t.Setenv(name, "")
+		if got := ResolveOpenAICompatKey(saved, "other-vendor"); got != "" {
+			t.Errorf("other-vendor got %q, want empty", got)
+		}
+	})
+	t.Run("nil config and unusable vendor are safe", func(t *testing.T) {
+		if got := ResolveOpenAICompatKey(nil, "example-vendor"); got != "" {
+			t.Errorf("nil cfg got %q", got)
+		}
+		if got := ResolveOpenAICompatKey(saved, ""); got != "" {
+			t.Errorf("empty vendor got %q", got)
+		}
+	})
+}
