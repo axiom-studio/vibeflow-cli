@@ -261,6 +261,21 @@ func DefaultConfig() *Config {
 				SessionFile:        "",
 				Default:            false,
 			},
+			// Any OpenAI-compatible endpoint (hosted API or self-hosted proxy),
+			// driven by the qwen binary. Base URL / vendor / model are captured
+			// per session rather than preset — see usesQwenHarness. The launch
+			// template is qwen's: --yolo for autonomous runs; --openai-base-url
+			// and --model are appended later by AppendQwenAPIFlags.
+			"openai-compatible": {
+				Name:               "OpenAI Compatible",
+				Binary:             "qwen",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
+				PromptTemplate:     "",
+				Env:                map[string]string{},
+				VibeFlowIntegrated: false,
+				SessionFile:        "",
+				Default:            false,
+			},
 			"copilot": {
 				Name:   "GitHub Copilot CLI",
 				Binary: "copilot",
@@ -722,6 +737,11 @@ func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]str
 			return env, ""
 		}
 		return env, qwenKey
+	case "openai-compatible":
+		// Deliberately NOT the qwen case: that would hand a saved/shell
+		// OPENAI_API_KEY (usually a real OpenAI key) to whatever vendor the
+		// user pointed at. This provider's key is optional and per vendor.
+		return env, ""
 	default:
 		return env, ""
 	}

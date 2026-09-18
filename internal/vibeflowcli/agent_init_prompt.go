@@ -97,7 +97,9 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	switch providerKey {
 	case "gemini":
 		return baseCommand + fmt.Sprintf(" -p '%s'", escaped)
-	case "qwen", "copilot":
+	// openai-compatible runs the qwen binary, so it takes qwen's -i
+	// (interactive) prompt shape rather than the one-shot positional form.
+	case "qwen", "openai-compatible", "copilot":
 		return baseCommand + fmt.Sprintf(" -i '%s'", escaped)
 	default:
 		return baseCommand + fmt.Sprintf(" '%s'", escaped)
@@ -281,7 +283,8 @@ func codexConfigRawArg(value string) string {
 // single quotes and embedded single quotes use standard shell escaping, since
 // the assembled command is handed to `sh -c` via tmux send-keys.
 func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) string {
-	if providerKey != "qwen" {
+	// Only qwen-binary providers understand --openai-base-url / --model.
+	if !usesQwenHarness(providerKey) {
 		return baseCommand
 	}
 	out := baseCommand
@@ -301,10 +304,20 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 // the shell export is the only model source — copying it in lets
 // AppendQwenAPIFlags emit an explicit `--model` flag on those paths too.
 func applyQwenModelPassthrough(providerKey string, sessionEnv map[string]string) {
-	if providerKey != "qwen" || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
+	// Skip non-qwen-binary providers, and never override a model the
+	// session already carries (wizard, --model flag, or stored metadata).
+	if !usesQwenHarness(providerKey) || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
 		return
 	}
 	if v := os.Getenv("OPENAI_MODEL"); v != "" {
 		sessionEnv["OPENAI_MODEL"] = v
 	}
+}
+
+// usesQwenHarness reports whether a provider runs the qwen binary and so
+// takes its model and endpoint from OPENAI_MODEL / OPENAI_BASE_URL. It is the
+// single switch every launch/restart path checks, so a new qwen-backed
+// provider only needs to be added here.
+func usesQwenHarness(providerKey string) bool {
+	return providerKey == "qwen" || providerKey == "openai-compatible"
 }

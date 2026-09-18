@@ -2763,7 +2763,9 @@ func (w *WizardModel) applyQwenPreset() {
 // routing), so the wizard never offers them the gateway routing choice.
 func providerSupportsGateway(providerKey string) bool {
 	switch providerKey {
-	case "qwen", "cursor", "copilot":
+	// openai-compatible talks straight to the user-supplied base URL, so
+	// gateway routing would override the endpoint the user chose.
+	case "qwen", "openai-compatible", "cursor", "copilot":
 		return false
 	default:
 		return true

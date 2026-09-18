@@ -28,8 +28,8 @@ func TestNewProviderRegistry(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	keys := reg.Keys()
-	if len(keys) != 7 {
-		t.Fatalf("expected 7 providers, got %d", len(keys))
+	if len(keys) != 8 {
+		t.Fatalf("expected 8 providers, got %d", len(keys))
 	}
 	for _, k := range []string{"claude", "codex", "copilot", "cursor", "gemini", "qwen", "kiro"} {
 		if _, ok := reg.Get(k); !ok {
@@ -43,11 +43,11 @@ func TestProviderRegistry_List(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	list := reg.List()
-	if len(list) != 7 {
-		t.Fatalf("expected 7 providers, got %d", len(list))
+	if len(list) != 8 {
+		t.Fatalf("expected 8 providers, got %d", len(list))
 	}
-	// Should be sorted alphabetically by key: claude, codex, copilot, cursor, gemini, kiro, qwen.
-	names := []string{"Claude Code", "OpenAI Codex CLI", "GitHub Copilot CLI", "Cursor Agent", "Google Gemini CLI", "Kiro CLI", "Qwen Code"}
+	// Should be sorted alphabetically by key: claude, codex, copilot, cursor, gemini, kiro, openai-compatible, qwen.
+	names := []string{"Claude Code", "OpenAI Codex CLI", "GitHub Copilot CLI", "Cursor Agent", "Google Gemini CLI", "Kiro CLI", "OpenAI Compatible", "Qwen Code"}
 	for i, p := range list {
 		if p.Name != names[i] {
 			t.Errorf("list[%d].Name = %q, want %q", i, p.Name, names[i])
@@ -130,7 +130,7 @@ func TestProviderRegistry_Keys(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 
 	keys := reg.Keys()
-	expected := []string{"claude", "codex", "copilot", "cursor", "gemini", "kiro", "qwen"}
+	expected := []string{"claude", "codex", "copilot", "cursor", "gemini", "kiro", "openai-compatible", "qwen"}
 	if len(keys) != len(expected) {
 		t.Fatalf("expected %d keys, got %d", len(expected), len(keys))
 	}
@@ -556,4 +556,24 @@ func TestResolvePersonaProvider(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestDefaultConfig_OpenAICompatibleRunsTheQwenBinary(t *testing.T) {
+	cfg := DefaultConfig()
+	p, ok := cfg.Providers["openai-compatible"]
+	if !ok {
+		t.Fatal("expected openai-compatible provider in defaults")
+	}
+	if p.Name != "OpenAI Compatible" {
+		t.Errorf("Name = %q, want OpenAI Compatible", p.Name)
+	}
+	if p.Binary != "qwen" {
+		t.Errorf("Binary = %q, want qwen", p.Binary)
+	}
+	if p.LaunchTemplate != cfg.Providers["qwen"].LaunchTemplate {
+		t.Errorf("LaunchTemplate = %q, want qwen's %q", p.LaunchTemplate, cfg.Providers["qwen"].LaunchTemplate)
+	}
+	if p.VibeFlowIntegrated || p.SessionFile != "" || p.Default {
+		t.Errorf("VibeFlowIntegrated/SessionFile/Default = %v/%q/%v, want false/\"\"/false", p.VibeFlowIntegrated, p.SessionFile, p.Default)
+	}
 }
