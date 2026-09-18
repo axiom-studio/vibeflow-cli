@@ -547,3 +547,50 @@ func TestLaunchCmd_OpenAICompat(t *testing.T) {
 		t.Error("API key written to sessions.json")
 	}
 }
+
+func TestValidateOpenAICompatEndpoint_RejectsCredentialsInURL(t *testing.T) {
+	tests := []struct {
+		baseURL string
+		wantErr string // "" = accepted
+	}{
+		{"http://localhost:4000/v1", ""},         // plain URL still accepted
+		{"https://llm.internal:8443/api/v1", ""}, // port + path accepted
+		{"https://ci:S3cret@llm.internal/v1", "credentials"},
+		{"https://ci@llm.internal/v1", "credentials"}, // user without password
+		{"https://h/v1?api-key=S3cret", "query string"},
+		{"https://h/v1?", "query string"}, // empty query marker
+		{"https://h/v1#token=S3cret", "query string or fragment"},
+	}
+	for _, tt := range tests {
+		err := ValidateOpenAICompatEndpoint(tt.baseURL, "example-vendor", "some-model")
+		switch {
+		case tt.wantErr == "" && err != nil:
+			t.Errorf("%q: unexpected error %v", tt.baseURL, err)
+		case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+			t.Errorf("%q: err = %v, want it to mention %q", tt.baseURL, err, tt.wantErr)
+		}
+		// The rejection message must never echo the secret back.
+		if err != nil && strings.Contains(err.Error(), "S3cret") {
+			t.Errorf("%q: error echoes the credential: %v", tt.baseURL, err)
+		}
+	}
+}
+
+func TestWizard_OpenAICompatCredentialedURLIsNotSaved(t *testing.T) {
+	cfg := &Config{}
+	w := oacWizardFixture(t, cfg)
+	w, _ = w.advance()
+	w = fillOAC(w, "https://ci:S3cret@llm.internal/v1", "example-vendor", "some-model", "")
+	w = press(w, keyEnter)
+	if w.step != StepOpenAICompatConfig || !strings.Contains(w.oacErr, "credentials") {
+		t.Errorf("step=%v err=%q, want to stay on the endpoint step with a credentials error", w.step, w.oacErr)
+	}
+	if cfg.OpenAICompat.LastBaseURL != "" {
+		t.Errorf("credentialed URL written to config: %q", cfg.OpenAICompat.LastBaseURL)
+	}
+	if _, err := os.Stat(ConfigPath()); err == nil {
+		if data, _ := os.ReadFile(ConfigPath()); strings.Contains(string(data), "S3cret") {
+			t.Error("credential written to config.yaml")
+		}
+	}
+}
