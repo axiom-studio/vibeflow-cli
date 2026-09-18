@@ -746,6 +746,15 @@ func ValidateOpenAICompatEndpoint(baseURL, vendor, model string) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("base URL must be an http(s) URL, e.g. http://localhost:4000/v1")
 	}
+	// The base URL reaches the qwen command line (readable by every local
+	// user), the logs and config, so it must not carry credentials. A query
+	// or fragment is never part of an API base URL either.
+	if u.User != nil {
+		return fmt.Errorf("base URL must not contain credentials (user:password@) — use the API key field or OPENAI_COMPAT_API_KEY_<VENDOR>")
+	}
+	if u.RawQuery != "" || u.Fragment != "" || strings.Contains(baseURL, "?") || strings.Contains(baseURL, "#") {
+		return fmt.Errorf("base URL must not contain a query string or fragment — put an API key in the API key field or OPENAI_COMPAT_API_KEY_<VENDOR>")
+	}
 	// The vendor names the key slot, so it needs at least one letter or digit.
 	if OpenAICompatKeyEnvName(vendor) == "" {
 		return fmt.Errorf("vendor is required (letters or digits, e.g. my-proxy)")
