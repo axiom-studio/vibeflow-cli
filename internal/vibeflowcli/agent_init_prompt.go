@@ -288,6 +288,12 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 		return baseCommand
 	}
 	out := baseCommand
+	// A fresh qwen install has no saved auth type; without this flag the
+	// interactive session stops on an auth-provider picker and an unattended
+	// pane hangs. The qwen provider keeps relying on the user's own settings.
+	if providerKey == "openai-compatible" {
+		out += " --auth-type openai"
+	}
 	if v := env["OPENAI_BASE_URL"]; v != "" {
 		out += fmt.Sprintf(" --openai-base-url '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
