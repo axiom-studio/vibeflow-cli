@@ -45,6 +45,9 @@ const (
 	// Qwen configuration runs before branch selection; View maps steps
 	// explicitly so display order does not depend on these numeric values.
 	StepQwenLaunchConfig
+	// Endpoint entry for the openai-compatible provider; also runs before
+	// branch selection.
+	StepOpenAICompatConfig
 )
 
 // WorktreeChoice represents the user's worktree selection.
@@ -176,6 +179,12 @@ type WizardModel struct {
 	qwenBaseURLInput string // OPENAI_BASE_URL value, auto-filled from preset, editable.
 	qwenUserEdited   bool   // True if user has typed in either input since last vendor change/reset.
 	qwenInitialized  bool   // True once applyQwenPreset has seeded inputs at least once.
+
+	// OpenAI-compatible endpoint (StepOpenAICompatConfig). Inputs are indexed
+	// by the oacRow* constants; the API key input is never rendered in clear.
+	oacInputs      [oacRowCount]string
+	oacErr         string // inline validation error shown under the inputs
+	oacInitialized bool   // True once the inputs were prefilled from config
 
 	// Branch auto-detection.
 	currentBranch     string // Current HEAD branch for auto-positioning cursor.
@@ -493,6 +502,11 @@ func (w WizardModel) buildQuickSwitchResult() (WizardModel, tea.Cmd) {
 		EnvVars:              env,
 		LLMGatewayEnabled:    w.switchSource.LLMGatewayEnabled,
 	}
+	// openai-compatible: no endpoint step runs here, so reuse the source
+	// session's endpoint (empty if the source used another provider).
+	if pe.key == "openai-compatible" {
+		w.result.Vendor, w.result.BaseURL, w.result.Model = w.switchSource.Vendor, w.switchSource.BaseURL, w.switchSource.Model
+	}
 	w.done = true
 	return w, nil
 }
@@ -655,6 +669,11 @@ func (w WizardModel) buildGroupEditResult() (WizardModel, tea.Cmd) {
 		WorkDir:           a.WorkingDir,
 		EnvVars:           env,
 		LLMGatewayEnabled: a.LLMGatewayEnabled,
+	}
+	// openai-compatible: group edit skips the endpoint step, so reuse the
+	// anchor session's endpoint (empty if the anchor used another provider).
+	if pe.key == "openai-compatible" {
+		w.result.Vendor, w.result.BaseURL, w.result.Model = a.Vendor, a.BaseURL, a.Model
 	}
 	w.done = true
 	return w, nil
@@ -905,9 +924,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.editingBinary = false
 						// Update the provider entry to reflect availability.
 						w.providers[w.selectedProvider].available = true
-						if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
-							w.enterQwenLaunchConfig()
-						} else {
+						if !w.enterProviderConfigStep() {
 							w.step = StepBranch
 							w.cursor = 0
 							w.cursorToCurrentBranch()
@@ -1151,9 +1168,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						// force direct mode so a gateway preference saved by a
 						// previous provider can't leak in.
 						w.llmGatewayEnabled = false
-						if w.postProviderConfigStep() == StepQwenLaunchConfig {
-							w.enterQwenLaunchConfig()
-						} else {
+						if !w.enterProviderConfigStep() {
 							w.step = StepBranch
 							w.cursor = 0
 							w.cursorToCurrentBranch()
@@ -1295,6 +1310,49 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			}
 		}
 
+		// StepOpenAICompatConfig: four text inputs (base URL, vendor, model,
+		// API key). Every row accepts typing, so letters never navigate —
+		// only arrows/tab move between rows.
+		if w.step == StepOpenAICompatConfig {
+			switch msg.String() {
+			case "enter":
+				// Enter moves down; on the last row it validates and commits.
+				if w.cursor < oacRowCount-1 {
+					w.cursor++
+					return w, nil
+				}
+				return w.advance()
+			case "esc":
+				return w.goBack()
+			case "up", "shift+tab":
+				if w.cursor > 0 {
+					w.cursor--
+				}
+				return w, nil
+			case "down", "tab":
+				if w.cursor < oacRowCount-1 {
+					w.cursor++
+				}
+				return w, nil
+			case "backspace":
+				// Delete the last character of the focused input.
+				if in := w.oacInputs[w.cursor]; len(in) > 0 {
+					w.oacInputs[w.cursor] = in[:len(in)-1]
+				}
+				w.oacErr = ""
+				return w, nil
+			default:
+				// Append printable ASCII (typed or pasted) to the focused input.
+				for _, ch := range msg.Text {
+					if ch >= ' ' && ch <= '~' {
+						w.oacInputs[w.cursor] += string(ch)
+						w.oacErr = ""
+					}
+				}
+				return w, nil
+			}
+		}
+
 		switch msg.String() {
 		case "up", "k":
 			if w.cursor > 0 {
@@ -1425,6 +1483,7 @@ func (w WizardModel) View() string {
 		{StepEnvToken, "Env"},
 		{StepLLMGateway, "Gateway"},
 		{StepQwenLaunchConfig, "Qwen"},
+		{StepOpenAICompatConfig, "Endpoint"},
 		{StepBranch, "Branch"},
 		{StepWorktree, "Worktree"},
 		{StepPermissions, "Permissions"},
@@ -1436,6 +1495,10 @@ func (w WizardModel) View() string {
 	var stepLine strings.Builder
 	for _, s := range steps {
 		if s.step == StepQwenLaunchConfig && w.postProviderConfigStep() != StepQwenLaunchConfig {
+			continue
+		}
+		// Only show the endpoint step for the openai-compatible provider.
+		if s.step == StepOpenAICompatConfig && w.postProviderConfigStep() != StepOpenAICompatConfig {
 			continue
 		}
 		if stepLine.Len() > 0 {
@@ -1741,6 +1804,45 @@ func (w WizardModel) View() string {
 		b.WriteString(helpStyle.Render(hint))
 		return b.String()
 
+	case StepOpenAICompatConfig:
+		dim := lipgloss.NewStyle().Foreground(dimColor)
+		cursorMark := lipgloss.NewStyle().Foreground(accentColor).Render("█")
+
+		b.WriteString("OpenAI-compatible endpoint:\n")
+		b.WriteString(dim.Render("(any server exposing the OpenAI chat API — hosted vendor or self-hosted proxy)"))
+		b.WriteString("\n\n")
+
+		// One row per input; the focused row gets the "> " marker and cursor.
+		labels := [oacRowCount]string{"Base URL", "Vendor  ", "Model   ", "API key "}
+		for row, label := range labels {
+			value := w.oacInputs[row]
+			if row == oacRowAPIKey {
+				// Mask the key: one bullet per character, never the characters.
+				value = strings.Repeat("•", len(value))
+			}
+			line := fmt.Sprintf("%s: %s", label, value)
+			if row == w.cursor {
+				b.WriteString("> " + line + cursorMark + "\n")
+			} else {
+				b.WriteString("  " + line + "\n")
+			}
+		}
+
+		// Explain what an empty key means for the vendor currently typed.
+		keyHint := "API key is optional — leave blank for endpoints without auth"
+		if ResolveOpenAICompatKey(w.config, w.oacInputs[oacRowVendor]) != "" {
+			keyHint = "a key is already saved for this vendor — leave blank to keep using it"
+		}
+		b.WriteString("\n" + dim.Render(keyHint) + "\n")
+
+		// Inline validation error from the last enter on the final row.
+		if w.oacErr != "" {
+			b.WriteString(lipgloss.NewStyle().Foreground(errorColor).Render("✗ "+w.oacErr) + "\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(helpStyle.Render("↑/↓/tab: move  type to edit  enter: next / confirm  esc: back"))
+		return b.String()
+
 	case StepBranch:
 		if w.editingBranch || w.editingBranchBase {
 			dim := lipgloss.NewStyle().Foreground(dimColor)
@@ -1986,6 +2088,18 @@ func (w WizardModel) View() string {
 				b.WriteString(fmt.Sprintf("  Qwen Base URL: %s\n", w.qwenBaseURLInput))
 			}
 		}
+		// OpenAI-compatible endpoint summary. The API key is never shown —
+		// not even masked — only whether one will be sent.
+		if pe.key == "openai-compatible" {
+			b.WriteString(fmt.Sprintf("  Vendor:        %s\n", w.oacValue(oacRowVendor)))
+			b.WriteString(fmt.Sprintf("  Base URL:      %s\n", w.oacValue(oacRowBaseURL)))
+			b.WriteString(fmt.Sprintf("  Model:         %s\n", w.oacValue(oacRowModel)))
+			keyState := "none (keyless endpoint)"
+			if ResolveOpenAICompatKey(w.config, w.oacValue(oacRowVendor)) != "" {
+				keyState = "saved for this vendor"
+			}
+			b.WriteString(fmt.Sprintf("  API key:       %s\n", keyState))
+		}
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("enter: create  esc: back"))
 		return b.String()
@@ -2023,6 +2137,8 @@ func (w WizardModel) listLen() int {
 		return len(w.llmGatewayOpts)
 	case StepQwenLaunchConfig:
 		return len(qwenLaunchPresets()) + 2 // vendor rows + model input + base URL input
+	case StepOpenAICompatConfig:
+		return oacRowCount // base URL, vendor, model, API key inputs
 	case StepBranch:
 		return len(w.filteredBranches)
 	case StepWorktree:
@@ -2147,9 +2263,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			// direct-only provider like qwen/cursor): force direct mode so a
 			// gateway preference saved by a previous provider can't leak in.
 			w.llmGatewayEnabled = false
-			if w.postProviderConfigStep() == StepQwenLaunchConfig {
-				w.enterQwenLaunchConfig()
-			} else {
+			if !w.enterProviderConfigStep() {
 				w.step = StepBranch
 				w.cursor = 0
 				w.cursorToCurrentBranch()
@@ -2163,9 +2277,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			w.config.LLMGatewayEnabled = w.llmGatewayEnabled
 			_ = SaveConfig(w.config, ConfigPath())
 		}
-		if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
-			w.enterQwenLaunchConfig()
-		} else {
+		if !w.enterProviderConfigStep() {
 			w.step = StepBranch
 			w.cursor = 0
 			w.cursorToCurrentBranch()
@@ -2192,6 +2304,26 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		} else {
 			delete(w.envVars, "OPENAI_MODEL")
 		}
+		w.step = StepBranch
+		w.cursor = 0
+		w.cursorToCurrentBranch()
+	case StepOpenAICompatConfig:
+		// Validate; on failure stay on the step and show the error inline.
+		vendor, baseURL, model := w.oacValue(oacRowVendor), w.oacValue(oacRowBaseURL), w.oacValue(oacRowModel)
+		if err := ValidateOpenAICompatEndpoint(baseURL, vendor, model); err != nil {
+			w.oacErr = err.Error()
+			return w, nil
+		}
+		w.oacErr = ""
+		// Remember the endpoint for the next wizard run and store a newly
+		// typed key in the vendor's own slot (a blank key keeps any saved one).
+		if w.config != nil {
+			w.config.OpenAICompat = OpenAICompatConfig{LastBaseURL: baseURL, LastVendor: vendor, LastModel: model}
+			w.config.SaveOpenAICompatKey(vendor, w.oacInputs[oacRowAPIKey])
+			_ = SaveConfig(w.config, ConfigPath())
+		}
+		// Drop the typed key from wizard state now that it is stored.
+		w.oacInputs[oacRowAPIKey] = ""
 		w.step = StepBranch
 		w.cursor = 0
 		w.cursorToCurrentBranch()
@@ -2350,6 +2482,12 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			EnvVars:              w.envVars,
 			LLMGatewayEnabled:    w.llmGatewayEnabled,
 		}
+		// openai-compatible: carry the endpoint entered in the wizard.
+		if pe.key == "openai-compatible" {
+			w.result.Vendor = w.oacValue(oacRowVendor)
+			w.result.BaseURL = w.oacValue(oacRowBaseURL)
+			w.result.Model = w.oacValue(oacRowModel)
+		}
 		w.done = true
 	}
 	return w, nil
@@ -2483,20 +2621,23 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 			w.cancelled = true
 			return w, nil
 		}
-		// Reverse of advance(): qwen launch config first, then LLM gateway,
-		// else fall back to the provider step.
-		if w.postProviderConfigStep() == StepQwenLaunchConfig {
-			w.enterQwenLaunchConfig()
-		} else if w.shouldShowGatewayStep() {
+		// Reverse of advance(): provider config step (qwen / openai-compatible)
+		// first, then LLM gateway, else fall back to the provider step.
+		if w.enterProviderConfigStep() {
+			return w, nil
+		}
+		if w.shouldShowGatewayStep() {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
 		} else {
 			w.step = StepProvider
 			w.cursor = w.selectedProvider
 		}
-	case StepQwenLaunchConfig:
+	case StepQwenLaunchConfig, StepOpenAICompatConfig:
 		// Reverse of advance(): if the user came from the gateway step, return
-		// there; otherwise jump back to the provider step.
+		// there; otherwise jump back to the provider step. (openai-compatible
+		// never shows the gateway step, so it always returns to the provider.)
+		w.oacErr = ""
 		if w.shouldShowGatewayStep() {
 			w.step = StepLLMGateway
 			w.cursor = w.selectedLLMGateway
@@ -2804,7 +2945,56 @@ func (w WizardModel) postProviderConfigStep() WizardStep {
 	if pe.key == "qwen" {
 		return StepQwenLaunchConfig
 	}
+	// openai-compatible always needs an endpoint before branch selection.
+	if pe.key == "openai-compatible" {
+		return StepOpenAICompatConfig
+	}
 	return StepBranch
+}
+
+// enterProviderConfigStep enters the provider-specific config step that
+// follows provider/gateway selection, if the selected provider has one.
+// Returns false when there is none, so the caller moves on to branch.
+func (w *WizardModel) enterProviderConfigStep() bool {
+	switch w.postProviderConfigStep() {
+	case StepQwenLaunchConfig:
+		w.enterQwenLaunchConfig()
+		return true
+	case StepOpenAICompatConfig:
+		w.enterOpenAICompatConfig()
+		return true
+	}
+	return false
+}
+
+// Row indices of the StepOpenAICompatConfig inputs, in display order.
+const (
+	oacRowBaseURL = iota
+	oacRowVendor
+	oacRowModel
+	oacRowAPIKey
+	oacRowCount // number of rows
+)
+
+// enterOpenAICompatConfig moves to the endpoint step. On first entry the
+// base URL / vendor / model are prefilled from the last values used; the
+// API key input always starts empty (a saved key is reused when left blank).
+func (w *WizardModel) enterOpenAICompatConfig() {
+	w.step = StepOpenAICompatConfig
+	w.cursor = oacRowBaseURL
+	w.oacErr = ""
+	if !w.oacInitialized && w.config != nil {
+		w.oacInitialized = true
+		last := w.config.OpenAICompat
+		w.oacInputs[oacRowBaseURL] = last.LastBaseURL
+		w.oacInputs[oacRowVendor] = last.LastVendor
+		w.oacInputs[oacRowModel] = last.LastModel
+	}
+}
+
+// oacValue returns an endpoint input with surrounding whitespace removed.
+func (w WizardModel) oacValue(row int) string {
+	return strings.TrimSpace(w.oacInputs[row])
 }
 
 // enterQwenLaunchConfig is called when transitioning into the step. Seeds
