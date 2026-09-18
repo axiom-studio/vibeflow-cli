@@ -809,7 +809,7 @@ func TestParseAgentSelection(t *testing.T) {
 
 func TestBootstrapAgents_OrderAndKeys(t *testing.T) {
 	got := agentKeys(bootstrapAgents())
-	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro", "copilot"}
+	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro", "copilot", "qwen"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("agent order = %v, want %v", got, want)
 	}
@@ -1159,5 +1159,100 @@ func TestBackupDir_IsNotWorldReadable(t *testing.T) {
 	}
 	if got := dirMode(t, filepath.Join(root, ".backup")); got != 0o700 {
 		t.Errorf("backup dir mode = %04o, want 0700", got)
+	}
+}
+
+func TestBootstrapAgents_QwenUsesHTTPURLFormat(t *testing.T) {
+	var qwen bootstrapAgent
+	for _, a := range bootstrapAgents() {
+		if a.key == "qwen" {
+			qwen = a
+		}
+	}
+	if qwen.entry == nil {
+		t.Fatal("qwen bootstrap agent missing entry builder")
+	}
+	entry := qwen.entry("https://cloud.example/rest/v1/vibeflow/mcp", "raw-key")
+	// qwen declares streamable HTTP with httpUrl; a plain url would mean SSE.
+	if entry["httpUrl"] != "https://cloud.example/rest/v1/vibeflow/mcp" {
+		t.Errorf("httpUrl = %v", entry["httpUrl"])
+	}
+	if _, ok := entry["url"]; ok {
+		t.Error("qwen entry must not set url (qwen reads url as SSE)")
+	}
+	if !equalJSON(entry["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("timeout = %v, want %d", entry["timeout"], mcpClientTimeoutMS)
+	}
+	// The bearer is an env reference; the raw key is never written.
+	headers, _ := entry["headers"].(map[string]any)
+	if headers["Authorization"] != mcpBearerRef {
+		t.Errorf("Authorization = %v, want %s", headers["Authorization"], mcpBearerRef)
+	}
+	data, _ := json.Marshal(entry)
+	if strings.Contains(string(data), "raw-key") {
+		t.Error("qwen entry contains the raw API key")
+	}
+	if normalizeAgentKey("qwen-code") != "qwen" {
+		t.Error("alias qwen-code does not resolve to qwen")
+	}
+}
+
+func TestBootstrapAndUninstall_QwenPreservesOtherSettings(t *testing.T) {
+	withTempRoot(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	// An existing qwen settings file with unrelated settings and another server.
+	settings := filepath.Join(home, ".qwen", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	existing := `{"theme":"dark","mcpServers":{"other":{"command":"other-mcp"}}}`
+	if err := os.WriteFile(settings, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+
+	run := func(args ...string) {
+		t.Helper()
+		root := newBootstrapTestRoot()
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out.String())
+		}
+	}
+
+	run("bootstrap", "--api-key", "K", "--config", cfgPath, "--agents", "qwen")
+	got := readJSONFile(t, settings)
+	entry := mcpServerEntry(t, got, "vibeflow")
+	if entry["httpUrl"] != defaultBootstrapBaseURL+mcpEndpointPath {
+		t.Errorf("httpUrl = %v", entry["httpUrl"])
+	}
+	if got["theme"] != "dark" {
+		t.Error("bootstrap dropped an unrelated qwen setting")
+	}
+	mcpServerEntry(t, got, "other") // unrelated server kept
+	if raw, _ := os.ReadFile(settings); strings.Contains(string(raw), `"K"`) {
+		t.Error("API key written into qwen settings")
+	}
+
+	// Re-running is idempotent.
+	before, _ := os.ReadFile(settings)
+	run("bootstrap", "--api-key", "K", "--config", cfgPath, "--agents", "qwen")
+	if after, _ := os.ReadFile(settings); string(after) != string(before) {
+		t.Error("second bootstrap changed qwen settings")
+	}
+
+	run("uninstall", "--config", cfgPath, "--agents", "qwen")
+	got = readJSONFile(t, settings)
+	servers, _ := got["mcpServers"].(map[string]any)
+	if _, ok := servers["vibeflow"]; ok {
+		t.Error("uninstall left the vibeflow entry")
+	}
+	if _, ok := servers["other"]; !ok || got["theme"] != "dark" {
+		t.Error("uninstall removed unrelated qwen settings")
 	}
 }
