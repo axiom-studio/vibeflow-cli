@@ -2086,6 +2086,9 @@ func (w WizardModel) View() string {
 		if w.routing == RoutingShell {
 			if urlVar, baseURL := DetectShellEndpoint(pe.key); baseURL != "" {
 				b.WriteString(fmt.Sprintf("  Endpoint:      %s (from %s)\n", displayEndpointURL(baseURL), urlVar))
+				if shellEndpointSendsLogin(pe.key) {
+					b.WriteString(fmt.Sprintf("  Warning:       %s\n", shellLoginWarning))
+				}
 			}
 		}
 		// Qwen launch config summary — shown whenever the qwen step ran
@@ -2946,6 +2949,14 @@ func (w WizardModel) afterProviderSelected() (WizardModel, tea.Cmd) {
 	return w, nil
 }
 
+// selectedProviderKey returns the key of the selected harness, or "".
+func (w WizardModel) selectedProviderKey() string {
+	if w.selectedProvider >= 0 && w.selectedProvider < len(w.providers) {
+		return w.providers[w.selectedProvider].key
+	}
+	return ""
+}
+
 // routingOption is one row of the Routing step.
 type routingOption struct {
 	mode    string // RoutingGateway / RoutingDirect / RoutingEndpoint
@@ -2974,7 +2985,13 @@ func (w WizardModel) routingOptions() []routingOption {
 		if problem := shellEndpointProblem(baseURL); problem != "" {
 			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", urlVar + " " + problem, false})
 		} else {
-			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", urlVar + " = " + displayEndpointURL(baseURL), true})
+			note := urlVar + " = " + displayEndpointURL(baseURL)
+			// Still selectable, but the user must see that their login
+			// would go to this URL (and it is not pre-selected).
+			if shellEndpointSendsLogin(key) {
+				note += "; " + shellLoginWarning
+			}
+			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", note, true})
 			directNote = "ignores the detected endpoint"
 		}
 	}
@@ -2997,7 +3014,7 @@ func (w *WizardModel) enterRoutingStep() {
 	preferred := w.routing
 	if !w.routingChosen {
 		for _, opt := range opts {
-			if opt.mode == RoutingShell && opt.enabled {
+			if opt.mode == RoutingShell && opt.enabled && !shellEndpointSendsLogin(w.selectedProviderKey()) {
 				preferred = RoutingShell
 			}
 		}

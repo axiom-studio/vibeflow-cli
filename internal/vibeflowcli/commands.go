@@ -269,6 +269,9 @@ func launchCmd() *cobra.Command {
 			var shellURL string
 			if routing == RoutingShell {
 				shellURL, _ = ResolveShellEndpoint(provider)
+				if shellEndpointSendsLogin(provider) {
+					fmt.Fprintf(os.Stderr, "warning: --routing shell: %s\n", shellLoginWarning)
+				}
 				for k, v := range BuildShellEndpointEnv(provider, shellURL) {
 					baseEnv[k] = v
 				}
