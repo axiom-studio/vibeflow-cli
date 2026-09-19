@@ -216,6 +216,7 @@ func endpointTestProviders() map[string]Provider {
 func endpointWizardFixture(t *testing.T, cfg *Config, providerKey string) WizardModel {
 	t.Helper()
 	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	clearShellEndpoints(t) // the host shell may export one
 	cfg.Providers = endpointTestProviders()
 	wm := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
 	wm.selectedSessionType = 0 // vanilla
@@ -661,7 +662,7 @@ func TestValidateRoutingFlags(t *testing.T) {
 		{"direct", "copilot", RoutingDirect, false, "", "", "", nil},
 		{"endpoint complete", "copilot", RoutingEndpoint, false, url, vendor, model, nil},
 		{"endpoint without vendor", "codex", RoutingEndpoint, false, url, "", model, nil},
-		{"unknown routing", "claude", "proxy", false, "", "", "", []string{"--routing must be gateway, direct or endpoint"}},
+		{"unknown routing", "claude", "proxy", false, "", "", "", []string{"--routing must be gateway, direct, endpoint or shell"}},
 		{"--llm-gateway conflicts with direct", "claude", RoutingDirect, true, "", "", "", []string{"--llm-gateway conflicts with --routing direct"}},
 		{"--llm-gateway conflicts with endpoint", "claude", RoutingEndpoint, true, url, "", model, []string{"conflicts"}},
 		{"--base-url without endpoint", "claude", "", false, url, "", "", []string{"only valid with --routing endpoint"}},

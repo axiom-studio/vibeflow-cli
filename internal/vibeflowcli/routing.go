@@ -16,7 +16,12 @@
 
 package vibeflowcli
 
-import "strings"
+import (
+	"fmt"
+	"net/url"
+	"os"
+	"strings"
+)
 
 // Routing modes: how a harness reaches its model.
 const (
@@ -28,6 +33,9 @@ const (
 	// RoutingEndpoint connects to a user-supplied compatible endpoint
 	// (hosted API, LiteLLM, vLLM, ...).
 	RoutingEndpoint = "endpoint"
+	// RoutingShell keeps the endpoint already configured in the user's shell
+	// (e.g. ANTHROPIC_BASE_URL) instead of clearing it for direct routing.
+	RoutingShell = "shell"
 )
 
 // endpointAPIFormats lists the harnesses that can use a compatible endpoint
@@ -191,4 +199,138 @@ func AppendEndpointFlags(command, providerKey, baseURL string) string {
 		command += " --auth-type openai"
 	}
 	return command
+}
+
+// shellEndpoint describes how a harness is pointed at an endpoint from the
+// shell: the variable holding the URL and the variables that go with it
+// (credentials, model), which are passed through unchanged.
+type shellEndpoint struct {
+	urlVar  string
+	related []string
+}
+
+// shellEndpoints lists, per harness, the shell variables that configure a
+// custom endpoint. Cursor and Kiro have none.
+var shellEndpoints = map[string]shellEndpoint{
+	"claude": {"ANTHROPIC_BASE_URL", []string{
+		"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+	}},
+	"copilot": {"COPILOT_PROVIDER_BASE_URL", []string{
+		"COPILOT_PROVIDER_TYPE", "COPILOT_PROVIDER_API_KEY", "COPILOT_PROVIDER_BEARER_TOKEN", "COPILOT_PROVIDER_WIRE_API", "COPILOT_MODEL",
+	}},
+	// Codex ignores OPENAI_BASE_URL itself (verified on 0.154), so the URL is
+	// applied through the same -c model provider flags as endpoint routing.
+	"codex":  {"OPENAI_BASE_URL", []string{"OPENAI_API_KEY"}},
+	"qwen":   {"OPENAI_BASE_URL", []string{"OPENAI_API_KEY", "OPENAI_MODEL"}},
+	"gemini": {"GOOGLE_GEMINI_BASE_URL", []string{"GEMINI_API_KEY"}},
+}
+
+// DetectShellEndpoint reports the endpoint configured for the harness in the
+// current environment: the variable name and its URL, or "" when none is set.
+func DetectShellEndpoint(providerKey string) (urlVar, baseURL string) {
+	se, ok := shellEndpoints[providerKey]
+	if !ok {
+		return "", ""
+	}
+	return se.urlVar, strings.TrimSpace(os.Getenv(se.urlVar))
+}
+
+// shellEndpointProblem returns why a detected URL can't be used, or "".
+// Launch commands and spawn logs carry the URL, so it must not hold
+// credentials, the same rule as for a typed endpoint.
+func shellEndpointProblem(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	switch {
+	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
+		return "not an http(s) URL"
+	case u.User != nil:
+		return "contains credentials (user:password@)"
+	case u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(baseURL, "?#"):
+		return "contains a query string or fragment"
+	}
+	return ""
+}
+
+// ResolveShellEndpoint returns the usable endpoint URL configured in the
+// shell for the harness, or an error naming what is missing or wrong.
+func ResolveShellEndpoint(providerKey string) (string, error) {
+	urlVar, baseURL := DetectShellEndpoint(providerKey)
+	if urlVar == "" {
+		return "", fmt.Errorf("provider %q cannot use an endpoint from the shell", providerKey)
+	}
+	if baseURL == "" {
+		return "", fmt.Errorf("no endpoint configured in the shell: %s is not set", urlVar)
+	}
+	if problem := shellEndpointProblem(baseURL); problem != "" {
+		return "", fmt.Errorf("%s %s", urlVar, problem)
+	}
+	return baseURL, nil
+}
+
+// BuildShellEndpointEnv returns the session env for shell routing: the
+// endpoint URL and every related variable set in the current environment,
+// passed explicitly so the session uses exactly what the user's shell has
+// (a pane otherwise inherits the tmux server's env, which may be older).
+func BuildShellEndpointEnv(providerKey, baseURL string) map[string]string {
+	env := make(map[string]string)
+	se, ok := shellEndpoints[providerKey]
+	if !ok {
+		return env
+	}
+	env[se.urlVar] = baseURL
+	for _, name := range se.related {
+		if v := os.Getenv(name); v != "" {
+			env[name] = v
+		}
+	}
+	if providerKey == "codex" {
+		// Codex gets the URL through AppendShellEndpointFlags; a blank
+		// OPENAI_BASE_URL keeps the gateway provider flags off, and env_key
+		// needs a value even for a keyless endpoint.
+		env["OPENAI_BASE_URL"] = ""
+		if env["OPENAI_API_KEY"] == "" {
+			env["OPENAI_API_KEY"] = openAICompatNoKey
+		}
+	}
+	return env
+}
+
+// AppendShellEndpointFlags appends the launch flags shell routing needs:
+// Codex's temporary model provider pointing at the shell URL. Other
+// harnesses read their endpoint from the env.
+func AppendShellEndpointFlags(command, providerKey, baseURL string) string {
+	if providerKey != "codex" {
+		return command
+	}
+	return AppendEndpointFlags(command, providerKey, baseURL)
+}
+
+// ClearShellEndpointEnv blanks an endpoint configured in the shell when the
+// user explicitly chose direct routing for a harness whose direct mode would
+// otherwise pick it up. Claude Code, Codex and Gemini CLI are already cleared
+// by ClearLLMGatewayEnv; Qwen Code's direct flow sets its own endpoint.
+// Returns nothing when no such endpoint is set, so launches without one are
+// unchanged.
+func ClearShellEndpointEnv(providerKey string) map[string]string {
+	env := make(map[string]string)
+	if providerKey != "copilot" {
+		return env
+	}
+	// Copilot switches to BYOK whenever COPILOT_PROVIDER_BASE_URL is set.
+	if urlVar, baseURL := DetectShellEndpoint(providerKey); baseURL != "" {
+		env[urlVar] = ""
+	}
+	return env
+}
+
+// displayEndpointURL returns a URL safe to show on screen: credentials,
+// query and fragment removed.
+func displayEndpointURL(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "(unparseable URL)"
+	}
+	u.User, u.RawQuery, u.Fragment, u.RawFragment, u.ForceQuery = nil, "", "", "", false
+	return u.String()
 }
