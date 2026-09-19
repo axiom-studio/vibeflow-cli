@@ -1344,6 +1344,20 @@ func GetGitBranch(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// GetGitRemoteURL returns the URL of the "origin" remote for dir, or "" when
+// dir is empty, not a git repo, or has no origin. Like GetGitBranch, an empty
+// dir is refused so vibeflow-cli's own repo is never reported by mistake.
+func GetGitRemoteURL(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // ListSessionNames returns the full tmux names of all vibeflow sessions.
 // Useful for passing to Store.Sync() to clean up orphaned metadata.
 func (tm *TmuxManager) ListSessionNames() ([]string, error) {

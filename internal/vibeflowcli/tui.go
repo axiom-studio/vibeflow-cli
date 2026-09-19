@@ -1722,7 +1722,16 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	// vibeflow sessions — even if session_init failed, the agent has MCP
 	// access and will call session_init itself on startup.
 	if result.SessionType == "vibeflow" {
-		initPrompt := BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona)
+		// Tell the agent the exact values to register with (session ID,
+		// harness, model, repo) so it never has to guess them.
+		initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona), SessionIdentity{
+			SessionID:    name,
+			AgentType:    agentTypeForProvider(provider),
+			AgentModel:   result.Model,
+			GitBranch:    branch,
+			GitRemoteURL: GetGitRemoteURL(workDir),
+			WorkingDir:   workDir,
+		})
 		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
 	}
 	command, err = WrapOpenShellCommand(command, m.config.OpenShell)

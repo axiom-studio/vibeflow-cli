@@ -347,7 +347,16 @@ func launchCmd() *cobra.Command {
 					if mcpName == "" {
 						mcpName = DefaultMCPToolName
 					}
-					initPrompt := BuildVibeflowInitPrompt(mcpName, sessionProject, p)
+					// Tell the agent the exact values to register with so it
+					// never guesses its session ID, harness, model or repo.
+					initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(mcpName, sessionProject, p), SessionIdentity{
+						SessionID:    sessionName,
+						AgentType:    agentTypeForProvider(provider),
+						AgentModel:   sessionModel,
+						GitBranch:    branch,
+						GitRemoteURL: GetGitRemoteURL(workDir),
+						WorkingDir:   workDir,
+					})
 					if cloudDispatch {
 						initPrompt = BuildVibeflowCloudDispatchInitPrompt(mcpName, sessionProject, p, sessionName)
 					}
@@ -875,7 +884,19 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		projectName = cfg.DefaultProject
 	}
 	if meta.SessionType == "vibeflow" {
-		initPrompt := BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona)
+		// Re-register with the same identity the session was launched with.
+		registeredID := meta.VibeFlowSessionID
+		if registeredID == "" {
+			registeredID = meta.Name
+		}
+		initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona), SessionIdentity{
+			SessionID:    registeredID,
+			AgentType:    agentTypeForProvider(provider),
+			AgentModel:   meta.Model,
+			GitBranch:    branch,
+			GitRemoteURL: GetGitRemoteURL(workDir),
+			WorkingDir:   workDir,
+		})
 		if meta.CloudDispatch || meta.DispatchMode == "cloud_queue" {
 			sessionID := meta.VibeFlowSessionID
 			if sessionID == "" {
