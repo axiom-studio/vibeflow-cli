@@ -702,26 +702,27 @@ const openAICompatKeyPrefix = "OPENAI_COMPAT_API_KEY_"
 // openai-compatible API key for vendor. The vendor is encoded like qwen's
 // endpoint segment: uppercased, each run of non-alphanumerics becomes one
 // underscore ("my-proxy.local" → OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL).
-// Returns "" when the vendor has no letters or digits, so a key is never
-// stored under the bare prefix.
+// The vendor is an optional display label: when it is empty (or has no
+// letters or digits) the key lives in the single default slot
+// OPENAI_COMPAT_API_KEY.
 func OpenAICompatKeyEnvName(vendor string) string {
 	// Encode the vendor into an env-var-safe suffix.
 	enc := encodeQwenEnvSegment(vendor)
-	// No usable suffix → no slot.
+	// No usable suffix → the default slot shared by unlabelled endpoints.
 	if enc == "" {
-		return ""
+		return openAICompatDefaultKey
 	}
 	return openAICompatKeyPrefix + enc
 }
+
+// openAICompatDefaultKey holds the endpoint API key when no vendor is set.
+const openAICompatDefaultKey = "OPENAI_COMPAT_API_KEY"
 
 // ResolveOpenAICompatKey returns the API key for vendor: the shell env var
 // wins over the saved config value. Returns "" when neither is set (keyless
 // endpoint). It never reads the shared OPENAI_API_KEY slot.
 func ResolveOpenAICompatKey(cfg *Config, vendor string) string {
 	name := OpenAICompatKeyEnvName(vendor)
-	if name == "" {
-		return ""
-	}
 	// 1. Shell export, e.g. OPENAI_COMPAT_API_KEY_MY_PROXY=... vibeflow launch.
 	if val := cleanEnvToken(os.Getenv(name)); val != "" {
 		return val
@@ -739,7 +740,8 @@ func ResolveOpenAICompatKey(cfg *Config, vendor string) string {
 func (c *Config) SaveOpenAICompatKey(vendor, key string) {
 	name := OpenAICompatKeyEnvName(vendor)
 	key = cleanEnvToken(key)
-	if name == "" || key == "" {
+	// An empty key never overwrites one saved earlier.
+	if key == "" {
 		return
 	}
 	// Lazily create the map for configs that have never saved an env var.
@@ -767,10 +769,7 @@ func ValidateOpenAICompatEndpoint(baseURL, vendor, model string) error {
 	if u.RawQuery != "" || u.Fragment != "" || strings.Contains(baseURL, "?") || strings.Contains(baseURL, "#") {
 		return fmt.Errorf("base URL must not contain a query string or fragment — put an API key in the API key field or OPENAI_COMPAT_API_KEY_<VENDOR>")
 	}
-	// The vendor names the key slot, so it needs at least one letter or digit.
-	if OpenAICompatKeyEnvName(vendor) == "" {
-		return fmt.Errorf("vendor is required (letters or digits, e.g. my-proxy)")
-	}
+	// The vendor is an optional label, so it is not validated here.
 	// The model id is passed verbatim to the endpoint.
 	if strings.TrimSpace(model) == "" {
 		return fmt.Errorf("model is required")

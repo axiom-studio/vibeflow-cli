@@ -205,9 +205,15 @@ func launchCmd() *cobra.Command {
 				}
 			}
 
+			// How the harness reaches its model: gateway, direct or a
+			// compatible endpoint. Gateway availability is resolved first
+			// because it depends on the provider.
+			gatewayEnabled, warnGatewayIgnored := GatewayEnabledForProvider(llmGateway, cfg.LLMGatewayEnabled, provider)
+			routing := resolveRouting("", gatewayEnabled, provider)
+
 			// Resolve provider env vars (e.g. codex bearer token).
 			envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
-			if missingVar != "" {
+			if missingVar != "" && !endpointSuppliesKey(routing, missingVar) {
 				return fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 			}
 			baseEnv := cloneStringMap(prov.Env)
@@ -225,7 +231,6 @@ func launchCmd() *cobra.Command {
 			// gateway-related vars to prevent inheritance from the parent shell.
 			// Providers that connect directly (qwen, cursor) never route through
 			// the gateway; warn if the user explicitly asked via --llm-gateway.
-			gatewayEnabled, warnGatewayIgnored := GatewayEnabledForProvider(llmGateway, cfg.LLMGatewayEnabled, provider)
 			if warnGatewayIgnored {
 				fmt.Fprintf(os.Stderr, "warning: --llm-gateway ignored for provider %q — it connects directly to the provider\n", provider)
 			}
@@ -317,10 +322,15 @@ func launchCmd() *cobra.Command {
 					}
 					sessionEnv["OPENAI_MODEL"] = sessionModel
 				}
-				// openai-compatible: point the session at --base-url with this
+				// Endpoint routing: point the harness at --base-url with this
 				// persona's model and the vendor's key (or the keyless placeholder).
-				if provider == "openai-compatible" {
-					applyOpenAICompatEnv(sessionEnv, cfg, vendor, baseURL, sessionModel)
+				if routing == RoutingEndpoint {
+					if sessionEnv == nil {
+						sessionEnv = make(map[string]string)
+					}
+					for k, v := range BuildEndpointEnv(provider, cfg, vendor, baseURL, sessionModel) {
+						sessionEnv[k] = v
+					}
 				}
 				command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
 					WorkDir:         workDir,
@@ -337,6 +347,9 @@ func launchCmd() *cobra.Command {
 				// flags so the agents see the routed configuration explicitly on
 				// every launch path.
 				command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
+				if routing == RoutingEndpoint {
+					command = AppendEndpointFlags(command, provider, baseURL)
+				}
 				applyQwenModelPassthrough(provider, sessionEnv)
 				command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
@@ -413,6 +426,7 @@ func launchCmd() *cobra.Command {
 					Model:             sessionModel,
 					Vendor:            vendor,  // openai-compatible only; restart re-resolves the key
 					BaseURL:           baseURL, // openai-compatible only; restart reconnects here
+					Routing:           routing, // restart reconnects the same way
 					LLMGatewayEnabled: gatewayEnabled,
 					OpenShell:         openShellMeta(openShellCfg),
 					CreatedAt:         time.Now(),
@@ -790,11 +804,14 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		provider = "claude"
 	}
 
-	// An openai-compatible session can only be relaunched against the
-	// endpoint and model it was created with. Fail before touching the old
-	// pane rather than start qwen pointed at a default endpoint.
-	if provider == "openai-compatible" && (meta.BaseURL == "" || meta.Model == "") {
-		return SessionMeta{}, fmt.Errorf("restart openai-compatible session %q: session metadata is missing the base URL or model — launch a new session instead", meta.Name)
+	// Relaunch the same way the session was launched.
+	routing := routingForMeta(meta)
+
+	// An endpoint session can only be relaunched against the endpoint and
+	// model it was created with. Fail before touching the old pane rather
+	// than start the harness pointed at its default backend.
+	if routing == RoutingEndpoint && (meta.BaseURL == "" || meta.Model == "") {
+		return SessionMeta{}, fmt.Errorf("restart %s session %q: session metadata is missing the endpoint base URL or model — launch a new session instead", provider, meta.Name)
 	}
 
 	prov, ok := registry.Get(provider)
@@ -828,7 +845,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 
 	// Resolve provider env vars.
 	envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
-	if missingVar != "" {
+	if missingVar != "" && !endpointSuppliesKey(routing, missingVar) {
 		return SessionMeta{}, fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 	}
 	sessionEnv := cloneStringMap(prov.Env)
@@ -842,7 +859,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 
 	// LLM gateway env vars.
-	if meta.LLMGatewayEnabled {
+	if routing == RoutingGateway {
 		if sessionEnv == nil {
 			sessionEnv = make(map[string]string)
 		}
@@ -870,10 +887,13 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		}
 		sessionEnv["OPENAI_MODEL"] = meta.Model
 	}
-	// Reconnect openai-compatible sessions to their stored endpoint/model and
+	// Reconnect endpoint sessions to their stored endpoint/model and
 	// re-resolve the vendor's key (never stored in metadata).
-	if provider == "openai-compatible" {
-		applyOpenAICompatEnv(sessionEnv, cfg, meta.Vendor, meta.BaseURL, meta.Model)
+	if routing == RoutingEndpoint {
+		for k, v := range BuildEndpointEnv(provider, cfg, meta.Vendor, meta.BaseURL, meta.Model) {
+			sessionEnv[k] = v
+		}
+		command = AppendEndpointFlags(command, provider, meta.BaseURL)
 	}
 	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
@@ -1018,6 +1038,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		Model:                  meta.Model,
 		Vendor:                 meta.Vendor,  // keep the endpoint for the next restart
 		BaseURL:                meta.BaseURL, // keep the endpoint for the next restart
+		Routing:                routing,      // keep the routing for the next restart
 		LLMGatewayEnabled:      meta.LLMGatewayEnabled,
 		MCPToolName:            meta.MCPToolName,
 		OpenShell:              meta.OpenShell,

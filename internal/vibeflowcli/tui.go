@@ -1606,12 +1606,16 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 
 // executeLaunch performs the actual session creation after conflict resolution.
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
-	// An openai-compatible launch without an endpoint (e.g. a quick switch or
-	// team override from a session of another provider) cannot start. Fail
+	// How the harness reaches its model. The gateway only applies to
+	// VibeFlow sessions, as before.
+	routing := resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled, result.ProviderKey)
+
+	// An endpoint launch without a usable endpoint (e.g. a quick switch or
+	// team override from a session with other routing) cannot start. Fail
 	// before creating any worktree or session.
-	if result.ProviderKey == "openai-compatible" {
+	if routing == RoutingEndpoint {
 		if err := ValidateOpenAICompatEndpoint(result.BaseURL, result.Vendor, result.Model); err != nil {
-			return sessionsMsg{err: fmt.Errorf("openai-compatible session needs an endpoint — use New Session to enter it: %w", err)}
+			return sessionsMsg{err: fmt.Errorf("%s session needs a compatible endpoint — use New Session to enter it: %w", result.ProviderKey, err)}
 		}
 	}
 	workDir, worktreePath, err := m.resolveSessionWorkDir(result)
@@ -1658,6 +1662,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		ServerURL:       m.config.ServerURL,
 		SessionID:       vibeflowSessionID,
 		SkipPermissions: result.SkipPermissions,
+		Model:           result.Model, // set only for endpoint routing; passes the model flag
 		Binary:          result.Provider.Binary,
 	})
 	if err == nil && cmd != "" {
@@ -1684,7 +1689,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	// If LLM gateway is enabled, inject gateway env vars for the provider.
 	// Otherwise, explicitly clear gateway-related vars to prevent inheritance
 	// from the parent shell environment.
-	if result.SessionType == "vibeflow" && result.LLMGatewayEnabled {
+	if routing == RoutingGateway {
 		if result.Provider.Env == nil {
 			result.Provider.Env = make(map[string]string)
 		}
@@ -1701,16 +1706,21 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 	result.Provider.Env = WithMCPTokenEnv(result.Provider.Env, m.config)
 
-	// Point openai-compatible sessions at the endpoint/model chosen in the
-	// wizard and inject the vendor's key (or the keyless placeholder).
-	if provider == "openai-compatible" {
-		applyOpenAICompatEnv(result.Provider.Env, m.config, result.Vendor, result.BaseURL, result.Model)
+	// Endpoint routing: point the harness at the endpoint/model chosen in
+	// the wizard and inject the vendor's key (or the keyless placeholder).
+	if routing == RoutingEndpoint {
+		for k, v := range BuildEndpointEnv(provider, m.config, result.Vendor, result.BaseURL, result.Model) {
+			result.Provider.Env[k] = v
+		}
 	}
 
 	// Mirror Codex gateway config and qwen routed env vars onto the command
 	// line so each provider sees the explicit launch-time configuration it
 	// expects.
 	command = AppendCodexGatewayProviderFlags(command, provider, result.Provider.Env)
+	if routing == RoutingEndpoint {
+		command = AppendEndpointFlags(command, provider, result.BaseURL)
+	}
 	// For qwen, env vars alone don't always drive model reporting.
 	// Must run after env merging and before the init-prompt append so the
 	// flags land between the base command and the seed prompt argument.
@@ -1805,6 +1815,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		Model:             result.Model,   // openai-compatible: restored on restart
 		Vendor:            result.Vendor,  // openai-compatible: selects the key slot on restart
 		BaseURL:           result.BaseURL, // openai-compatible: restored on restart
+		Routing:           routing,        // restart reconnects the same way
 		LLMGatewayEnabled: result.LLMGatewayEnabled,
 		MCPToolName:       m.config.MCPToolName,
 		OpenShell:         openShellMeta(m.config.OpenShell),

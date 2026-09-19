@@ -85,6 +85,9 @@ type WizardResult struct {
 	WorkDir              string            // Project root directory selected in StepWorkDir.
 	EnvVars              map[string]string // Extra env vars to set on the tmux session.
 	LLMGatewayEnabled    bool              // True if user opted to route LLM requests through the gateway.
+	// Routing mode ("direct", "gateway", "endpoint"); empty means "derive it
+	// from LLMGatewayEnabled and the provider" (see resolveRouting).
+	Routing string
 	// Endpoint captured by StepOpenAICompatConfig (openai-compatible only).
 	Vendor  string // free-text vendor label; selects the OPENAI_COMPAT_API_KEY_<VENDOR> slot
 	BaseURL string // http(s) base URL of the OpenAI-compatible API
