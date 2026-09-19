@@ -202,6 +202,8 @@ If the harness's endpoint variable is already set in the environment you launch 
 
 These values are passed to the session explicitly, so it uses what your shell has now. **Connect directly to the provider** ignores the detected endpoint: Claude Code, Codex and Gemini CLI get it cleared as before, and Copilot gets `COPILOT_PROVIDER_BASE_URL` cleared so it uses your GitHub subscription. A detected URL with credentials, a query string or a non-http scheme is shown but can't be selected.
 
+**Claude Code login.** With only `ANTHROPIC_BASE_URL` set (no `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`), Claude Code signs in with your Claude subscription and sends that login to the detected URL. In that case the option is not pre-selected, and both it and the confirm screen say so. Headless `--routing shell` prints a warning. Unlike a compatible endpoint, shell routing does not replace your credentials. Gemini CLI is not affected: every launch path requires `GEMINI_API_KEY`, so its Google login is not used.
+
 Headless, `--routing shell` does the same and fails if the variable isn't set. Restarting a shell-routed session also fails, before launching, if the variable is gone. Without `--routing`, nothing changes.
 
 ### VibeFlow sessions

@@ -268,6 +268,19 @@ func ResolveShellEndpoint(providerKey string) (string, error) {
 	return baseURL, nil
 }
 
+// shellEndpointSendsLogin reports whether shell routing would send the
+// harness's own subscription login to the detected endpoint. Claude Code
+// authenticates with the user's login when neither ANTHROPIC_AUTH_TOKEN nor
+// ANTHROPIC_API_KEY is set, and sends it to ANTHROPIC_BASE_URL (verified on
+// 2.1.274). Gemini CLI always gets GEMINI_API_KEY, since every launch path
+// requires it, so its Google login is not used.
+func shellEndpointSendsLogin(providerKey string) bool {
+	return providerKey == "claude" && os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" && os.Getenv("ANTHROPIC_API_KEY") == ""
+}
+
+// shellLoginWarning explains what shellEndpointSendsLogin guards against.
+const shellLoginWarning = "no ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY is set, so your Claude login would be sent to this URL"
+
 // BuildShellEndpointEnv returns the session env for shell routing: the
 // endpoint URL and every related variable set in the current environment,
 // passed explicitly so the session uses exactly what the user's shell has

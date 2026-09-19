@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -199,6 +200,47 @@ func TestWizard_DetectedEndpointIsOfferedAndPreselected(t *testing.T) {
 	}
 }
 
+func TestShellEndpointSendsLogin(t *testing.T) {
+	clearShellEndpoints(t)
+	if !shellEndpointSendsLogin("claude") {
+		t.Error("claude without a token must be flagged")
+	}
+	for _, v := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
+		t.Setenv(v, "sk-x")
+		if shellEndpointSendsLogin("claude") {
+			t.Errorf("claude with %s must not be flagged", v)
+		}
+		t.Setenv(v, "")
+	}
+	for _, p := range []string{"copilot", "codex", "qwen", "gemini"} {
+		if shellEndpointSendsLogin(p) {
+			t.Errorf("%s must not be flagged", p)
+		}
+	}
+}
+
+func TestWizard_DetectedEndpointWarnsBeforeSendingClaudeLogin(t *testing.T) {
+	w := endpointWizardFixture(t, &Config{}, "claude")
+	t.Setenv("ANTHROPIC_BASE_URL", "http://proxy.local:4000")
+	w, _ = w.advance()
+	opts := w.routingOptions()
+	if opts[0].mode != RoutingShell || !opts[0].enabled || !strings.Contains(opts[0].note, shellLoginWarning) {
+		t.Fatalf("detected option = %+v, want selectable with the login warning", opts[0])
+	}
+	if opt := opts[w.cursor]; opt.mode != RoutingDirect {
+		t.Errorf("cursor on %q, want direct (not pre-selected)", opt.mode)
+	}
+	// Choosing it anyway: the confirm screen repeats the warning.
+	w = chooseRouting(t, w, RoutingShell)
+	w.step = StepConfirm
+	w.selectedBranch = 1
+	w.worktreeOpts = []string{"Current directory"}
+	w.permissionOpts = []string{"Yes", "No"}
+	if view := w.View(); !strings.Contains(view, "Warning:       "+shellLoginWarning) {
+		t.Errorf("confirm view missing the login warning:\n%s", view)
+	}
+}
+
 func TestWizard_DetectedEndpointChoiceIsKeptOnBack(t *testing.T) {
 	// Once the user picks direct, going back to Routing keeps that choice
 	// instead of pre-selecting the detected endpoint again.
@@ -340,8 +382,21 @@ func TestLaunchCmd_ShellRouting(t *testing.T) {
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
 		t.Fatal(err)
 	}
+	var stderr string // what the last launch printed to stderr
 	launch := func(args ...string) string {
 		t.Helper()
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved := os.Stderr
+		os.Stderr = w
+		defer func() {
+			os.Stderr = saved
+			w.Close()
+			out, _ := io.ReadAll(r)
+			stderr = string(out)
+		}()
 		root := &cobra.Command{Use: "vibeflow"}
 		root.PersistentFlags().String("config", "", "")
 		root.PersistentFlags().String("mcp", "", "")
@@ -375,6 +430,9 @@ func TestLaunchCmd_ShellRouting(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := launch(tt.args...)
+			if strings.Contains(stderr, "Claude login") {
+				t.Errorf("unexpected login warning with a token set: %s", stderr)
+			}
 			for _, want := range tt.want {
 				if !strings.Contains(got, want) {
 					t.Errorf("agent record missing %q:\n%s", want, got)
@@ -388,6 +446,19 @@ func TestLaunchCmd_ShellRouting(t *testing.T) {
 		})
 	}
 
+	// Without a token the Claude login would reach the endpoint: the launch
+	// still happens (explicit choice) but warns.
+	t.Run("claude shell without a token warns", func(t *testing.T) {
+		t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+		got := launch("--provider", "claude", "--routing", "shell")
+		if !strings.Contains(stderr, "warning: --routing shell: "+shellLoginWarning) {
+			t.Errorf("stderr = %q, want the login warning", stderr)
+		}
+		if !strings.Contains(got, "ANTHROPIC_BASE_URL=http://claude-proxy.local:4000\n") {
+			t.Errorf("session did not get the endpoint:\n%s", got)
+		}
+	})
+
 	// The routing is recorded so restart reconnects the same way.
 	metas, err := NewStore().List()
 	if err != nil {
@@ -399,8 +470,8 @@ func TestLaunchCmd_ShellRouting(t *testing.T) {
 			shellCount++
 		}
 	}
-	if shellCount != 2 {
-		t.Errorf("sessions recorded with shell routing = %d, want 2", shellCount)
+	if shellCount != 3 {
+		t.Errorf("sessions recorded with shell routing = %d, want 3", shellCount)
 	}
 }
 
