@@ -1378,8 +1378,8 @@ func TestOpenAICompatKeyEnvName(t *testing.T) {
 		{"ExampleVendor", "OPENAI_COMPAT_API_KEY_EXAMPLEVENDOR"},    // mixed case
 		{"my-proxy.local", "OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL"},  // punctuation → underscore
 		{"  my  proxy -- v2 ", "OPENAI_COMPAT_API_KEY_MY_PROXY_V2"}, // runs collapse, ends trimmed
-		{"", ""},   // empty vendor → no slot
-		{"--", ""}, // no letters/digits → no slot
+		{"", "OPENAI_COMPAT_API_KEY"},                               // no vendor → default slot
+		{"--", "OPENAI_COMPAT_API_KEY"},                             // no letters/digits → default slot
 	}
 	for _, tt := range tests {
 		if got := OpenAICompatKeyEnvName(tt.vendor); got != tt.want {
@@ -1399,12 +1399,18 @@ func TestSaveOpenAICompatKey_UsesVendorSlotNotSharedKey(t *testing.T) {
 	}
 }
 
-func TestSaveOpenAICompatKey_EmptyInputsAreNoOps(t *testing.T) {
+func TestSaveOpenAICompatKey_EmptyInputs(t *testing.T) {
+	// An empty key is a no-op.
 	cfg := &Config{}
 	cfg.SaveOpenAICompatKey("example-vendor", "")
-	cfg.SaveOpenAICompatKey("", "sk-vendor")
 	if len(cfg.SavedEnvVars) != 0 {
 		t.Errorf("SavedEnvVars = %v, want empty", cfg.SavedEnvVars)
+	}
+
+	// No vendor: the key goes to the default slot.
+	cfg.SaveOpenAICompatKey("", "sk-default")
+	if got := cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY"]; got != "sk-default" {
+		t.Errorf("default slot = %q, want sk-default", got)
 	}
 
 	// A keyless relaunch must not wipe a key saved earlier.

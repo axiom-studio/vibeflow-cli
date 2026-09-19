@@ -87,7 +87,7 @@ func TestRestartSession_OpenAICompatWithoutEndpointFailsBeforeLaunch(t *testing.
 	} {
 		meta.TmuxSession = tm.FullSessionName(meta.Provider, meta.Name)
 		_, err := RestartSession(meta, cfg, tm, NewStore(), NewSessionCache(), NewProviderRegistry(cfg))
-		if err == nil || !strings.Contains(err.Error(), "missing the base URL or model") {
+		if err == nil || !strings.Contains(err.Error(), "base URL or model") {
 			t.Errorf("%s: err = %v, want missing base URL/model error", meta.Name, err)
 		}
 		if tm.HasSession(meta.TmuxSession) {
@@ -282,8 +282,6 @@ func TestWizard_OpenAICompatValidation(t *testing.T) {
 		{"empty URL", "", "example-vendor", "some-model", "base URL"},
 		{"non-http URL", "ftp://host/v1", "example-vendor", "some-model", "base URL"},
 		{"URL without host", "http://", "example-vendor", "some-model", "base URL"},
-		{"empty vendor", "http://host/v1", "", "some-model", "vendor"},
-		{"punctuation-only vendor", "http://host/v1", "--", "some-model", "vendor"},
 		{"empty model", "http://host/v1", "example-vendor", "   ", "model"},
 	}
 	for _, tt := range tests {
@@ -406,7 +404,7 @@ func TestExecuteLaunch_OpenAICompatWithoutEndpointFails(t *testing.T) {
 	m := Model{config: &Config{}}
 	msg := m.executeLaunch(WizardResult{ProviderKey: "openai-compatible", WorktreeChoice: WorktreeCurrent})
 	sm, ok := msg.(sessionsMsg)
-	if !ok || sm.err == nil || !strings.Contains(sm.err.Error(), "needs an endpoint") {
+	if !ok || sm.err == nil || !strings.Contains(sm.err.Error(), "needs a compatible endpoint") {
 		t.Errorf("executeLaunch = %#v, want endpoint error", msg)
 	}
 }
@@ -709,5 +707,21 @@ func TestMigrateProviders_StripsOpenAICompatSessionEnv(t *testing.T) {
 	}
 	if strings.Contains(string(data), "sk-leaked") {
 		t.Error("saved config still contains the leaked key")
+	}
+}
+
+func TestWizard_OpenAICompatVendorIsOptional(t *testing.T) {
+	// The vendor is a display label; leaving it blank must still launch.
+	cfg := &Config{}
+	w := oacWizardFixture(t, cfg)
+	t.Setenv("OPENAI_COMPAT_API_KEY", "")
+	w, _ = w.advance()
+	w = fillOAC(w, "http://llm-proxy.local:4000/v1", "", "some-model", "sk-no-vendor")
+	w = press(w, keyEnter)
+	if w.oacErr != "" || w.step != StepBranch {
+		t.Fatalf("err=%q step=%v, want to continue to branch with no vendor", w.oacErr, w.step)
+	}
+	if got := cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY"]; got != "sk-no-vendor" {
+		t.Errorf("default key slot = %q, want the typed key", got)
 	}
 }
