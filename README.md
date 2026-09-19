@@ -229,9 +229,9 @@ The interactive wizard walks through:
 3. **Project** - Select VibeFlow project (VibeFlow mode only)
 4. **Persona** - Developer, Principal Engineer, Architect, UX Designer, QA Lead, Security Lead, Product Manager, Project Manager, or Customer (VibeFlow mode only)
 5. **Provider** - Choose agent (Claude, Codex, Gemini, Cursor, Qwen, Kiro CLI, GitHub Copilot CLI) with availability detection
-6. **Environment token** - Enter required API keys if not already saved (e.g. `OPENAI_API_KEY` for Qwen API-key mode)
-7. **LLM Gateway** - Optional: route LLM traffic via VibeFlow server gateway
-7a. **Qwen launch config** _(qwen-only)_ - Pick a vendor preset (OpenAI / Qwen DashScope / z.ai / Custom) to auto-fill `OPENAI_BASE_URL` + `OPENAI_MODEL`; values are editable. With the LLM Gateway **on**, only the model is used (endpoint + key come from the gateway). See [Providers — Qwen launch config](docs/VibeFlow-CLI/docs/providers.md#qwen-launch-config-api-key-mode)
+6. **Environment token** - Enter required API keys if not already saved (e.g. `OPENAI_API_KEY` for Qwen API-key mode; provider keys are asked only for direct routing)
+7. **Routing** - How the agent reaches its model: Axiom Studio AI Gateway, an endpoint detected in your shell, directly to the provider, or a compatible endpoint (e.g. LiteLLM, vLLM). See [Providers — Routing](docs/VibeFlow-CLI/docs/providers.md#routing)
+7a. **Qwen launch config** _(qwen, direct or gateway routing)_ - Pick a vendor preset (OpenAI / Qwen DashScope / z.ai / Custom) to auto-fill `OPENAI_BASE_URL` + `OPENAI_MODEL`; values are editable. With the LLM Gateway **on**, only the model is used (endpoint + key come from the gateway). See [Providers — Qwen launch config](docs/VibeFlow-CLI/docs/providers.md#qwen-launch-config-api-key-mode)
 8. **Branch** - Select git branch or create new
 9. **Worktree** - Use current directory, create new worktree, or specify custom path
 10. **Permissions** - Skip permission prompts for autonomous mode
