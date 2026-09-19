@@ -89,6 +89,8 @@ func TestEndpointSuppliesKey(t *testing.T) {
 
 func TestBuildEndpointEnv(t *testing.T) {
 	const url, model = "http://llm-proxy.local:4000/v1", "some-model"
+	// Claude Code and Gemini CLI append their own versioned path.
+	const root = "http://llm-proxy.local:4000"
 	t.Setenv("OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR", "")
 	withKey := &Config{SavedEnvVars: map[string]string{"OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR": "sk-vendor"}}
 	keyless := &Config{}
@@ -110,17 +112,42 @@ func TestBuildEndpointEnv(t *testing.T) {
 		{"codex", withKey, map[string]string{"OPENAI_API_KEY": "sk-vendor", "OPENAI_BASE_URL": ""}},
 		{"codex", keyless, map[string]string{"OPENAI_API_KEY": openAICompatNoKey, "OPENAI_BASE_URL": ""}},
 		{"claude", keyless, map[string]string{ // placeholder so the subscription login is never sent
-			"ANTHROPIC_BASE_URL": url, "ANTHROPIC_AUTH_TOKEN": openAICompatNoKey, "ANTHROPIC_API_KEY": "", "ANTHROPIC_CUSTOM_HEADERS": "",
+			"ANTHROPIC_BASE_URL": root, "ANTHROPIC_AUTH_TOKEN": openAICompatNoKey, "ANTHROPIC_API_KEY": "", "ANTHROPIC_CUSTOM_HEADERS": "",
 			"ANTHROPIC_MODEL": model, "ANTHROPIC_DEFAULT_HAIKU_MODEL": model, "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
 			"ANTHROPIC_DEFAULT_OPUS_MODEL": model, "ANTHROPIC_DEFAULT_FABLE_MODEL": model,
 		}},
-		{"gemini", withKey, map[string]string{"GOOGLE_GEMINI_BASE_URL": url, "GEMINI_API_KEY": "sk-vendor"}},
+		{"gemini", withKey, map[string]string{"GOOGLE_GEMINI_BASE_URL": root, "GEMINI_API_KEY": "sk-vendor"}},
 		{"cursor", withKey, map[string]string{}}, // unsupported: nothing set
 	}
 	for _, tt := range tests {
 		got := BuildEndpointEnv(tt.provider, tt.cfg, "example-vendor", url, model)
 		if !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("BuildEndpointEnv(%s) =\n  %v\nwant\n  %v", tt.provider, got, tt.want)
+		}
+	}
+}
+
+func TestEndpointRootURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://host:4000/v1":     "http://host:4000", // documented form
+		"http://host:4000/v1/":    "http://host:4000",
+		"http://host:4000":        "http://host:4000", // root passes through
+		"http://host:4000/":       "http://host:4000",
+		"https://h/api/anthropic": "https://h/api/anthropic", // other paths untouched
+		"https://h/proxy/v1":      "https://h/proxy",
+		"https://h/v1beta":        "https://h/v1beta",
+		"https://h/v1/v1":         "https://h/v1", // only one segment removed
+	} {
+		if got := endpointRootURL(in); got != want {
+			t.Errorf("endpointRootURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Harnesses that take the /v1 URL as-is keep it.
+	for _, p := range []string{"copilot", "qwen"} {
+		for _, v := range BuildEndpointEnv(p, &Config{}, "", "http://host:4000/v1", "m") {
+			if strings.HasPrefix(v, "http://host:4000") && v != "http://host:4000/v1" {
+				t.Errorf("%s base URL = %q, want the /v1 URL unchanged", p, v)
+			}
 		}
 	}
 }
@@ -201,6 +228,7 @@ func TestRestartSession_EndpointRoutingPerHarness(t *testing.T) {
 	}
 
 	const url = "http://llm-proxy.local:4000/v1"
+	const root = "http://llm-proxy.local:4000" // claude/gemini append their own /v1 path
 	tests := []struct {
 		provider string
 		want     []string
@@ -208,13 +236,13 @@ func TestRestartSession_EndpointRoutingPerHarness(t *testing.T) {
 	}{
 		{"copilot", []string{"COPILOT_PROVIDER_BASE_URL=" + url, "COPILOT_PROVIDER_API_KEY=sk-vendor", "COPILOT_PROVIDER_BEARER_TOKEN=\n", "COPILOT_MODEL=some-model", "ARG=--model\nARG=some-model"},
 			[]string{"COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_API_KEY", "COPILOT_PROVIDER_BEARER_TOKEN"}},
-		{"claude", []string{"ANTHROPIC_BASE_URL=" + url, "ANTHROPIC_AUTH_TOKEN=sk-vendor", "ANTHROPIC_API_KEY=\n", "ANTHROPIC_MODEL=some-model"},
+		{"claude", []string{"ANTHROPIC_BASE_URL=" + root + "\n", "ANTHROPIC_AUTH_TOKEN=sk-vendor", "ANTHROPIC_API_KEY=\n", "ANTHROPIC_MODEL=some-model"},
 			[]string{"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"}},
 		{"codex", []string{"OPENAI_API_KEY=sk-vendor", "OPENAI_BASE_URL=\n", `ARG=model_providers.vibeflow-endpoint.base_url="` + url + `"`, "ARG=-m\nARG=some-model"},
 			[]string{"OPENAI_API_KEY", "OPENAI_BASE_URL"}},
 		{"qwen", []string{"OPENAI_API_KEY=sk-vendor", "OPENAI_BASE_URL=" + url, "ARG=--auth-type\nARG=openai", "ARG=--openai-base-url\nARG=" + url, "ARG=--model\nARG=some-model"},
 			[]string{"OPENAI_API_KEY", "OPENAI_BASE_URL"}},
-		{"gemini", []string{"GOOGLE_GEMINI_BASE_URL=" + url, "GEMINI_API_KEY=sk-vendor"},
+		{"gemini", []string{"GOOGLE_GEMINI_BASE_URL=" + root + "\n", "GEMINI_API_KEY=sk-vendor"},
 			[]string{"GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"}},
 	}
 	for _, tt := range tests {
