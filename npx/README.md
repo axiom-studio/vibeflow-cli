@@ -34,9 +34,8 @@ It will:
    because `vibeflow launch` cannot work without it.
 3. Run `vibeflow bootstrap --all --api-key <key>`, which writes **9 targets**: the
    MCP server config for all eight supported agents — Claude CLI, Claude Desktop,
-   Gemini CLI, Cursor, Codex CLI, **Kiro CLI**, **GitHub Copilot CLI**, **Qwen Code**
-   (also used by the OpenAI Compatible provider) — plus the `vibeflow-cli`
-   `config.yaml` that stores your API key.
+   Gemini CLI, Cursor, Codex CLI, **Kiro CLI**, **GitHub Copilot CLI**, **Qwen Code** — plus the
+   `vibeflow-cli` `config.yaml` that stores your API key.
 
    Each agent config carries the endpoint and a `${MCP_TOKEN}` reference rather
    than the key itself. Six of the seven JSON agents also get the 300000 ms
