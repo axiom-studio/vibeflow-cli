@@ -16,6 +16,8 @@
 
 package vibeflowcli
 
+import "strings"
+
 // Routing modes: how a harness reaches its model.
 const (
 	// RoutingDirect connects the harness to its own provider (subscription
@@ -129,7 +131,7 @@ func BuildEndpointEnv(providerKey string, cfg *Config, vendor, baseURL, model st
 		// Claude Code: ANTHROPIC_AUTH_TOKEN is always set so the user's
 		// subscription login is never sent to the endpoint; ANTHROPIC_API_KEY
 		// and the gateway header are blanked for the same reason.
-		env["ANTHROPIC_BASE_URL"] = baseURL
+		env["ANTHROPIC_BASE_URL"] = endpointRootURL(baseURL)
 		env["ANTHROPIC_AUTH_TOKEN"] = keyOrPlaceholder
 		env["ANTHROPIC_API_KEY"] = ""
 		env["ANTHROPIC_CUSTOM_HEADERS"] = ""
@@ -146,10 +148,20 @@ func BuildEndpointEnv(providerKey string, cfg *Config, vendor, baseURL, model st
 		}
 	case "gemini":
 		// Gemini CLI: same variables the gateway uses.
-		env["GOOGLE_GEMINI_BASE_URL"] = baseURL
+		env["GOOGLE_GEMINI_BASE_URL"] = endpointRootURL(baseURL)
 		env["GEMINI_API_KEY"] = keyOrPlaceholder
 	}
 	return env
+}
+
+// endpointRootURL returns the base URL for harnesses that append their own
+// versioned path: Claude Code adds /v1/messages and Gemini CLI adds
+// /v1beta/..., so the documented form ending in /v1 would otherwise become
+// /v1/v1/messages. One trailing "/v1" (and trailing "/") is removed; any other
+// URL passes through unchanged. The gateway wiring shapes these the same way
+// (root for claude/gemini, root + /v1 for the OpenAI-style harnesses).
+func endpointRootURL(baseURL string) string {
+	return strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/v1")
 }
 
 // codexEndpointProviderID names the temporary Codex model provider that
