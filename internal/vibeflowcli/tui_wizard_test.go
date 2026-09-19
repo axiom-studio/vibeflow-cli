@@ -931,6 +931,7 @@ func TestWizardAdvance_RoutingStepForEveryHarness(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("VIBEFLOW_ROOT", t.TempDir()) // the gateway choice is saved
+			clearShellEndpoints(t)                 // the host shell may export one
 			idx := providerIdxByKey(t, WizardModel{providers: providers}, tt.provider)
 			w := WizardModel{
 				selectedSessionType: 1,

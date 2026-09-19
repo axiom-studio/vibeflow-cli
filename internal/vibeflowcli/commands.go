@@ -257,6 +257,22 @@ func launchCmd() *cobra.Command {
 					baseEnv[k] = v
 				}
 			}
+			// An explicit --routing direct also clears an endpoint set in the
+			// shell; without --routing the existing behavior is kept.
+			if routingFlag == RoutingDirect {
+				for k, v := range ClearShellEndpointEnv(provider) {
+					baseEnv[k] = v
+				}
+			}
+			// --routing shell: pass the shell's endpoint and related vars
+			// through (validated above, so the URL is set and usable).
+			var shellURL string
+			if routing == RoutingShell {
+				shellURL, _ = ResolveShellEndpoint(provider)
+				for k, v := range BuildShellEndpointEnv(provider, shellURL) {
+					baseEnv[k] = v
+				}
+			}
 			baseEnv = WithMCPTokenEnv(baseEnv, cfg)
 
 			openShellCfg := cfg.OpenShell
@@ -357,6 +373,9 @@ func launchCmd() *cobra.Command {
 				command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
 				if routing == RoutingEndpoint {
 					command = AppendEndpointFlags(command, provider, baseURL)
+				}
+				if routing == RoutingShell {
+					command = AppendShellEndpointFlags(command, provider, shellURL)
 				}
 				applyQwenModelPassthrough(provider, sessionEnv)
 				command = AppendQwenAPIFlags(command, provider, sessionEnv)
@@ -476,7 +495,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&openshellProvidersRaw, "openshell-provider", "", "Comma-separated OpenShell provider names to attach")
 	cmd.Flags().BoolVar(&openshellNoAutoProviders, "openshell-no-auto-providers", false, "Disable OpenShell credential auto-provider discovery")
 	cmd.Flags().StringVar(&model, "model", "", "Model id to pass to each launched provider session")
-	cmd.Flags().StringVar(&routingFlag, "routing", "", "How the agent reaches its model: gateway (Axiom Studio AI Gateway), direct, or endpoint (a compatible endpoint; needs --base-url and --model)")
+	cmd.Flags().StringVar(&routingFlag, "routing", "", "How the agent reaches its model: gateway (Axiom Studio AI Gateway), direct, endpoint (a compatible endpoint; needs --base-url and --model), or shell (the endpoint already set in the environment, e.g. ANTHROPIC_BASE_URL)")
 	cmd.Flags().StringVar(&baseURL, "base-url", "", "Compatible endpoint base URL, e.g. http://localhost:4000/v1 (with --routing endpoint)")
 	cmd.Flags().StringVar(&vendor, "vendor", "", "Optional endpoint label; the API key is read from OPENAI_COMPAT_API_KEY_<VENDOR> (or OPENAI_COMPAT_API_KEY without a vendor)")
 	cmd.Flags().StringVar(&modelsRaw, "models", "", "Comma-separated persona=model overrides for team launches")
@@ -497,9 +516,9 @@ func launchCmd() *cobra.Command {
 // --base-url / --vendor are rejected without it rather than silently ignored.
 func validateRoutingFlags(provider, routing string, llmGateway bool, baseURL, vendor, model string) error {
 	switch routing {
-	case "", RoutingGateway, RoutingDirect, RoutingEndpoint:
+	case "", RoutingGateway, RoutingDirect, RoutingEndpoint, RoutingShell:
 	default:
-		return fmt.Errorf("--routing must be gateway, direct or endpoint (got %q)", routing)
+		return fmt.Errorf("--routing must be gateway, direct, endpoint or shell (got %q)", routing)
 	}
 	if llmGateway && routing != "" && routing != RoutingGateway {
 		return fmt.Errorf("--llm-gateway conflicts with --routing %s", routing)
@@ -510,6 +529,12 @@ func validateRoutingFlags(provider, routing string, llmGateway bool, baseURL, ve
 		}
 		if routing == RoutingGateway && !providerSupportsGateway(provider) {
 			return fmt.Errorf("provider %q cannot route through the Axiom Studio AI Gateway", provider)
+		}
+		// Shell routing uses the endpoint already set in the environment.
+		if routing == RoutingShell {
+			if _, err := ResolveShellEndpoint(provider); err != nil {
+				return fmt.Errorf("--routing shell: %w", err)
+			}
 		}
 		return nil
 	}
@@ -837,6 +862,15 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	if routing == RoutingEndpoint && (meta.BaseURL == "" || meta.Model == "") {
 		return SessionMeta{}, fmt.Errorf("restart %s session %q: session metadata is missing the endpoint base URL or model — launch a new session instead", provider, meta.Name)
 	}
+	// A shell-routed session needs the endpoint to still be set in this
+	// environment; otherwise it would silently restart direct.
+	var shellURL string
+	if routing == RoutingShell {
+		var err error
+		if shellURL, err = ResolveShellEndpoint(provider); err != nil {
+			return SessionMeta{}, fmt.Errorf("restart %s session %q: %w", provider, meta.Name, err)
+		}
+	}
 
 	prov, ok := registry.Get(provider)
 	if !ok {
@@ -898,6 +932,20 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 			sessionEnv[k] = v
 		}
 	}
+	// Sessions launched with direct chosen explicitly keep ignoring an
+	// endpoint set in the shell; records without a routing mode are
+	// restarted as before.
+	if meta.Routing == RoutingDirect {
+		for k, v := range ClearShellEndpointEnv(provider) {
+			sessionEnv[k] = v
+		}
+	}
+	// Shell routing: pass the shell's endpoint and related vars through.
+	if routing == RoutingShell {
+		for k, v := range BuildShellEndpointEnv(provider, shellURL) {
+			sessionEnv[k] = v
+		}
+	}
 	sessionEnv = WithMCPTokenEnv(sessionEnv, cfg)
 
 	// Mirror Codex gateway config and qwen routed env vars onto CLI flags on
@@ -918,6 +966,9 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 			sessionEnv[k] = v
 		}
 		command = AppendEndpointFlags(command, provider, meta.BaseURL)
+	}
+	if routing == RoutingShell {
+		command = AppendShellEndpointFlags(command, provider, shellURL)
 	}
 	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)

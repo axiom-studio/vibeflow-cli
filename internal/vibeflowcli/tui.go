@@ -1621,6 +1621,15 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			return sessionsMsg{err: fmt.Errorf("%s session needs a compatible endpoint — use New Session to enter it: %w", result.ProviderKey, err)}
 		}
 	}
+	// Shell routing needs the endpoint to still be configured in this
+	// environment; otherwise the session would silently go direct.
+	var shellURL string
+	if routing == RoutingShell {
+		var err error
+		if shellURL, err = ResolveShellEndpoint(result.ProviderKey); err != nil {
+			return sessionsMsg{err: err}
+		}
+	}
 	workDir, worktreePath, err := m.resolveSessionWorkDir(result)
 	if err != nil {
 		return sessionsMsg{err: err}
@@ -1707,6 +1716,19 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			result.Provider.Env[k] = v
 		}
 	}
+	// Direct routing chosen over an endpoint detected in the shell: make
+	// sure the harness doesn't pick that endpoint up anyway.
+	if routing == RoutingDirect {
+		for k, v := range ClearShellEndpointEnv(provider) {
+			result.Provider.Env[k] = v
+		}
+	}
+	// Shell routing: pass the shell's endpoint and related vars through.
+	if routing == RoutingShell {
+		for k, v := range BuildShellEndpointEnv(provider, shellURL) {
+			result.Provider.Env[k] = v
+		}
+	}
 	result.Provider.Env = WithMCPTokenEnv(result.Provider.Env, m.config)
 
 	// Endpoint routing: point the harness at the endpoint/model chosen in
@@ -1723,6 +1745,9 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	command = AppendCodexGatewayProviderFlags(command, provider, result.Provider.Env)
 	if routing == RoutingEndpoint {
 		command = AppendEndpointFlags(command, provider, result.BaseURL)
+	}
+	if routing == RoutingShell {
+		command = AppendShellEndpointFlags(command, provider, shellURL)
 	}
 	// For qwen, env vars alone don't always drive model reporting.
 	// Must run after env merging and before the init-prompt append so the

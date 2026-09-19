@@ -2080,11 +2080,18 @@ func (w WizardModel) View() string {
 			RoutingGateway:  "Axiom Studio AI Gateway",
 			RoutingDirect:   "Direct to provider",
 			RoutingEndpoint: "Compatible endpoint",
+			RoutingShell:    "Detected endpoint",
 		}[w.routing]
 		b.WriteString(fmt.Sprintf("  Routing:       %s\n", routingLabel))
-		// Qwen launch config summary — shown whenever the qwen step ran. In
-		// gateway mode the base URL is omitted (the gateway endpoint is used).
-		if pe.key == "qwen" {
+		if w.routing == RoutingShell {
+			if urlVar, baseURL := DetectShellEndpoint(pe.key); baseURL != "" {
+				b.WriteString(fmt.Sprintf("  Endpoint:      %s (from %s)\n", displayEndpointURL(baseURL), urlVar))
+			}
+		}
+		// Qwen launch config summary — shown whenever the qwen step ran
+		// (direct or gateway routing). In gateway mode the base URL is
+		// omitted (the gateway endpoint is used).
+		if pe.key == "qwen" && w.postProviderConfigStep() == StepQwenLaunchConfig {
 			presets := qwenLaunchPresets()
 			vendorLabel := "Custom"
 			if w.qwenVendorIdx >= 0 && w.qwenVendorIdx < len(presets) {
@@ -2265,8 +2272,9 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			// key prompt is dropped.
 			w.deferredEnvToken = ""
 			w.enterOpenAICompatConfig()
-		case w.routing == RoutingDirect && w.deferredEnvToken != "":
-			// Direct routing needs the provider's own API key.
+		case (w.routing == RoutingDirect || w.routing == RoutingShell) && w.deferredEnvToken != "":
+			// Direct routing needs the provider's own API key, and so does an
+			// endpoint from the shell (it uses the harness's own key vars).
 			w.envTokenVarName = w.deferredEnvToken
 			w.envTokenValue = ""
 			w.editingEnvToken = true
@@ -2959,7 +2967,18 @@ func (w WizardModel) routingOptions() []routingOption {
 	if w.shouldShowGatewayStep() {
 		opts = append(opts, routingOption{RoutingGateway, "Axiom Studio AI Gateway", "observability, cost tracking and governance", true})
 	}
-	opts = append(opts, routingOption{RoutingDirect, "Connect directly to the provider", "", true})
+	// An endpoint already configured in the shell is offered first after the
+	// gateway; the URL is shown without credentials, never the key.
+	directNote := ""
+	if urlVar, baseURL := DetectShellEndpoint(key); baseURL != "" {
+		if problem := shellEndpointProblem(baseURL); problem != "" {
+			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", urlVar + " " + problem, false})
+		} else {
+			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", urlVar + " = " + displayEndpointURL(baseURL), true})
+			directNote = "ignores the detected endpoint"
+		}
+	}
+	opts = append(opts, routingOption{RoutingDirect, "Connect directly to the provider", directNote, true})
 	if format, ok := EndpointAPIFormat(key); ok {
 		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", "needs the " + format, true})
 	} else {
@@ -2969,10 +2988,20 @@ func (w WizardModel) routingOptions() []routingOption {
 }
 
 // enterRoutingStep shows the Routing step with the cursor on the current
-// choice, falling back to direct when that choice isn't available here.
+// choice, falling back to direct when that choice isn't available here. A
+// usable endpoint detected in the shell is pre-selected until the user has
+// chosen a routing on this run.
 func (w *WizardModel) enterRoutingStep() {
 	w.step = StepLLMGateway
 	opts := w.routingOptions()
+	preferred := w.routing
+	if !w.routingChosen {
+		for _, opt := range opts {
+			if opt.mode == RoutingShell && opt.enabled {
+				preferred = RoutingShell
+			}
+		}
+	}
 	w.cursor = 0
 	for i, opt := range opts {
 		if opt.mode == RoutingDirect {
@@ -2980,7 +3009,7 @@ func (w *WizardModel) enterRoutingStep() {
 		}
 	}
 	for i, opt := range opts {
-		if opt.mode == w.routing && opt.enabled {
+		if opt.mode == preferred && opt.enabled {
 			w.cursor = i
 		}
 	}
@@ -3022,8 +3051,9 @@ func (w WizardModel) postProviderConfigStep() WizardStep {
 	}
 	pe := w.providers[w.selectedProvider]
 	// qwen's vendor presets configure its own endpoint; with endpoint
-	// routing the Endpoint step does that instead.
-	if pe.key == "qwen" && w.routing != RoutingEndpoint {
+	// routing the Endpoint step does that instead, and with shell routing
+	// the shell's OPENAI_* values do.
+	if pe.key == "qwen" && w.routing != RoutingEndpoint && w.routing != RoutingShell {
 		return StepQwenLaunchConfig
 	}
 	return StepBranch
