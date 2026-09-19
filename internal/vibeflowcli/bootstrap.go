@@ -78,7 +78,7 @@ func bootstrapAgents() []bootstrapAgent {
 		{key: "claude-desktop", label: "Claude Desktop", path: claudeDesktopConfigPath, entry: claudeDesktopEntry},
 		{key: "kiro", label: "Kiro CLI", path: kiroConfigPath, entry: jsonHTTPEntry("http", true)},
 		{key: "copilot", label: "GitHub Copilot CLI", path: copilotConfigPath, entry: copilotEntry},
-		// Qwen Code — also the agent behind the openai-compatible provider.
+		// Qwen Code — needed for VibeFlow sessions on the qwen harness.
 		{key: "qwen", label: "Qwen Code", path: qwenConfigPath, entry: qwenEntry},
 	}
 }

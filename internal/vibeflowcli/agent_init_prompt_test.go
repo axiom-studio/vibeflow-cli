@@ -520,14 +520,16 @@ Pane is dead (status 143, Mon Sep  7 18:19:42 2026)`
 	}
 }
 
-func TestOpenAICompatibleUsesQwenLaunchShape(t *testing.T) {
+func TestQwenEndpointLaunchShape(t *testing.T) {
 	env := map[string]string{
 		"OPENAI_API_KEY":  "sk-vendor",
 		"OPENAI_BASE_URL": "http://llm-proxy.local:4000/v1",
 		"OPENAI_MODEL":    "qwen3-coder",
 	}
-	cmd := AppendQwenAPIFlags("qwen --yolo", "openai-compatible", env)
-	cmd = AppendVibeflowInitPrompt(cmd, "openai-compatible", "hi")
+	// Same order as the launch paths: endpoint flags, qwen API flags, prompt.
+	cmd := AppendEndpointFlags("qwen --yolo", "qwen", env["OPENAI_BASE_URL"])
+	cmd = AppendQwenAPIFlags(cmd, "qwen", env)
+	cmd = AppendVibeflowInitPrompt(cmd, "qwen", "hi")
 	const want = `qwen --yolo --auth-type openai --openai-base-url 'http://llm-proxy.local:4000/v1' --model 'qwen3-coder' -i 'hi'`
 	if cmd != want {
 		t.Errorf("command:\n got:  %q\n want: %q", cmd, want)
@@ -537,24 +539,11 @@ func TestOpenAICompatibleUsesQwenLaunchShape(t *testing.T) {
 	}
 }
 
-func TestApplyQwenModelPassthrough_OpenAICompatible(t *testing.T) {
-	t.Setenv("OPENAI_MODEL", "glm-4.6")
-	env := map[string]string{}
-	applyQwenModelPassthrough("openai-compatible", env)
-	if env["OPENAI_MODEL"] != "glm-4.6" {
-		t.Errorf("OPENAI_MODEL = %q, want glm-4.6", env["OPENAI_MODEL"])
-	}
-}
-
-func TestAppendQwenAPIFlags_AuthTypeOnlyForOpenAICompatible(t *testing.T) {
+func TestAppendQwenAPIFlags_NoAuthTypeForDirectQwen(t *testing.T) {
 	env := map[string]string{"OPENAI_BASE_URL": "http://llm-proxy.local/v1"}
-	// qwen keeps relying on the user's own saved qwen auth settings.
+	// Direct qwen keeps relying on the user's own saved qwen auth settings;
+	// only endpoint routing forces the OpenAI auth path (AppendEndpointFlags).
 	if got := AppendQwenAPIFlags("qwen", "qwen", env); strings.Contains(got, "--auth-type") {
 		t.Errorf("qwen command %q must not force an auth type", got)
-	}
-	// openai-compatible forces the OpenAI auth path so a fresh qwen install
-	// does not stop on its interactive auth picker.
-	if got := AppendQwenAPIFlags("qwen", "openai-compatible", env); !strings.HasPrefix(got, "qwen --auth-type openai ") {
-		t.Errorf("openai-compatible command %q must start with --auth-type openai", got)
 	}
 }

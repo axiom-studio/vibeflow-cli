@@ -79,7 +79,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 
 func launchCmd() *cobra.Command {
 	var provider, branch, worktreeName, persona, personasRaw, project, sessionType, model, modelsRaw string
-	var baseURL, vendor string // openai-compatible endpoint (--base-url / --vendor)
+	var routingFlag, baseURL, vendor string // --routing and the compatible endpoint (--base-url / --vendor)
 	var openshellSandbox, openshellFrom, openshellPolicy, openshellProvidersRaw string
 	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders, cloudDispatch, replace, reuse bool
 
@@ -102,7 +102,7 @@ func launchCmd() *cobra.Command {
 			if provider == "" {
 				provider = "claude"
 			}
-			if err := validateOpenAICompatLaunchFlags(provider, baseURL, vendor, model); err != nil {
+			if err := validateRoutingFlags(provider, routingFlag, llmGateway, baseURL, vendor, model); err != nil {
 				return err
 			}
 			branchRequested := cmd.Flags().Changed("branch")
@@ -206,10 +206,18 @@ func launchCmd() *cobra.Command {
 			}
 
 			// How the harness reaches its model: gateway, direct or a
-			// compatible endpoint. Gateway availability is resolved first
-			// because it depends on the provider.
-			gatewayEnabled, warnGatewayIgnored := GatewayEnabledForProvider(llmGateway, cfg.LLMGatewayEnabled, provider)
-			routing := resolveRouting("", gatewayEnabled, provider)
+			// compatible endpoint. Without --routing the existing behavior
+			// applies: --llm-gateway or the saved gateway preference, where
+			// the provider supports it; otherwise direct.
+			routing := routingFlag
+			gatewayEnabled, warnGatewayIgnored := false, false
+			switch routing {
+			case "":
+				gatewayEnabled, warnGatewayIgnored = GatewayEnabledForProvider(llmGateway, cfg.LLMGatewayEnabled, provider)
+				routing = resolveRouting("", gatewayEnabled)
+			case RoutingGateway:
+				gatewayEnabled = true // provider support checked in validateRoutingFlags
+			}
 
 			// Resolve provider env vars (e.g. codex bearer token).
 			envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
@@ -316,7 +324,7 @@ func launchCmd() *cobra.Command {
 				sessionEnv := cloneStringMap(baseEnv)
 				// qwen-binary providers read the model from OPENAI_MODEL; seed it
 				// from --model / --models so AppendQwenAPIFlags emits --model.
-				if usesQwenHarness(provider) && sessionModel != "" {
+				if provider == "qwen" && sessionModel != "" {
 					if sessionEnv == nil {
 						sessionEnv = make(map[string]string)
 					}
@@ -364,7 +372,7 @@ func launchCmd() *cobra.Command {
 					// never guesses its session ID, harness, model or repo.
 					initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(mcpName, sessionProject, p), SessionIdentity{
 						SessionID:    sessionName,
-						AgentType:    agentTypeForProvider(provider),
+						AgentType:    provider,
 						AgentModel:   sessionModel,
 						GitBranch:    branch,
 						GitRemoteURL: GetGitRemoteURL(workDir),
@@ -424,8 +432,8 @@ func launchCmd() *cobra.Command {
 					CloudDispatch:     cloudDispatch,
 					SkipPermissions:   skipPermissions,
 					Model:             sessionModel,
-					Vendor:            vendor,  // openai-compatible only; restart re-resolves the key
-					BaseURL:           baseURL, // openai-compatible only; restart reconnects here
+					Vendor:            vendor,  // endpoint routing only; restart re-resolves the key
+					BaseURL:           baseURL, // endpoint routing only; restart reconnects here
 					Routing:           routing, // restart reconnects the same way
 					LLMGatewayEnabled: gatewayEnabled,
 					OpenShell:         openShellMeta(openShellCfg),
@@ -460,7 +468,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&worktreeName, "worktree-name", "", "Custom worktree directory name (default: auto-generated)")
 	cmd.Flags().BoolVar(&newBranch, "new-branch", false, "Create a new git branch (used with --worktree)")
 	cmd.Flags().BoolVar(&skipPermissions, "skip-permissions", false, "Skip permission prompts (autonomous mode)")
-	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through Axiom Cloud Gateway")
+	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through the Axiom Studio AI Gateway (same as --routing gateway)")
 	cmd.Flags().BoolVar(&openshell, "openshell", false, "Run the agent inside an NVIDIA OpenShell sandbox")
 	cmd.Flags().StringVar(&openshellSandbox, "openshell-sandbox", "", "OpenShell sandbox name (sets --name for create mode)")
 	cmd.Flags().StringVar(&openshellFrom, "openshell-from", "", "OpenShell sandbox image/base to create from")
@@ -468,8 +476,9 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&openshellProvidersRaw, "openshell-provider", "", "Comma-separated OpenShell provider names to attach")
 	cmd.Flags().BoolVar(&openshellNoAutoProviders, "openshell-no-auto-providers", false, "Disable OpenShell credential auto-provider discovery")
 	cmd.Flags().StringVar(&model, "model", "", "Model id to pass to each launched provider session")
-	cmd.Flags().StringVar(&baseURL, "base-url", "", "OpenAI-compatible API base URL, e.g. http://localhost:4000/v1 (--provider openai-compatible only)")
-	cmd.Flags().StringVar(&vendor, "vendor", "", "Vendor label; the API key is read from OPENAI_COMPAT_API_KEY_<VENDOR> (--provider openai-compatible only)")
+	cmd.Flags().StringVar(&routingFlag, "routing", "", "How the agent reaches its model: gateway (Axiom Studio AI Gateway), direct, or endpoint (a compatible endpoint; needs --base-url and --model)")
+	cmd.Flags().StringVar(&baseURL, "base-url", "", "Compatible endpoint base URL, e.g. http://localhost:4000/v1 (with --routing endpoint)")
+	cmd.Flags().StringVar(&vendor, "vendor", "", "Optional endpoint label; the API key is read from OPENAI_COMPAT_API_KEY_<VENDOR> (or OPENAI_COMPAT_API_KEY without a vendor)")
 	cmd.Flags().StringVar(&modelsRaw, "models", "", "Comma-separated persona=model overrides for team launches")
 	cmd.Flags().StringVar(&persona, "persona", "", "Persona key for vibeflow sessions")
 	cmd.Flags().StringVar(&personasRaw, "personas", "", "Comma-separated persona keys for team mode")
@@ -481,30 +490,45 @@ func launchCmd() *cobra.Command {
 	return cmd
 }
 
-// validateOpenAICompatLaunchFlags checks the endpoint flags of `vibeflow
-// launch`. openai-compatible needs --base-url, --vendor and --model (all
-// missing ones are named in one error); other providers must not receive
-// --base-url / --vendor, which they would silently ignore.
-func validateOpenAICompatLaunchFlags(provider, baseURL, vendor, model string) error {
-	if provider != "openai-compatible" {
+// validateRoutingFlags checks the routing flags of `vibeflow launch` before
+// anything is created. --llm-gateway is an alias for --routing gateway;
+// --routing endpoint needs a harness that can use a compatible endpoint plus
+// --base-url and --model (every missing flag is named in one error), and
+// --base-url / --vendor are rejected without it rather than silently ignored.
+func validateRoutingFlags(provider, routing string, llmGateway bool, baseURL, vendor, model string) error {
+	switch routing {
+	case "", RoutingGateway, RoutingDirect, RoutingEndpoint:
+	default:
+		return fmt.Errorf("--routing must be gateway, direct or endpoint (got %q)", routing)
+	}
+	if llmGateway && routing != "" && routing != RoutingGateway {
+		return fmt.Errorf("--llm-gateway conflicts with --routing %s", routing)
+	}
+	if routing != RoutingEndpoint {
 		if baseURL != "" || vendor != "" {
-			return fmt.Errorf("--base-url and --vendor are only valid with --provider openai-compatible (got %q)", provider)
+			return fmt.Errorf("--base-url and --vendor are only valid with --routing endpoint")
+		}
+		if routing == RoutingGateway && !providerSupportsGateway(provider) {
+			return fmt.Errorf("provider %q cannot route through the Axiom Studio AI Gateway", provider)
 		}
 		return nil
 	}
+	if !providerSupportsEndpoint(provider) {
+		return fmt.Errorf("provider %q cannot connect to a compatible endpoint", provider)
+	}
 	// Collect every missing flag so the user fixes them in one go.
 	var missing []string
-	for _, f := range []struct{ name, value string }{{"--base-url", baseURL}, {"--vendor", vendor}, {"--model", model}} {
+	for _, f := range []struct{ name, value string }{{"--base-url", baseURL}, {"--model", model}} {
 		if strings.TrimSpace(f.value) == "" {
 			missing = append(missing, f.name)
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("--provider openai-compatible requires %s", strings.Join(missing, ", "))
+		return fmt.Errorf("--routing endpoint requires %s", strings.Join(missing, ", "))
 	}
 	// Same rules as the wizard's endpoint step.
 	if err := ValidateOpenAICompatEndpoint(baseURL, vendor, model); err != nil {
-		return fmt.Errorf("--provider openai-compatible: %w", err)
+		return fmt.Errorf("--routing endpoint: %w", err)
 	}
 	return nil
 }
@@ -881,7 +905,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
 	// Restore the stored model for qwen-binary providers so the restarted
 	// session runs the same model it was launched with.
-	if usesQwenHarness(provider) && meta.Model != "" {
+	if provider == "qwen" && meta.Model != "" {
 		if sessionEnv == nil {
 			sessionEnv = make(map[string]string)
 		}
@@ -911,7 +935,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		}
 		initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona), SessionIdentity{
 			SessionID:    registeredID,
-			AgentType:    agentTypeForProvider(provider),
+			AgentType:    provider,
 			AgentModel:   meta.Model,
 			GitBranch:    branch,
 			GitRemoteURL: GetGitRemoteURL(workDir),

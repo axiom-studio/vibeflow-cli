@@ -40,8 +40,7 @@ var providerDocFile = map[string]string{
 	"cursor": "AGENTS.md",
 	// Qwen Code reads QWEN.md (plus AGENTS.md) — it does NOT read GEMINI.md despite
 	// being a gemini-cli fork. See https://github.com/QwenLM/qwen-code docs/users/features/memory.md
-	"qwen":              "QWEN.md",
-	"openai-compatible": "QWEN.md", // runs the qwen binary, so it reads the same instruction file
+	"qwen": "QWEN.md",
 	// Copilot CLI loads AGENTS.md by default from the git root and cwd
 	// (its --no-custom-instructions flag disables exactly that) — same
 	// template as Codex/Cursor. Verified on v1.0.79.

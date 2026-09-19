@@ -1608,12 +1608,15 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	// How the harness reaches its model. The gateway only applies to
 	// VibeFlow sessions, as before.
-	routing := resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled, result.ProviderKey)
+	routing := resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled)
 
 	// An endpoint launch without a usable endpoint (e.g. a quick switch or
 	// team override from a session with other routing) cannot start. Fail
 	// before creating any worktree or session.
 	if routing == RoutingEndpoint {
+		if !providerSupportsEndpoint(result.ProviderKey) {
+			return sessionsMsg{err: fmt.Errorf("%s cannot connect to a compatible endpoint", result.ProviderKey)}
+		}
 		if err := ValidateOpenAICompatEndpoint(result.BaseURL, result.Vendor, result.Model); err != nil {
 			return sessionsMsg{err: fmt.Errorf("%s session needs a compatible endpoint — use New Session to enter it: %w", result.ProviderKey, err)}
 		}
@@ -1736,7 +1739,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		// harness, model, repo) so it never has to guess them.
 		initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona), SessionIdentity{
 			SessionID:    name,
-			AgentType:    agentTypeForProvider(provider),
+			AgentType:    provider,
 			AgentModel:   result.Model,
 			GitBranch:    branch,
 			GitRemoteURL: GetGitRemoteURL(workDir),
@@ -1812,9 +1815,9 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		VibeFlowSessionID: vibeflowSessionID,
 		SessionType:       result.SessionType,
 		SkipPermissions:   result.SkipPermissions,
-		Model:             result.Model,   // openai-compatible: restored on restart
-		Vendor:            result.Vendor,  // openai-compatible: selects the key slot on restart
-		BaseURL:           result.BaseURL, // openai-compatible: restored on restart
+		Model:             result.Model,   // endpoint routing: restored on restart
+		Vendor:            result.Vendor,  // endpoint routing: selects the key slot on restart
+		BaseURL:           result.BaseURL, // endpoint routing: restored on restart
 		Routing:           routing,        // restart reconnects the same way
 		LLMGatewayEnabled: result.LLMGatewayEnabled,
 		MCPToolName:       m.config.MCPToolName,

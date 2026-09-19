@@ -31,7 +31,7 @@ func TestWizardView_BreadcrumbMatchesCurrentStep(t *testing.T) {
 	}{
 		{StepProvider, "Provider"},
 		{StepEnvToken, "Env"},
-		{StepLLMGateway, "Gateway"},
+		{StepLLMGateway, "Routing"},
 		{StepQwenLaunchConfig, "Qwen"},
 		{StepBranch, "Branch"},
 		{StepWorktree, "Worktree"},
@@ -856,7 +856,6 @@ func TestProviderSupportsGateway(t *testing.T) {
 		{"codex", true},
 		{"gemini", true},
 		{"qwen", false},
-		{"openai-compatible", false}, // connects directly to the user's endpoint
 		{"cursor", false},
 		{"copilot", false},                    // talks only to GitHub's model routing
 		{"some-future-custom-provider", true}, // default: gateway-eligible
@@ -912,39 +911,51 @@ func TestShouldShowGatewayStep(t *testing.T) {
 	}
 }
 
-// TestWizardAdvance_SkipsGatewayForQwenAndCursor proves the forward flow: qwen
-// and cursor jump straight past StepLLMGateway (qwen → its launch config,
-// cursor → branch) and a stale gateway "yes" carried in from a prior provider
-// is forced back off, while claude still lands on the gateway step.
-func TestWizardAdvance_SkipsGatewayForQwenAndCursor(t *testing.T) {
+// TestWizardAdvance_RoutingStepForEveryHarness proves the forward flow: every
+// harness lands on the Routing step, the gateway is only offered where it
+// works (claude here, not qwen or cursor), and a stale gateway "yes" carried
+// in from a prior provider cannot select the gateway where it isn't offered.
+func TestWizardAdvance_RoutingStepForEveryHarness(t *testing.T) {
 	providers := gatewayTestProviders()
 	tests := []struct {
 		name          string
 		provider      string
-		wantStep      WizardStep
+		wantGateway   bool       // gateway offered on the Routing step
+		wantAfter     WizardStep // step after accepting the default choice
 		wantGatewayOn bool
 	}{
-		{"claude shows gateway step", "claude", StepLLMGateway, true},
-		{"cursor skips to branch", "cursor", StepBranch, false},
-		{"qwen skips to qwen launch config", "qwen", StepQwenLaunchConfig, false},
+		{"claude offers gateway", "claude", true, StepBranch, true},
+		{"cursor routes direct to branch", "cursor", false, StepBranch, false},
+		{"qwen routes direct to qwen launch config", "qwen", false, StepQwenLaunchConfig, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("VIBEFLOW_ROOT", t.TempDir()) // the gateway choice is saved
 			idx := providerIdxByKey(t, WizardModel{providers: providers}, tt.provider)
 			w := WizardModel{
 				selectedSessionType: 1,
 				// qwen reads OPENAI_API_KEY via ResolveProviderEnvVars; provide it
-				// so the flow reaches the gateway decision instead of StepEnvToken.
+				// so direct routing continues instead of asking for the key.
 				config:            &Config{APIToken: "tok", SavedEnvVars: map[string]string{"OPENAI_API_KEY": "x"}},
 				providers:         providers,
 				selectedProvider:  idx,
 				cursor:            idx,
 				step:              StepProvider,
+				routing:           RoutingGateway,
 				llmGatewayEnabled: true, // stale "yes" from a previous provider
 			}
 			got, _ := w.advance()
-			if got.step != tt.wantStep {
-				t.Errorf("step after advance = %v, want %v", got.step, tt.wantStep)
+			if got.step != StepLLMGateway {
+				t.Fatalf("step after provider = %v, want the Routing step", got.step)
+			}
+			if offered := got.routingOptions()[0].mode == RoutingGateway; offered != tt.wantGateway {
+				t.Errorf("gateway offered = %v, want %v", offered, tt.wantGateway)
+			}
+			// Accept the preselected choice: the saved gateway where offered,
+			// direct otherwise.
+			got, _ = got.advance()
+			if got.step != tt.wantAfter {
+				t.Errorf("step after routing = %v, want %v", got.step, tt.wantAfter)
 			}
 			if got.llmGatewayEnabled != tt.wantGatewayOn {
 				t.Errorf("llmGatewayEnabled = %v, want %v", got.llmGatewayEnabled, tt.wantGatewayOn)
@@ -953,10 +964,10 @@ func TestWizardAdvance_SkipsGatewayForQwenAndCursor(t *testing.T) {
 	}
 }
 
-// TestWizardGoBack_SkipsGatewayForQwenAndCursor proves back-navigation stays
-// symmetric: qwen and cursor never land on StepLLMGateway when reversing, while
-// claude does.
-func TestWizardGoBack_SkipsGatewayForQwenAndCursor(t *testing.T) {
+// TestWizardGoBack_ReturnsToRouting proves back-navigation stays symmetric
+// with the forward flow: steps after Routing return to it, and qwen's
+// launch config sits between Routing and branch.
+func TestWizardGoBack_ReturnsToRouting(t *testing.T) {
 	providers := gatewayTestProviders()
 	tokenCfg := &Config{APIToken: "tok"}
 	tests := []struct {
@@ -965,10 +976,11 @@ func TestWizardGoBack_SkipsGatewayForQwenAndCursor(t *testing.T) {
 		fromStep WizardStep
 		wantStep WizardStep
 	}{
-		{"claude back from branch hits gateway", "claude", StepBranch, StepLLMGateway},
-		{"cursor back from branch skips gateway", "cursor", StepBranch, StepProvider},
+		{"claude back from branch hits routing", "claude", StepBranch, StepLLMGateway},
+		{"cursor back from branch hits routing", "cursor", StepBranch, StepLLMGateway},
 		{"qwen back from branch hits qwen config", "qwen", StepBranch, StepQwenLaunchConfig},
-		{"qwen back from qwen config skips gateway", "qwen", StepQwenLaunchConfig, StepProvider},
+		{"qwen back from qwen config hits routing", "qwen", StepQwenLaunchConfig, StepLLMGateway},
+		{"back from routing hits provider", "cursor", StepLLMGateway, StepProvider},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

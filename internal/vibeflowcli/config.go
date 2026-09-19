@@ -135,8 +135,8 @@ type Config struct {
 	OpenAICompat      OpenAICompatConfig  `yaml:"openai_compatible,omitempty"`
 }
 
-// OpenAICompatConfig remembers the last endpoint entered for the
-// openai-compatible provider so the wizard can prefill it. API keys are not
+// OpenAICompatConfig remembers the last compatible endpoint entered in the
+// wizard so it can be prefilled. API keys are not
 // kept here — they live in SavedEnvVars under OPENAI_COMPAT_API_KEY_<VENDOR>.
 type OpenAICompatConfig struct {
 	LastBaseURL string `yaml:"last_base_url,omitempty"`
@@ -264,21 +264,6 @@ func DefaultConfig() *Config {
 			},
 			"qwen": {
 				Name:               "Qwen Code",
-				Binary:             "qwen",
-				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
-				PromptTemplate:     "",
-				Env:                map[string]string{},
-				VibeFlowIntegrated: false,
-				SessionFile:        "",
-				Default:            false,
-			},
-			// Any OpenAI-compatible endpoint (hosted API or self-hosted proxy),
-			// driven by the qwen binary. Base URL / vendor / model are captured
-			// per session rather than preset — see usesQwenHarness. The launch
-			// template is qwen's: --yolo for autonomous runs; --openai-base-url
-			// and --model are appended later by AppendQwenAPIFlags.
-			"openai-compatible": {
-				Name:               "OpenAI Compatible",
 				Binary:             "qwen",
 				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
 				PromptTemplate:     "",
@@ -426,19 +411,15 @@ func migrateProviders(cfg *Config, path string) {
 			}
 		}
 
-		// openai-compatible session values are resolved per launch and must
-		// never live in the provider's static env. Earlier development builds
-		// could persist them here; drop them so a stored key is not reused.
-		if key == "openai-compatible" {
-			for _, k := range []string{"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "MCP_TOKEN"} {
-				if _, ok := prov.Env[k]; ok {
-					delete(prov.Env, k)
-					dirty = true
-				}
-			}
-		}
-
 		cfg.Providers[key] = prov
+	}
+
+	// A compatible endpoint is a routing option now, not a provider. Drop the
+	// "openai-compatible" provider entry that pre-release builds wrote, along
+	// with any session values those builds persisted into its env.
+	if _, ok := cfg.Providers[legacyOpenAICompatProvider]; ok {
+		delete(cfg.Providers, legacyOpenAICompatProvider)
+		dirty = true
 	}
 
 	// Add any built-in providers the user's config is missing. Lets users on
@@ -694,12 +675,16 @@ func cleanEnvToken(val string) string {
 	return strings.Trim(val, "[]\"' \t\n\r")
 }
 
-// openAICompatKeyPrefix names the per-vendor API key slots of the
-// openai-compatible provider, e.g. OPENAI_COMPAT_API_KEY_MY_PROXY.
+// legacyOpenAICompatProvider is the provider key pre-release builds used for
+// compatible endpoints; migrateProviders removes it from existing configs.
+const legacyOpenAICompatProvider = "openai-compatible"
+
+// openAICompatKeyPrefix names the per-vendor API key slots used by endpoint
+// routing, e.g. OPENAI_COMPAT_API_KEY_MY_PROXY.
 const openAICompatKeyPrefix = "OPENAI_COMPAT_API_KEY_"
 
 // OpenAICompatKeyEnvName returns the env var / saved-config name holding the
-// openai-compatible API key for vendor. The vendor is encoded like qwen's
+// endpoint API key for vendor. The vendor is encoded like qwen's
 // endpoint segment: uppercased, each run of non-alphanumerics becomes one
 // underscore ("my-proxy.local" → OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL).
 // The vendor is an optional display label: when it is empty (or has no
@@ -751,7 +736,7 @@ func (c *Config) SaveOpenAICompatKey(vendor, key string) {
 	c.SavedEnvVars[name] = key
 }
 
-// ValidateOpenAICompatEndpoint checks the inputs of an openai-compatible
+// ValidateOpenAICompatEndpoint checks the inputs of an endpoint-routed
 // session (wizard step and `vibeflow launch` flags share it). It returns the
 // first problem as a user-facing message, or nil when all three are usable.
 func ValidateOpenAICompatEndpoint(baseURL, vendor, model string) error {
@@ -784,7 +769,7 @@ func ValidateOpenAICompatEndpoint(baseURL, vendor, model string) error {
 const openAICompatNoKey = "no-key"
 
 // applyOpenAICompatEnv writes the endpoint, model and API key of an
-// openai-compatible session into sessionEnv. All three are ALWAYS set: a pane
+// qwen session routed to a compatible endpoint into sessionEnv. All three are ALWAYS set: a pane
 // inherits the tmux server's global env, so leaving one unset would let a
 // shell-exported OPENAI_API_KEY (often a real OpenAI key) or OPENAI_BASE_URL
 // reach the session. Callers pass the base URL / vendor / model captured by
@@ -868,11 +853,6 @@ func ResolveProviderEnvVars(cfg *Config, providerKey string) (env map[string]str
 			return env, ""
 		}
 		return env, qwenKey
-	case "openai-compatible":
-		// Deliberately NOT the qwen case: that would hand a saved/shell
-		// OPENAI_API_KEY (usually a real OpenAI key) to whatever vendor the
-		// user pointed at. This provider's key is optional and per vendor.
-		return env, ""
 	default:
 		return env, ""
 	}

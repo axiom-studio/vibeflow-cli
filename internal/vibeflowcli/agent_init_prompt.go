@@ -82,15 +82,6 @@ func WithSessionIdentity(prompt string, id SessionIdentity) string {
 	return prompt + " Register with exactly these values (session_init and session_register); do not infer or change them: " + strings.Join(fields, ", ") + "."
 }
 
-// agentTypeForProvider returns the harness name an agent should register as.
-// The openai-compatible provider runs the qwen binary, so it reports "qwen".
-func agentTypeForProvider(providerKey string) string {
-	if providerKey == "openai-compatible" {
-		return "qwen"
-	}
-	return providerKey
-}
-
 func BuildVibeflowCloudDispatchInitPrompt(mcpName, projectName, persona, sessionID string) string {
 	if mcpName == "" {
 		mcpName = DefaultMCPToolName
@@ -144,9 +135,7 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	switch providerKey {
 	case "gemini":
 		return baseCommand + fmt.Sprintf(" -p '%s'", escaped)
-	// openai-compatible runs the qwen binary, so it takes qwen's -i
-	// (interactive) prompt shape rather than the one-shot positional form.
-	case "qwen", "openai-compatible", "copilot":
+	case "qwen", "copilot":
 		return baseCommand + fmt.Sprintf(" -i '%s'", escaped)
 	default:
 		return baseCommand + fmt.Sprintf(" '%s'", escaped)
@@ -331,16 +320,10 @@ func codexConfigRawArg(value string) string {
 // the assembled command is handed to `sh -c` via tmux send-keys.
 func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) string {
 	// Only qwen-binary providers understand --openai-base-url / --model.
-	if !usesQwenHarness(providerKey) {
+	if providerKey != "qwen" {
 		return baseCommand
 	}
 	out := baseCommand
-	// A fresh qwen install has no saved auth type; without this flag the
-	// interactive session stops on an auth-provider picker and an unattended
-	// pane hangs. The qwen provider keeps relying on the user's own settings.
-	if providerKey == "openai-compatible" {
-		out += " --auth-type openai"
-	}
 	if v := env["OPENAI_BASE_URL"]; v != "" {
 		out += fmt.Sprintf(" --openai-base-url '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
@@ -359,18 +342,10 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 func applyQwenModelPassthrough(providerKey string, sessionEnv map[string]string) {
 	// Skip non-qwen-binary providers, and never override a model the
 	// session already carries (wizard, --model flag, or stored metadata).
-	if !usesQwenHarness(providerKey) || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
+	if providerKey != "qwen" || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
 		return
 	}
 	if v := os.Getenv("OPENAI_MODEL"); v != "" {
 		sessionEnv["OPENAI_MODEL"] = v
 	}
-}
-
-// usesQwenHarness reports whether a provider runs the qwen binary and so
-// takes its model and endpoint from OPENAI_MODEL / OPENAI_BASE_URL. It is the
-// single switch every launch/restart path checks, so a new qwen-backed
-// provider only needs to be added here.
-func usesQwenHarness(providerKey string) bool {
-	return providerKey == "qwen" || providerKey == "openai-compatible"
 }
