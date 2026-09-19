@@ -34,12 +34,11 @@ const (
 // and the API the endpoint must speak for each. A harness missing from this
 // map (Cursor, Kiro) has no way to point at a custom endpoint.
 var endpointAPIFormats = map[string]string{
-	"copilot":           "OpenAI API",
-	"qwen":              "OpenAI API",
-	"openai-compatible": "OpenAI API",
-	"codex":             "OpenAI Responses API",
-	"claude":            "Anthropic Messages API",
-	"gemini":            "Gemini API",
+	"copilot": "OpenAI API",
+	"qwen":    "OpenAI API",
+	"codex":   "OpenAI Responses API",
+	"claude":  "Anthropic Messages API",
+	"gemini":  "Gemini API",
 }
 
 // EndpointAPIFormat returns the API a compatible endpoint must speak for the
@@ -58,16 +57,13 @@ func providerSupportsEndpoint(providerKey string) bool {
 
 // resolveRouting returns the routing mode for a launch. An explicit mode wins;
 // otherwise it is derived the way launches worked before routing modes
-// existed: the gateway flag means gateway, the openai-compatible provider
-// means endpoint, anything else is direct.
-func resolveRouting(explicit string, gatewayEnabled bool, providerKey string) string {
+// existed: the gateway flag means gateway, anything else is direct.
+func resolveRouting(explicit string, gatewayEnabled bool) string {
 	switch {
 	case explicit != "":
 		return explicit
 	case gatewayEnabled:
 		return RoutingGateway
-	case providerKey == "openai-compatible":
-		return RoutingEndpoint
 	default:
 		return RoutingDirect
 	}
@@ -77,7 +73,7 @@ func resolveRouting(explicit string, gatewayEnabled bool, providerKey string) st
 // Records written before the routing field existed fall back to the gateway
 // flag and provider.
 func routingForMeta(meta SessionMeta) string {
-	return resolveRouting(meta.Routing, meta.LLMGatewayEnabled, meta.Provider)
+	return resolveRouting(meta.Routing, meta.LLMGatewayEnabled)
 }
 
 // endpointSuppliesKey reports whether a "missing env var" from
@@ -85,10 +81,14 @@ func routingForMeta(meta SessionMeta) string {
 // endpoint, whose key replaces the harness's own provider key. Other missing
 // vars (e.g. the codex MCP bearer token) are still required.
 func endpointSuppliesKey(routing, missingVar string) bool {
-	if routing != RoutingEndpoint {
-		return false
-	}
-	return missingVar == "GEMINI_API_KEY" || missingVar == "OPENAI_API_KEY"
+	return routing == RoutingEndpoint && isProviderAPIKeyVar(missingVar)
+}
+
+// isProviderAPIKeyVar reports whether a var ResolveProviderEnvVars can ask
+// for is a harness's own model-provider API key (as opposed to e.g. the codex
+// MCP bearer token). Only direct routing needs it.
+func isProviderAPIKeyVar(name string) bool {
+	return name == "GEMINI_API_KEY" || name == "OPENAI_API_KEY"
 }
 
 // BuildEndpointEnv returns the session env that points a harness at a
@@ -118,7 +118,7 @@ func BuildEndpointEnv(providerKey string, cfg *Config, vendor, baseURL, model st
 		env["COPILOT_PROVIDER_BEARER_TOKEN"] = ""
 		env["COPILOT_PROVIDER_WIRE_API"] = ""
 		env["COPILOT_MODEL"] = model
-	case "qwen", "openai-compatible":
+	case "qwen":
 		// Qwen Code reads the OpenAI-compatible env trio.
 		applyOpenAICompatEnv(env, cfg, vendor, baseURL, model)
 	case "codex":
@@ -173,8 +173,7 @@ const codexEndpointProviderID = "vibeflow-endpoint"
 //   - codex: a temporary model provider (Responses API, key read from
 //     OPENAI_API_KEY via env_key — never on the command line).
 //   - qwen: --auth-type openai, so a fresh install does not stop on its
-//     interactive sign-in picker. (The openai-compatible provider already
-//     gets it from AppendQwenAPIFlags.)
+//     interactive sign-in picker.
 func AppendEndpointFlags(command, providerKey, baseURL string) string {
 	switch providerKey {
 	case "codex":

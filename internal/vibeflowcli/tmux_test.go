@@ -895,7 +895,7 @@ func TestIsSecretEnvKey(t *testing.T) {
 		{"ANTHROPIC_AUTH_TOKEN", true},
 		{"ANTHROPIC_API_KEY", true},
 		{"QWEN_CUSTOM_API_KEY_OPENAI_HTTPS_API_Z_AI_API_PAAS_V4", true},
-		{"OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR", true}, // openai-compatible per-vendor key
+		{"OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR", true}, // compatible endpoint per-vendor key
 		{"OPENAI_BASE_URL", false},
 		{"ANTHROPIC_BASE_URL", false},
 		{"OPENAI_MODEL", false},

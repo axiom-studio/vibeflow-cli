@@ -48,8 +48,8 @@ func TestDefaultConfig(t *testing.T) {
 	}
 
 	// Seven built-in providers.
-	if len(cfg.Providers) != 8 {
-		t.Fatalf("expected 8 providers, got %d", len(cfg.Providers))
+	if len(cfg.Providers) != 7 {
+		t.Fatalf("expected 7 providers, got %d", len(cfg.Providers))
 	}
 	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen", "kiro", "copilot"} {
 		if _, ok := cfg.Providers[key]; !ok {
@@ -89,8 +89,8 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
-	if len(cfg.Providers) != 8 {
-		t.Errorf("expected 8 default providers, got %d", len(cfg.Providers))
+	if len(cfg.Providers) != 7 {
+		t.Errorf("expected 7 default providers, got %d", len(cfg.Providers))
 	}
 }
 
@@ -1330,45 +1330,6 @@ func TestDefaultConfig_OutboundEndpoints(t *testing.T) {
 	}
 }
 
-func TestResolveProviderEnvVars_OpenAICompatibleNeverReusesSharedOpenAIKey(t *testing.T) {
-	// The shared OPENAI_API_KEY is usually a real OpenAI key; handing it to an
-	// arbitrary vendor endpoint would leak it. The key is optional, so nothing
-	// is reported missing either.
-	t.Setenv("OPENAI_API_KEY", "sk-shell")
-	cfg := &Config{SavedEnvVars: map[string]string{"OPENAI_API_KEY": "sk-saved"}}
-	env, missing := ResolveProviderEnvVars(cfg, "openai-compatible")
-	if missing != "" {
-		t.Errorf("missing = %q, want none", missing)
-	}
-	if len(env) != 0 {
-		t.Errorf("env = %v, want empty", env)
-	}
-}
-
-func TestMigrateProviders_AddsMissingOpenAICompatible(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := &Config{Providers: map[string]Provider{"qwen": DefaultConfig().Providers["qwen"]}}
-	migrateProviders(cfg, path)
-	if _, ok := cfg.Providers["openai-compatible"]; !ok {
-		t.Error("migrateProviders did not add the openai-compatible built-in to an older config")
-	}
-}
-
-func TestClearLLMGatewayEnv_OpenAICompatibleKeepsBaseURL(t *testing.T) {
-	// The base URL is the user's chosen endpoint; blanking it would send the
-	// session to api.openai.com.
-	if env := ClearLLMGatewayEnv("openai-compatible"); len(env) != 0 {
-		t.Errorf("ClearLLMGatewayEnv(openai-compatible) = %v, want empty", env)
-	}
-}
-
-func TestGatewayEnabledForProvider_OpenAICompatibleIsDirectOnly(t *testing.T) {
-	enabled, warn := GatewayEnabledForProvider(true, true, "openai-compatible")
-	if enabled || !warn {
-		t.Errorf("enabled/warn = %v/%v, want false/true", enabled, warn)
-	}
-}
-
 func TestOpenAICompatKeyEnvName(t *testing.T) {
 	tests := []struct {
 		vendor string
@@ -1501,7 +1462,7 @@ func TestApplyOpenAICompatEnv(t *testing.T) {
 		env := map[string]string{"OPENAI_API_KEY": "sk-shell-openai"}
 		applyOpenAICompatEnv(env, &Config{}, "example-vendor", "http://llm-proxy.local/v1", "some-model")
 		if env["OPENAI_API_KEY"] == "sk-shell-openai" {
-			t.Error("shell OPENAI_API_KEY reached the openai-compatible session")
+			t.Error("shell OPENAI_API_KEY reached the endpoint session")
 		}
 		if env["OPENAI_BASE_URL"] != "http://llm-proxy.local/v1" {
 			t.Errorf("OPENAI_BASE_URL = %q, want the session's endpoint", env["OPENAI_BASE_URL"])

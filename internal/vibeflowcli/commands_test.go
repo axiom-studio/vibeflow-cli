@@ -297,12 +297,3 @@ func runModelsCmd(t *testing.T, args []string) (string, error) {
 	err := cmd.Execute()
 	return buf.String(), err
 }
-
-func TestModelsCmd_OpenAICompatibleHasNoCuratedList(t *testing.T) {
-	// The model is free text typed by the user; a curated list would be wrong
-	// for every vendor behind this provider.
-	out, err := runModelsCmd(t, []string{"openai-compatible"})
-	if err == nil || !strings.Contains(err.Error(), `no curated model list for provider "openai-compatible"`) {
-		t.Errorf("err = %v, want no-curated-list error\n---\n%s", err, out)
-	}
-}

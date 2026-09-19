@@ -60,17 +60,6 @@ func TestWithSessionIdentity(t *testing.T) {
 	})
 }
 
-func TestAgentTypeForProvider(t *testing.T) {
-	for provider, want := range map[string]string{
-		"claude": "claude", "codex": "codex", "copilot": "copilot", "qwen": "qwen",
-		"openai-compatible": "qwen", // runs the qwen binary
-	} {
-		if got := agentTypeForProvider(provider); got != want {
-			t.Errorf("agentTypeForProvider(%q) = %q, want %q", provider, got, want)
-		}
-	}
-}
-
 func TestGetGitRemoteURL(t *testing.T) {
 	repo := newTestRepo(t, "")
 	if got := GetGitRemoteURL(repo); got != "" {

@@ -52,18 +52,16 @@ func TestResolveRouting(t *testing.T) {
 	tests := []struct {
 		explicit string
 		gateway  bool
-		provider string
 		want     string
 	}{
-		{"", false, "claude", RoutingDirect},
-		{"", true, "claude", RoutingGateway},
-		{"", false, "openai-compatible", RoutingEndpoint},
-		{RoutingEndpoint, false, "copilot", RoutingEndpoint},
-		{RoutingDirect, true, "claude", RoutingDirect}, // explicit wins
+		{"", false, RoutingDirect},
+		{"", true, RoutingGateway},
+		{RoutingEndpoint, false, RoutingEndpoint},
+		{RoutingDirect, true, RoutingDirect}, // explicit wins
 	}
 	for _, tt := range tests {
-		if got := resolveRouting(tt.explicit, tt.gateway, tt.provider); got != tt.want {
-			t.Errorf("resolveRouting(%q, %v, %q) = %q, want %q", tt.explicit, tt.gateway, tt.provider, got, tt.want)
+		if got := resolveRouting(tt.explicit, tt.gateway); got != tt.want {
+			t.Errorf("resolveRouting(%q, %v) = %q, want %q", tt.explicit, tt.gateway, got, tt.want)
 		}
 	}
 	// Records written before the routing field existed.
@@ -170,7 +168,7 @@ func TestAppendEndpointFlags(t *testing.T) {
 		t.Errorf("qwen flags = %q", got)
 	}
 	// Harnesses configured purely through env get no extra flags.
-	for _, p := range []string{"claude", "copilot", "gemini", "openai-compatible"} {
+	for _, p := range []string{"claude", "copilot", "gemini", "cursor"} {
 		if got := AppendEndpointFlags(p, p, url); got != p {
 			t.Errorf("%s flags = %q, want unchanged", p, got)
 		}
