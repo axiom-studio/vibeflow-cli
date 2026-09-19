@@ -92,7 +92,7 @@ When you launch a qwen session **without** the LLM Gateway, the wizard inserts a
 | `OPENAI_BASE_URL` | `StepQwenLaunchConfig` vendor preset, editable. |
 | `OPENAI_MODEL` | `StepQwenLaunchConfig` vendor preset, editable. |
 
-The step is **skipped** for any other provider. For qwen it also runs when the LLM Gateway is enabled, but in that mode only the **model** selection is committed (`OPENAI_MODEL`) — the gateway provides its own `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `QWEN_CUSTOM_API_KEY_*` endpoint binding, so the base URL input is ignored.
+The step is **skipped** for any other provider, and for qwen when the session routes to a compatible endpoint or to an endpoint detected in the shell (see [Routing](#routing)). For qwen it also runs when the LLM Gateway is enabled, but in that mode only the **model** selection is committed (`OPENAI_MODEL`) — the gateway provides its own `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `QWEN_CUSTOM_API_KEY_*` endpoint binding, so the base URL input is ignored.
 
 ### Vendor presets
 
@@ -120,6 +120,95 @@ The step is **skipped** for any other provider. For qwen it also runs when the L
 6. Pick a branch / worktree / permissions, confirm, and the tmux session starts with `qwen --yolo` (when skip-permissions is selected) and the three OpenAI-compatible env vars exported.
 
 On the **LLM Gateway** path, `BuildLLMGatewayEnv("qwen", …)` injects the gateway-derived `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and the `QWEN_CUSTOM_API_KEY_*` endpoint binding instead; the launch-config step still runs there, but only to capture the model (see [LLM Gateway](#llm-gateway)).
+
+## Routing
+
+After you pick a harness, the wizard's **Routing** step ("Configure routing for your coding agent") decides how it reaches its model. Headless launches use `--routing`.
+
+| Option | `--routing` | When it is offered |
+|---|---|---|
+| **Axiom Studio AI Gateway** | `gateway` (or `--llm-gateway`) | VibeFlow sessions with an API token, on harnesses the gateway supports (Claude Code, Codex, Gemini CLI). See [LLM Gateway](#llm-gateway). |
+| **Use detected endpoint** | `shell` | The harness's endpoint variable is already set in your shell. See [Detected endpoint](#detected-endpoint). |
+| **Connect directly to the provider** | `direct` | Always. The harness uses its own login or provider API key. |
+| **Connect to a compatible endpoint** | `endpoint` | Copilot, Qwen Code, Codex, Claude Code and Gemini CLI. Shown disabled for Cursor and Kiro, which have no way to point at a custom endpoint. |
+
+Without `--routing`, headless launches behave as before: `--llm-gateway` or the saved gateway preference where the harness supports it, otherwise direct.
+
+### Compatible endpoint
+
+Connects the harness to any server that speaks the API it needs: a hosted API, or a self-hosted proxy or inference server such as LiteLLM or vLLM.
+
+| Harness | Endpoint must speak | How vibeflow-cli points it at the endpoint |
+|---|---|---|
+| GitHub Copilot CLI | OpenAI API (chat completions) | Copilot's BYOK variables: `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE=openai`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_MODEL`. No GitHub login is needed. |
+| Qwen Code | OpenAI API (chat completions) | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, plus `--auth-type openai --openai-base-url … --model …` |
+| Codex CLI | OpenAI Responses API | A temporary model provider via `-c model_provider=…` flags; the key is read from `OPENAI_API_KEY` (`env_key`) |
+| Claude Code | Anthropic Messages API | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and every model tier (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`) set to your model |
+| Gemini CLI | Gemini API | `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY` |
+
+The wizard asks for:
+
+| Input | Required | Notes |
+|---|---|---|
+| Base URL | yes | Absolute `http://` or `https://` URL of the API, usually ending in `/v1`. Claude Code and Gemini CLI add their own versioned path, so vibeflow-cli gives them the URL without a trailing `/v1`; enter the same URL for every harness. |
+| Model | yes | Model id exactly as the endpoint expects it. |
+| Vendor | no | Display label (e.g. `my-proxy`). When set, it also names the slot the API key is stored in. |
+| API key | no | Leave blank for endpoints without authentication. |
+
+Headless:
+
+```bash
+vibeflow launch --provider copilot --routing endpoint \
+  --base-url http://<host>:4000/v1 --model <model-name> [--vendor <label>]
+```
+
+`--routing endpoint` requires `--base-url` and `--model` (all missing flags are listed at once). `--base-url` and `--vendor` are rejected with any other routing, and `--routing endpoint` is rejected for Cursor and Kiro.
+
+**API key storage.** With a vendor, the key is stored in `saved_env_vars` under `OPENAI_COMPAT_API_KEY_<VENDOR>`: the vendor uppercased, with each run of other characters turned into `_` (`my-proxy.local` → `OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL`). Without a vendor, it uses `OPENAI_COMPAT_API_KEY`. An exported shell variable of that name takes precedence over the saved value. The harness's own key variables are always set explicitly for the session, so a key exported in your shell (such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) is never sent to the endpoint. For Claude Code the configured token is always sent, never your Claude subscription login. The key is passed through the environment only, never on the command line, and is redacted in logs.
+
+Keys entered in the wizard are saved in plaintext in `~/.vibeflow-cli/config.yaml` (file mode `0600`). To keep a key off disk, leave the wizard field blank and export the variable from your shell or secrets manager instead; exported keys are never written to the config.
+
+**Base URL rules.** The base URL must not contain credentials (`user:password@host`), a query string or a fragment. It appears on some agents' command lines, which other local users can read, and in logs and saved metadata. Put credentials in the API key field or the key variable.
+
+**Endpoints without a key.** With no key set, Qwen Code, Codex, Claude Code and Gemini CLI get the placeholder `no-key`, which servers without authentication ignore. Qwen Code refuses to start without a key, and for Claude Code the placeholder also keeps your subscription login from being sent. Copilot is started without a key.
+
+**Models and tools.** Coding agents rely on tool calling, so the model behind the endpoint must support it (Copilot also needs streaming). Small local models often don't; pick one your server documents as tool-capable.
+
+**Restart.** Routing, vendor, base URL and model are stored in the session metadata (`routing`, `vendor`, `base_url` and `model` in `sessions.json`; never the key). Kill/restart reconnects to the same endpoint and re-reads the key.
+
+#### Use with LiteLLM / vLLM
+
+A LiteLLM proxy serves the OpenAI chat, OpenAI Responses and Anthropic Messages routes, so one proxy works for Copilot, Qwen Code, Codex and Claude Code:
+
+```bash
+export OPENAI_COMPAT_API_KEY_LITELLM=<proxy-key>   # if the proxy has a master key
+vibeflow launch --provider copilot --routing endpoint \
+  --base-url http://<host>:4000/v1 --vendor litellm --model <model-name> --skip-permissions
+```
+
+Swap `--provider` for `qwen`, `codex` or `claude` to use another harness against the same proxy. vLLM serves the OpenAI chat route. Use its server URL (commonly `http://<host>:8000/v1`) and the served model name with Copilot or Qwen Code. In the TUI wizard, pick the harness, choose **Connect to a compatible endpoint** on the Routing step, and enter the same values.
+
+### Detected endpoint
+
+If the harness's endpoint variable is already set in the environment you launch from, the Routing step offers **Use detected endpoint**, pre-selected, and shows the URL (without credentials, never the key):
+
+| Harness | Variable | Also passed through when set |
+|---|---|---|
+| Claude Code | `ANTHROPIC_BASE_URL` | `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, model variables |
+| GitHub Copilot CLI | `COPILOT_PROVIDER_BASE_URL` | the other `COPILOT_PROVIDER_*` variables, `COPILOT_MODEL` |
+| Codex CLI | `OPENAI_BASE_URL` | `OPENAI_API_KEY` (Codex ignores `OPENAI_BASE_URL` itself, so the URL is applied with the same model provider flags as a compatible endpoint) |
+| Qwen Code | `OPENAI_BASE_URL` | `OPENAI_API_KEY`, `OPENAI_MODEL` (the Qwen launch config step is skipped) |
+| Gemini CLI | `GOOGLE_GEMINI_BASE_URL` | `GEMINI_API_KEY` |
+
+These values are passed to the session explicitly, so it uses what your shell has now. **Connect directly to the provider** ignores the detected endpoint: Claude Code, Codex and Gemini CLI get it cleared as before, and Copilot gets `COPILOT_PROVIDER_BASE_URL` cleared so it uses your GitHub subscription. A detected URL with credentials, a query string or a non-http scheme is shown but can't be selected.
+
+**Claude Code login.** With only `ANTHROPIC_BASE_URL` set (no `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`), Claude Code signs in with your Claude subscription and sends that login to the detected URL. In that case the option is not pre-selected, and both it and the confirm screen say so. Headless `--routing shell` prints a warning. Unlike a compatible endpoint, shell routing does not replace your credentials. Gemini CLI is not affected: every launch path requires `GEMINI_API_KEY`, so its Google login is not used.
+
+Headless, `--routing shell` does the same and fails if the variable isn't set. Restarting a shell-routed session also fails, before launching, if the variable is gone. Without `--routing`, nothing changes.
+
+### VibeFlow sessions
+
+Whatever the routing, the agent reaches VibeFlow through the VibeFlow MCP server in its own config. Run `vibeflow bootstrap --all --api-key <key>` once per machine, or target the harness with `--agents`. Without it, a VibeFlow-mode session starts but the agent has no VibeFlow tools. Vanilla sessions don't need it.
 
 ## Custom providers
 

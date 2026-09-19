@@ -45,6 +45,9 @@ const (
 	// Qwen configuration runs before branch selection; View maps steps
 	// explicitly so display order does not depend on these numeric values.
 	StepQwenLaunchConfig
+	// Compatible-endpoint inputs, shown when the Routing step's endpoint
+	// option is chosen; runs before branch selection.
+	StepOpenAICompatConfig
 )
 
 // WorktreeChoice represents the user's worktree selection.
@@ -82,6 +85,13 @@ type WizardResult struct {
 	WorkDir              string            // Project root directory selected in StepWorkDir.
 	EnvVars              map[string]string // Extra env vars to set on the tmux session.
 	LLMGatewayEnabled    bool              // True if user opted to route LLM requests through the gateway.
+	// Routing mode ("direct", "gateway", "endpoint"); empty means "derive it
+	// from LLMGatewayEnabled and the provider" (see resolveRouting).
+	Routing string
+	// Endpoint captured by StepOpenAICompatConfig (endpoint routing only).
+	Vendor  string // free-text vendor label; selects the OPENAI_COMPAT_API_KEY_<VENDOR> slot
+	BaseURL string // http(s) base URL of the OpenAI-compatible API
+	Model   string // model id sent to that endpoint
 }
 
 // WizardModel is a Bubble Tea sub-model for multi-step session creation.
@@ -160,10 +170,11 @@ type WizardModel struct {
 	editingEnvToken bool              // True when text input for env token is active.
 	envVars         map[string]string // Resolved env vars to pass to session.
 
-	// LLM Gateway (StepLLMGateway).
-	llmGatewayOpts     []string // Display options for gateway step.
-	selectedLLMGateway int      // 0 = Yes, 1 = No.
-	llmGatewayEnabled  bool     // True if user chose to route through gateway.
+	// Routing (StepLLMGateway, labelled "Routing").
+	routing           string // chosen mode: RoutingGateway / RoutingDirect / RoutingEndpoint
+	routingChosen     bool   // true once the Routing step was confirmed for the current provider
+	deferredEnvToken  string // provider key var asked only when the user picks direct routing
+	llmGatewayEnabled bool   // True if user chose to route through gateway.
 
 	// Qwen launch config (StepQwenLaunchConfig — all qwen flows; in gateway
 	// mode only the model selection is committed).
@@ -172,6 +183,12 @@ type WizardModel struct {
 	qwenBaseURLInput string // OPENAI_BASE_URL value, auto-filled from preset, editable.
 	qwenUserEdited   bool   // True if user has typed in either input since last vendor change/reset.
 	qwenInitialized  bool   // True once applyQwenPreset has seeded inputs at least once.
+
+	// OpenAI-compatible endpoint (StepOpenAICompatConfig). Inputs are indexed
+	// by the oacRow* constants; the API key input is never rendered in clear.
+	oacInputs      [oacRowCount]string
+	oacErr         string // inline validation error shown under the inputs
+	oacInitialized bool   // True once the inputs were prefilled from config
 
 	// Branch auto-detection.
 	currentBranch     string // Current HEAD branch for auto-positioning cursor.
@@ -300,10 +317,10 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		_ = SaveConfig(cfg, ConfigPath())
 	}
 
-	// Pre-select LLM gateway from saved config.
-	savedGatewayChoice := 1 // Default: No
+	// Pre-select routing from the saved gateway preference.
+	savedRouting := RoutingDirect
 	if cfg != nil && cfg.LLMGatewayEnabled {
-		savedGatewayChoice = 0 // Yes
+		savedRouting = RoutingGateway
 	}
 
 	personasList := defaultPersonas()
@@ -326,8 +343,7 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		filteredBranches:   filteredBr,
 		existingWorktrees:  existingWts,
 		worktreeOpts:       []string{"New worktree", "Specify directory", "Current directory"},
-		llmGatewayOpts:     []string{"Yes — Route through gateway", "No — Connect directly to provider"},
-		selectedLLMGateway: savedGatewayChoice,
+		routing:            savedRouting,
 		llmGatewayEnabled:  cfg != nil && cfg.LLMGatewayEnabled,
 		permissionOpts:     []string{"Skip permissions (autonomous)", "Keep permissions (interactive)"},
 		dirHistory:         dirHistory,
@@ -424,6 +440,7 @@ func NewQuickSwitchWizard(meta SessionMeta, registry *ProviderRegistry, repoRoot
 		defaultBranch:       getDefaultBranch(repoRoot),
 		selectedWorkDir:     repoRoot,
 		llmGatewayEnabled:   meta.LLMGatewayEnabled,
+		routing:             routingForMeta(meta),
 		quickSwitch:         true,
 		switchSource:        &meta,
 	}
@@ -488,6 +505,12 @@ func (w WizardModel) buildQuickSwitchResult() (WizardModel, tea.Cmd) {
 		WorkDir:              w.selectedWorkDir,
 		EnvVars:              env,
 		LLMGatewayEnabled:    w.switchSource.LLMGatewayEnabled,
+		Routing:              routingForMeta(*w.switchSource),
+	}
+	// No routing step runs here, so an endpoint session reuses the source
+	// session's endpoint.
+	if w.result.Routing == RoutingEndpoint {
+		w.result.Vendor, w.result.BaseURL, w.result.Model = w.switchSource.Vendor, w.switchSource.BaseURL, w.switchSource.Model
 	}
 	w.done = true
 	return w, nil
@@ -592,6 +615,7 @@ func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *Provi
 		defaultBranch:     anchor.Branch,
 		selectedWorkDir:   anchor.WorkingDir,
 		llmGatewayEnabled: anchor.LLMGatewayEnabled,
+		routing:           routingForMeta(anchor),
 		groupEdit:         true,
 		groupAnchor:       &a,
 		groupRunning:      running,
@@ -651,6 +675,12 @@ func (w WizardModel) buildGroupEditResult() (WizardModel, tea.Cmd) {
 		WorkDir:           a.WorkingDir,
 		EnvVars:           env,
 		LLMGatewayEnabled: a.LLMGatewayEnabled,
+		Routing:           routingForMeta(*a),
+	}
+	// Group edit skips the routing step, so endpoint sessions reuse the
+	// anchor session's endpoint.
+	if w.result.Routing == RoutingEndpoint {
+		w.result.Vendor, w.result.BaseURL, w.result.Model = a.Vendor, a.BaseURL, a.Model
 	}
 	w.done = true
 	return w, nil
@@ -901,13 +931,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.editingBinary = false
 						// Update the provider entry to reflect availability.
 						w.providers[w.selectedProvider].available = true
-						if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
-							w.enterQwenLaunchConfig()
-						} else {
-							w.step = StepBranch
-							w.cursor = 0
-							w.cursorToCurrentBranch()
-						}
+						return w.afterProviderSelected()
 					}
 				}
 			case "esc":
@@ -1135,32 +1159,24 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 						w.config.SavedEnvVars[w.envTokenVarName] = w.envTokenValue
 						_ = SaveConfig(w.config, ConfigPath())
 					}
-					// Gateway-eligible vibeflow sessions get the gateway step;
-					// otherwise jump to the qwen launch config (qwen-only) or
-					// directly to branch.
-					if w.shouldShowGatewayStep() {
-						w.step = StepLLMGateway
-						w.cursor = w.selectedLLMGateway
+					// The key is saved; don't ask for it again on this run.
+					if w.envTokenVarName == w.deferredEnvToken {
+						w.deferredEnvToken = ""
+					}
+					// Asked before routing (e.g. the codex MCP token) → Routing
+					// next; asked after choosing direct routing → continue past it.
+					if w.routingChosen {
+						w.continueAfterRouting()
 					} else {
-						// Gateway step skipped (non-vibeflow session, no API
-						// token, or a direct-only provider like qwen/cursor):
-						// force direct mode so a gateway preference saved by a
-						// previous provider can't leak in.
-						w.llmGatewayEnabled = false
-						if w.postProviderConfigStep() == StepQwenLaunchConfig {
-							w.enterQwenLaunchConfig()
-						} else {
-							w.step = StepBranch
-							w.cursor = 0
-							w.cursorToCurrentBranch()
-						}
+						w.enterRoutingStep()
 					}
 				}
 			case "esc":
+				// Back to Routing when the key was asked after choosing direct
+				// routing, else to the provider list (see goBack).
 				w.editingEnvToken = false
 				w.envTokenValue = ""
-				w.step = StepProvider
-				w.cursor = w.selectedProvider
+				return w.goBack()
 			case "backspace":
 				if len(w.envTokenValue) > 0 {
 					w.envTokenValue = w.envTokenValue[:len(w.envTokenValue)-1]
@@ -1285,6 +1301,49 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 							}
 							w.qwenUserEdited = true
 						}
+					}
+				}
+				return w, nil
+			}
+		}
+
+		// StepOpenAICompatConfig: four text inputs (base URL, vendor, model,
+		// API key). Every row accepts typing, so letters never navigate —
+		// only arrows/tab move between rows.
+		if w.step == StepOpenAICompatConfig {
+			switch msg.String() {
+			case "enter":
+				// Enter moves down; on the last row it validates and commits.
+				if w.cursor < oacRowCount-1 {
+					w.cursor++
+					return w, nil
+				}
+				return w.advance()
+			case "esc":
+				return w.goBack()
+			case "up", "shift+tab":
+				if w.cursor > 0 {
+					w.cursor--
+				}
+				return w, nil
+			case "down", "tab":
+				if w.cursor < oacRowCount-1 {
+					w.cursor++
+				}
+				return w, nil
+			case "backspace":
+				// Delete the last character of the focused input.
+				if in := w.oacInputs[w.cursor]; len(in) > 0 {
+					w.oacInputs[w.cursor] = in[:len(in)-1]
+				}
+				w.oacErr = ""
+				return w, nil
+			default:
+				// Append printable ASCII (typed or pasted) to the focused input.
+				for _, ch := range msg.Text {
+					if ch >= ' ' && ch <= '~' {
+						w.oacInputs[w.cursor] += string(ch)
+						w.oacErr = ""
 					}
 				}
 				return w, nil
@@ -1419,8 +1478,9 @@ func (w WizardModel) View() string {
 		{StepTeam, "Team"},
 		{StepProvider, "Provider"},
 		{StepEnvToken, "Env"},
-		{StepLLMGateway, "Gateway"},
+		{StepLLMGateway, "Routing"},
 		{StepQwenLaunchConfig, "Qwen"},
+		{StepOpenAICompatConfig, "Endpoint"},
 		{StepBranch, "Branch"},
 		{StepWorktree, "Worktree"},
 		{StepPermissions, "Permissions"},
@@ -1432,6 +1492,10 @@ func (w WizardModel) View() string {
 	var stepLine strings.Builder
 	for _, s := range steps {
 		if s.step == StepQwenLaunchConfig && w.postProviderConfigStep() != StepQwenLaunchConfig {
+			continue
+		}
+		// Only show the endpoint step when endpoint routing is chosen.
+		if s.step == StepOpenAICompatConfig && w.routing != RoutingEndpoint {
 			continue
 		}
 		if stepLine.Len() > 0 {
@@ -1667,15 +1731,23 @@ func (w WizardModel) View() string {
 		b.WriteString(helpStyle.Render("enter: confirm  esc: back"))
 
 	case StepLLMGateway:
-		b.WriteString("Route LLM requests through Axiom Cloud Gateway?\n")
-		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("(Enables observability, cost tracking, and governance)"))
+		dim := lipgloss.NewStyle().Foreground(dimColor)
+		b.WriteString("Configure routing for your coding agent\n")
+		b.WriteString(dim.Render("(how the agent reaches its model)"))
 		b.WriteString("\n\n")
-		for i, opt := range w.llmGatewayOpts {
+		for i, opt := range w.routingOptions() {
 			cursor := "  "
 			if i == w.cursor {
 				cursor = "> "
 			}
-			b.WriteString(fmt.Sprintf("%s%s\n", cursor, opt))
+			// Unavailable options stay visible but dimmed, with the reason.
+			line := opt.label
+			if !opt.enabled {
+				line = dim.Render(opt.label + " — " + opt.note)
+			} else if opt.note != "" {
+				line += " " + dim.Render("("+opt.note+")")
+			}
+			b.WriteString(fmt.Sprintf("%s%s\n", cursor, line))
 		}
 
 	case StepQwenLaunchConfig:
@@ -1735,6 +1807,51 @@ func (w WizardModel) View() string {
 			hint = "j/k: navigate  type to edit  r: reset (overrides edits)  enter: confirm  esc: back"
 		}
 		b.WriteString(helpStyle.Render(hint))
+		return b.String()
+
+	case StepOpenAICompatConfig:
+		dim := lipgloss.NewStyle().Foreground(dimColor)
+		cursorMark := lipgloss.NewStyle().Foreground(accentColor).Render("█")
+
+		format := "OpenAI API"
+		if w.selectedProvider >= 0 && w.selectedProvider < len(w.providers) {
+			if f, ok := EndpointAPIFormat(w.providers[w.selectedProvider].key); ok {
+				format = f
+			}
+		}
+		b.WriteString("Compatible endpoint:\n")
+		b.WriteString(dim.Render("(hosted API or self-hosted proxy such as LiteLLM; must speak the " + format + ")"))
+		b.WriteString("\n\n")
+
+		// One row per input; the focused row gets the "> " marker and cursor.
+		labels := [oacRowCount]string{"Base URL", "Vendor  ", "Model   ", "API key "}
+		for row, label := range labels {
+			value := w.oacInputs[row]
+			if row == oacRowAPIKey {
+				// Mask the key: one bullet per character, never the characters.
+				value = strings.Repeat("•", len(value))
+			}
+			line := fmt.Sprintf("%s: %s", label, value)
+			if row == w.cursor {
+				b.WriteString("> " + line + cursorMark + "\n")
+			} else {
+				b.WriteString("  " + line + "\n")
+			}
+		}
+
+		// Explain what an empty key means for the vendor currently typed.
+		keyHint := "API key is optional — leave blank for endpoints without auth"
+		if ResolveOpenAICompatKey(w.config, w.oacInputs[oacRowVendor]) != "" {
+			keyHint = "a key is already saved for this vendor — leave blank to keep using it"
+		}
+		b.WriteString("\n" + dim.Render(keyHint) + "\n")
+
+		// Inline validation error from the last enter on the final row.
+		if w.oacErr != "" {
+			b.WriteString(lipgloss.NewStyle().Foreground(errorColor).Render("✗ "+w.oacErr) + "\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(helpStyle.Render("↑/↓/tab: move  type to edit  enter: next / confirm  esc: back"))
 		return b.String()
 
 	case StepBranch:
@@ -1959,16 +2076,25 @@ func (w WizardModel) View() string {
 			perm = "Skip permissions"
 		}
 		b.WriteString(fmt.Sprintf("  Permissions:   %s\n", perm))
-		if w.selectedSessionType == 1 {
-			gw := "Direct (no proxy)"
-			if w.llmGatewayEnabled {
-				gw = "Enabled (via gateway)"
+		routingLabel := map[string]string{
+			RoutingGateway:  "Axiom Studio AI Gateway",
+			RoutingDirect:   "Direct to provider",
+			RoutingEndpoint: "Compatible endpoint",
+			RoutingShell:    "Detected endpoint",
+		}[w.routing]
+		b.WriteString(fmt.Sprintf("  Routing:       %s\n", routingLabel))
+		if w.routing == RoutingShell {
+			if urlVar, baseURL := DetectShellEndpoint(pe.key); baseURL != "" {
+				b.WriteString(fmt.Sprintf("  Endpoint:      %s (from %s)\n", displayEndpointURL(baseURL), urlVar))
+				if shellEndpointSendsLogin(pe.key) {
+					b.WriteString(fmt.Sprintf("  Warning:       %s\n", shellLoginWarning))
+				}
 			}
-			b.WriteString(fmt.Sprintf("  LLM Gateway:   %s\n", gw))
 		}
-		// Qwen launch config summary — shown whenever the qwen step ran. In
-		// gateway mode the base URL is omitted (the gateway endpoint is used).
-		if pe.key == "qwen" {
+		// Qwen launch config summary — shown whenever the qwen step ran
+		// (direct or gateway routing). In gateway mode the base URL is
+		// omitted (the gateway endpoint is used).
+		if pe.key == "qwen" && w.postProviderConfigStep() == StepQwenLaunchConfig {
 			presets := qwenLaunchPresets()
 			vendorLabel := "Custom"
 			if w.qwenVendorIdx >= 0 && w.qwenVendorIdx < len(presets) {
@@ -1981,6 +2107,18 @@ func (w WizardModel) View() string {
 			if w.qwenBaseURLInput != "" && !w.llmGatewayEnabled {
 				b.WriteString(fmt.Sprintf("  Qwen Base URL: %s\n", w.qwenBaseURLInput))
 			}
+		}
+		// Endpoint summary. The API key is never shown — not even masked —
+		// only whether one will be sent.
+		if w.routing == RoutingEndpoint {
+			b.WriteString(fmt.Sprintf("  Vendor:        %s\n", w.oacValue(oacRowVendor)))
+			b.WriteString(fmt.Sprintf("  Base URL:      %s\n", w.oacValue(oacRowBaseURL)))
+			b.WriteString(fmt.Sprintf("  Model:         %s\n", w.oacValue(oacRowModel)))
+			keyState := "none (keyless endpoint)"
+			if ResolveOpenAICompatKey(w.config, w.oacValue(oacRowVendor)) != "" {
+				keyState = "saved for this vendor"
+			}
+			b.WriteString(fmt.Sprintf("  API key:       %s\n", keyState))
 		}
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("enter: create  esc: back"))
@@ -2016,9 +2154,11 @@ func (w WizardModel) listLen() int {
 	case StepEnvToken:
 		return 1
 	case StepLLMGateway:
-		return len(w.llmGatewayOpts)
+		return len(w.routingOptions())
 	case StepQwenLaunchConfig:
 		return len(qwenLaunchPresets()) + 2 // vendor rows + model input + base URL input
+	case StepOpenAICompatConfig:
+		return oacRowCount // base URL, vendor, model, API key inputs
 	case StepBranch:
 		return len(w.filteredBranches)
 	case StepWorktree:
@@ -2113,58 +2253,37 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		// Check if the team-default provider needs an env token (e.g. codex
 		// bearer_token_env_var). Per-persona overrides reuse the same env-var
 		// surface — see launch resolution in tui.go.
-		pe := w.providers[w.selectedProvider]
-		env, missing := ResolveProviderEnvVars(w.config, pe.key)
-		if missing != "" {
-			w.envTokenVarName = missing
-			w.envTokenValue = ""
-			w.editingEnvToken = true
-			w.envVars = env
-			w.step = StepEnvToken
-			return w, nil
-		}
-		w.envVars = env
-		// Group edit inherits branch/worktree/permissions/gateway from the
-		// anchor — jump straight to confirm after the (per-persona) provider
-		// selection. The anchor's provider is already configured, so the
-		// missing-token branch above is unreachable here.
-		if w.groupEdit {
-			w.step = StepConfirm
-			w.cursor = 0
-			return w, nil
-		}
-		// Gateway-eligible vibeflow sessions get the gateway step; otherwise
-		// advance to the qwen launch config (qwen-only) or directly to branch.
-		if w.shouldShowGatewayStep() {
-			w.step = StepLLMGateway
-			w.cursor = w.selectedLLMGateway
-		} else {
-			// Gateway step skipped (non-vibeflow session, no API token, or a
-			// direct-only provider like qwen/cursor): force direct mode so a
-			// gateway preference saved by a previous provider can't leak in.
-			w.llmGatewayEnabled = false
-			if w.postProviderConfigStep() == StepQwenLaunchConfig {
-				w.enterQwenLaunchConfig()
-			} else {
-				w.step = StepBranch
-				w.cursor = 0
-				w.cursorToCurrentBranch()
-			}
-		}
+		return w.afterProviderSelected()
 	case StepLLMGateway:
-		w.selectedLLMGateway = w.cursor
-		w.llmGatewayEnabled = w.cursor == 0 // 0 = Yes
-		// Persist choice in config.
-		if w.config != nil {
+		// Routing chosen. Unavailable options (e.g. an endpoint for a harness
+		// that can't use one) can't be selected.
+		opts := w.routingOptions()
+		if w.cursor >= len(opts) || !opts[w.cursor].enabled {
+			return w, nil
+		}
+		w.routing = opts[w.cursor].mode
+		w.routingChosen = true
+		w.llmGatewayEnabled = w.routing == RoutingGateway
+		// Remember the gateway preference, but only where it was on offer.
+		if w.config != nil && w.shouldShowGatewayStep() {
 			w.config.LLMGatewayEnabled = w.llmGatewayEnabled
 			_ = SaveConfig(w.config, ConfigPath())
 		}
-		if next := w.postProviderConfigStep(); next == StepQwenLaunchConfig {
-			w.enterQwenLaunchConfig()
-		} else {
-			w.step = StepBranch
-			w.cursor = 0
-			w.cursorToCurrentBranch()
+		switch {
+		case w.routing == RoutingEndpoint:
+			// The endpoint's key replaces the provider key, so a deferred
+			// key prompt is dropped.
+			w.deferredEnvToken = ""
+			w.enterOpenAICompatConfig()
+		case (w.routing == RoutingDirect || w.routing == RoutingShell) && w.deferredEnvToken != "":
+			// Direct routing needs the provider's own API key, and so does an
+			// endpoint from the shell (it uses the harness's own key vars).
+			w.envTokenVarName = w.deferredEnvToken
+			w.envTokenValue = ""
+			w.editingEnvToken = true
+			w.step = StepEnvToken
+		default:
+			w.continueAfterRouting()
 		}
 	case StepEnvToken:
 		// Re-enter editing if not already done.
@@ -2188,6 +2307,26 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		} else {
 			delete(w.envVars, "OPENAI_MODEL")
 		}
+		w.step = StepBranch
+		w.cursor = 0
+		w.cursorToCurrentBranch()
+	case StepOpenAICompatConfig:
+		// Validate; on failure stay on the step and show the error inline.
+		vendor, baseURL, model := w.oacValue(oacRowVendor), w.oacValue(oacRowBaseURL), w.oacValue(oacRowModel)
+		if err := ValidateOpenAICompatEndpoint(baseURL, vendor, model); err != nil {
+			w.oacErr = err.Error()
+			return w, nil
+		}
+		w.oacErr = ""
+		// Remember the endpoint for the next wizard run and store a newly
+		// typed key in the vendor's own slot (a blank key keeps any saved one).
+		if w.config != nil {
+			w.config.OpenAICompat = OpenAICompatConfig{LastBaseURL: baseURL, LastVendor: vendor, LastModel: model}
+			w.config.SaveOpenAICompatKey(vendor, w.oacInputs[oacRowAPIKey])
+			_ = SaveConfig(w.config, ConfigPath())
+		}
+		// Drop the typed key from wizard state now that it is stored.
+		w.oacInputs[oacRowAPIKey] = ""
 		w.step = StepBranch
 		w.cursor = 0
 		w.cursorToCurrentBranch()
@@ -2345,6 +2484,13 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			WorkDir:              w.selectedWorkDir,
 			EnvVars:              w.envVars,
 			LLMGatewayEnabled:    w.llmGatewayEnabled,
+			Routing:              w.routing,
+		}
+		// Endpoint routing: carry the endpoint entered in the wizard.
+		if w.routing == RoutingEndpoint {
+			w.result.Vendor = w.oacValue(oacRowVendor)
+			w.result.BaseURL = w.oacValue(oacRowBaseURL)
+			w.result.Model = w.oacValue(oacRowModel)
 		}
 		w.done = true
 	}
@@ -2469,8 +2615,15 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 			w.cursor = w.selectedSessionType
 		}
 	case StepEnvToken:
-		w.step = StepProvider
-		w.cursor = w.selectedProvider
+		// A key asked after choosing direct routing goes back to Routing; one
+		// asked right after the provider goes back to the provider list.
+		if w.routingChosen {
+			w.editingEnvToken = false
+			w.enterRoutingStep()
+		} else {
+			w.step = StepProvider
+			w.cursor = w.selectedProvider
+		}
 	case StepLLMGateway:
 		w.step = StepProvider
 		w.cursor = w.selectedProvider
@@ -2479,27 +2632,20 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 			w.cancelled = true
 			return w, nil
 		}
-		// Reverse of advance(): qwen launch config first, then LLM gateway,
-		// else fall back to the provider step.
-		if w.postProviderConfigStep() == StepQwenLaunchConfig {
-			w.enterQwenLaunchConfig()
-		} else if w.shouldShowGatewayStep() {
-			w.step = StepLLMGateway
-			w.cursor = w.selectedLLMGateway
-		} else {
-			w.step = StepProvider
-			w.cursor = w.selectedProvider
+		// Reverse of advance(): the endpoint inputs or the harness's config
+		// step (qwen presets) when they ran, else the Routing step.
+		if w.routing == RoutingEndpoint {
+			w.enterOpenAICompatConfig()
+			return w, nil
 		}
-	case StepQwenLaunchConfig:
-		// Reverse of advance(): if the user came from the gateway step, return
-		// there; otherwise jump back to the provider step.
-		if w.shouldShowGatewayStep() {
-			w.step = StepLLMGateway
-			w.cursor = w.selectedLLMGateway
-		} else {
-			w.step = StepProvider
-			w.cursor = w.selectedProvider
+		if w.enterProviderConfigStep() {
+			return w, nil
 		}
+		w.enterRoutingStep()
+	case StepQwenLaunchConfig, StepOpenAICompatConfig:
+		// Reverse of advance(): both follow the Routing step.
+		w.oacErr = ""
+		w.enterRoutingStep()
 	case StepWorktree:
 		w.step = StepBranch
 		// Restore cursor to the position in the filtered list.
@@ -2770,6 +2916,132 @@ func providerSupportsGateway(providerKey string) bool {
 	}
 }
 
+// afterProviderSelected continues the wizard once a provider is chosen: ask
+// for any missing credential the harness needs whatever the routing (e.g. the
+// codex MCP token), then show the Routing step. A missing provider API key
+// (GEMINI_API_KEY / OPENAI_API_KEY) is deferred: only direct routing uses it.
+func (w WizardModel) afterProviderSelected() (WizardModel, tea.Cmd) {
+	pe := w.providers[w.selectedProvider]
+	env, missing := ResolveProviderEnvVars(w.config, pe.key)
+	w.envVars = env
+	w.deferredEnvToken = ""
+	w.routingChosen = false
+	if missing != "" {
+		if isProviderAPIKeyVar(missing) && !w.groupEdit {
+			w.deferredEnvToken = missing
+		} else {
+			w.envTokenVarName = missing
+			w.envTokenValue = ""
+			w.editingEnvToken = true
+			w.step = StepEnvToken
+			return w, nil
+		}
+	}
+	// Group edit inherits branch/worktree/permissions/routing from the
+	// anchor — jump straight to confirm after the (per-persona) provider
+	// selection.
+	if w.groupEdit {
+		w.step = StepConfirm
+		w.cursor = 0
+		return w, nil
+	}
+	w.enterRoutingStep()
+	return w, nil
+}
+
+// selectedProviderKey returns the key of the selected harness, or "".
+func (w WizardModel) selectedProviderKey() string {
+	if w.selectedProvider >= 0 && w.selectedProvider < len(w.providers) {
+		return w.providers[w.selectedProvider].key
+	}
+	return ""
+}
+
+// routingOption is one row of the Routing step.
+type routingOption struct {
+	mode    string // RoutingGateway / RoutingDirect / RoutingEndpoint
+	label   string
+	note    string // what the option needs, or why it is unavailable
+	enabled bool
+}
+
+// routingOptions lists the Routing step's choices for the selected harness:
+// the gateway (only where it works today), direct, and a compatible endpoint
+// (shown disabled for harnesses that can't use one).
+func (w WizardModel) routingOptions() []routingOption {
+	var key, name string
+	if w.selectedProvider >= 0 && w.selectedProvider < len(w.providers) {
+		key = w.providers[w.selectedProvider].key
+		name = w.providers[w.selectedProvider].provider.Name
+	}
+	var opts []routingOption
+	if w.shouldShowGatewayStep() {
+		opts = append(opts, routingOption{RoutingGateway, "Axiom Studio AI Gateway", "observability, cost tracking and governance", true})
+	}
+	// An endpoint already configured in the shell is offered first after the
+	// gateway; the URL is shown without credentials, never the key.
+	directNote := ""
+	if urlVar, baseURL := DetectShellEndpoint(key); baseURL != "" {
+		if problem := shellEndpointProblem(baseURL); problem != "" {
+			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", urlVar + " " + problem, false})
+		} else {
+			note := urlVar + " = " + displayEndpointURL(baseURL)
+			// Still selectable, but the user must see that their login
+			// would go to this URL (and it is not pre-selected).
+			if shellEndpointSendsLogin(key) {
+				note += "; " + shellLoginWarning
+			}
+			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", note, true})
+			directNote = "ignores the detected endpoint"
+		}
+	}
+	opts = append(opts, routingOption{RoutingDirect, "Connect directly to the provider", directNote, true})
+	if format, ok := EndpointAPIFormat(key); ok {
+		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", "needs the " + format, true})
+	} else {
+		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", "not supported by " + name, false})
+	}
+	return opts
+}
+
+// enterRoutingStep shows the Routing step with the cursor on the current
+// choice, falling back to direct when that choice isn't available here. A
+// usable endpoint detected in the shell is pre-selected until the user has
+// chosen a routing on this run.
+func (w *WizardModel) enterRoutingStep() {
+	w.step = StepLLMGateway
+	opts := w.routingOptions()
+	preferred := w.routing
+	if !w.routingChosen {
+		for _, opt := range opts {
+			if opt.mode == RoutingShell && opt.enabled && !shellEndpointSendsLogin(w.selectedProviderKey()) {
+				preferred = RoutingShell
+			}
+		}
+	}
+	w.cursor = 0
+	for i, opt := range opts {
+		if opt.mode == RoutingDirect {
+			w.cursor = i
+		}
+	}
+	for i, opt := range opts {
+		if opt.mode == preferred && opt.enabled {
+			w.cursor = i
+		}
+	}
+}
+
+// continueAfterRouting moves past the Routing step: the harness's own config
+// step (qwen presets) when it has one, else branch selection.
+func (w *WizardModel) continueAfterRouting() {
+	if !w.enterProviderConfigStep() {
+		w.step = StepBranch
+		w.cursor = 0
+		w.cursorToCurrentBranch()
+	}
+}
+
 // shouldShowGatewayStep reports whether the wizard should present the LLM
 // Gateway routing choice (StepLLMGateway). It is offered only for vibeflow
 // sessions that have an API token configured AND a selected provider that
@@ -2795,10 +3067,54 @@ func (w WizardModel) postProviderConfigStep() WizardStep {
 		return StepBranch
 	}
 	pe := w.providers[w.selectedProvider]
-	if pe.key == "qwen" {
+	// qwen's vendor presets configure its own endpoint; with endpoint
+	// routing the Endpoint step does that instead, and with shell routing
+	// the shell's OPENAI_* values do.
+	if pe.key == "qwen" && w.routing != RoutingEndpoint && w.routing != RoutingShell {
 		return StepQwenLaunchConfig
 	}
 	return StepBranch
+}
+
+// enterProviderConfigStep enters the provider-specific config step that
+// follows provider/gateway selection, if the selected provider has one.
+// Returns false when there is none, so the caller moves on to branch.
+func (w *WizardModel) enterProviderConfigStep() bool {
+	if w.postProviderConfigStep() == StepQwenLaunchConfig {
+		w.enterQwenLaunchConfig()
+		return true
+	}
+	return false
+}
+
+// Row indices of the StepOpenAICompatConfig inputs, in display order.
+const (
+	oacRowBaseURL = iota
+	oacRowVendor
+	oacRowModel
+	oacRowAPIKey
+	oacRowCount // number of rows
+)
+
+// enterOpenAICompatConfig moves to the endpoint step. On first entry the
+// base URL / vendor / model are prefilled from the last values used; the
+// API key input always starts empty (a saved key is reused when left blank).
+func (w *WizardModel) enterOpenAICompatConfig() {
+	w.step = StepOpenAICompatConfig
+	w.cursor = oacRowBaseURL
+	w.oacErr = ""
+	if !w.oacInitialized && w.config != nil {
+		w.oacInitialized = true
+		last := w.config.OpenAICompat
+		w.oacInputs[oacRowBaseURL] = last.LastBaseURL
+		w.oacInputs[oacRowVendor] = last.LastVendor
+		w.oacInputs[oacRowModel] = last.LastModel
+	}
+}
+
+// oacValue returns an endpoint input with surrounding whitespace removed.
+func (w WizardModel) oacValue(row int) string {
+	return strings.TrimSpace(w.oacInputs[row])
 }
 
 // enterQwenLaunchConfig is called when transitioning into the step. Seeds

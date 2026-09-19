@@ -79,6 +79,7 @@ func loadComponents(cfgPath string) (*Config, *TmuxManager, *Store, *WorktreeMan
 
 func launchCmd() *cobra.Command {
 	var provider, branch, worktreeName, persona, personasRaw, project, sessionType, model, modelsRaw string
+	var routingFlag, baseURL, vendor string // --routing and the compatible endpoint (--base-url / --vendor)
 	var openshellSandbox, openshellFrom, openshellPolicy, openshellProvidersRaw string
 	var worktree, skipPermissions, newBranch, llmGateway, openshell, openshellNoAutoProviders, cloudDispatch, replace, reuse bool
 
@@ -100,6 +101,9 @@ func launchCmd() *cobra.Command {
 			}
 			if provider == "" {
 				provider = "claude"
+			}
+			if err := validateRoutingFlags(provider, routingFlag, llmGateway, baseURL, vendor, model); err != nil {
+				return err
 			}
 			branchRequested := cmd.Flags().Changed("branch")
 			if branch == "" {
@@ -201,9 +205,23 @@ func launchCmd() *cobra.Command {
 				}
 			}
 
+			// How the harness reaches its model: gateway, direct or a
+			// compatible endpoint. Without --routing the existing behavior
+			// applies: --llm-gateway or the saved gateway preference, where
+			// the provider supports it; otherwise direct.
+			routing := routingFlag
+			gatewayEnabled, warnGatewayIgnored := false, false
+			switch routing {
+			case "":
+				gatewayEnabled, warnGatewayIgnored = GatewayEnabledForProvider(llmGateway, cfg.LLMGatewayEnabled, provider)
+				routing = resolveRouting("", gatewayEnabled)
+			case RoutingGateway:
+				gatewayEnabled = true // provider support checked in validateRoutingFlags
+			}
+
 			// Resolve provider env vars (e.g. codex bearer token).
 			envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
-			if missingVar != "" {
+			if missingVar != "" && !endpointSuppliesKey(routing, missingVar) {
 				return fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 			}
 			baseEnv := cloneStringMap(prov.Env)
@@ -221,7 +239,6 @@ func launchCmd() *cobra.Command {
 			// gateway-related vars to prevent inheritance from the parent shell.
 			// Providers that connect directly (qwen, cursor) never route through
 			// the gateway; warn if the user explicitly asked via --llm-gateway.
-			gatewayEnabled, warnGatewayIgnored := GatewayEnabledForProvider(llmGateway, cfg.LLMGatewayEnabled, provider)
 			if warnGatewayIgnored {
 				fmt.Fprintf(os.Stderr, "warning: --llm-gateway ignored for provider %q — it connects directly to the provider\n", provider)
 			}
@@ -237,6 +254,25 @@ func launchCmd() *cobra.Command {
 					baseEnv = make(map[string]string)
 				}
 				for k, v := range ClearLLMGatewayEnv(provider) {
+					baseEnv[k] = v
+				}
+			}
+			// An explicit --routing direct also clears an endpoint set in the
+			// shell; without --routing the existing behavior is kept.
+			if routingFlag == RoutingDirect {
+				for k, v := range ClearShellEndpointEnv(provider) {
+					baseEnv[k] = v
+				}
+			}
+			// --routing shell: pass the shell's endpoint and related vars
+			// through (validated above, so the URL is set and usable).
+			var shellURL string
+			if routing == RoutingShell {
+				shellURL, _ = ResolveShellEndpoint(provider)
+				if shellEndpointSendsLogin(provider) {
+					fmt.Fprintf(os.Stderr, "warning: --routing shell: %s\n", shellLoginWarning)
+				}
+				for k, v := range BuildShellEndpointEnv(provider, shellURL) {
 					baseEnv[k] = v
 				}
 			}
@@ -305,11 +341,23 @@ func launchCmd() *cobra.Command {
 				}
 				sessionModel := modelForPersona(model, personaModels, p)
 				sessionEnv := cloneStringMap(baseEnv)
+				// qwen-binary providers read the model from OPENAI_MODEL; seed it
+				// from --model / --models so AppendQwenAPIFlags emits --model.
 				if provider == "qwen" && sessionModel != "" {
 					if sessionEnv == nil {
 						sessionEnv = make(map[string]string)
 					}
 					sessionEnv["OPENAI_MODEL"] = sessionModel
+				}
+				// Endpoint routing: point the harness at --base-url with this
+				// persona's model and the vendor's key (or the keyless placeholder).
+				if routing == RoutingEndpoint {
+					if sessionEnv == nil {
+						sessionEnv = make(map[string]string)
+					}
+					for k, v := range BuildEndpointEnv(provider, cfg, vendor, baseURL, sessionModel) {
+						sessionEnv[k] = v
+					}
 				}
 				command, err := RenderLaunchCommand(prov.LaunchTemplate, LaunchTemplateVars{
 					WorkDir:         workDir,
@@ -326,6 +374,12 @@ func launchCmd() *cobra.Command {
 				// flags so the agents see the routed configuration explicitly on
 				// every launch path.
 				command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
+				if routing == RoutingEndpoint {
+					command = AppendEndpointFlags(command, provider, baseURL)
+				}
+				if routing == RoutingShell {
+					command = AppendShellEndpointFlags(command, provider, shellURL)
+				}
 				applyQwenModelPassthrough(provider, sessionEnv)
 				command = AppendQwenAPIFlags(command, provider, sessionEnv)
 
@@ -336,7 +390,16 @@ func launchCmd() *cobra.Command {
 					if mcpName == "" {
 						mcpName = DefaultMCPToolName
 					}
-					initPrompt := BuildVibeflowInitPrompt(mcpName, sessionProject, p)
+					// Tell the agent the exact values to register with so it
+					// never guesses its session ID, harness, model or repo.
+					initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(mcpName, sessionProject, p), SessionIdentity{
+						SessionID:    sessionName,
+						AgentType:    provider,
+						AgentModel:   sessionModel,
+						GitBranch:    branch,
+						GitRemoteURL: GetGitRemoteURL(workDir),
+						WorkingDir:   workDir,
+					})
 					if cloudDispatch {
 						initPrompt = BuildVibeflowCloudDispatchInitPrompt(mcpName, sessionProject, p, sessionName)
 					}
@@ -391,6 +454,9 @@ func launchCmd() *cobra.Command {
 					CloudDispatch:     cloudDispatch,
 					SkipPermissions:   skipPermissions,
 					Model:             sessionModel,
+					Vendor:            vendor,  // endpoint routing only; restart re-resolves the key
+					BaseURL:           baseURL, // endpoint routing only; restart reconnects here
+					Routing:           routing, // restart reconnects the same way
 					LLMGatewayEnabled: gatewayEnabled,
 					OpenShell:         openShellMeta(openShellCfg),
 					CreatedAt:         time.Now(),
@@ -424,7 +490,7 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&worktreeName, "worktree-name", "", "Custom worktree directory name (default: auto-generated)")
 	cmd.Flags().BoolVar(&newBranch, "new-branch", false, "Create a new git branch (used with --worktree)")
 	cmd.Flags().BoolVar(&skipPermissions, "skip-permissions", false, "Skip permission prompts (autonomous mode)")
-	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through Axiom Cloud Gateway")
+	cmd.Flags().BoolVar(&llmGateway, "llm-gateway", false, "Route LLM requests through the Axiom Studio AI Gateway (same as --routing gateway)")
 	cmd.Flags().BoolVar(&openshell, "openshell", false, "Run the agent inside an NVIDIA OpenShell sandbox")
 	cmd.Flags().StringVar(&openshellSandbox, "openshell-sandbox", "", "OpenShell sandbox name (sets --name for create mode)")
 	cmd.Flags().StringVar(&openshellFrom, "openshell-from", "", "OpenShell sandbox image/base to create from")
@@ -432,6 +498,9 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&openshellProvidersRaw, "openshell-provider", "", "Comma-separated OpenShell provider names to attach")
 	cmd.Flags().BoolVar(&openshellNoAutoProviders, "openshell-no-auto-providers", false, "Disable OpenShell credential auto-provider discovery")
 	cmd.Flags().StringVar(&model, "model", "", "Model id to pass to each launched provider session")
+	cmd.Flags().StringVar(&routingFlag, "routing", "", "How the agent reaches its model: gateway (Axiom Studio AI Gateway), direct, endpoint (a compatible endpoint; needs --base-url and --model), or shell (the endpoint already set in the environment, e.g. ANTHROPIC_BASE_URL)")
+	cmd.Flags().StringVar(&baseURL, "base-url", "", "Compatible endpoint base URL, e.g. http://localhost:4000/v1 (with --routing endpoint)")
+	cmd.Flags().StringVar(&vendor, "vendor", "", "Optional endpoint label; the API key is read from OPENAI_COMPAT_API_KEY_<VENDOR> (or OPENAI_COMPAT_API_KEY without a vendor)")
 	cmd.Flags().StringVar(&modelsRaw, "models", "", "Comma-separated persona=model overrides for team launches")
 	cmd.Flags().StringVar(&persona, "persona", "", "Persona key for vibeflow sessions")
 	cmd.Flags().StringVar(&personasRaw, "personas", "", "Comma-separated persona keys for team mode")
@@ -441,6 +510,55 @@ func launchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&replace, "replace", false, "Stop and replace existing sessions for the selected personas")
 	cmd.Flags().BoolVar(&reuse, "reuse", false, "Relaunch selected personas using their existing session IDs")
 	return cmd
+}
+
+// validateRoutingFlags checks the routing flags of `vibeflow launch` before
+// anything is created. --llm-gateway is an alias for --routing gateway;
+// --routing endpoint needs a harness that can use a compatible endpoint plus
+// --base-url and --model (every missing flag is named in one error), and
+// --base-url / --vendor are rejected without it rather than silently ignored.
+func validateRoutingFlags(provider, routing string, llmGateway bool, baseURL, vendor, model string) error {
+	switch routing {
+	case "", RoutingGateway, RoutingDirect, RoutingEndpoint, RoutingShell:
+	default:
+		return fmt.Errorf("--routing must be gateway, direct, endpoint or shell (got %q)", routing)
+	}
+	if llmGateway && routing != "" && routing != RoutingGateway {
+		return fmt.Errorf("--llm-gateway conflicts with --routing %s", routing)
+	}
+	if routing != RoutingEndpoint {
+		if baseURL != "" || vendor != "" {
+			return fmt.Errorf("--base-url and --vendor are only valid with --routing endpoint")
+		}
+		if routing == RoutingGateway && !providerSupportsGateway(provider) {
+			return fmt.Errorf("provider %q cannot route through the Axiom Studio AI Gateway", provider)
+		}
+		// Shell routing uses the endpoint already set in the environment.
+		if routing == RoutingShell {
+			if _, err := ResolveShellEndpoint(provider); err != nil {
+				return fmt.Errorf("--routing shell: %w", err)
+			}
+		}
+		return nil
+	}
+	if !providerSupportsEndpoint(provider) {
+		return fmt.Errorf("provider %q cannot connect to a compatible endpoint", provider)
+	}
+	// Collect every missing flag so the user fixes them in one go.
+	var missing []string
+	for _, f := range []struct{ name, value string }{{"--base-url", baseURL}, {"--model", model}} {
+		if strings.TrimSpace(f.value) == "" {
+			missing = append(missing, f.name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("--routing endpoint requires %s", strings.Join(missing, ", "))
+	}
+	// Same rules as the wizard's endpoint step.
+	if err := ValidateOpenAICompatEndpoint(baseURL, vendor, model); err != nil {
+		return fmt.Errorf("--routing endpoint: %w", err)
+	}
+	return nil
 }
 
 func preparePersonaSessions(tmux *TmuxManager, store *Store, cache *SessionCache, workDir, project string, personas []string, reuse bool) (map[string]string, error) {
@@ -738,6 +856,25 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		provider = "claude"
 	}
 
+	// Relaunch the same way the session was launched.
+	routing := routingForMeta(meta)
+
+	// An endpoint session can only be relaunched against the endpoint and
+	// model it was created with. Fail before touching the old pane rather
+	// than start the harness pointed at its default backend.
+	if routing == RoutingEndpoint && (meta.BaseURL == "" || meta.Model == "") {
+		return SessionMeta{}, fmt.Errorf("restart %s session %q: session metadata is missing the endpoint base URL or model — launch a new session instead", provider, meta.Name)
+	}
+	// A shell-routed session needs the endpoint to still be set in this
+	// environment; otherwise it would silently restart direct.
+	var shellURL string
+	if routing == RoutingShell {
+		var err error
+		if shellURL, err = ResolveShellEndpoint(provider); err != nil {
+			return SessionMeta{}, fmt.Errorf("restart %s session %q: %w", provider, meta.Name, err)
+		}
+	}
+
 	prov, ok := registry.Get(provider)
 	if !ok {
 		return SessionMeta{}, fmt.Errorf("unknown provider %q", provider)
@@ -769,7 +906,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 
 	// Resolve provider env vars.
 	envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
-	if missingVar != "" {
+	if missingVar != "" && !endpointSuppliesKey(routing, missingVar) {
 		return SessionMeta{}, fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 	}
 	sessionEnv := cloneStringMap(prov.Env)
@@ -783,7 +920,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 
 	// LLM gateway env vars.
-	if meta.LLMGatewayEnabled {
+	if routing == RoutingGateway {
 		if sessionEnv == nil {
 			sessionEnv = make(map[string]string)
 		}
@@ -798,16 +935,43 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 			sessionEnv[k] = v
 		}
 	}
+	// Sessions launched with direct chosen explicitly keep ignoring an
+	// endpoint set in the shell; records without a routing mode are
+	// restarted as before.
+	if meta.Routing == RoutingDirect {
+		for k, v := range ClearShellEndpointEnv(provider) {
+			sessionEnv[k] = v
+		}
+	}
+	// Shell routing: pass the shell's endpoint and related vars through.
+	if routing == RoutingShell {
+		for k, v := range BuildShellEndpointEnv(provider, shellURL) {
+			sessionEnv[k] = v
+		}
+	}
 	sessionEnv = WithMCPTokenEnv(sessionEnv, cfg)
 
 	// Mirror Codex gateway config and qwen routed env vars onto CLI flags on
 	// restart too. Must run before the init-prompt append.
 	command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
+	// Restore the stored model for qwen-binary providers so the restarted
+	// session runs the same model it was launched with.
 	if provider == "qwen" && meta.Model != "" {
 		if sessionEnv == nil {
 			sessionEnv = make(map[string]string)
 		}
 		sessionEnv["OPENAI_MODEL"] = meta.Model
+	}
+	// Reconnect endpoint sessions to their stored endpoint/model and
+	// re-resolve the vendor's key (never stored in metadata).
+	if routing == RoutingEndpoint {
+		for k, v := range BuildEndpointEnv(provider, cfg, meta.Vendor, meta.BaseURL, meta.Model) {
+			sessionEnv[k] = v
+		}
+		command = AppendEndpointFlags(command, provider, meta.BaseURL)
+	}
+	if routing == RoutingShell {
+		command = AppendShellEndpointFlags(command, provider, shellURL)
 	}
 	applyQwenModelPassthrough(provider, sessionEnv)
 	command = AppendQwenAPIFlags(command, provider, sessionEnv)
@@ -818,7 +982,19 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		projectName = cfg.DefaultProject
 	}
 	if meta.SessionType == "vibeflow" {
-		initPrompt := BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona)
+		// Re-register with the same identity the session was launched with.
+		registeredID := meta.VibeFlowSessionID
+		if registeredID == "" {
+			registeredID = meta.Name
+		}
+		initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(meta.MCPToolName, projectName, meta.Persona), SessionIdentity{
+			SessionID:    registeredID,
+			AgentType:    provider,
+			AgentModel:   meta.Model,
+			GitBranch:    branch,
+			GitRemoteURL: GetGitRemoteURL(workDir),
+			WorkingDir:   workDir,
+		})
 		if meta.CloudDispatch || meta.DispatchMode == "cloud_queue" {
 			sessionID := meta.VibeFlowSessionID
 			if sessionID == "" {
@@ -938,6 +1114,9 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 		CloudDispatch:          meta.CloudDispatch,
 		SkipPermissions:        meta.SkipPermissions,
 		Model:                  meta.Model,
+		Vendor:                 meta.Vendor,  // keep the endpoint for the next restart
+		BaseURL:                meta.BaseURL, // keep the endpoint for the next restart
+		Routing:                routing,      // keep the routing for the next restart
 		LLMGatewayEnabled:      meta.LLMGatewayEnabled,
 		MCPToolName:            meta.MCPToolName,
 		OpenShell:              meta.OpenShell,

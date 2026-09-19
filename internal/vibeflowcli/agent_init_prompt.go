@@ -44,6 +44,44 @@ func BuildVibeflowInitPrompt(mcpName, projectName, persona string) string {
 	)
 }
 
+// SessionIdentity holds the values an agent reports when it registers with
+// VibeFlow (session_init / session_register). vibeflow-cli already knows all
+// of them at launch; left to itself an agent has to guess, and a wrong
+// session ID, agent type or git remote hides the session from the project's
+// team views.
+type SessionIdentity struct {
+	SessionID    string // ID vibeflow-cli launched the session with
+	AgentType    string // harness, e.g. "claude", "qwen"
+	AgentModel   string // model the session runs, when known
+	GitBranch    string
+	GitRemoteURL string
+	WorkingDir   string
+}
+
+// WithSessionIdentity appends the known registration values to an init
+// prompt. Empty values are omitted, and an identity with no values returns the
+// prompt unchanged.
+func WithSessionIdentity(prompt string, id SessionIdentity) string {
+	var fields []string
+	// Collect only the values that are actually known.
+	for _, f := range []struct{ key, val string }{
+		{"session_id", id.SessionID},
+		{"agent_type", id.AgentType},
+		{"agent_model", id.AgentModel},
+		{"git_branch", id.GitBranch},
+		{"git_remote_url", id.GitRemoteURL},
+		{"working_directory", id.WorkingDir},
+	} {
+		if f.val != "" {
+			fields = append(fields, fmt.Sprintf("%s=%q", f.key, f.val))
+		}
+	}
+	if len(fields) == 0 {
+		return prompt
+	}
+	return prompt + " Register with exactly these values (session_init and session_register); do not infer or change them: " + strings.Join(fields, ", ") + "."
+}
+
 func BuildVibeflowCloudDispatchInitPrompt(mcpName, projectName, persona, sessionID string) string {
 	if mcpName == "" {
 		mcpName = DefaultMCPToolName
@@ -281,6 +319,7 @@ func codexConfigRawArg(value string) string {
 // single quotes and embedded single quotes use standard shell escaping, since
 // the assembled command is handed to `sh -c` via tmux send-keys.
 func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) string {
+	// Only qwen-binary providers understand --openai-base-url / --model.
 	if providerKey != "qwen" {
 		return baseCommand
 	}
@@ -301,6 +340,8 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 // the shell export is the only model source — copying it in lets
 // AppendQwenAPIFlags emit an explicit `--model` flag on those paths too.
 func applyQwenModelPassthrough(providerKey string, sessionEnv map[string]string) {
+	// Skip non-qwen-binary providers, and never override a model the
+	// session already carries (wizard, --model flag, or stored metadata).
 	if providerKey != "qwen" || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
 		return
 	}
