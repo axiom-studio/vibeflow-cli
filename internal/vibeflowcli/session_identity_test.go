@@ -79,6 +79,40 @@ func TestGetGitRemoteURL(t *testing.T) {
 	}
 }
 
+func TestGetGitRemoteURL_StripsCredentials(t *testing.T) {
+	repo := newTestRepo(t, "")
+	if out, err := exec.Command("git", "-C", repo, "remote", "add", "origin", "https://x-access-token:ghp_FAKE123@github.com/org/repo.git").CombinedOutput(); err != nil {
+		t.Fatalf("add remote: %v: %s", err, out)
+	}
+	if got := GetGitRemoteURL(repo); got != "https://github.com/org/repo.git" {
+		t.Errorf("got %q, want the URL without credentials", got)
+	}
+	for in, want := range map[string]string{
+		"git@github.com:org/repo.git":                    "git@github.com:org/repo.git", // scp-style: no secret
+		"ssh://git@host.example/org/repo.git":            "ssh://git@host.example/org/repo.git",
+		"ssh://git:S3cret@host.example/org/repo.git":     "ssh://git@host.example/org/repo.git",
+		"https://ghp_FAKE123@github.com/org/repo.git":    "https://github.com/org/repo.git", // token as the user
+		"http://u:S3cret@git.local:8080/r.git":           "http://git.local:8080/r.git",
+		"https://github.com/org/repo.git?token=S3cret#x": "https://github.com/org/repo.git",
+		"https://github.com/org/repo.git":                "https://github.com/org/repo.git",
+		"https://u:S3cret@bad host/r.git":                "", // unparseable → dropped, never raw
+	} {
+		if got := sanitizeRemoteURL(in); got != want {
+			t.Errorf("sanitizeRemoteURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRedactCommandSecrets_MasksURLCredentials(t *testing.T) {
+	got := redactCommandSecrets(`claude 'git_remote_url="https://u:S3cret@github.com/o/r.git"'`)
+	if strings.Contains(got, "S3cret") || !strings.Contains(got, "https://<redacted>@github.com/o/r.git") {
+		t.Errorf("redacted = %q", got)
+	}
+	if plain := `claude 'git@github.com:o/r.git https://github.com/o/r.git'`; redactCommandSecrets(plain) != plain {
+		t.Errorf("URLs without credentials must be unchanged: %q", redactCommandSecrets(plain))
+	}
+}
+
 // TestVibeflowInitPrompt_CarriesSessionIdentity launches and then restarts a
 // VibeFlow-mode session on a real tmux server with a fake agent, and checks
 // the prompt the agent receives names the session ID vibeflow-cli launched
@@ -166,4 +200,33 @@ func TestVibeflowInitPrompt_CarriesSessionIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("restart", readArgs())
+
+	// A token-bearing HTTPS origin must never reach the prompt, the spawn log
+	// or the session store.
+	if out, err := exec.Command("git", "-C", repo, "remote", "set-url", "origin", "https://x-access-token:ghp_FAKE123@github.com/org/repo.git").CombinedOutput(); err != nil {
+		t.Fatalf("set remote: %v: %s", err, out)
+	}
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RestartSession(meta, cfg, tm, NewStore(), NewSessionCache(), NewProviderRegistry(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	args := readArgs()
+	if !strings.Contains(args, `git_remote_url="https://github.com/org/repo.git"`) {
+		t.Errorf("prompt missing the sanitized remote:\n%s", args)
+	}
+	for _, f := range []string{"", filepath.Join(state, "vibeflow-cli.log"), DefaultStorePath()} {
+		text := args
+		if f != "" {
+			data, err := os.ReadFile(f)
+			if err != nil || len(data) == 0 {
+				t.Fatalf("read %s: %v", f, err)
+			}
+			text = string(data)
+		}
+		if strings.Contains(text, "ghp_FAKE123") {
+			t.Errorf("remote token leaked into %s", map[bool]string{true: "the prompt", false: f}[f == ""])
+		}
+	}
 }
