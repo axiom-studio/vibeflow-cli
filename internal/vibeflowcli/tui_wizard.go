@@ -2926,17 +2926,24 @@ func (w *WizardModel) applyQwenPreset() {
 }
 
 // providerSupportsGateway reports whether a provider can route LLM requests
-// through the Axiom Studio AI Gateway — that is, whether BuildLLMGatewayEnv
-// has a case for it. Claude Code, Codex, Gemini CLI and Qwen Code do; the
-// others connect only to their own backend, so offering them the choice
-// would set nothing and silently run direct.
+// through the Axiom Studio AI Gateway. It asks BuildLLMGatewayEnv itself, so
+// it cannot drift from it: a provider it has no case for — including a custom
+// provider from config.yaml — would be offered a choice that sets nothing and
+// silently runs direct.
 func providerSupportsGateway(providerKey string) bool {
-	return gatewayUnsupportedReason(providerKey, providerKey) == ""
+	return len(BuildLLMGatewayEnv(providerKey, "https://gateway.invalid", "probe")) > 0
 }
 
 // gatewayUnsupportedReason explains why a harness cannot use the gateway, or
-// "" when it can. The text is shown on the dimmed Routing row.
+// "" when it can. The text is shown on the dimmed Routing row; the built-in
+// harnesses get a specific explanation, anything else a generic one.
 func gatewayUnsupportedReason(providerKey, name string) string {
+	if providerSupportsGateway(providerKey) {
+		return ""
+	}
+	if name == "" {
+		name = providerKey
+	}
 	switch providerKey {
 	case "copilot":
 		return "not supported by " + name + " (talks only to GitHub's model routing)"
@@ -2945,7 +2952,7 @@ func gatewayUnsupportedReason(providerKey, name string) string {
 	case "kiro":
 		return "not supported by " + name + " (authenticates with its own KIRO_API_KEY)"
 	default:
-		return ""
+		return "not supported by " + name
 	}
 }
 
@@ -3176,7 +3183,7 @@ func (w WizardModel) recentEndpointHint() (string, EndpointRecord) {
 	if name := w.providerDisplayName(usedWith); name != "" {
 		line += " with " + name
 	}
-	line += ": " + rec.BaseURL
+	line += ": " + displayEndpointURL(rec.BaseURL)
 	if rec.Model != "" {
 		line += " (" + rec.Model + ")"
 	}

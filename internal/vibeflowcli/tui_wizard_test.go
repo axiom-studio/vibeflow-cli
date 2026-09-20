@@ -851,13 +851,54 @@ func TestPostProviderConfigStep_RoutingMatrix(t *testing.T) {
 // every built-in harness offered the gateway must actually get gateway
 // variables, or the session would silently run direct (issue #5269).
 func TestGatewayOfferedOnlyWhereItSetsSomething(t *testing.T) {
+	keys := []string{"mycli", ""} // custom provider keys are supported too
 	for key := range DefaultConfig().Providers {
-		if !providerSupportsGateway(key) {
-			continue
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
+		offered := providerSupportsGateway(key)
+		sets := len(BuildLLMGatewayEnv(key, "https://cloud.example.test", "tok")) > 0
+		if offered != sets {
+			t.Errorf("provider %q: gateway offered = %v but BuildLLMGatewayEnv sets something = %v", key, offered, sets)
 		}
-		if env := BuildLLMGatewayEnv(key, "https://cloud.example.test", "tok"); len(env) == 0 {
-			t.Errorf("%s is offered the gateway but BuildLLMGatewayEnv sets nothing for it", key)
+		// Whatever cannot use it must be able to say why.
+		if !offered && gatewayUnsupportedReason(key, "Some CLI") == "" {
+			t.Errorf("provider %q has no reason text for the dimmed row", key)
 		}
+	}
+}
+
+// TestWizard_CustomProviderCannotSelectTheGateway covers issue #5306: a
+// provider added in config.yaml has no gateway wiring, so the row must be
+// present but unselectable rather than silently routing direct.
+func TestWizard_CustomProviderCannotSelectTheGateway(t *testing.T) {
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	clearShellEndpoints(t)
+	cfg := &Config{APIToken: "tok", Providers: map[string]Provider{"mycli": {Name: "My CLI", Binary: "sh"}}}
+	w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+	w.selectedSessionType = 1 // vibeflow with a token: the gateway row applies
+	w.selectedProvider = providerIdxByKey(t, w, "mycli")
+	w.enterRoutingStep()
+
+	gateway := w.routingOptions()[0]
+	if gateway.mode != RoutingGateway {
+		t.Fatalf("first option = %q, want the gateway row", gateway.mode)
+	}
+	if gateway.enabled {
+		t.Error("a custom provider must not be able to select the gateway")
+	}
+	if want := "not supported by My CLI"; gateway.note != want {
+		t.Errorf("gateway note = %q, want %q", gateway.note, want)
+	}
+	// Selecting it does nothing.
+	w.cursor = 0
+	if got, _ := w.advance(); got.step != StepLLMGateway || got.routingChosen {
+		t.Errorf("disabled gateway row was accepted: step=%v", got.step)
+	}
+	// And the headless flag is rejected for the same provider.
+	if err := validateRoutingFlags("mycli", RoutingGateway, false, "", "", ""); err == nil ||
+		!strings.Contains(err.Error(), "cannot route through the Axiom Studio AI Gateway") {
+		t.Errorf("--routing gateway --provider mycli: err = %v", err)
 	}
 }
 
@@ -871,9 +912,12 @@ func TestProviderSupportsGateway(t *testing.T) {
 		{"gemini", true},
 		{"qwen", true}, // BuildLLMGatewayEnv has a qwen case
 		{"cursor", false},
-		{"copilot", false},                    // talks only to GitHub's model routing
-		{"kiro", false},                       // own KIRO_API_KEY; no BuildLLMGatewayEnv case
-		{"some-future-custom-provider", true}, // default: gateway-eligible
+		{"copilot", false}, // talks only to GitHub's model routing
+		{"kiro", false},    // own KIRO_API_KEY; no BuildLLMGatewayEnv case
+		// A custom provider from config.yaml has no BuildLLMGatewayEnv case,
+		// so the gateway must not be offered for it (issue #5306).
+		{"some-future-custom-provider", false},
+		{"", false},
 	}
 	for _, tt := range tests {
 		if got := providerSupportsGateway(tt.key); got != tt.want {
