@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -324,6 +325,16 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 		return baseCommand
 	}
 	out := baseCommand
+	// A fresh Qwen Code install with no saved auth type stops on its
+	// interactive "Connect a Provider" picker, which hangs an unattended
+	// session forever. qwen infers the OpenAI auth path from the env only
+	// when OPENAI_API_KEY, OPENAI_MODEL and OPENAI_BASE_URL are ALL set
+	// (getAuthTypeFromEnv, 0.24.0), so a session without a model — an empty
+	// Custom preset, or a headless launch with no --model — never gets there.
+	// Whenever vibeflow supplies the endpoint, say so explicitly.
+	if env["OPENAI_BASE_URL"] != "" && qwenNeedsAuthTypeFlag(baseCommand) {
+		out += " --auth-type openai"
+	}
 	if v := env["OPENAI_BASE_URL"]; v != "" {
 		out += fmt.Sprintf(" --openai-base-url '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
@@ -331,6 +342,47 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 		out += fmt.Sprintf(" --model '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
 	return out
+}
+
+// qwenNeedsAuthTypeFlag reports whether a qwen launch should be pinned to the
+// OpenAI auth path. It is left alone when the command already says so (see
+// AppendEndpointFlags), when the user asked for qwen's OAuth mode through the
+// environment, or when they have completed qwen's own auth setup — those
+// users already start without the picker, and their choice must win.
+func qwenNeedsAuthTypeFlag(baseCommand string) bool {
+	if strings.Contains(baseCommand, "--auth-type") || os.Getenv("QWEN_OAUTH") != "" {
+		return false
+	}
+	return qwenSavedAuthType() == ""
+}
+
+// qwenSavedAuthType returns the auth type saved in Qwen Code's own settings
+// (security.auth.selectedType in ~/.qwen/settings.json), or "" when none is
+// set. A file that cannot be read or parsed is reported as configured, so an
+// unreadable settings file never changes an existing user's launch.
+func qwenSavedAuthType() string {
+	path, err := qwenConfigPath()
+	if err != nil {
+		return "unknown"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "" // no settings at all: qwen would show the picker
+		}
+		return "unknown"
+	}
+	var settings struct {
+		Security struct {
+			Auth struct {
+				SelectedType string `json:"selectedType"`
+			} `json:"auth"`
+		} `json:"security"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return "unknown"
+	}
+	return settings.Security.Auth.SelectedType
 }
 
 // applyQwenModelPassthrough copies OPENAI_MODEL from the calling shell into
