@@ -375,12 +375,64 @@ func readJSONObject(path string) (map[string]any, error) {
 	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		// Gemini CLI and Qwen Code both accept comments in settings.json and
+		// users do annotate these files, so a commented file must not stop
+		// bootstrap. Retry without the comments; anything still invalid
+		// reports the original parse error.
+		stripped := stripJSONComments(data)
+		if len(stripped) == len(data) || json.Unmarshal(stripped, &root) != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		// Writing the file back re-encodes it, which drops the comments. The
+		// previous file is kept (see writeConfigFileWithBackup).
+		warnf("%s contains comments; they are not preserved when vibeflow rewrites the file (the previous version is backed up under %s)", path, filepath.Join(RootDir(), ".backup"))
 	}
 	if root == nil {
 		root = map[string]any{}
 	}
 	return root, nil
+}
+
+// stripJSONComments removes // line and /* */ block comments from JSONC,
+// leaving comment markers inside strings alone (a URL's "//", say). Returns
+// the input unchanged when it holds no comments.
+func stripJSONComments(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString, escaped := false, false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if inString {
+			out = append(out, c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch {
+		case c == '"':
+			inString = true
+			out = append(out, c)
+		case c == '/' && i+1 < len(data) && data[i+1] == '/':
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+			i-- // the loop's i++ re-reads the newline, keeping line breaks
+		case c == '/' && i+1 < len(data) && data[i+1] == '*':
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			i++ // skip the closing "/"
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func writeJSONObject(path string, root map[string]any) (string, error) {

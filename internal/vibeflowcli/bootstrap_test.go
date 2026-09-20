@@ -1256,3 +1256,110 @@ func TestBootstrapAndUninstall_QwenPreservesOtherSettings(t *testing.T) {
 		t.Error("uninstall removed unrelated qwen settings")
 	}
 }
+
+func TestStripJSONComments(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"line comment", "{\n  // my model\n  \"a\": 1\n}", "{\n  \n  \"a\": 1\n}"}, // indentation before the comment is kept
+		{"trailing line comment", `{"a": 1} // done`, `{"a": 1} `},
+		{"block comment", "{/* note */\"a\": 1}", `{"a": 1}`},
+		{"multi-line block", "{\n/* one\n   two */\n\"a\": 1}", "{\n\n\"a\": 1}"},
+		// Comment markers inside strings must survive: URLs are the common case.
+		{"url in string", `{"httpUrl": "https://cloud.example/rest/v1/mcp"}`, `{"httpUrl": "https://cloud.example/rest/v1/mcp"}`},
+		{"block marker in string", `{"a": "/* not a comment */"}`, `{"a": "/* not a comment */"}`},
+		{"escaped quote before marker", `{"a": "he said \"//\" ok"}`, `{"a": "he said \"//\" ok"}`},
+		{"no comments", `{"a": 1}`, `{"a": 1}`},
+		{"comment at EOF without newline", `{"a": 1}` + "\n// end", `{"a": 1}` + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(stripJSONComments([]byte(tt.in))); got != tt.want {
+				t.Errorf("stripJSONComments(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBootstrapCmd_CommentedSettingsAreConfigured covers the JSONC settings
+// files Gemini CLI and Qwen Code accept: bootstrap must configure them
+// instead of failing with a raw parse error, keep the user's own settings,
+// and say that comments are lost.
+func TestBootstrapCmd_CommentedSettingsAreConfigured(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	SetRootDir("")
+
+	commented := "{\n  // my model choice\n  \"model\": {\"name\": \"qwen3-coder-plus\"},\n  /* keep this */\n  \"ui\": {\"theme\": \"dark\"}\n}\n"
+	for _, dir := range []string{".qwen", ".gemini"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, dir, "settings.json"), []byte(commented), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var warnings bytes.Buffer
+	SetWarnWriter(&warnings)
+	t.Cleanup(func() { SetWarnWriter(nil) })
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	root := newBootstrapTestRoot()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"bootstrap", "--api-key", "K-123", "--base-url", "https://cloud.example", "--config", cfgPath, "--agents", "qwen,gemini"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("bootstrap execute: %v\n%s", err, out.String())
+	}
+
+	for _, dir := range []string{".qwen", ".gemini"} {
+		path := filepath.Join(home, dir, "settings.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("%s is not valid JSON after bootstrap: %v\n%s", path, err, data)
+		}
+		if _, ok := got["mcpServers"]; !ok {
+			t.Errorf("%s has no mcpServers after bootstrap:\n%s", path, data)
+		}
+		// The user's own settings survive the rewrite.
+		if model, _ := got["model"].(map[string]any); model["name"] != "qwen3-coder-plus" {
+			t.Errorf("%s lost the user's model setting:\n%s", path, data)
+		}
+		if ui, _ := got["ui"].(map[string]any); ui["theme"] != "dark" {
+			t.Errorf("%s lost the user's ui setting:\n%s", path, data)
+		}
+		// The rewrite drops the comments, so the user is told and the
+		// original file is kept.
+		if !strings.Contains(warnings.String(), path) {
+			t.Errorf("no warning naming %s:\n%s", path, warnings.String())
+		}
+	}
+	if !strings.Contains(warnings.String(), "not preserved") {
+		t.Errorf("warning does not say comments are lost: %q", warnings.String())
+	}
+	backups, _ := filepath.Glob(filepath.Join(RootDir(), ".backup", "*settings*"))
+	if len(backups) == 0 {
+		t.Error("no backup of the commented settings files")
+	}
+}
+
+func TestReadJSONObject_InvalidJSONStillFails(t *testing.T) {
+	// Only comments are tolerated: real syntax errors keep their message.
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"a": 1,,}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readJSONObject(path); err == nil || !strings.Contains(err.Error(), "parse "+path) {
+		t.Errorf("err = %v, want a parse error naming the file", err)
+	}
+}
