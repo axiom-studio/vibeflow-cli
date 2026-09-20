@@ -29,11 +29,11 @@ import (
 
 func TestEndpointSupportByHarness(t *testing.T) {
 	for provider, want := range map[string]string{
-		"copilot": "OpenAI API",
-		"qwen":    "OpenAI API",
-		"codex":   "OpenAI Responses API",
-		"claude":  "Anthropic Messages API",
-		"gemini":  "Gemini API",
+		"copilot": "OpenAI-compatible",
+		"qwen":    "OpenAI-compatible",
+		"codex":   "OpenAI-compatible, Responses API",
+		"claude":  "Anthropic-compatible, Messages API",
+		"gemini":  "Gemini-compatible",
 	} {
 		got, ok := EndpointAPIFormat(provider)
 		if !ok || got != want {
@@ -73,14 +73,21 @@ func TestResolveRouting(t *testing.T) {
 	}
 }
 
-func TestEndpointSuppliesKey(t *testing.T) {
-	if !endpointSuppliesKey(RoutingEndpoint, "GEMINI_API_KEY") || !endpointSuppliesKey(RoutingEndpoint, "OPENAI_API_KEY") {
+func TestRoutingSuppliesKey(t *testing.T) {
+	if !routingSuppliesKey(RoutingEndpoint, "gemini", "GEMINI_API_KEY") || !routingSuppliesKey(RoutingEndpoint, "qwen", "OPENAI_API_KEY") {
 		t.Error("the endpoint key must replace the harness's own provider key")
 	}
-	if endpointSuppliesKey(RoutingDirect, "GEMINI_API_KEY") {
-		t.Error("direct routing still needs the provider key")
+	// The gateway issues its own key for the harnesses it wires.
+	if !routingSuppliesKey(RoutingGateway, "qwen", "OPENAI_API_KEY") || !routingSuppliesKey(RoutingGateway, "gemini", "GEMINI_API_KEY") {
+		t.Error("gateway routing supplies the provider key")
 	}
-	if endpointSuppliesKey(RoutingEndpoint, "MCP_TOKEN") {
+	if routingSuppliesKey(RoutingGateway, "codex", "MCP_TOKEN") {
+		t.Error("the gateway does not supply the codex MCP bearer token")
+	}
+	if routingSuppliesKey(RoutingDirect, "gemini", "GEMINI_API_KEY") || routingSuppliesKey(RoutingShell, "qwen", "OPENAI_API_KEY") {
+		t.Error("direct and shell routing still need the provider's own key")
+	}
+	if routingSuppliesKey(RoutingEndpoint, "codex", "MCP_TOKEN") {
 		t.Error("the MCP bearer token is still required with an endpoint")
 	}
 }

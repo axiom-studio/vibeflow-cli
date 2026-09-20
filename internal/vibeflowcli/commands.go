@@ -221,7 +221,7 @@ func launchCmd() *cobra.Command {
 
 			// Resolve provider env vars (e.g. codex bearer token).
 			envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
-			if missingVar != "" && !endpointSuppliesKey(routing, missingVar) {
+			if missingVar != "" && !routingSuppliesKey(routing, provider, missingVar) {
 				return fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 			}
 			baseEnv := cloneStringMap(prov.Env)
@@ -906,7 +906,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 
 	// Resolve provider env vars.
 	envVars, missingVar := ResolveProviderEnvVars(cfg, provider)
-	if missingVar != "" && !endpointSuppliesKey(routing, missingVar) {
+	if missingVar != "" && !routingSuppliesKey(routing, provider, missingVar) {
 		return SessionMeta{}, fmt.Errorf("provider %q requires env var %q — set it in the environment or use the TUI wizard", provider, missingVar)
 	}
 	sessionEnv := cloneStringMap(prov.Env)

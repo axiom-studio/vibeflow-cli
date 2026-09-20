@@ -869,7 +869,7 @@ func TestProviderSupportsGateway(t *testing.T) {
 		{"claude", true},
 		{"codex", true},
 		{"gemini", true},
-		{"qwen", false},
+		{"qwen", true}, // BuildLLMGatewayEnv has a qwen case
 		{"cursor", false},
 		{"copilot", false},                    // talks only to GitHub's model routing
 		{"kiro", false},                       // own KIRO_API_KEY; no BuildLLMGatewayEnv case
@@ -905,7 +905,7 @@ func TestShouldShowGatewayStep(t *testing.T) {
 		{"claude vibeflow+token shows", 1, tokenCfg, "claude", true},
 		{"codex vibeflow+token shows", 1, tokenCfg, "codex", true},
 		{"gemini vibeflow+token shows", 1, tokenCfg, "gemini", true},
-		{"qwen vibeflow+token hidden", 1, tokenCfg, "qwen", false},
+		{"qwen vibeflow+token shows", 1, tokenCfg, "qwen", true},
 		{"cursor vibeflow+token hidden", 1, tokenCfg, "cursor", false},
 		{"claude vanilla session hidden", 0, tokenCfg, "claude", false},
 		{"claude no api token hidden", 1, &Config{}, "claude", false},
@@ -940,8 +940,8 @@ func TestWizardAdvance_RoutingStepForEveryHarness(t *testing.T) {
 		wantGatewayOn bool
 	}{
 		{"claude offers gateway", "claude", true, StepBranch, true},
-		{"cursor routes direct to branch", "cursor", false, StepBranch, false},
-		{"qwen routes direct to qwen launch config", "qwen", false, StepQwenLaunchConfig, false},
+		{"qwen offers gateway", "qwen", true, StepQwenLaunchConfig, true},
+		{"cursor cannot use it and routes direct", "cursor", false, StepBranch, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -964,8 +964,14 @@ func TestWizardAdvance_RoutingStepForEveryHarness(t *testing.T) {
 			if got.step != StepLLMGateway {
 				t.Fatalf("step after provider = %v, want the Routing step", got.step)
 			}
-			if offered := got.routingOptions()[0].mode == RoutingGateway; offered != tt.wantGateway {
-				t.Errorf("gateway offered = %v, want %v", offered, tt.wantGateway)
+			// The gateway row is always present for a VibeFlow session with a
+			// token; harnesses that cannot use it show it disabled.
+			gateway := got.routingOptions()[0]
+			if gateway.mode != RoutingGateway {
+				t.Fatalf("first option = %q, want the gateway row", gateway.mode)
+			}
+			if gateway.enabled != tt.wantGateway {
+				t.Errorf("gateway selectable = %v, want %v (note %q)", gateway.enabled, tt.wantGateway, gateway.note)
 			}
 			// Accept the preselected choice: the saved gateway where offered,
 			// direct otherwise.

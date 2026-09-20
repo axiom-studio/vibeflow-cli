@@ -1815,14 +1815,14 @@ func (w WizardModel) View() string {
 		dim := lipgloss.NewStyle().Foreground(dimColor)
 		cursorMark := lipgloss.NewStyle().Foreground(accentColor).Render("█")
 
-		format := "OpenAI API"
+		format := "OpenAI-compatible"
 		if w.selectedProvider >= 0 && w.selectedProvider < len(w.providers) {
 			if f, ok := EndpointAPIFormat(w.providers[w.selectedProvider].key); ok {
 				format = f
 			}
 		}
 		b.WriteString("Compatible endpoint:\n")
-		b.WriteString(dim.Render("(hosted API or self-hosted proxy such as LiteLLM; must speak the " + format + ")"))
+		b.WriteString(dim.Render("(hosted API or self-hosted proxy such as LiteLLM — " + format + ")"))
 		b.WriteString("\n\n")
 
 		// One row per input; the focused row gets the "> " marker and cursor.
@@ -2912,19 +2912,33 @@ func (w *WizardModel) applyQwenPreset() {
 }
 
 // providerSupportsGateway reports whether a provider can route LLM requests
-// through the Axiom Cloud LLM Gateway. qwen, cursor, and copilot connect
-// directly to their own backend (copilot talks only to GitHub's model
-// routing), and kiro authenticates with its own KIRO_API_KEY with no
-// custom-endpoint mechanism to target — BuildLLMGatewayEnv has no case for
-// any of them, so offering the choice would set nothing and silently run
-// direct. The wizard never offers them the gateway routing choice.
+// through the Axiom Studio AI Gateway — that is, whether BuildLLMGatewayEnv
+// has a case for it. Claude Code, Codex, Gemini CLI and Qwen Code do; the
+// others connect only to their own backend, so offering them the choice
+// would set nothing and silently run direct.
 func providerSupportsGateway(providerKey string) bool {
+	return gatewayUnsupportedReason(providerKey, providerKey) == ""
+}
+
+// gatewayUnsupportedReason explains why a harness cannot use the gateway, or
+// "" when it can. The text is shown on the dimmed Routing row.
+func gatewayUnsupportedReason(providerKey, name string) string {
 	switch providerKey {
-	case "qwen", "cursor", "copilot", "kiro":
-		return false
+	case "copilot":
+		return "not supported by " + name + " — it talks only to GitHub's model routing"
+	case "cursor":
+		return "not supported by " + name + " — it connects only to its own backend"
+	case "kiro":
+		return "not supported by " + name + " — it authenticates with its own KIRO_API_KEY"
 	default:
-		return true
+		return ""
 	}
+}
+
+// gatewayAppliesToSession reports whether the gateway could be used for this
+// session at all: VibeFlow sessions with an API token configured.
+func (w WizardModel) gatewayAppliesToSession() bool {
+	return w.selectedSessionType == 1 && w.config != nil && w.config.APIToken != ""
 }
 
 // afterProviderSelected continues the wizard once a provider is chosen: ask
@@ -2997,12 +3011,19 @@ func (w WizardModel) routingOptions() []routingOption {
 		name = w.providers[w.selectedProvider].provider.Name
 	}
 	var opts []routingOption
-	if w.shouldShowGatewayStep() {
-		opts = append(opts, routingOption{RoutingGateway, "Axiom Studio AI Gateway", "observability, cost tracking and governance", true})
+	// The gateway row appears wherever the gateway could apply at all (a
+	// VibeFlow session with an API token). Harnesses it cannot reach show it
+	// dimmed with the reason rather than silently missing.
+	if w.gatewayAppliesToSession() {
+		if providerSupportsGateway(key) {
+			opts = append(opts, routingOption{RoutingGateway, "Axiom Studio AI Gateway", "observability, cost tracking and governance", true})
+		} else {
+			opts = append(opts, routingOption{RoutingGateway, "Axiom Studio AI Gateway", gatewayUnsupportedReason(key, name), false})
+		}
 	}
 	// An endpoint already configured in the shell is offered first after the
 	// gateway; the URL is shown without credentials, never the key.
-	directNote := ""
+	directNote := "subscription, OAuth or API key from your shell"
 	if urlVar, baseURL := DetectShellEndpoint(key); baseURL != "" {
 		if problem := shellEndpointProblem(baseURL); problem != "" {
 			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", urlVar + " " + problem, false})
@@ -3014,12 +3035,12 @@ func (w WizardModel) routingOptions() []routingOption {
 				note += "; " + shellLoginWarning
 			}
 			opts = append(opts, routingOption{RoutingShell, "Use detected endpoint", note, true})
-			directNote = "ignores the detected endpoint"
+			directNote += "; ignores the detected endpoint"
 		}
 	}
 	opts = append(opts, routingOption{RoutingDirect, "Connect directly to the provider", directNote, true})
 	if format, ok := EndpointAPIFormat(key); ok {
-		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", "needs the " + format, true})
+		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", format, true})
 	} else {
 		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", "not supported by " + name, false})
 	}

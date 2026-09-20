@@ -42,12 +42,15 @@ const (
 // endpointAPIFormats lists the harnesses that can use a compatible endpoint
 // and the API the endpoint must speak for each. A harness missing from this
 // map (Cursor, Kiro) has no way to point at a custom endpoint.
+// The endpoint is a compatible server (LiteLLM, vLLM, a hosted vendor), not
+// the vendor's own API, so each value says "compatible" and names the wire
+// format only where the harness needs a specific one.
 var endpointAPIFormats = map[string]string{
-	"copilot": "OpenAI API",
-	"qwen":    "OpenAI API",
-	"codex":   "OpenAI Responses API",
-	"claude":  "Anthropic Messages API",
-	"gemini":  "Gemini API",
+	"copilot": "OpenAI-compatible",
+	"qwen":    "OpenAI-compatible",
+	"codex":   "OpenAI-compatible, Responses API",
+	"claude":  "Anthropic-compatible, Messages API",
+	"gemini":  "Gemini-compatible",
 }
 
 // EndpointAPIFormat returns the API a compatible endpoint must speak for the
@@ -85,12 +88,23 @@ func routingForMeta(meta SessionMeta) string {
 	return resolveRouting(meta.Routing, meta.LLMGatewayEnabled)
 }
 
-// endpointSuppliesKey reports whether a "missing env var" from
-// ResolveProviderEnvVars can be ignored because the launch uses a compatible
-// endpoint, whose key replaces the harness's own provider key. Other missing
-// vars (e.g. the codex MCP bearer token) are still required.
-func endpointSuppliesKey(routing, missingVar string) bool {
-	return routing == RoutingEndpoint && isProviderAPIKeyVar(missingVar)
+// routingSuppliesKey reports whether a "missing env var" from
+// ResolveProviderEnvVars can be ignored because the chosen routing provides
+// that variable itself: a compatible endpoint's key replaces the harness's
+// own provider key, and the gateway supplies its own (OPENAI_API_KEY for
+// Qwen Code, GEMINI_API_KEY for Gemini CLI). Other missing vars (e.g. the
+// codex MCP bearer token) are still required.
+func routingSuppliesKey(routing, providerKey, missingVar string) bool {
+	switch routing {
+	case RoutingEndpoint:
+		return isProviderAPIKeyVar(missingVar)
+	case RoutingGateway:
+		// Ask the gateway builder itself, so this cannot drift from it.
+		_, ok := BuildLLMGatewayEnv(providerKey, "https://gateway.invalid", "probe")[missingVar]
+		return ok
+	default:
+		return false
+	}
 }
 
 // isProviderAPIKeyVar reports whether a var ResolveProviderEnvVars can ask
