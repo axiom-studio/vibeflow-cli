@@ -847,6 +847,20 @@ func TestPostProviderConfigStep_RoutingMatrix(t *testing.T) {
 	}
 }
 
+// TestGatewayOfferedOnlyWhereItSetsSomething keeps the Routing step honest:
+// every built-in harness offered the gateway must actually get gateway
+// variables, or the session would silently run direct (issue #5269).
+func TestGatewayOfferedOnlyWhereItSetsSomething(t *testing.T) {
+	for key := range DefaultConfig().Providers {
+		if !providerSupportsGateway(key) {
+			continue
+		}
+		if env := BuildLLMGatewayEnv(key, "https://cloud.example.test", "tok"); len(env) == 0 {
+			t.Errorf("%s is offered the gateway but BuildLLMGatewayEnv sets nothing for it", key)
+		}
+	}
+}
+
 func TestProviderSupportsGateway(t *testing.T) {
 	tests := []struct {
 		key  string
@@ -858,6 +872,7 @@ func TestProviderSupportsGateway(t *testing.T) {
 		{"qwen", false},
 		{"cursor", false},
 		{"copilot", false},                    // talks only to GitHub's model routing
+		{"kiro", false},                       // own KIRO_API_KEY; no BuildLLMGatewayEnv case
 		{"some-future-custom-provider", true}, // default: gateway-eligible
 	}
 	for _, tt := range tests {
