@@ -135,13 +135,68 @@ type Config struct {
 	OpenAICompat      OpenAICompatConfig  `yaml:"openai_compatible,omitempty"`
 }
 
-// OpenAICompatConfig remembers the last compatible endpoint entered in the
-// wizard so it can be prefilled. API keys are not
-// kept here — they live in SavedEnvVars under OPENAI_COMPAT_API_KEY_<VENDOR>.
+// OpenAICompatConfig remembers compatible endpoints entered in the wizard so
+// the endpoint step can offer them again. They are offered, never filled in:
+// an endpoint entered for one harness may not even speak the API another one
+// needs. API keys are not kept here — they live in SavedEnvVars under
+// OPENAI_COMPAT_API_KEY_<VENDOR>.
 type OpenAICompatConfig struct {
+	// Recent holds the last endpoint used with each harness, keyed by
+	// provider key.
+	Recent map[string]EndpointRecord `yaml:"recent,omitempty"`
+	// LastProvider is the harness the most recent endpoint was used with.
+	LastProvider string `yaml:"last_provider,omitempty"`
+	// The fields below are what pre-release builds wrote: a single endpoint
+	// with no harness. They are still read, so an upgrade keeps the entry.
 	LastBaseURL string `yaml:"last_base_url,omitempty"`
 	LastVendor  string `yaml:"last_vendor,omitempty"`
 	LastModel   string `yaml:"last_model,omitempty"`
+}
+
+// EndpointRecord is one remembered compatible endpoint. The API key is never
+// part of it.
+type EndpointRecord struct {
+	BaseURL string `yaml:"base_url,omitempty"`
+	Vendor  string `yaml:"vendor,omitempty"`
+	Model   string `yaml:"model,omitempty"`
+}
+
+// RememberEndpoint records the endpoint a harness was just launched with, so
+// the next run can offer it.
+func (c *Config) RememberEndpoint(providerKey, baseURL, vendor, model string) {
+	if c == nil || providerKey == "" {
+		return
+	}
+	if c.OpenAICompat.Recent == nil {
+		c.OpenAICompat.Recent = make(map[string]EndpointRecord)
+	}
+	c.OpenAICompat.Recent[providerKey] = EndpointRecord{BaseURL: baseURL, Vendor: vendor, Model: model}
+	c.OpenAICompat.LastProvider = providerKey
+	// Keep the legacy fields in step so a downgrade still finds an endpoint.
+	c.OpenAICompat.LastBaseURL, c.OpenAICompat.LastVendor, c.OpenAICompat.LastModel = baseURL, vendor, model
+}
+
+// RecentEndpoint returns an endpoint to offer for providerKey: the one last
+// used with that harness, else the most recent from any harness. The second
+// result names the harness it came from ("" when a pre-release record has no
+// harness recorded), and ok is false when there is nothing to offer.
+func (c *Config) RecentEndpoint(providerKey string) (rec EndpointRecord, usedWith string, ok bool) {
+	if c == nil {
+		return EndpointRecord{}, "", false
+	}
+	if rec, found := c.OpenAICompat.Recent[providerKey]; found && rec.BaseURL != "" {
+		return rec, providerKey, true
+	}
+	if last := c.OpenAICompat.LastProvider; last != "" {
+		if rec, found := c.OpenAICompat.Recent[last]; found && rec.BaseURL != "" {
+			return rec, last, true
+		}
+	}
+	if c.OpenAICompat.LastBaseURL != "" {
+		legacy := EndpointRecord{BaseURL: c.OpenAICompat.LastBaseURL, Vendor: c.OpenAICompat.LastVendor, Model: c.OpenAICompat.LastModel}
+		return legacy, c.OpenAICompat.LastProvider, true
+	}
+	return EndpointRecord{}, "", false
 }
 
 // AddDirectoryToHistory adds a directory to the front of the history list,

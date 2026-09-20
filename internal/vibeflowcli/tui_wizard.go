@@ -187,9 +187,8 @@ type WizardModel struct {
 
 	// OpenAI-compatible endpoint (StepOpenAICompatConfig). Inputs are indexed
 	// by the oacRow* constants; the API key input is never rendered in clear.
-	oacInputs      [oacRowCount]string
-	oacErr         string // inline validation error shown under the inputs
-	oacInitialized bool   // True once the inputs were prefilled from config
+	oacInputs [oacRowCount]string
+	oacErr    string // inline validation error shown under the inputs
 
 	// Branch auto-detection.
 	currentBranch     string // Current HEAD branch for auto-positioning cursor.
@@ -1333,6 +1332,16 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					w.cursor++
 				}
 				return w, nil
+			case "ctrl+r":
+				// Fill the endpoint fields from the offered record. The API
+				// key is never filled in.
+				if _, rec := w.recentEndpointHint(); rec.BaseURL != "" {
+					w.oacInputs[oacRowBaseURL] = rec.BaseURL
+					w.oacInputs[oacRowVendor] = rec.Vendor
+					w.oacInputs[oacRowModel] = rec.Model
+					w.oacErr = ""
+				}
+				return w, nil
 			case "backspace":
 				// Delete the last character of the focused input.
 				if in := w.oacInputs[w.cursor]; len(in) > 0 {
@@ -1841,6 +1850,11 @@ func (w WizardModel) View() string {
 			}
 		}
 
+		// Offer the last endpoint (never filled in automatically).
+		if hint, _ := w.recentEndpointHint(); hint != "" {
+			b.WriteString("\n" + dim.Render(hint) + "\n")
+		}
+
 		// Explain what an empty key means for the vendor currently typed.
 		keyHint := "API key is optional — leave blank for endpoints without auth"
 		if ResolveOpenAICompatKey(w.config, w.oacInputs[oacRowVendor]) != "" {
@@ -2329,7 +2343,7 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		// Remember the endpoint for the next wizard run and store a newly
 		// typed key in the vendor's own slot (a blank key keeps any saved one).
 		if w.config != nil {
-			w.config.OpenAICompat = OpenAICompatConfig{LastBaseURL: baseURL, LastVendor: vendor, LastModel: model}
+			w.config.RememberEndpoint(w.selectedProviderKey(), baseURL, vendor, model)
 			w.config.SaveOpenAICompatKey(vendor, w.oacInputs[oacRowAPIKey])
 			_ = SaveConfig(w.config, ConfigPath())
 		}
@@ -2925,11 +2939,11 @@ func providerSupportsGateway(providerKey string) bool {
 func gatewayUnsupportedReason(providerKey, name string) string {
 	switch providerKey {
 	case "copilot":
-		return "not supported by " + name + " — it talks only to GitHub's model routing"
+		return "not supported by " + name + " (talks only to GitHub's model routing)"
 	case "cursor":
-		return "not supported by " + name + " — it connects only to its own backend"
+		return "not supported by " + name + " (connects only to its own backend)"
 	case "kiro":
-		return "not supported by " + name + " — it authenticates with its own KIRO_API_KEY"
+		return "not supported by " + name + " (authenticates with its own KIRO_API_KEY)"
 	default:
 		return ""
 	}
@@ -3042,7 +3056,7 @@ func (w WizardModel) routingOptions() []routingOption {
 	if format, ok := EndpointAPIFormat(key); ok {
 		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", format, true})
 	} else {
-		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", "not supported by " + name, false})
+		opts = append(opts, routingOption{RoutingEndpoint, "Connect to a compatible endpoint", "not supported by " + name + " (no custom endpoint mechanism)", false})
 	}
 	return opts
 }
@@ -3146,13 +3160,37 @@ func (w *WizardModel) enterOpenAICompatConfig() {
 	w.step = StepOpenAICompatConfig
 	w.cursor = oacRowBaseURL
 	w.oacErr = ""
-	if !w.oacInitialized && w.config != nil {
-		w.oacInitialized = true
-		last := w.config.OpenAICompat
-		w.oacInputs[oacRowBaseURL] = last.LastBaseURL
-		w.oacInputs[oacRowVendor] = last.LastVendor
-		w.oacInputs[oacRowModel] = last.LastModel
+	// The inputs are NOT prefilled: an endpoint entered for another harness
+	// may not speak the API this one needs. The last one is offered instead
+	// (see recentEndpointHint), and ctrl+r fills it in.
+}
+
+// recentEndpointHint returns the line offering the last endpoint, and the
+// record it would fill in. The line is empty when there is nothing to offer.
+func (w WizardModel) recentEndpointHint() (string, EndpointRecord) {
+	rec, usedWith, ok := w.config.RecentEndpoint(w.selectedProviderKey())
+	if !ok {
+		return "", EndpointRecord{}
 	}
+	line := "last used"
+	if name := w.providerDisplayName(usedWith); name != "" {
+		line += " with " + name
+	}
+	line += ": " + rec.BaseURL
+	if rec.Model != "" {
+		line += " (" + rec.Model + ")"
+	}
+	return line + " — press ctrl+r to fill", rec
+}
+
+// providerDisplayName returns a harness's display name for its key.
+func (w WizardModel) providerDisplayName(key string) string {
+	for _, pe := range w.providers {
+		if pe.key == key {
+			return pe.provider.Name
+		}
+	}
+	return ""
 }
 
 // oacValue returns an endpoint input with surrounding whitespace removed.
