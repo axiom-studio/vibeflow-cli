@@ -153,6 +153,8 @@ The wizard asks for:
 | Base URL | yes | Absolute `http://` or `https://` URL of the API, usually ending in `/v1`. Claude Code and Gemini CLI add their own versioned path, so vibeflow-cli gives them the URL without a trailing `/v1`; enter the same URL for every harness. |
 | Model | yes | Model id exactly as the endpoint expects it. |
 | Vendor | no | Display label (e.g. `my-proxy`). When set, it also names the slot the API key is stored in. |
+
+The inputs start empty. The endpoint you last used is offered below them, named with the harness it was used with, and `ctrl+r` fills it in — an endpoint entered for one harness is never applied to another by itself, since it may not speak the API that one needs. The API key is never offered or filled in.
 | API key | no | Leave blank for endpoints without authentication. |
 
 Headless:

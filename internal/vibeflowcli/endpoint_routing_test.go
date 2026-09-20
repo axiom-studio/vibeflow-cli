@@ -305,8 +305,8 @@ func TestWizard_RoutingOptionsPerHarness(t *testing.T) {
 		{"codex", true, "OpenAI-compatible, Responses API"},
 		{"claude", true, "Anthropic-compatible, Messages API"},
 		{"gemini", true, "Gemini-compatible"},
-		{"cursor", false, "not supported by Cursor Agent"},
-		{"kiro", false, "not supported by Kiro CLI"},
+		{"cursor", false, "not supported by Cursor Agent (no custom endpoint mechanism)"},
+		{"kiro", false, "not supported by Kiro CLI (no custom endpoint mechanism)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {
@@ -545,8 +545,10 @@ func TestWizard_EndpointKeyMaskedStoredPerVendorAndNeverInConfirm(t *testing.T) 
 	if cfg.SavedEnvVars["OPENAI_API_KEY"] != "sk-shared" {
 		t.Error("shared OPENAI_API_KEY slot was modified")
 	}
-	if cfg.OpenAICompat != (OpenAICompatConfig{LastBaseURL: "http://llm-proxy.local:4000/v1", LastVendor: "example-vendor", LastModel: "some-model"}) {
-		t.Errorf("last-used endpoint = %+v", cfg.OpenAICompat)
+	// The endpoint is remembered against the harness it was used with.
+	rec, usedWith, ok := cfg.RecentEndpoint("copilot")
+	if !ok || usedWith != "copilot" || rec != (EndpointRecord{BaseURL: "http://llm-proxy.local:4000/v1", Vendor: "example-vendor", Model: "some-model"}) {
+		t.Errorf("remembered endpoint = %+v (harness %q, ok %v)", rec, usedWith, ok)
 	}
 	if w.oacInputs[oacRowAPIKey] != "" {
 		t.Error("typed key must be dropped from wizard state after it is stored")
@@ -565,21 +567,77 @@ func TestWizard_EndpointKeyMaskedStoredPerVendorAndNeverInConfirm(t *testing.T) 
 	}
 }
 
-func TestWizard_EndpointPrefillsLastUsedEndpoint(t *testing.T) {
-	cfg := &Config{OpenAICompat: OpenAICompatConfig{LastBaseURL: "http://prev/v1", LastVendor: "prev-vendor", LastModel: "prev-model"}}
+// TestWizard_EndpointOffersLastUsedEndpoint proves the endpoint step never
+// fills itself in from another session: it offers the last endpoint and
+// fills it only when the user asks (ctrl+r).
+func TestWizard_EndpointOffersLastUsedEndpoint(t *testing.T) {
+	prev := EndpointRecord{BaseURL: "http://prev/v1", Vendor: "prev-vendor", Model: "prev-model"}
+	cfg := &Config{OpenAICompat: OpenAICompatConfig{
+		Recent:       map[string]EndpointRecord{"qwen": prev},
+		LastProvider: "qwen",
+	}}
+	// A different harness: nothing is filled in, and the offer names the
+	// harness the endpoint came from.
 	w := toEndpointStep(t, endpointWizardFixture(t, cfg, "copilot"))
-	if w.oacInputs[oacRowBaseURL] != "http://prev/v1" || w.oacInputs[oacRowVendor] != "prev-vendor" || w.oacInputs[oacRowModel] != "prev-model" {
-		t.Errorf("prefill = %q", w.oacInputs)
+	for row, name := range map[int]string{oacRowBaseURL: "base URL", oacRowVendor: "vendor", oacRowModel: "model", oacRowAPIKey: "API key"} {
+		if w.oacInputs[row] != "" {
+			t.Errorf("%s was prefilled with %q", name, w.oacInputs[row])
+		}
+	}
+	view := w.View()
+	for _, want := range []string{"last used with Qwen Code", "http://prev/v1", "prev-model", "press ctrl+r to fill"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("endpoint view missing %q:\n%s", want, view)
+		}
+	}
+
+	// ctrl+r fills the three fields, never the key.
+	w = press(w, tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if w.oacInputs[oacRowBaseURL] != prev.BaseURL || w.oacInputs[oacRowVendor] != prev.Vendor || w.oacInputs[oacRowModel] != prev.Model {
+		t.Errorf("ctrl+r filled %q", w.oacInputs)
 	}
 	if w.oacInputs[oacRowAPIKey] != "" {
-		t.Error("API key input must never be prefilled")
+		t.Error("ctrl+r must never fill the API key")
 	}
-	// Re-entry keeps what the user typed rather than re-prefilling.
+
+	// Re-entry keeps what the user typed.
 	w = typeText(w, "x")
 	w, _ = w.goBack()
 	w = chooseRouting(t, w, RoutingEndpoint)
 	if w.oacInputs[oacRowBaseURL] != "http://prev/v1x" {
 		t.Errorf("re-entry lost edits: %q", w.oacInputs[oacRowBaseURL])
+	}
+}
+
+func TestConfig_RecentEndpoint(t *testing.T) {
+	qwenEP := EndpointRecord{BaseURL: "http://qwen/v1", Model: "m-qwen"}
+	copilotEP := EndpointRecord{BaseURL: "http://copilot/v1", Model: "m-copilot"}
+	cfg := &Config{OpenAICompat: OpenAICompatConfig{
+		Recent:       map[string]EndpointRecord{"qwen": qwenEP, "copilot": copilotEP},
+		LastProvider: "qwen",
+	}}
+	// The harness's own entry wins over the most recent one.
+	if rec, usedWith, ok := cfg.RecentEndpoint("copilot"); !ok || usedWith != "copilot" || rec != copilotEP {
+		t.Errorf("copilot → %+v (%q, %v)", rec, usedWith, ok)
+	}
+	// With no entry for this harness, the most recent one is offered, named.
+	if rec, usedWith, ok := cfg.RecentEndpoint("claude"); !ok || usedWith != "qwen" || rec != qwenEP {
+		t.Errorf("claude → %+v (%q, %v)", rec, usedWith, ok)
+	}
+	// Nothing recorded at all.
+	if _, _, ok := (&Config{}).RecentEndpoint("claude"); ok {
+		t.Error("an empty config must offer nothing")
+	}
+	// Records from pre-release builds (single endpoint, no harness) are kept.
+	legacy := &Config{OpenAICompat: OpenAICompatConfig{LastBaseURL: "http://old/v1", LastVendor: "v", LastModel: "m"}}
+	rec, usedWith, ok := legacy.RecentEndpoint("claude")
+	if !ok || usedWith != "" || rec != (EndpointRecord{BaseURL: "http://old/v1", Vendor: "v", Model: "m"}) {
+		t.Errorf("legacy record → %+v (%q, %v)", rec, usedWith, ok)
+	}
+	// Remembering writes the per-harness entry.
+	cfg.RememberEndpoint("claude", "http://new/v1", "vend", "m-new")
+	if rec, usedWith, _ := cfg.RecentEndpoint("claude"); usedWith != "claude" || rec.BaseURL != "http://new/v1" {
+		t.Errorf("after RememberEndpoint: %+v (%q)", rec, usedWith)
 	}
 }
 
