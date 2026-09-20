@@ -2914,10 +2914,13 @@ func (w *WizardModel) applyQwenPreset() {
 // providerSupportsGateway reports whether a provider can route LLM requests
 // through the Axiom Cloud LLM Gateway. qwen, cursor, and copilot connect
 // directly to their own backend (copilot talks only to GitHub's model
-// routing), so the wizard never offers them the gateway routing choice.
+// routing), and kiro authenticates with its own KIRO_API_KEY with no
+// custom-endpoint mechanism to target — BuildLLMGatewayEnv has no case for
+// any of them, so offering the choice would set nothing and silently run
+// direct. The wizard never offers them the gateway routing choice.
 func providerSupportsGateway(providerKey string) bool {
 	switch providerKey {
-	case "qwen", "cursor", "copilot":
+	case "qwen", "cursor", "copilot", "kiro":
 		return false
 	default:
 		return true

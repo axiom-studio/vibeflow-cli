@@ -353,6 +353,7 @@ func TestWizard_RoutingOffersGatewayOnlyWhereItWorks(t *testing.T) {
 		{"copilot", 1, "tok", "direct,endpoint"}, // harness without gateway support
 		{"qwen", 1, "tok", "direct,endpoint"},
 		{"cursor", 1, "tok", "direct,endpoint"},
+		{"kiro", 1, "tok", "direct,endpoint"},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/type%d/token=%v", tt.provider, tt.sessionType, tt.token != ""), func(t *testing.T) {
@@ -668,6 +669,7 @@ func TestValidateRoutingFlags(t *testing.T) {
 		{"--base-url without endpoint", "claude", "", false, url, "", "", []string{"only valid with --routing endpoint"}},
 		{"--vendor with direct", "qwen", RoutingDirect, false, "", vendor, "", []string{"only valid with --routing endpoint"}},
 		{"gateway on harness without it", "copilot", RoutingGateway, false, "", "", "", []string{"cannot route through the Axiom Studio AI Gateway"}},
+		{"gateway on kiro", "kiro", RoutingGateway, false, "", "", "", []string{"cannot route through the Axiom Studio AI Gateway"}},
 		{"endpoint on cursor", "cursor", RoutingEndpoint, false, url, "", model, []string{"cannot connect to a compatible endpoint"}},
 		{"endpoint on kiro", "kiro", RoutingEndpoint, false, url, "", model, []string{"cannot connect to a compatible endpoint"}},
 		{"all missing named at once", "copilot", RoutingEndpoint, false, "", "", "", []string{"requires --base-url, --model"}},
