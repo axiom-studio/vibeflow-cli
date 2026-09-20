@@ -127,7 +127,7 @@ After you pick a harness, the wizard's **Routing** step ("Configure routing for 
 
 | Option | `--routing` | When it is offered |
 |---|---|---|
-| **Axiom Studio AI Gateway** | `gateway` (or `--llm-gateway`) | VibeFlow sessions with an API token, on harnesses the gateway supports (Claude Code, Codex, Gemini CLI). See [LLM Gateway](#llm-gateway). |
+| **Axiom Studio AI Gateway** | `gateway` (or `--llm-gateway`) | VibeFlow sessions with an API token, on harnesses the gateway supports (Claude Code, Codex, Gemini CLI, Qwen Code). Copilot, Cursor and Kiro show the option disabled with the reason. See [LLM Gateway](#llm-gateway). |
 | **Use detected endpoint** | `shell` | The harness's endpoint variable is already set in your shell. See [Detected endpoint](#detected-endpoint). |
 | **Connect directly to the provider** | `direct` | Always. The harness uses its own login or provider API key. |
 | **Connect to a compatible endpoint** | `endpoint` | Copilot, Qwen Code, Codex, Claude Code and Gemini CLI. Shown disabled for Cursor and Kiro, which have no way to point at a custom endpoint. |
@@ -138,13 +138,13 @@ Without `--routing`, headless launches behave as before: `--llm-gateway` or the 
 
 Connects the harness to any server that speaks the API it needs: a hosted API, or a self-hosted proxy or inference server such as LiteLLM or vLLM.
 
-| Harness | Endpoint must speak | How vibeflow-cli points it at the endpoint |
+| Harness | Endpoint must be | How vibeflow-cli points it at the endpoint |
 |---|---|---|
-| GitHub Copilot CLI | OpenAI API (chat completions) | Copilot's BYOK variables: `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE=openai`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_MODEL`. No GitHub login is needed. |
-| Qwen Code | OpenAI API (chat completions) | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, plus `--auth-type openai --openai-base-url … --model …` |
-| Codex CLI | OpenAI Responses API | A temporary model provider via `-c model_provider=…` flags; the key is read from `OPENAI_API_KEY` (`env_key`) |
-| Claude Code | Anthropic Messages API | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and every model tier (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`) set to your model |
-| Gemini CLI | Gemini API | `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY` |
+| GitHub Copilot CLI | OpenAI-compatible (chat completions) | Copilot's BYOK variables: `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE=openai`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_MODEL`. No GitHub login is needed. |
+| Qwen Code | OpenAI-compatible (chat completions) | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, plus `--auth-type openai --openai-base-url … --model …` |
+| Codex CLI | OpenAI-compatible (Responses API) | A temporary model provider via `-c model_provider=…` flags; the key is read from `OPENAI_API_KEY` (`env_key`) |
+| Claude Code | Anthropic-compatible (Messages API) | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and every model tier (`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`) set to your model |
+| Gemini CLI | Gemini-compatible | `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY` |
 
 The wizard asks for:
 

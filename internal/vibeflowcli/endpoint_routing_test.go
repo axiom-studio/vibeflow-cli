@@ -300,11 +300,11 @@ func TestWizard_RoutingOptionsPerHarness(t *testing.T) {
 		endpointOn     bool
 		endpointNoteIn string // part of the option's note
 	}{
-		{"copilot", true, "OpenAI API"},
-		{"qwen", true, "OpenAI API"},
-		{"codex", true, "OpenAI Responses API"},
-		{"claude", true, "Anthropic Messages API"},
-		{"gemini", true, "Gemini API"},
+		{"copilot", true, "OpenAI-compatible"},
+		{"qwen", true, "OpenAI-compatible"},
+		{"codex", true, "OpenAI-compatible, Responses API"},
+		{"claude", true, "Anthropic-compatible, Messages API"},
+		{"gemini", true, "Gemini-compatible"},
 		{"cursor", false, "not supported by Cursor Agent"},
 		{"kiro", false, "not supported by Kiro CLI"},
 	}
@@ -341,19 +341,21 @@ func TestWizard_RoutingOptionsPerHarness(t *testing.T) {
 
 func TestWizard_RoutingOffersGatewayOnlyWhereItWorks(t *testing.T) {
 	tests := []struct {
-		provider    string
-		sessionType int // 0 vanilla, 1 vibeflow
-		token       string
-		want        string
+		provider     string
+		sessionType  int // 0 vanilla, 1 vibeflow
+		token        string
+		want         string
+		wantSelectab bool // is the gateway row selectable?
 	}{
-		{"claude", 1, "tok", "gateway,direct,endpoint"},
-		{"codex", 1, "tok", "gateway,direct,endpoint"},
-		{"claude", 1, "", "direct,endpoint"}, // no API token → no gateway
-		{"claude", 0, "tok", "direct,endpoint"},
-		{"copilot", 1, "tok", "direct,endpoint"}, // harness without gateway support
-		{"qwen", 1, "tok", "direct,endpoint"},
-		{"cursor", 1, "tok", "direct,endpoint"},
-		{"kiro", 1, "tok", "direct,endpoint"},
+		{"claude", 1, "tok", "gateway,direct,endpoint", true},
+		{"codex", 1, "tok", "gateway,direct,endpoint", true},
+		{"qwen", 1, "tok", "gateway,direct,endpoint", true}, // wired in BuildLLMGatewayEnv
+		{"claude", 1, "", "direct,endpoint", false},         // no API token → no gateway row
+		{"claude", 0, "tok", "direct,endpoint", false},      // vanilla session
+		// Harnesses with no gateway wiring: the row is shown, but disabled.
+		{"copilot", 1, "tok", "gateway,direct,endpoint", false},
+		{"cursor", 1, "tok", "gateway,direct,endpoint", false},
+		{"kiro", 1, "tok", "gateway,direct,endpoint", false},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/type%d/token=%v", tt.provider, tt.sessionType, tt.token != ""), func(t *testing.T) {
@@ -361,6 +363,18 @@ func TestWizard_RoutingOffersGatewayOnlyWhereItWorks(t *testing.T) {
 			w.selectedSessionType = tt.sessionType
 			if got := strings.Join(routingModes(w), ","); got != tt.want {
 				t.Errorf("routing modes = %s, want %s", got, tt.want)
+			}
+			for _, opt := range w.routingOptions() {
+				if opt.mode != RoutingGateway {
+					continue
+				}
+				if opt.enabled != tt.wantSelectab {
+					t.Errorf("gateway selectable = %v, want %v", opt.enabled, tt.wantSelectab)
+				}
+				// A disabled row must say why.
+				if !opt.enabled && !strings.Contains(opt.note, "not supported by") {
+					t.Errorf("disabled gateway row has no reason: %q", opt.note)
+				}
 			}
 		})
 	}
@@ -503,9 +517,9 @@ func TestWizard_EndpointValidation(t *testing.T) {
 }
 
 func TestWizard_EndpointStepNamesTheAPIFormat(t *testing.T) {
-	for provider, format := range map[string]string{"copilot": "OpenAI API", "codex": "OpenAI Responses API", "claude": "Anthropic Messages API"} {
+	for provider, format := range map[string]string{"copilot": "OpenAI-compatible", "codex": "OpenAI-compatible, Responses API", "claude": "Anthropic-compatible, Messages API"} {
 		w := toEndpointStep(t, endpointWizardFixture(t, &Config{}, provider))
-		if view := w.View(); !strings.Contains(view, "must speak the "+format) {
+		if view := w.View(); !strings.Contains(view, "LiteLLM — "+format) {
 			t.Errorf("%s endpoint step does not name the %s:\n%s", provider, format, view)
 		}
 	}
@@ -670,6 +684,7 @@ func TestValidateRoutingFlags(t *testing.T) {
 		{"--vendor with direct", "qwen", RoutingDirect, false, "", vendor, "", []string{"only valid with --routing endpoint"}},
 		{"gateway on harness without it", "copilot", RoutingGateway, false, "", "", "", []string{"cannot route through the Axiom Studio AI Gateway"}},
 		{"gateway on kiro", "kiro", RoutingGateway, false, "", "", "", []string{"cannot route through the Axiom Studio AI Gateway"}},
+		{"gateway on qwen", "qwen", RoutingGateway, false, "", "", "", nil},
 		{"endpoint on cursor", "cursor", RoutingEndpoint, false, url, "", model, []string{"cannot connect to a compatible endpoint"}},
 		{"endpoint on kiro", "kiro", RoutingEndpoint, false, url, "", model, []string{"cannot connect to a compatible endpoint"}},
 		{"all missing named at once", "copilot", RoutingEndpoint, false, "", "", "", []string{"requires --base-url, --model"}},
@@ -967,5 +982,110 @@ func TestWizard_EndpointVendorIsOptional(t *testing.T) {
 	}
 	if got := cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY"]; got != "sk-no-vendor" {
 		t.Errorf("default key slot = %q, want the typed key", got)
+	}
+}
+
+// TestWizard_RoutingNotesExplainEachOption pins the text on every row: the
+// user must be able to tell the options apart without reading the docs.
+func TestWizard_RoutingNotesExplainEachOption(t *testing.T) {
+	tests := []struct {
+		provider     string
+		wantEndpoint string
+		wantGateway  string // "" = selectable
+	}{
+		{provider: "claude", wantEndpoint: "Anthropic-compatible, Messages API"},
+		{provider: "codex", wantEndpoint: "OpenAI-compatible, Responses API"},
+		{provider: "qwen", wantEndpoint: "OpenAI-compatible"},
+		{provider: "copilot", wantEndpoint: "OpenAI-compatible", wantGateway: "GitHub's model routing"},
+		{provider: "cursor", wantGateway: "its own backend"},
+		{provider: "kiro", wantGateway: "KIRO_API_KEY"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			w := endpointWizardFixture(t, &Config{APIToken: "tok"}, tt.provider)
+			w.selectedSessionType = 1 // vibeflow, so the gateway row is present
+			w.enterRoutingStep()
+			notes := map[string]routingOption{}
+			for _, opt := range w.routingOptions() {
+				notes[opt.mode] = opt
+			}
+			// Direct says how the harness authenticates itself.
+			if got := notes[RoutingDirect].note; got != "subscription, OAuth or API key from your shell" {
+				t.Errorf("direct note = %q", got)
+			}
+			// The endpoint row says compatible, never the vendor's own API.
+			if ep, ok := notes[RoutingEndpoint]; ok && ep.enabled {
+				if ep.note != tt.wantEndpoint {
+					t.Errorf("endpoint note = %q, want %q", ep.note, tt.wantEndpoint)
+				}
+				if strings.Contains(ep.note, "needs the") {
+					t.Errorf("endpoint note still names the vendor API: %q", ep.note)
+				}
+			}
+			gw := notes[RoutingGateway]
+			if tt.wantGateway == "" {
+				if !gw.enabled {
+					t.Errorf("gateway should be selectable, note %q", gw.note)
+				}
+			} else if gw.enabled || !strings.Contains(gw.note, tt.wantGateway) {
+				t.Errorf("gateway row = %+v, want disabled mentioning %q", gw, tt.wantGateway)
+			}
+			// Everything the row carries is rendered.
+			view := w.View()
+			for _, opt := range w.routingOptions() {
+				if opt.note != "" && !strings.Contains(view, opt.note) {
+					t.Errorf("routing view missing note %q:\n%s", opt.note, view)
+				}
+			}
+		})
+	}
+}
+
+// TestLaunchCmd_QwenGatewayRouting checks the fix end to end: qwen is wired
+// for the gateway (BuildLLMGatewayEnv), so --routing gateway must actually
+// route it instead of warning and running direct.
+func TestLaunchCmd_QwenGatewayRouting(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	repo := newTestRepo(t, "")
+	t.Chdir(repo)
+	state := t.TempDir()
+	t.Setenv("VIBEFLOW_ROOT", state)
+	t.Setenv("MCP_TOKEN", "")
+	clearShellEndpoints(t)
+
+	socket := fmt.Sprintf("vftest-qwen-gw-%d-%d", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { _, _ = NewTmuxManager(socket).run("kill-server") })
+	binary, read := shellTestAgent(t, state)
+	cfg := DefaultConfig()
+	cfg.TmuxSocket = socket
+	cfg.ServerURL = "https://cloud.example.test"
+	cfg.APIToken = "tok-test"
+	prov := cfg.Providers["qwen"]
+	prov.Binary = binary
+	cfg.Providers["qwen"] = prov
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	root := &cobra.Command{Use: "vibeflow"}
+	root.PersistentFlags().String("config", "", "")
+	root.PersistentFlags().String("mcp", "", "")
+	root.AddCommand(launchCmd())
+	root.SilenceErrors, root.SilenceUsage = true, true
+	root.SetArgs([]string{"launch", "--provider", "qwen", "--routing", "gateway", "--model", "glm-4.6"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	got := read()
+	if !strings.Contains(got, "OPENAI_BASE_URL=https://cloud.example.test/rest/v1/llm-gateway/v1\n") {
+		t.Errorf("session did not get the gateway endpoint:\n%s", got)
+	}
+	metas, err := NewStore().List()
+	if err != nil || len(metas) != 1 {
+		t.Fatalf("stored sessions = %v, %v", metas, err)
+	}
+	if m := metas[0]; m.Routing != RoutingGateway || !m.LLMGatewayEnabled {
+		t.Errorf("meta routing = %q gateway = %v, want gateway", m.Routing, m.LLMGatewayEnabled)
 	}
 }
