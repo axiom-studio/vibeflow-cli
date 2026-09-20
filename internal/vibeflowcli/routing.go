@@ -18,6 +18,7 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -280,6 +281,25 @@ func shellEndpointSendsLogin(providerKey string) bool {
 
 // shellLoginWarning explains what shellEndpointSendsLogin guards against.
 const shellLoginWarning = "no ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY is set, so your Claude login would be sent to this URL"
+
+// warnWriter receives launch-time warnings. It is nil (→ os.Stderr) for the
+// CLI; the TUI points it at its log file, because writing to the terminal
+// would corrupt the rendered screen.
+var warnWriter io.Writer
+
+// SetWarnWriter redirects launch warnings away from stderr. Passing nil
+// restores stderr.
+func SetWarnWriter(w io.Writer) { warnWriter = w }
+
+// warnf reports a launch-time warning the user should see but that must not
+// stop the launch.
+func warnf(format string, args ...interface{}) {
+	w := warnWriter
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, "warning: "+format+"\n", args...)
+}
 
 // BuildShellEndpointEnv returns the session env for shell routing: the
 // endpoint URL and every related variable set in the current environment,

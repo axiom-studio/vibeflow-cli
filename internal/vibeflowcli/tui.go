@@ -1725,6 +1725,11 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 	// Shell routing: pass the shell's endpoint and related vars through.
 	if routing == RoutingShell {
+		// Quick switch and group edit inherit shell routing without showing
+		// the Routing or Confirm screens, so the warning is recorded here.
+		if shellEndpointSendsLogin(provider) {
+			warnf("%s: %s", provider, shellLoginWarning)
+		}
 		for k, v := range BuildShellEndpointEnv(provider, shellURL) {
 			result.Provider.Env[k] = v
 		}

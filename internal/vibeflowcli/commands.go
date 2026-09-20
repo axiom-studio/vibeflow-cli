@@ -270,7 +270,7 @@ func launchCmd() *cobra.Command {
 			if routing == RoutingShell {
 				shellURL, _ = ResolveShellEndpoint(provider)
 				if shellEndpointSendsLogin(provider) {
-					fmt.Fprintf(os.Stderr, "warning: --routing shell: %s\n", shellLoginWarning)
+					warnf("--routing shell: %s", shellLoginWarning)
 				}
 				for k, v := range BuildShellEndpointEnv(provider, shellURL) {
 					baseEnv[k] = v
@@ -945,6 +945,11 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 	// Shell routing: pass the shell's endpoint and related vars through.
 	if routing == RoutingShell {
+		// Every restart re-sends the Claude login to the detected endpoint,
+		// so it warns as the launch did.
+		if shellEndpointSendsLogin(provider) {
+			warnf("restart %s: %s", meta.Name, shellLoginWarning)
+		}
 		for k, v := range BuildShellEndpointEnv(provider, shellURL) {
 			sessionEnv[k] = v
 		}
