@@ -157,6 +157,7 @@ type WizardModel struct {
 	binaryPath          string // Custom binary path entered by user.
 	editingBinary       bool   // True when text input for binary path is active.
 	binaryPathErr       string // Validation error for binary path.
+	binaryPathProvider  string // Provider key binaryPath was typed for.
 	customBaseDir       string // Custom base directory for worktree.
 	editingCustomDir    bool   // True when text input for custom dir is active.
 	customDirErr        string // Validation error for custom dir.
@@ -938,6 +939,7 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 				w.editingBinary = false
 				w.binaryPath = ""
 				w.binaryPathErr = ""
+				w.binaryPathProvider = ""
 				// Stay on provider step.
 			case "backspace":
 				if len(w.binaryPath) > 0 {
@@ -2243,10 +2245,16 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 				// Provider binary not found — prompt for absolute path.
 				w.binaryPath = ""
 				w.binaryPathErr = ""
+				w.binaryPathProvider = w.providers[w.cursor].key
 				w.editingBinary = true
 				return w, nil
 			}
 		}
+		// A path typed for another provider must not follow the user to this
+		// one: it would launch the wrong binary and be saved to config as
+		// that provider's binary. Re-selecting the provider it was typed for
+		// keeps it.
+		w.clearForeignBinaryPath()
 		// Team mode: w.selectedProvider is already maintained by left/right
 		// cycling, and uninstalled providers are skipped during cycling so no
 		// editingBinary fallback is needed.
@@ -2947,6 +2955,17 @@ func (w WizardModel) afterProviderSelected() (WizardModel, tea.Cmd) {
 	}
 	w.enterRoutingStep()
 	return w, nil
+}
+
+// clearForeignBinaryPath drops a custom binary path that was typed for a
+// different provider than the selected one.
+func (w *WizardModel) clearForeignBinaryPath() {
+	if w.binaryPath == "" || w.binaryPathProvider == w.selectedProviderKey() {
+		return
+	}
+	w.binaryPath = ""
+	w.binaryPathErr = ""
+	w.binaryPathProvider = ""
 }
 
 // selectedProviderKey returns the key of the selected harness, or "".

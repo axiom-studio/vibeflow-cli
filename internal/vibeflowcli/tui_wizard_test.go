@@ -1286,3 +1286,74 @@ func TestWizardStepTeam_PersonaRowsAlignConsistently(t *testing.T) {
 		}
 	}
 }
+
+// TestWizard_BinaryPathDoesNotFollowToAnotherProvider drives the real wizard
+// through the reported sequence: type a binary path for an uninstalled
+// provider, go back, then pick an installed one. The typed path must not
+// launch (or be saved as) the second provider's binary.
+func TestWizard_BinaryPathDoesNotFollowToAnotherProvider(t *testing.T) {
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	clearShellEndpoints(t)
+	cfg := &Config{Providers: map[string]Provider{
+		"kiro":    {Name: "Kiro CLI", Binary: t.TempDir() + "/not-installed"},
+		"copilot": {Name: "GitHub Copilot CLI", Binary: "sh"},
+	}}
+	w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+	w.selectedSessionType = 0 // vanilla
+	w.step = StepProvider
+	w.branches = []string{"[+] Create new branch", "main"}
+	w.filteredBranches = []int{0, 1}
+
+	// 1. Select the uninstalled provider and type a real executable path.
+	w.cursor = providerIdxByKey(t, w, "kiro")
+	w, _ = w.advance()
+	if !w.editingBinary {
+		t.Fatal("an uninstalled provider must prompt for a binary path")
+	}
+	w = typeText(w, "/bin/true")
+	w = press(w, keyEnter)
+	if w.step != StepLLMGateway || w.binaryPath != "/bin/true" {
+		t.Fatalf("step=%v path=%q, want the Routing step with the typed path", w.step, w.binaryPath)
+	}
+
+	// 2. Go back and select the installed provider instead.
+	w, _ = w.goBack()
+	if w.step != StepProvider {
+		t.Fatalf("back from routing: step = %v, want StepProvider", w.step)
+	}
+	w.cursor = providerIdxByKey(t, w, "copilot")
+	w, _ = w.advance()
+	if w.binaryPath != "" {
+		t.Errorf("binary path %q followed to another provider", w.binaryPath)
+	}
+
+	// 3. Finish: the result must not carry the path, and copilot's binary
+	// (which executeLaunch would persist to config.yaml) stays untouched.
+	w.step = StepConfirm
+	w.selectedBranch = 1
+	w.worktreeOpts = []string{"Current directory"}
+	w.permissionOpts = []string{"Yes", "No"}
+	w, _ = w.advance()
+	if !w.done {
+		t.Fatal("wizard did not finish")
+	}
+	if w.result.CustomBinaryPath != "" || w.result.Provider.Binary != "sh" {
+		t.Errorf("result binary = %q / custom %q, want copilot's own binary", w.result.Provider.Binary, w.result.CustomBinaryPath)
+	}
+
+	// Re-selecting the provider the path was typed for keeps it.
+	w2 := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+	w2.selectedSessionType = 0
+	w2.step = StepProvider
+	w2.branches, w2.filteredBranches = w.branches, w.filteredBranches
+	w2.cursor = providerIdxByKey(t, w2, "kiro")
+	w2, _ = w2.advance()
+	w2 = typeText(w2, "/bin/true")
+	w2 = press(w2, keyEnter)
+	w2, _ = w2.goBack()
+	w2.cursor = providerIdxByKey(t, w2, "kiro")
+	w2, _ = w2.advance()
+	if w2.binaryPath != "/bin/true" {
+		t.Errorf("path for the same provider was dropped: %q", w2.binaryPath)
+	}
+}
