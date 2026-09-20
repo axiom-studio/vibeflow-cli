@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -291,6 +292,68 @@ func TestWizard_QwenDetectedEndpointSkipsPresetsAndAsksForMissingKey(t *testing.
 	}
 }
 
+func TestExecuteLaunch_ShellRoutingWarnsWithoutAToken(t *testing.T) {
+	// Quick switch and group edit inherit shell routing and skip both the
+	// Routing and Confirm screens, so the warning is raised at launch time.
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	repo := newTestRepo(t, "")
+	state := t.TempDir()
+	t.Setenv("VIBEFLOW_ROOT", state)
+	t.Setenv("MCP_TOKEN", "")
+	clearShellEndpoints(t)
+	t.Setenv("ANTHROPIC_BASE_URL", "http://claude-proxy.local:4000")
+	tm := NewTmuxManager(fmt.Sprintf("vftest-shell-qs-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	binary, _ := shellTestAgent(t, state)
+	cfg := DefaultConfig()
+	m := Model{config: cfg, tmux: tm, logger: NewLogger(), store: NewStore(), cache: NewSessionCache()}
+
+	var warnings bytes.Buffer
+	SetWarnWriter(&warnings)
+	t.Cleanup(func() { SetWarnWriter(nil) })
+	msg := m.executeLaunch(WizardResult{
+		SessionType: "vanilla", ProviderKey: "claude", Provider: Provider{Binary: binary, LaunchTemplate: "{{.Binary}}"},
+		WorkDir: repo, WorktreeChoice: WorktreeCurrent, Branch: "main", Routing: RoutingShell,
+	})
+	if sm, ok := msg.(sessionsMsg); ok && sm.err != nil {
+		t.Fatal(sm.err)
+	}
+	if !strings.Contains(warnings.String(), shellLoginWarning) {
+		t.Errorf("warnings = %q, want the login warning", warnings.String())
+	}
+	// With a token the launch is silent.
+	warnings.Reset()
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-shell-auth")
+	msg = m.executeLaunch(WizardResult{
+		SessionType: "vanilla", ProviderKey: "claude", Provider: Provider{Binary: binary, LaunchTemplate: "{{.Binary}}"},
+		WorkDir: repo, WorktreeChoice: WorktreeCurrent, Branch: "main", Routing: RoutingShell,
+	})
+	if sm, ok := msg.(sessionsMsg); ok && sm.err != nil {
+		t.Fatal(sm.err)
+	}
+	if warnings.Len() != 0 {
+		t.Errorf("launch with a token warned: %q", warnings.String())
+	}
+}
+
+func TestLogger_WriteRecordsWarnings(t *testing.T) {
+	// The TUI sends warnings to the log instead of the terminal.
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	logger := NewLogger()
+	SetWarnWriter(logger)
+	t.Cleanup(func() { SetWarnWriter(nil); logger.Close() })
+	warnf("restart s1: %s", shellLoginWarning)
+	data, err := os.ReadFile(filepath.Join(RootDir(), "vibeflow-cli.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "warning: restart s1: "+shellLoginWarning) {
+		t.Errorf("log does not carry the warning:\n%s", data)
+	}
+}
+
 func TestExecuteLaunch_ShellRoutingNeedsTheEndpoint(t *testing.T) {
 	clearShellEndpoints(t)
 	m := Model{config: &Config{}}
@@ -503,13 +566,34 @@ func TestRestartSession_ShellRouting(t *testing.T) {
 	}
 
 	t.Setenv("ANTHROPIC_BASE_URL", "http://claude-proxy.local:4000")
+	// Every restart re-sends the Claude login to the detected endpoint when
+	// no token is set, so it must warn just as the launch did.
+	var warnings bytes.Buffer
+	SetWarnWriter(&warnings)
+	t.Cleanup(func() { SetWarnWriter(nil) })
 	updated, err := RestartSession(meta, cfg, tm, NewStore(), NewSessionCache(), NewProviderRegistry(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if want := "warning: restart " + meta.Name + ": " + shellLoginWarning; !strings.Contains(warnings.String(), want) {
+		t.Errorf("restart warnings = %q, want %q", warnings.String(), want)
+	}
 	if got := read(); !strings.Contains(got, "ANTHROPIC_BASE_URL=http://claude-proxy.local:4000\n") {
 		t.Errorf("restart did not pass the shell endpoint:\n%s", got)
 	}
+	// With a token there is nothing to warn about.
+	warnings.Reset()
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-shell-auth")
+	if _, err := RestartSession(meta, cfg, tm, NewStore(), NewSessionCache(), NewProviderRegistry(cfg)); err != nil {
+		t.Fatal(err)
+	}
+	if warnings.Len() != 0 {
+		t.Errorf("restart with a token warned: %q", warnings.String())
+	}
+	if got := read(); !strings.Contains(got, "ANTHROPIC_AUTH_TOKEN=sk-shell-auth\n") {
+		t.Errorf("restart did not pass the shell token:\n%s", got)
+	}
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
 	if updated.Routing != RoutingShell {
 		t.Errorf("updated routing = %q, want shell", updated.Routing)
 	}

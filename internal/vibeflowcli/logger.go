@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -50,6 +51,14 @@ func NewLogger() *Logger {
 }
 
 // Close closes the underlying file.
+// Write makes a Logger an io.Writer that records each message as a warning.
+// The TUI points warnWriter here so a launch warning lands in the log
+// instead of corrupting the rendered screen.
+func (l *Logger) Write(p []byte) (int, error) {
+	l.Warn("%s", strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
 func (l *Logger) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
