@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ import (
 )
 
 const sessionPrefix = "vibeflow_"
+const deadPaneRecoveryHint = "Press Enter to resume | Ctrl+Q: menu"
 
 // TmuxManager handles tmux session lifecycle.
 type TmuxManager struct {
@@ -104,6 +106,7 @@ type TmuxSession struct {
 
 // SessionOpts holds parameters for creating a provider-aware tmux session.
 type SessionOpts struct {
+	PaneID   string            // Respawn this exited pane instead of creating a session.
 	Name     string            // Short session name (without prefix).
 	Provider string            // Provider key (e.g. "claude", "codex").
 	WorkDir  string            // Working directory for the session.
@@ -383,7 +386,7 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 
 	// If a tmux session with the same name already exists, refuse to
 	// overwrite it. Sessions must coexist — deletion is user-initiated only.
-	if tm.HasSession(fullName) {
+	if opts.PaneID == "" && tm.HasSession(fullName) {
 		return fmt.Errorf("session %q already exists — use 'vibeflow delete' to remove it first", fullName)
 	}
 
@@ -399,6 +402,10 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 	}
 
 	args := []string{"new-session", "-d", "-s", fullName, "-c", opts.WorkDir}
+	if opts.PaneID != "" {
+		// No -k: a second recovery keypress must never kill an already resumed agent.
+		args = []string{"respawn-pane", "-t", opts.PaneID, "-c", opts.WorkDir}
+	}
 
 	// Set environment variables via tmux -e flags. For the claude provider this
 	// also injects the claude hardening defaults (issue #3493).
@@ -429,11 +436,17 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 	if err != nil {
 		return fmt.Errorf("create session %q: %w", fullName, err)
 	}
+	if opts.PaneID != "" {
+		return tm.configurePaneRecovery(opts.PaneID, fullName)
+	}
 
 	// Keep dead panes visible so the user can see why the agent exited.
 	// Set per-session as well as globally in EnsureServer because the
 	// global setting is lost when the server restarts (no prior sessions).
 	_, _ = tm.run("set-option", "-t", fullName, "remain-on-exit", "on")
+	if err := tm.configurePaneRecovery(fullName, fullName); err != nil {
+		return err
+	}
 
 	// Configure vibeflow-themed status bar for this session.
 	_ = tm.ConfigureStatusBar(fullName, StatusBarOpts{
@@ -521,7 +534,7 @@ func (tm *TmuxManager) HasSession(name string) bool {
 // ensurePrefix returns name with the session prefix, adding it only if
 // not already present.
 func (tm *TmuxManager) ensurePrefix(name string) string {
-	if strings.HasPrefix(name, sessionPrefix) {
+	if strings.HasPrefix(name, sessionPrefix) || strings.HasPrefix(name, "%") {
 		return name
 	}
 	return sessionPrefix + name
@@ -530,18 +543,22 @@ func (tm *TmuxManager) ensurePrefix(name string) string {
 // ResumeConversationID uses persisted exact identity or a dead pane's final
 // provider exit hint. Live pane output may still contain earlier conversations.
 func (tm *TmuxManager) ResumeConversationID(meta SessionMeta) string {
-	if tm == nil || !tm.HasSession(meta.TmuxSession) {
+	var pane string
+	if tm != nil && meta.TmuxSession != "" {
+		pane, _ = tm.agentPaneID(meta.TmuxSession)
+	}
+	if pane == "" {
 		if supportsExactResume(meta.Provider, meta.ProviderConversationID) && ParseSessionProvider(meta.TmuxSession) == meta.Provider {
 			return meta.ProviderConversationID
 		}
 		return ""
 	}
-	dead, err := tm.run("display-message", "-p", "-t", meta.TmuxSession, "#{pane_dead}")
+	dead, err := tm.run("display-message", "-p", "-t", pane, "#{pane_dead}")
 	if err != nil || strings.TrimSpace(dead) != "1" {
 		return ""
 	}
 	// -J rejoins terminal-wrapped hints, including Codex's long resume line.
-	output, err := tm.run("capture-pane", "-p", "-J", "-t", meta.TmuxSession, "-S", "-30")
+	output, err := tm.run("capture-pane", "-p", "-J", "-t", pane, "-S", "-30")
 	if err != nil {
 		return ""
 	}
@@ -1063,6 +1080,69 @@ func (tm *TmuxManager) sessionPaneCount(session string) int {
 	return len(strings.Fields(strings.TrimSpace(out)))
 }
 
+// paneRecoveryCommand is what tmux runs, with the pane ID appended, when Enter is
+// pressed in an exited pane.
+func (tm *TmuxManager) paneRecoveryCommand() (string, error) {
+	bin, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(RootDir())
+	if err != nil {
+		return "", err
+	}
+	command := shellQuote(bin) + " --root " + shellQuote(root) + " --tmux-socket " + shellQuote(tm.socketName)
+	if flagConfigPath != "" {
+		config, err := filepath.Abs(flagConfigPath)
+		if err != nil {
+			return "", err
+		}
+		command += " --config " + shellQuote(config)
+	}
+	return command + " resume-pane", nil
+}
+
+// agentPaneID returns the pane that carries a session's launch identity. A
+// session target alone means tmux's ACTIVE pane, which is the user's own shell
+// once they split the window. Panes launched before recovery existed carry no
+// identity, so those fall back to the active pane.
+func (tm *TmuxManager) agentPaneID(target string) (string, error) {
+	if !strings.HasPrefix(target, "%") {
+		out, err := tm.run("list-panes", "-s", "-t", target, "-F", "#{pane_id}\t#{@vibeflow_session}")
+		if err == nil {
+			for _, line := range strings.Split(out, "\n") {
+				if id, identity, ok := strings.Cut(strings.TrimSpace(line), "\t"); ok && identity == target {
+					return id, nil
+				}
+			}
+		}
+	}
+	return tm.paneID(target)
+}
+
+// configurePaneRecovery keeps the launch identity with the pane, including when
+// it is moved into a workbench or shares a tmux server with another CLI root.
+func (tm *TmuxManager) configurePaneRecovery(target, fullName string) error {
+	command, err := tm.paneRecoveryCommand()
+	if err != nil {
+		return err
+	}
+	for _, option := range []struct{ key, value string }{
+		{"@vibeflow_session", fullName},
+		{"@vibeflow_resume", command},
+		{"remain-on-exit", "on"},
+		{"remain-on-exit-format", "Pane is dead (status #{pane_dead_status}) | " + deadPaneRecoveryHint},
+	} {
+		if _, err := tm.run("set-option", "-p", "-t", target, option.key, option.value); err != nil {
+			if option.key == "remain-on-exit-format" {
+				continue // Older tmux versions retain their default exit banner.
+			}
+			return fmt.Errorf("configure pane recovery: %w", err)
+		}
+	}
+	return nil
+}
+
 // BindSessionKeys sets up key bindings for a vibeflow tmux session.
 // Binds Ctrl+Q (and Ctrl+\ as backup) to toggle between the agent session
 // and the vibeflow TUI. Uses tmux if-shell to conditionally detach (when
@@ -1071,6 +1151,14 @@ func (tm *TmuxManager) BindSessionKeys(sessionName string) error {
 	vibeflowBin, err := os.Executable()
 	if err != nil {
 		vibeflowBin = "vibeflow"
+	}
+	// Live agents receive Enter normally. The command is stored on the pane,
+	// so moving it into a workbench does not change which session is recovered.
+	if _, err := tm.run("bind-key", "-T", "root", "Enter", "if-shell", "-F",
+		"#{&&:#{pane_dead},#{!=:#{@vibeflow_resume},}}",
+		`run-shell -b -t "#{pane_id}" "#{@vibeflow_resume} #{pane_id}"`,
+		"send-keys Enter"); err != nil {
+		return fmt.Errorf("bind pane recovery: %w", err)
 	}
 
 	// Shell condition: check if vibeflow PID lock exists and process is alive.
@@ -1127,13 +1215,57 @@ func (tm *TmuxManager) BindSessionKeys(sessionName string) error {
 // Call this periodically (e.g. on session refresh) to ensure bindings
 // persist even after tmux configuration reloads.
 func (tm *TmuxManager) BindAllSessionKeys() {
-	sessions, err := tm.ListSessions()
+	sessions, err := NewStore().List()
 	if err != nil || len(sessions) == 0 {
 		return
 	}
-	// Bind once using the first session — bindings are global to the tmux
-	// server (root key table), not per-session.
-	_ = tm.BindSessionKeys(sessions[0].Name)
+	// Another CLI root may share this tmux server; its panes are not ours to restamp.
+	own := make(map[string]bool, len(sessions))
+	for _, session := range sessions {
+		own[session.TmuxSession] = true
+	}
+	command, err := tm.paneRecoveryCommand()
+	if err != nil {
+		return
+	}
+	// This runs on every TUI refresh, so read all panes in one call and write
+	// only what is missing or stale.
+	out, err := tm.run("list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{@vibeflow_session}\t#{@vibeflow_resume}")
+	if err != nil {
+		return
+	}
+	var panes [][]string
+	perSession := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.SplitN(strings.TrimRight(line, "\r"), "\t", 4); len(f) == 4 {
+			panes = append(panes, f)
+			perSession[f[1]]++
+		}
+	}
+	bound := false
+	for _, f := range panes {
+		id, session, identity, resume := f[0], f[1], f[2], f[3]
+		if identity == "" {
+			// Launched before recovery existed. Once the user has split the
+			// window, which pane holds the agent is no longer knowable.
+			if perSession[session] != 1 {
+				continue
+			}
+			identity = session
+		}
+		if !own[identity] {
+			continue
+		}
+		if !bound {
+			// Bindings are global to the tmux server (root key table).
+			_ = tm.BindSessionKeys(session)
+			bound = true
+		}
+		// A moved or upgraded binary leaves a stale command behind.
+		if f[2] == "" || resume != command {
+			_ = tm.configurePaneRecovery(id, identity)
+		}
+	}
 }
 
 // sanitizeTmuxStatusValue neutralizes externally-sourced strings before they

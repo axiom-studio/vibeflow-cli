@@ -515,7 +515,18 @@ Pane is dead (status 143, Mon Sep  7 18:19:42 2026)`
 		// it in place and broke resume for every provider (#5176).
 		{"codex", codexHintWithTrailer + "\nPane is dead (status 0, Sat Sep 12 06:30", id},
 		{"claude", claudeHint + "\nPane is dead (status 143, Mon Sep  7 18:1", id},
+		// The recovery footer vibeflow writes on a dead pane, which replaces
+		// tmux's default and must be stripped like it.
+		{"codex", codexHintWithTrailer + "\nPane is dead (status 0) | Press Enter to resume | Ctrl+Q", id},
+		// Panes captured over a CRLF terminal must parse the same.
+		{"codex", strings.ReplaceAll(codexHintWithTrailer, "\n", "\r\n"), id},
+		// Anything trailing the command is not part of the id.
+		{"codex", codexHint + "; touch /tmp/not-allowed", ""},
+		{"codex", "To continue this session, run:\n  codex resume not-a-uuid", ""},
+		{"codex", codexHintWithTrailer + "\nTo continue this session, run:\n  codex resume not-a-uuid", ""},
+		{"codex", codexHintWithTrailer + "\nnew conversation", ""},
 		{"claude", claudeHint + "\nnew conversation", ""},
+		{"claude", claudeHint + "\nPane is dead (status 0, Fri Sep 11 07:04:08 2026)", id},
 		{"claude", "chat mentioned claude --resume " + id, ""},
 		{"claude", "Resume this session with:\n" + id, ""},
 		{"codex", id, ""},
@@ -533,7 +544,7 @@ Pane is dead (status 143, Mon Sep  7 18:19:42 2026)`
 		{"copilot", "copilot", id, "env TEST=1 copilot --model test"},
 		{"claude", "claude", "$(touch /tmp/not-allowed)", "env TEST=1 claude --model test"},
 	} {
-		got, err := renderResumeCommand("env TEST=1 {{.Binary}} --model test", LaunchTemplateVars{Binary: tc.binary}, tc.provider, tc.id)
+		got, err := renderResumeCommand("env TEST=1 {{.Binary}} --model test", LaunchTemplateVars{Binary: tc.binary}, tc.provider, tc.id, false)
 		if err != nil || got != tc.want {
 			t.Errorf("%s resume = %q, %v; want %q", tc.provider, got, err, tc.want)
 		}
@@ -612,5 +623,20 @@ func TestAppendQwenAPIFlags_AuthTypeOnlyWhenQwenWouldStall(t *testing.T) {
 	// Other providers are never touched.
 	if got := AppendQwenAPIFlags("claude", "claude", endpoint); got != "claude" {
 		t.Errorf("claude command = %q, want unchanged", got)
+	}
+}
+
+func TestRecoveryPickerCommands(t *testing.T) {
+	for _, tc := range []struct{ provider, want string }{
+		{"claude", " --resume"}, {"codex", " resume"},
+		{"cursor", " --resume"}, {"qwen", " --resume"},
+		{"copilot", " --resume"}, {"kiro", " chat --resume-picker"},
+		{"gemini", " -i /resume"},
+	} {
+		prov := DefaultConfig().Providers[tc.provider]
+		got, err := renderResumeCommand(prov.LaunchTemplate, LaunchTemplateVars{Binary: "agent"}, tc.provider, "", true)
+		if err != nil || got != "agent"+tc.want {
+			t.Errorf("%s picker: got %q, %v; want %q", tc.provider, got, err, "agent"+tc.want)
+		}
 	}
 }

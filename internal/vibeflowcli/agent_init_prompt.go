@@ -217,8 +217,8 @@ func conversationIDFromExitHint(provider, output string) string {
 
 // renderResumeCommand supplies Codex's subcommand through the binary template
 // variable so custom wrappers (for example env ... {{.Binary}}) remain valid.
-func renderResumeCommand(tmpl string, vars LaunchTemplateVars, provider, id string) (string, error) {
-	if supportsExactResume(provider, id) && provider == "codex" {
+func renderResumeCommand(tmpl string, vars LaunchTemplateVars, provider, id string, picker bool) (string, error) {
+	if (supportsExactResume(provider, id) || picker) && provider == "codex" {
 		// Inserting a subcommand into a quoted executable makes it part of the
 		// executable's filename. Support raw binary tokens; refuse other custom
 		// templates before the old pane is replaced.
@@ -233,7 +233,10 @@ func renderResumeCommand(tmpl string, vars LaunchTemplateVars, provider, id stri
 				return "", fmt.Errorf("exact Codex resume requires an unquoted {{.Binary}} token in the launch template")
 			}
 		}
-		vars.Binary = shellQuote(vars.Binary) + " resume " + shellQuote(id)
+		vars.Binary = shellQuote(vars.Binary) + " resume"
+		if id != "" {
+			vars.Binary += " " + shellQuote(id)
+		}
 	}
 	command, err := RenderLaunchCommand(tmpl, vars)
 	if err != nil {
@@ -244,6 +247,19 @@ func renderResumeCommand(tmpl string, vars LaunchTemplateVars, provider, id stri
 	}
 	if supportsExactResume(provider, id) && provider == "claude" {
 		command += " --resume " + shellQuote(id)
+	}
+	if picker {
+		switch provider {
+		case "codex": // The resume subcommand opens its picker without an ID.
+		case "claude", "cursor", "qwen", "copilot":
+			command += " --resume"
+		case "kiro":
+			command += " --resume-picker"
+		case "gemini":
+			command += " -i /resume"
+		default:
+			return "", fmt.Errorf("conversation recovery is not configured for provider %q", provider)
+		}
 	}
 	return command, nil
 }

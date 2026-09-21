@@ -28,12 +28,29 @@ Running `vibeflow` with no subcommand starts the **Bubble Tea** full-screen term
 |-----|--------|
 | `Ctrl+Q` | Open VibeFlow menu overlay |
 | `Ctrl+\` | Alternate VibeFlow menu shortcut |
+| `Enter` in an exited pane | Resume the agent in the same pane |
 
 From the overlay you can jump between sessions and operations without stopping long-running agents.
 
 ## Dead session restart
 
-If the CLI finds **cached launch parameters** for sessions that are no longer in tmux, it can offer a **restart** multiselect on startup so you can relaunch with the same provider, branch, VibeFlow init prompt, and permission flags.
+If you accidentally exit an agent with **Ctrl+C**, press **Enter** in its dead pane to recover it.
+The pane shows **Press Enter to resume**, and recovery keeps the same pane and attached terminal, including inside a workbench.
+Enter continues to work normally in running agents.
+
+Claude and Codex resume the exact conversation when its ID is available in the final exit hint.
+Otherwise, recovery opens the harness's saved-conversation picker so you can choose the conversation to continue.
+This works with Claude, Codex, Cursor, Qwen, Kiro, and Copilot's resume options, and Gemini's `/resume` browser.
+Picker recovery waits for your selection and does not send a new VibeFlow initialization prompt.
+The previous pane output is saved before replacement so its recovery information remains available.
+
+On startup, the CLI offers a **restart** multiselect for cached sessions whose tmux session is missing or whose agent pane has exited.
+Select sessions with **Space**, then press **Enter** to restart with the same provider, branch, VibeFlow init prompt, and permission flags.
+
+Each entry shows whether it **resumes conversation** or starts fresh.
+Claude and Codex can resume an exact conversation identified by their final exit hint, including Codex's multiline hint with an optional conversation name.
+The startup restart picker and `vibeflow restart` start fresh when no exact conversation ID is available.
+Use **Enter inside the dead pane** to choose a saved conversation instead.
 
 ## Next steps
 
