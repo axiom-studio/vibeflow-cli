@@ -349,11 +349,11 @@ func TestWizard_RoutingOffersGatewayOnlyWhereItWorks(t *testing.T) {
 	}{
 		{"claude", 1, "tok", "gateway,direct,endpoint", true},
 		{"codex", 1, "tok", "gateway,direct,endpoint", true},
-		{"qwen", 1, "tok", "gateway,direct,endpoint", true}, // wired in BuildLLMGatewayEnv
-		{"claude", 1, "", "direct,endpoint", false},         // no API token → no gateway row
-		{"claude", 0, "tok", "direct,endpoint", false},      // vanilla session
+		{"qwen", 1, "tok", "gateway,direct,endpoint", true},    // wired in BuildLLMGatewayEnv
+		{"copilot", 1, "tok", "gateway,direct,endpoint", true}, // wired via Copilot BYOK
+		{"claude", 1, "", "direct,endpoint", false},            // no API token → no gateway row
+		{"claude", 0, "tok", "direct,endpoint", false},         // vanilla session
 		// Harnesses with no gateway wiring: the row is shown, but disabled.
-		{"copilot", 1, "tok", "gateway,direct,endpoint", false},
 		{"cursor", 1, "tok", "gateway,direct,endpoint", false},
 		{"kiro", 1, "tok", "gateway,direct,endpoint", false},
 	}
@@ -390,7 +390,7 @@ func TestWizard_RoutingCursorStartsOnSavedChoice(t *testing.T) {
 	if opt := w.routingOptions()[w.cursor]; opt.mode != RoutingGateway {
 		t.Errorf("cursor on %q, want gateway", opt.mode)
 	}
-	w.selectedProvider = providerIdxByKey(t, w, "copilot")
+	w.selectedProvider = providerIdxByKey(t, w, "cursor")
 	w.enterRoutingStep()
 	if opt := w.routingOptions()[w.cursor]; opt.mode != RoutingDirect {
 		t.Errorf("cursor on %q, want direct when the gateway is not offered", opt.mode)
@@ -740,9 +740,10 @@ func TestValidateRoutingFlags(t *testing.T) {
 		{"--llm-gateway conflicts with endpoint", "claude", RoutingEndpoint, true, url, "", model, []string{"conflicts"}},
 		{"--base-url without endpoint", "claude", "", false, url, "", "", []string{"only valid with --routing endpoint"}},
 		{"--vendor with direct", "qwen", RoutingDirect, false, "", vendor, "", []string{"only valid with --routing endpoint"}},
-		{"gateway on harness without it", "copilot", RoutingGateway, false, "", "", "", []string{"cannot route through the Axiom Studio AI Gateway"}},
+		{"gateway on harness without it", "cursor", RoutingGateway, false, "", "", "", []string{"cannot route through the Axiom Studio AI Gateway"}},
 		{"gateway on kiro", "kiro", RoutingGateway, false, "", "", "", []string{"cannot route through the Axiom Studio AI Gateway"}},
 		{"gateway on qwen", "qwen", RoutingGateway, false, "", "", "", nil},
+		{"gateway on copilot", "copilot", RoutingGateway, false, "", "", "", nil},
 		{"endpoint on cursor", "cursor", RoutingEndpoint, false, url, "", model, []string{"cannot connect to a compatible endpoint"}},
 		{"endpoint on kiro", "kiro", RoutingEndpoint, false, url, "", model, []string{"cannot connect to a compatible endpoint"}},
 		{"all missing named at once", "copilot", RoutingEndpoint, false, "", "", "", []string{"requires --base-url, --model"}},
@@ -1054,7 +1055,7 @@ func TestWizard_RoutingNotesExplainEachOption(t *testing.T) {
 		{provider: "claude", wantEndpoint: "Anthropic-compatible, Messages API"},
 		{provider: "codex", wantEndpoint: "OpenAI-compatible, Responses API"},
 		{provider: "qwen", wantEndpoint: "OpenAI-compatible"},
-		{provider: "copilot", wantEndpoint: "OpenAI-compatible", wantGateway: "GitHub's model routing"},
+		{provider: "copilot", wantEndpoint: "OpenAI-compatible"},
 		{provider: "cursor", wantGateway: "its own backend"},
 		{provider: "kiro", wantGateway: "KIRO_API_KEY"},
 	}

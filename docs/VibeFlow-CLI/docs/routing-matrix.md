@@ -22,7 +22,7 @@ Which coding agent can use which routing mode, and what each one is verified aga
 |---|---|---|---|---|
 | `claude` | yes | yes | yes | yes |
 | `codex` | yes | yes | yes | yes |
-| `copilot` | yes | gap (#5330) | yes | yes |
+| `copilot` | yes | yes | yes | yes |
 | `cursor` | yes | no | no | no |
 | `gemini` | yes | yes | yes | yes |
 | `kiro` | yes | no | no | no |
@@ -32,7 +32,7 @@ Yes means wired and covered by tests. No means the agent cannot do it and the wi
 
 ## Gaps
 
-- **`copilot` / `gateway`** (#5330) — BuildLLMGatewayEnv has no copilot case, so the option would set nothing and silently run direct. Copilot BYOK is COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_TYPE=openai, so pointing it at the gateway should work.
+None. Every mode an agent can support is wired.
 
 ## Not supported by design
 
@@ -60,6 +60,7 @@ These are shown in the wizard with the reason rather than hidden, so the mode is
 | `codex` | `endpoint` | OpenAI-compatible, Responses API | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | not yet |
 | `codex` | `shell` | OpenAI-compatible, Responses API | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | not yet |
 | `copilot` | `direct` | — | — | — | not yet |
+| `copilot` | `gateway` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` | `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API` | not yet |
 | `copilot` | `endpoint` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_MODEL` | `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API` | not yet |
 | `copilot` | `shell` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL` | — | not yet |
 | `cursor` | `direct` | — | — | — | not yet |

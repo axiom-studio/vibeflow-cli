@@ -239,10 +239,13 @@ var RoutingMatrix = []RoutingCell{
 		// in the shell, since setting it at all switches Copilot to BYOK.
 	},
 	{
-		Provider: "copilot", Routing: RoutingGateway, Status: Gap,
-		Reason: "BuildLLMGatewayEnv has no copilot case, so the option would set nothing and silently run direct. " +
-			"Copilot BYOK is COPILOT_PROVIDER_BASE_URL + COPILOT_PROVIDER_TYPE=openai, so pointing it at the gateway should work.",
-		Ticket: "#5330",
+		Provider: "copilot", Routing: RoutingGateway, Status: Supported,
+		WireFormat: "OpenAI-compatible",
+		// Same BYOK wiring as endpoint routing, pointed at the gateway.
+		RequiresEnv: []string{
+			"COPILOT_PROVIDER_BASE_URL", "COPILOT_PROVIDER_TYPE", "COPILOT_PROVIDER_API_KEY",
+		},
+		BlanksEnv: []string{"COPILOT_PROVIDER_BEARER_TOKEN", "COPILOT_PROVIDER_WIRE_API"},
 	},
 	{
 		Provider: "copilot", Routing: RoutingEndpoint, Status: Supported,

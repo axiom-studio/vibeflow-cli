@@ -2933,8 +2933,6 @@ func gatewayUnsupportedReason(providerKey, name string) string {
 		name = providerKey
 	}
 	switch providerKey {
-	case "copilot":
-		return "not supported by " + name + " (talks only to GitHub's model routing)"
 	case "cursor":
 		return "not supported by " + name + " (connects only to its own backend)"
 	case "kiro":

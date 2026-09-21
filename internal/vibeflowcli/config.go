@@ -556,6 +556,18 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 		env["OPENAI_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
 		env[QwenCustomAPIKeyEnvName("OPENAI", gatewayBaseURL+"/v1")] = apiToken
+	case "copilot":
+		// Copilot CLI BYOK: setting COPILOT_PROVIDER_BASE_URL switches it off
+		// GitHub's model routing and onto the gateway's OpenAI-compatible
+		// surface, the same wiring endpoint routing uses.
+		env["COPILOT_PROVIDER_BASE_URL"] = gatewayBaseURL + "/v1"
+		env["COPILOT_PROVIDER_TYPE"] = "openai"
+		env["COPILOT_PROVIDER_API_KEY"] = apiToken
+		// Blanked, not merely left unset: a pane inherits the tmux server's
+		// environment, so a bearer token or wire-API override exported in the
+		// user's shell would otherwise travel to the gateway alongside the key.
+		env["COPILOT_PROVIDER_BEARER_TOKEN"] = ""
+		env["COPILOT_PROVIDER_WIRE_API"] = ""
 	}
 	return env
 }
