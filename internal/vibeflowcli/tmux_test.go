@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -486,7 +487,7 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-workbench-roundtrip")
+	tm := NewTmuxManager("vftest-workbench-roundtrip-" + itoa(os.Getpid()))
 	// Guarantee a clean slate and always tear the server down.
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
@@ -653,7 +654,7 @@ func TestBindWorkbenchNavKeys(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-wbnavkeys")
+	tm := NewTmuxManager("vftest-wbnavkeys-" + itoa(os.Getpid()))
 	tm.safeMousePaneFocus = true
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
@@ -717,7 +718,7 @@ func TestBindWorkbenchNavKeys_OldTmuxGuardsExitingPane(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-wbnavkeys-old")
+	tm := NewTmuxManager("vftest-wbnavkeys-old-" + itoa(os.Getpid()))
 	tm.safeMousePaneFocus = false
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
@@ -760,7 +761,7 @@ func TestConfigureWorkbenchChrome_StatusPositionTop(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-chrome")
+	tm := NewTmuxManager("vftest-chrome-" + itoa(os.Getpid()))
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
 	if err := tm.EnsureServer(); err != nil {
@@ -800,7 +801,7 @@ func TestComposeProjectWorkbench_RoundTrip(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-projwb-roundtrip")
+	tm := NewTmuxManager("vftest-projwb-roundtrip-" + itoa(os.Getpid()))
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
 	if err := tm.EnsureServer(); err != nil {
@@ -945,7 +946,7 @@ func TestConfigureStatusBar_EscapesInjection(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-statusinj")
+	tm := NewTmuxManager("vftest-statusinj-" + itoa(os.Getpid()))
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
 	if err := tm.EnsureServer(); err != nil {
@@ -985,7 +986,7 @@ func TestWorkbenchRestore_PartialFailureKeepsStrandedPane(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-restore-partial")
+	tm := NewTmuxManager("vftest-restore-partial-" + itoa(os.Getpid()))
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
 	if err := tm.EnsureServer(); err != nil {
@@ -1119,7 +1120,7 @@ func TestStatusBar_WidthTiers(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-tiers")
+	tm := NewTmuxManager("vftest-tiers-" + itoa(os.Getpid()))
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
 	if err := tm.EnsureServer(); err != nil {
@@ -1190,7 +1191,7 @@ func TestStatusBar_StructuralCharactersAreLiteral(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	tm := NewTmuxManager("vftest-struct")
+	tm := NewTmuxManager("vftest-struct-" + itoa(os.Getpid()))
 	_, _ = tm.run("kill-server")
 	defer func() { _, _ = tm.run("kill-server") }()
 	if err := tm.EnsureServer(); err != nil {
