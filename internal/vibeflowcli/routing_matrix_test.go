@@ -27,6 +27,10 @@ const (
 	testEndpointModel = "test-model"
 	testVendor        = "acme"
 	testVendorKey     = "vendor-key-value"
+	// forwardedShellValue stands in for whatever the user has exported. It is
+	// recognisable so an assertion can tell a forwarded value apart from one
+	// the builder chose.
+	forwardedShellValue = "shell-exported-value"
 )
 
 // TestRoutingMatrixIsExhaustive fails when a harness in the live provider
@@ -152,15 +156,31 @@ func assertSupportedCell(t *testing.T, c RoutingCell) {
 	// undeclared variable — the shape a silent credential leak takes — into a
 	// failing test rather than an unnoticed change.
 	declared := make(map[string]bool)
-	for _, name := range append(append([]string{}, c.RequiresEnv...), c.BlanksEnv...) {
+	for _, name := range c.RequiresEnv {
+		declared[name] = true
+	}
+	for _, name := range c.BlanksEnv {
+		declared[name] = true
+	}
+	for _, name := range c.ForwardsEnv {
 		declared[name] = true
 	}
 	for name := range env {
 		if declared[name] || hasDeclaredPrefix(name, c.DynamicEnvPrefixes) {
 			continue
 		}
-		t.Errorf("%s/%s sets undeclared variable %s — add it to RequiresEnv or BlanksEnv "+
-			"so its behaviour is pinned", c.Provider, c.Routing, name)
+		t.Errorf("%s/%s sets undeclared variable %s — add it to RequiresEnv, BlanksEnv or "+
+			"ForwardsEnv so its behaviour is pinned", c.Provider, c.Routing, name)
+	}
+
+	// A declared pass-through must really carry the shell's value, not a
+	// value the builder chose. This is what makes the credential flow in the
+	// generated page verifiable rather than merely asserted.
+	for _, name := range c.ForwardsEnv {
+		if got := env[name]; got != "" && got != forwardedShellValue {
+			t.Errorf("%s/%s declares %s as forwarded from the shell, but the builder set its own "+
+				"value %q — move it to RequiresEnv", c.Provider, c.Routing, name, got)
+		}
 	}
 
 	for _, fragment := range c.Flags {
@@ -214,8 +234,14 @@ func assertUnavailableCell(t *testing.T, c RoutingCell) {
 func buildForCell(c RoutingCell) (map[string]string, string) {
 	switch c.Routing {
 	case RoutingDirect:
-		// Direct explicitly clears a gateway left in the environment.
-		return ClearLLMGatewayEnv(c.Provider), ""
+		// Direct explicitly clears both a gateway and a shell endpoint left
+		// in the environment, so the harness really falls back to its own
+		// login instead of quietly keeping the redirect.
+		env := ClearLLMGatewayEnv(c.Provider)
+		for name, value := range ClearShellEndpointEnv(c.Provider) {
+			env[name] = value
+		}
+		return env, ""
 	case RoutingGateway:
 		return BuildLLMGatewayEnv(c.Provider, testGatewayServer, testGatewayToken), ""
 	case RoutingEndpoint:
@@ -246,10 +272,15 @@ func hasDeclaredPrefix(name string, prefixes []string) bool {
 // developer or CI runner happens to export.
 func isolateRoutingEnv(t *testing.T) {
 	t.Helper()
+	// Every variable shell routing can forward is EXPORTED, not blanked.
+	// Blanking them made the "every emitted variable is declared" assertion
+	// vacuous for the shell cells: BuildShellEndpointEnv only emits a related
+	// variable when it is non-empty, so with them all empty the guard had
+	// nothing to bind to and a newly forwarded credential went unnoticed.
 	for _, se := range shellEndpoints {
-		t.Setenv(se.urlVar, "")
+		t.Setenv(se.urlVar, testEndpointURL)
 		for _, related := range se.related {
-			t.Setenv(related, "")
+			t.Setenv(related, forwardedShellValue)
 		}
 	}
 	// The vendor's key is present so keyed cells are deterministic; the

@@ -67,10 +67,21 @@ type RoutingCell struct {
 	// through the tmux server, so the only way to stop it reaching the far end
 	// is to set the variable explicitly to "".
 	BlanksEnv []string
+	// ForwardsEnv names variables the mode passes through from the user's
+	// shell when they are exported, rather than setting a value of its own.
+	// Shell routing forwards the harness's own credentials this way, so these
+	// DO reach the endpoint — they are the opposite of BlanksEnv and must be
+	// declared for the reader to see the real credential flow.
+	ForwardsEnv []string
 	// DynamicEnvPrefixes names variables whose full name is computed at build
 	// time (the qwen custom-API-key binding encodes the endpoint URL into the
 	// variable name), so they can be accounted for without being literals.
 	DynamicEnvPrefixes []string
+
+	// Caveat is a safety note shown as a footnote under the table, for a cell
+	// whose correct behaviour still has a consequence worth reading before
+	// choosing it.
+	Caveat string
 
 	// Flags are launch-flag fragments the mode appends to the command.
 	Flags []string
@@ -144,6 +155,17 @@ var RoutingMatrix = []RoutingCell{
 		Provider: "claude", Routing: RoutingShell, Status: Supported,
 		WireFormat:  "Anthropic-compatible, Messages API",
 		RequiresEnv: []string{"ANTHROPIC_BASE_URL"},
+		// Passed through to the endpoint when exported — including the
+		// credential. With neither token set, Claude Code sends the
+		// subscription login instead, which is why the launch paths warn.
+		ForwardsEnv: []string{
+			"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL",
+			"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+			"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+		},
+		Caveat: "If neither `ANTHROPIC_AUTH_TOKEN` nor `ANTHROPIC_API_KEY` is set, Claude Code sends your " +
+			"subscription login to this URL instead. The wizard warns about this and does not pre-select " +
+			"the detected endpoint in that case, and restart and quick-switch warn too.",
 	},
 
 	// ---- codex -------------------------------------------------------
@@ -176,6 +198,9 @@ var RoutingMatrix = []RoutingCell{
 		// the gateway provider flags off.
 		RequiresEnv: []string{"OPENAI_API_KEY"},
 		BlanksEnv:   []string{"OPENAI_BASE_URL"},
+		// The shell's own key is passed through as the endpoint credential;
+		// when none is exported the keyless placeholder is used instead.
+		ForwardsEnv: []string{"OPENAI_API_KEY"},
 		Flags:       codexEndpointFlagFragments,
 	},
 
@@ -200,6 +225,7 @@ var RoutingMatrix = []RoutingCell{
 		Provider: "gemini", Routing: RoutingShell, Status: Supported,
 		WireFormat:  "Gemini-compatible",
 		RequiresEnv: []string{"GOOGLE_GEMINI_BASE_URL"},
+		ForwardsEnv: []string{"GEMINI_API_KEY"},
 	},
 
 	// ---- qwen --------------------------------------------------------
@@ -230,13 +256,17 @@ var RoutingMatrix = []RoutingCell{
 		Provider: "qwen", Routing: RoutingShell, Status: Supported,
 		WireFormat:  "OpenAI-compatible",
 		RequiresEnv: []string{"OPENAI_BASE_URL"},
+		ForwardsEnv: []string{"OPENAI_API_KEY", "OPENAI_MODEL"},
 	},
 
 	// ---- copilot -----------------------------------------------------
 	{
 		Provider: "copilot", Routing: RoutingDirect, Status: Supported,
-		// COPILOT_PROVIDER_BASE_URL is blanked only when one is actually set
-		// in the shell, since setting it at all switches Copilot to BYOK.
+		// Blanked only when one is actually detected in the shell: merely
+		// setting COPILOT_PROVIDER_BASE_URL switches Copilot to BYOK, so
+		// choosing direct has to clear it or the choice would do nothing.
+		// Launches with no shell endpoint are left untouched.
+		BlanksEnv: []string{"COPILOT_PROVIDER_BASE_URL"},
 	},
 	{
 		Provider: "copilot", Routing: RoutingGateway, Status: Supported,
@@ -262,6 +292,13 @@ var RoutingMatrix = []RoutingCell{
 		Provider: "copilot", Routing: RoutingShell, Status: Supported,
 		WireFormat:  "OpenAI-compatible",
 		RequiresEnv: []string{"COPILOT_PROVIDER_BASE_URL"},
+		// Both credential variables are passed through here, where endpoint
+		// routing blanks the bearer token. Shell routing is the user's own
+		// wiring, so it forwards what they exported rather than overriding it.
+		ForwardsEnv: []string{
+			"COPILOT_PROVIDER_TYPE", "COPILOT_PROVIDER_API_KEY", "COPILOT_PROVIDER_BEARER_TOKEN",
+			"COPILOT_PROVIDER_WIRE_API", "COPILOT_MODEL",
+		},
 	},
 
 	// ---- cursor ------------------------------------------------------
@@ -406,7 +443,11 @@ func writeMatrixVerification(b *strings.Builder) {
 	b.WriteString("\n## What each supported mode sets\n\n")
 	b.WriteString("`Blanked` variables are the leak guards: a pane inherits the tmux server's environment, ")
 	b.WriteString("so a variable exported in your shell is cleared explicitly rather than merely left unset.\n\n")
-	b.WriteString("| Agent | Mode | Wire format | Set | Blanked | Live-verified |\n|---|---|---|---|---|---|\n")
+	b.WriteString("**`Forwarded from your shell` variables do reach the endpoint.** They are passed through ")
+	b.WriteString("as-is whenever you have them exported — this is how shell routing sends your own credential ")
+	b.WriteString("to the endpoint you chose. If you do not want a credential to leave your machine, unset it ")
+	b.WriteString("before launching, or use a different routing mode.\n\n")
+	b.WriteString("| Agent | Mode | Wire format | Set | Blanked | Forwarded from your shell | Live-verified |\n|---|---|---|---|---|---|---|\n")
 
 	for _, provider := range matrixProviders() {
 		for _, mode := range RoutingModes {
@@ -418,10 +459,30 @@ func writeMatrixVerification(b *strings.Builder) {
 			for _, p := range c.DynamicEnvPrefixes {
 				set = append(set, p+"*")
 			}
-			fmt.Fprintf(b, "| `%s` | `%s` | %s | %s | %s | %s |\n",
+			fmt.Fprintf(b, "| `%s` | `%s` | %s | %s | %s | %s | %s |\n",
 				c.Provider, c.Routing, orDash(c.WireFormat),
-				codeList(set), codeList(c.BlanksEnv), verifiedNote(*c))
+				codeList(set), codeList(c.BlanksEnv), codeList(c.ForwardsEnv), verifiedNote(*c))
 		}
+	}
+	writeMatrixCaveats(b)
+}
+
+// writeMatrixCaveats renders the per-cell safety notes under the table.
+func writeMatrixCaveats(b *strings.Builder) {
+	var withCaveat []RoutingCell
+	for _, provider := range matrixProviders() {
+		for _, mode := range RoutingModes {
+			if c := FindCell(provider, mode); c != nil && c.Caveat != "" {
+				withCaveat = append(withCaveat, *c)
+			}
+		}
+	}
+	if len(withCaveat) == 0 {
+		return
+	}
+	b.WriteString("\n### Before you choose\n\n")
+	for _, c := range withCaveat {
+		b.WriteString("- **`" + c.Provider + "` / `" + c.Routing + "`** — " + c.Caveat + "\n")
 	}
 }
 

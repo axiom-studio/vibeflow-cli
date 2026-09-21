@@ -49,27 +49,33 @@ These are shown in the wizard with the reason rather than hidden, so the mode is
 
 `Blanked` variables are the leak guards: a pane inherits the tmux server's environment, so a variable exported in your shell is cleared explicitly rather than merely left unset.
 
-| Agent | Mode | Wire format | Set | Blanked | Live-verified |
-|---|---|---|---|---|---|
-| `claude` | `direct` | — | — | `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_BASE_URL` | not yet |
-| `claude` | `gateway` | Anthropic-compatible, Messages API | `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_BASE_URL` | — | not yet |
-| `claude` | `endpoint` | Anthropic-compatible, Messages API | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL` | `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS` | not yet |
-| `claude` | `shell` | Anthropic-compatible, Messages API | `ANTHROPIC_BASE_URL` | — | not yet |
-| `codex` | `direct` | — | — | `OPENAI_BASE_URL` | not yet |
-| `codex` | `gateway` | OpenAI-compatible | `GATEWAY_API_KEY`, `OPENAI_BASE_URL` | — | not yet |
-| `codex` | `endpoint` | OpenAI-compatible, Responses API | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | not yet |
-| `codex` | `shell` | OpenAI-compatible, Responses API | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | not yet |
-| `copilot` | `direct` | — | — | — | not yet |
-| `copilot` | `gateway` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` | `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API` | not yet |
-| `copilot` | `endpoint` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_MODEL` | `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API` | not yet |
-| `copilot` | `shell` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL` | — | not yet |
-| `cursor` | `direct` | — | — | — | not yet |
-| `gemini` | `direct` | — | — | `GOOGLE_GEMINI_BASE_URL` | not yet |
-| `gemini` | `gateway` | Gemini-compatible | `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` | — | not yet |
-| `gemini` | `endpoint` | Gemini-compatible | `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY` | — | not yet |
-| `gemini` | `shell` | Gemini-compatible | `GOOGLE_GEMINI_BASE_URL` | — | not yet |
-| `kiro` | `direct` | — | — | — | not yet |
-| `qwen` | `direct` | — | — | — | not yet |
-| `qwen` | `gateway` | OpenAI-compatible | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `QWEN_CUSTOM_API_KEY_*` | — | not yet |
-| `qwen` | `endpoint` | OpenAI-compatible | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY` | — | not yet |
-| `qwen` | `shell` | OpenAI-compatible | `OPENAI_BASE_URL` | — | not yet |
+**`Forwarded from your shell` variables do reach the endpoint.** They are passed through as-is whenever you have them exported — this is how shell routing sends your own credential to the endpoint you chose. If you do not want a credential to leave your machine, unset it before launching, or use a different routing mode.
+
+| Agent | Mode | Wire format | Set | Blanked | Forwarded from your shell | Live-verified |
+|---|---|---|---|---|---|---|
+| `claude` | `direct` | — | — | `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_BASE_URL` | — | not yet |
+| `claude` | `gateway` | Anthropic-compatible, Messages API | `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_BASE_URL` | — | — | not yet |
+| `claude` | `endpoint` | Anthropic-compatible, Messages API | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL` | `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS` | — | not yet |
+| `claude` | `shell` | Anthropic-compatible, Messages API | `ANTHROPIC_BASE_URL` | — | `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL` | not yet |
+| `codex` | `direct` | — | — | `OPENAI_BASE_URL` | — | not yet |
+| `codex` | `gateway` | OpenAI-compatible | `GATEWAY_API_KEY`, `OPENAI_BASE_URL` | — | — | not yet |
+| `codex` | `endpoint` | OpenAI-compatible, Responses API | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | — | not yet |
+| `codex` | `shell` | OpenAI-compatible, Responses API | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `OPENAI_API_KEY` | not yet |
+| `copilot` | `direct` | — | — | `COPILOT_PROVIDER_BASE_URL` | — | not yet |
+| `copilot` | `gateway` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY` | `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API` | — | not yet |
+| `copilot` | `endpoint` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_MODEL` | `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API` | — | not yet |
+| `copilot` | `shell` | OpenAI-compatible | `COPILOT_PROVIDER_BASE_URL` | — | `COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BEARER_TOKEN`, `COPILOT_PROVIDER_WIRE_API`, `COPILOT_MODEL` | not yet |
+| `cursor` | `direct` | — | — | — | — | not yet |
+| `gemini` | `direct` | — | — | `GOOGLE_GEMINI_BASE_URL` | — | not yet |
+| `gemini` | `gateway` | Gemini-compatible | `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` | — | — | not yet |
+| `gemini` | `endpoint` | Gemini-compatible | `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY` | — | — | not yet |
+| `gemini` | `shell` | Gemini-compatible | `GOOGLE_GEMINI_BASE_URL` | — | `GEMINI_API_KEY` | not yet |
+| `kiro` | `direct` | — | — | — | — | not yet |
+| `qwen` | `direct` | — | — | — | — | not yet |
+| `qwen` | `gateway` | OpenAI-compatible | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `QWEN_CUSTOM_API_KEY_*` | — | — | not yet |
+| `qwen` | `endpoint` | OpenAI-compatible | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY` | — | — | not yet |
+| `qwen` | `shell` | OpenAI-compatible | `OPENAI_BASE_URL` | — | `OPENAI_API_KEY`, `OPENAI_MODEL` | not yet |
+
+### Before you choose
+
+- **`claude` / `shell`** — If neither `ANTHROPIC_AUTH_TOKEN` nor `ANTHROPIC_API_KEY` is set, Claude Code sends your subscription login to this URL instead. The wizard warns about this and does not pre-select the detected endpoint in that case, and restart and quick-switch warn too.
