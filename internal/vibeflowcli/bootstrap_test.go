@@ -809,7 +809,7 @@ func TestParseAgentSelection(t *testing.T) {
 
 func TestBootstrapAgents_OrderAndKeys(t *testing.T) {
 	got := agentKeys(bootstrapAgents())
-	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro", "copilot"}
+	want := []string{"codex", "gemini", "cursor", "claude-cli", "claude-desktop", "kiro", "copilot", "qwen"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("agent order = %v, want %v", got, want)
 	}
@@ -1159,5 +1159,207 @@ func TestBackupDir_IsNotWorldReadable(t *testing.T) {
 	}
 	if got := dirMode(t, filepath.Join(root, ".backup")); got != 0o700 {
 		t.Errorf("backup dir mode = %04o, want 0700", got)
+	}
+}
+
+func TestBootstrapAgents_QwenUsesHTTPURLFormat(t *testing.T) {
+	var qwen bootstrapAgent
+	for _, a := range bootstrapAgents() {
+		if a.key == "qwen" {
+			qwen = a
+		}
+	}
+	if qwen.entry == nil {
+		t.Fatal("qwen bootstrap agent missing entry builder")
+	}
+	entry := qwen.entry("https://cloud.example/rest/v1/vibeflow/mcp", "raw-key")
+	// qwen declares streamable HTTP with httpUrl; a plain url would mean SSE.
+	if entry["httpUrl"] != "https://cloud.example/rest/v1/vibeflow/mcp" {
+		t.Errorf("httpUrl = %v", entry["httpUrl"])
+	}
+	if _, ok := entry["url"]; ok {
+		t.Error("qwen entry must not set url (qwen reads url as SSE)")
+	}
+	if !equalJSON(entry["timeout"], mcpClientTimeoutMS) {
+		t.Errorf("timeout = %v, want %d", entry["timeout"], mcpClientTimeoutMS)
+	}
+	// The bearer is an env reference; the raw key is never written.
+	headers, _ := entry["headers"].(map[string]any)
+	if headers["Authorization"] != mcpBearerRef {
+		t.Errorf("Authorization = %v, want %s", headers["Authorization"], mcpBearerRef)
+	}
+	data, _ := json.Marshal(entry)
+	if strings.Contains(string(data), "raw-key") {
+		t.Error("qwen entry contains the raw API key")
+	}
+	if normalizeAgentKey("qwen-code") != "qwen" {
+		t.Error("alias qwen-code does not resolve to qwen")
+	}
+}
+
+func TestBootstrapAndUninstall_QwenPreservesOtherSettings(t *testing.T) {
+	withTempRoot(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	// An existing qwen settings file with unrelated settings and another server.
+	settings := filepath.Join(home, ".qwen", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	existing := `{"theme":"dark","mcpServers":{"other":{"command":"other-mcp"}}}`
+	if err := os.WriteFile(settings, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+
+	run := func(args ...string) {
+		t.Helper()
+		root := newBootstrapTestRoot()
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out.String())
+		}
+	}
+
+	run("bootstrap", "--api-key", "K", "--config", cfgPath, "--agents", "qwen")
+	got := readJSONFile(t, settings)
+	entry := mcpServerEntry(t, got, "vibeflow")
+	if entry["httpUrl"] != defaultBootstrapBaseURL+mcpEndpointPath {
+		t.Errorf("httpUrl = %v", entry["httpUrl"])
+	}
+	if got["theme"] != "dark" {
+		t.Error("bootstrap dropped an unrelated qwen setting")
+	}
+	mcpServerEntry(t, got, "other") // unrelated server kept
+	if raw, _ := os.ReadFile(settings); strings.Contains(string(raw), `"K"`) {
+		t.Error("API key written into qwen settings")
+	}
+
+	// Re-running is idempotent.
+	before, _ := os.ReadFile(settings)
+	run("bootstrap", "--api-key", "K", "--config", cfgPath, "--agents", "qwen")
+	if after, _ := os.ReadFile(settings); string(after) != string(before) {
+		t.Error("second bootstrap changed qwen settings")
+	}
+
+	run("uninstall", "--config", cfgPath, "--agents", "qwen")
+	got = readJSONFile(t, settings)
+	servers, _ := got["mcpServers"].(map[string]any)
+	if _, ok := servers["vibeflow"]; ok {
+		t.Error("uninstall left the vibeflow entry")
+	}
+	if _, ok := servers["other"]; !ok || got["theme"] != "dark" {
+		t.Error("uninstall removed unrelated qwen settings")
+	}
+}
+
+func TestStripJSONComments(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"line comment", "{\n  // my model\n  \"a\": 1\n}", "{\n  \n  \"a\": 1\n}"}, // indentation before the comment is kept
+		{"trailing line comment", `{"a": 1} // done`, `{"a": 1} `},
+		{"block comment", "{/* note */\"a\": 1}", `{"a": 1}`},
+		{"multi-line block", "{\n/* one\n   two */\n\"a\": 1}", "{\n\n\"a\": 1}"},
+		// Comment markers inside strings must survive: URLs are the common case.
+		{"url in string", `{"httpUrl": "https://cloud.example/rest/v1/mcp"}`, `{"httpUrl": "https://cloud.example/rest/v1/mcp"}`},
+		{"block marker in string", `{"a": "/* not a comment */"}`, `{"a": "/* not a comment */"}`},
+		{"escaped quote before marker", `{"a": "he said \"//\" ok"}`, `{"a": "he said \"//\" ok"}`},
+		{"no comments", `{"a": 1}`, `{"a": 1}`},
+		{"comment at EOF without newline", `{"a": 1}` + "\n// end", `{"a": 1}` + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(stripJSONComments([]byte(tt.in))); got != tt.want {
+				t.Errorf("stripJSONComments(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBootstrapCmd_CommentedSettingsAreConfigured covers the JSONC settings
+// files Gemini CLI and Qwen Code accept: bootstrap must configure them
+// instead of failing with a raw parse error, keep the user's own settings,
+// and say that comments are lost.
+func TestBootstrapCmd_CommentedSettingsAreConfigured(t *testing.T) {
+	origRoot := rootDir
+	t.Cleanup(func() { rootDir = origRoot })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("VIBEFLOW_ROOT", "")
+	os.Unsetenv("VIBEFLOW_ROOT")
+	SetRootDir("")
+
+	commented := "{\n  // my model choice\n  \"model\": {\"name\": \"qwen3-coder-plus\"},\n  /* keep this */\n  \"ui\": {\"theme\": \"dark\"}\n}\n"
+	for _, dir := range []string{".qwen", ".gemini"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, dir, "settings.json"), []byte(commented), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var warnings bytes.Buffer
+	SetWarnWriter(&warnings)
+	t.Cleanup(func() { SetWarnWriter(nil) })
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	root := newBootstrapTestRoot()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"bootstrap", "--api-key", "K-123", "--base-url", "https://cloud.example", "--config", cfgPath, "--agents", "qwen,gemini"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("bootstrap execute: %v\n%s", err, out.String())
+	}
+
+	for _, dir := range []string{".qwen", ".gemini"} {
+		path := filepath.Join(home, dir, "settings.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("%s is not valid JSON after bootstrap: %v\n%s", path, err, data)
+		}
+		if _, ok := got["mcpServers"]; !ok {
+			t.Errorf("%s has no mcpServers after bootstrap:\n%s", path, data)
+		}
+		// The user's own settings survive the rewrite.
+		if model, _ := got["model"].(map[string]any); model["name"] != "qwen3-coder-plus" {
+			t.Errorf("%s lost the user's model setting:\n%s", path, data)
+		}
+		if ui, _ := got["ui"].(map[string]any); ui["theme"] != "dark" {
+			t.Errorf("%s lost the user's ui setting:\n%s", path, data)
+		}
+		// The rewrite drops the comments, so the user is told and the
+		// original file is kept.
+		if !strings.Contains(warnings.String(), path) {
+			t.Errorf("no warning naming %s:\n%s", path, warnings.String())
+		}
+	}
+	if !strings.Contains(warnings.String(), "not preserved") {
+		t.Errorf("warning does not say comments are lost: %q", warnings.String())
+	}
+	backups, _ := filepath.Glob(filepath.Join(RootDir(), ".backup", "*settings*"))
+	if len(backups) == 0 {
+		t.Error("no backup of the commented settings files")
+	}
+}
+
+func TestReadJSONObject_InvalidJSONStillFails(t *testing.T) {
+	// Only comments are tolerated: real syntax errors keep their message.
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"a": 1,,}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readJSONObject(path); err == nil || !strings.Contains(err.Error(), "parse "+path) {
+		t.Errorf("err = %v, want a parse error naming the file", err)
 	}
 }

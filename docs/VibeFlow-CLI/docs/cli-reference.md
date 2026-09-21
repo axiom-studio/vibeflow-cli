@@ -46,7 +46,7 @@ Create and launch a session without the full wizard. Key flags:
 
 | Flag | Description |
 |------|-------------|
-| `--provider` | Provider key: `claude`, `codex`, `cursor`, `gemini`, `qwen`, or a custom key from `config.yaml` |
+| `--provider` | Provider key: `claude`, `codex`, `copilot`, `cursor`, `gemini`, `kiro`, `qwen`, or a custom key from `config.yaml` |
 | `--branch` | Git branch (default `main`) |
 | `--worktree` | Create a new git worktree for the session |
 | `--new-branch` | Create a new git branch (used with `--worktree`) |
@@ -56,7 +56,10 @@ Create and launch a session without the full wizard. Key flags:
 | `--models` | Comma-separated `persona=model` overrides for team launches |
 | `--reuse` | Relaunch matching project/work-directory personas with their existing durable session IDs; removes older duplicates |
 | `--replace` | Stop matching persona sessions and launch fresh sessions with new IDs |
-| `--llm-gateway` | Route LLM requests through the VibeFlow server's LLM Gateway |
+| `--routing` | How the agent reaches its model: `gateway`, `direct`, `endpoint` (a compatible endpoint) or `shell` (the endpoint already set in the environment). See [Providers — Routing](providers.md#routing) |
+| `--base-url` | Compatible endpoint URL (with `--routing endpoint`) |
+| `--vendor` | Optional endpoint label; names the key slot `OPENAI_COMPAT_API_KEY_<VENDOR>` (with `--routing endpoint`) |
+| `--llm-gateway` | Route LLM requests through the VibeFlow server's LLM Gateway (same as `--routing gateway`) |
 | `--openshell` | Run the agent command inside an NVIDIA OpenShell sandbox |
 | `--openshell-sandbox` | OpenShell sandbox name |
 | `--openshell-from` | OpenShell sandbox image/base |
@@ -73,6 +76,8 @@ vibeflow launch --provider codex --skip-permissions --llm-gateway
 vibeflow launch --provider claude --personas developer,architect --model sonnet --models developer=gpt-5.1-codex,architect=opus
 vibeflow launch --provider codex --project nimbus --personas developer,architect --reuse
 vibeflow launch --provider qwen --skip-permissions
+vibeflow launch --provider copilot --routing endpoint --base-url http://localhost:4000/v1 --model <model-name>
+vibeflow launch --provider claude --routing shell
 vibeflow launch --provider codex --openshell --openshell-sandbox vf-main
 ```
 

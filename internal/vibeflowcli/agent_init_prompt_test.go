@@ -17,6 +17,8 @@
 package vibeflowcli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -178,7 +180,26 @@ func TestAppendVibeflowInitPrompt_EscapesSingleQuotes(t *testing.T) {
 	}
 }
 
+// qwenConfiguredHome points HOME at a fresh Qwen Code install that has
+// already completed auth setup, so tests that pin the qwen command shape are
+// not affected by the machine's own ~/.qwen/settings.json (or the
+// fresh-install --auth-type flag, covered by its own test).
+func qwenConfiguredHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("QWEN_OAUTH", "")
+	if err := os.MkdirAll(filepath.Join(home, ".qwen"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := []byte(`{"security":{"auth":{"selectedType":"openai"}}}`)
+	if err := os.WriteFile(filepath.Join(home, ".qwen", "settings.json"), settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAppendQwenAPIFlags(t *testing.T) {
+	qwenConfiguredHome(t)
 	tests := []struct {
 		name        string
 		providerKey string
@@ -276,6 +297,7 @@ func TestAppendQwenAPIFlags(t *testing.T) {
 }
 
 func TestAppendQwenAPIFlags_EscapesSingleQuotes(t *testing.T) {
+	qwenConfiguredHome(t)
 	// Single quotes in values must be sh-escaped via the '\'' idiom so the
 	// wrapping single-quoted argument stays balanced when tmux passes the
 	// assembled command through `sh -c`. The same idiom is used by
@@ -293,6 +315,7 @@ func TestAppendQwenAPIFlags_EscapesSingleQuotes(t *testing.T) {
 }
 
 func TestAppendQwenAPIFlags_OrderingWithInitPrompt(t *testing.T) {
+	qwenConfiguredHome(t)
 	// Integration: flags must land between the base command (e.g. `qwen --yolo`)
 	// and the `-i 'prompt'` arg appended by AppendVibeflowInitPrompt, so qwen's
 	// arg parser sees them as options rather than as part of the seed prompt.
@@ -517,5 +540,77 @@ Pane is dead (status 143, Mon Sep  7 18:19:42 2026)`
 		if strings.Contains(got, "--continue") || strings.Contains(got, "--last") {
 			t.Error("restart may not select a directory's latest conversation")
 		}
+	}
+}
+
+func TestQwenEndpointLaunchShape(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY":  "sk-vendor",
+		"OPENAI_BASE_URL": "http://llm-proxy.local:4000/v1",
+		"OPENAI_MODEL":    "qwen3-coder",
+	}
+	// Same order as the launch paths: endpoint flags, qwen API flags, prompt.
+	cmd := AppendEndpointFlags("qwen --yolo", "qwen", env["OPENAI_BASE_URL"])
+	cmd = AppendQwenAPIFlags(cmd, "qwen", env)
+	cmd = AppendVibeflowInitPrompt(cmd, "qwen", "hi")
+	const want = `qwen --yolo --auth-type openai --openai-base-url 'http://llm-proxy.local:4000/v1' --model 'qwen3-coder' -i 'hi'`
+	if cmd != want {
+		t.Errorf("command:\n got:  %q\n want: %q", cmd, want)
+	}
+	if strings.Contains(cmd, "sk-vendor") {
+		t.Error("API key must never appear on the command line (issue #1993)")
+	}
+}
+
+// TestAppendQwenAPIFlags_AuthTypeOnlyWhenQwenWouldStall covers the fresh-install
+// hang: qwen stops on its interactive provider picker unless it has a saved
+// auth type, and it only infers one from the env when OPENAI_API_KEY,
+// OPENAI_MODEL and OPENAI_BASE_URL are all set.
+func TestAppendQwenAPIFlags_AuthTypeOnlyWhenQwenWouldStall(t *testing.T) {
+	endpoint := map[string]string{"OPENAI_BASE_URL": "http://llm-proxy.local/v1"}
+	writeSettings := func(t *testing.T, content string) {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if content == "" {
+			return // no settings file at all
+		}
+		if err := os.MkdirAll(filepath.Join(home, ".qwen"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".qwen", "settings.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name, settings, qwenOAuth, command string
+		env                                map[string]string
+		wantFlag                           bool
+	}{
+		{name: "no settings file", command: "qwen", env: endpoint, wantFlag: true},
+		{name: "settings without an auth type", settings: `{"ui":{"autoModeAcknowledged":true}}`, command: "qwen", env: endpoint, wantFlag: true},
+		{name: "saved openai auth", settings: `{"security":{"auth":{"selectedType":"openai"}}}`, command: "qwen", env: endpoint},
+		{name: "saved qwen-oauth is left alone", settings: `{"security":{"auth":{"selectedType":"qwen-oauth"}}}`, command: "qwen", env: endpoint},
+		{name: "unreadable settings are left alone", settings: `{"security": BROKEN`, command: "qwen", env: endpoint},
+		{name: "QWEN_OAUTH wins", qwenOAuth: "1", command: "qwen", env: endpoint},
+		{name: "no endpoint supplied", command: "qwen", env: map[string]string{"OPENAI_MODEL": "m"}},
+		{name: "endpoint routing already set it", command: "qwen --auth-type openai", env: endpoint},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writeSettings(t, tt.settings)
+			t.Setenv("QWEN_OAUTH", tt.qwenOAuth)
+			got := AppendQwenAPIFlags(tt.command, "qwen", tt.env)
+			if hasFlag := strings.Count(got, "--auth-type openai") == 1 && !strings.Contains(tt.command, "--auth-type"); hasFlag != tt.wantFlag {
+				t.Errorf("command = %q, want --auth-type openai added = %v", got, tt.wantFlag)
+			}
+			if strings.Count(got, "--auth-type") > 1 {
+				t.Errorf("duplicate auth type flag: %q", got)
+			}
+		})
+	}
+	// Other providers are never touched.
+	if got := AppendQwenAPIFlags("claude", "claude", endpoint); got != "claude" {
+		t.Errorf("claude command = %q, want unchanged", got)
 	}
 }

@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -278,6 +279,10 @@ var secretEnvPrefixes = []string{
 	"GATEWAY_API_KEY=",
 	"OPENAI_API_KEY=",
 	"QWEN_CUSTOM_API_KEY",       // dynamic suffix encodes the endpoint; value is the key
+	"OPENAI_COMPAT_API_KEY_",    // endpoint per-vendor key; suffix encodes the vendor
+	"OPENAI_COMPAT_API_KEY=",    // endpoint key when no vendor is set
+	"COPILOT_PROVIDER_API_KEY=", // copilot endpoint key
+	"COPILOT_PROVIDER_BEARER_TOKEN=",
 	"ANTHROPIC_CUSTOM_HEADERS=", // gateway mode embeds the API token as "x-axiom-api-key: <token>"
 	"ANTHROPIC_AUTH_TOKEN=",
 	"ANTHROPIC_API_KEY=",
@@ -293,8 +298,14 @@ var openaiAPIKeyFlagRe = regexp.MustCompile(`--openai-api-key[= ]('[^']*'(?:\\''
 // raw command). Commands without key flags are returned unchanged. Our own
 // builders no longer emit `--openai-api-key`, but custom launch templates may.
 func redactCommandSecrets(command string) string {
-	return openaiAPIKeyFlagRe.ReplaceAllString(command, "--openai-api-key <redacted>")
+	command = openaiAPIKeyFlagRe.ReplaceAllString(command, "--openai-api-key <redacted>")
+	// Defence in depth: mask user:password@ in any URL in the command.
+	return urlCredentialsRe.ReplaceAllString(command, "://<redacted>@")
 }
+
+// urlCredentialsRe matches the "user:password@" part of a URL inside a
+// logged command string.
+var urlCredentialsRe = regexp.MustCompile(`://[^\s/@'"]+:[^\s/@'"]+@`)
 
 // isSecretEnvKey reports whether the named env var carries a secret whose
 // value must never be displayed or logged. Shares secretEnvPrefixes with
@@ -1341,6 +1352,47 @@ func GetGitBranch(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// GetGitRemoteURL returns the URL of the "origin" remote for dir, or "" when
+// dir is empty, not a git repo, or has no origin. Like GetGitBranch, an empty
+// dir is refused so vibeflow-cli's own repo is never reported by mistake.
+func GetGitRemoteURL(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	return sanitizeRemoteURL(strings.TrimSpace(string(out)))
+}
+
+// sanitizeRemoteURL removes credentials from a git remote URL. The URL goes
+// into the agent's init prompt: its command line, the spawn log, the model
+// provider and the VibeFlow server. HTTP(S) remotes lose their whole userinfo,
+// because a token can be the user part alone (https://TOKEN@host/...). Other
+// URL forms (ssh://git@host/...) keep a plain user name but lose any
+// password. Query and fragment are dropped. scp-style remotes
+// (git@host:org/repo.git) carry no secret and are returned unchanged. A URL
+// that can't be parsed is dropped rather than reported raw.
+func sanitizeRemoteURL(remote string) string {
+	if !strings.Contains(remote, "://") {
+		return remote
+	}
+	u, err := url.Parse(remote)
+	if err != nil {
+		return ""
+	}
+	switch {
+	case u.User == nil:
+	case u.Scheme == "http" || u.Scheme == "https":
+		u.User = nil
+	default:
+		u.User = url.User(u.User.Username()) // keep the user, drop any password
+	}
+	u.RawQuery, u.Fragment, u.RawFragment, u.ForceQuery = "", "", "", false
+	return u.String()
 }
 
 // ListSessionNames returns the full tmux names of all vibeflow sessions.

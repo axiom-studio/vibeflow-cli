@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -42,6 +43,44 @@ func BuildVibeflowInitPrompt(mcpName, projectName, persona string) string {
 		"Initialize a %s session for project %s with persona %q and follow the agent prompt.",
 		mcpName, projectName, persona,
 	)
+}
+
+// SessionIdentity holds the values an agent reports when it registers with
+// VibeFlow (session_init / session_register). vibeflow-cli already knows all
+// of them at launch; left to itself an agent has to guess, and a wrong
+// session ID, agent type or git remote hides the session from the project's
+// team views.
+type SessionIdentity struct {
+	SessionID    string // ID vibeflow-cli launched the session with
+	AgentType    string // harness, e.g. "claude", "qwen"
+	AgentModel   string // model the session runs, when known
+	GitBranch    string
+	GitRemoteURL string
+	WorkingDir   string
+}
+
+// WithSessionIdentity appends the known registration values to an init
+// prompt. Empty values are omitted, and an identity with no values returns the
+// prompt unchanged.
+func WithSessionIdentity(prompt string, id SessionIdentity) string {
+	var fields []string
+	// Collect only the values that are actually known.
+	for _, f := range []struct{ key, val string }{
+		{"session_id", id.SessionID},
+		{"agent_type", id.AgentType},
+		{"agent_model", id.AgentModel},
+		{"git_branch", id.GitBranch},
+		{"git_remote_url", id.GitRemoteURL},
+		{"working_directory", id.WorkingDir},
+	} {
+		if f.val != "" {
+			fields = append(fields, fmt.Sprintf("%s=%q", f.key, f.val))
+		}
+	}
+	if len(fields) == 0 {
+		return prompt
+	}
+	return prompt + " Register with exactly these values (session_init and session_register); do not infer or change them: " + strings.Join(fields, ", ") + "."
 }
 
 func BuildVibeflowCloudDispatchInitPrompt(mcpName, projectName, persona, sessionID string) string {
@@ -281,10 +320,21 @@ func codexConfigRawArg(value string) string {
 // single quotes and embedded single quotes use standard shell escaping, since
 // the assembled command is handed to `sh -c` via tmux send-keys.
 func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) string {
+	// Only qwen-binary providers understand --openai-base-url / --model.
 	if providerKey != "qwen" {
 		return baseCommand
 	}
 	out := baseCommand
+	// A fresh Qwen Code install with no saved auth type stops on its
+	// interactive "Connect a Provider" picker, which hangs an unattended
+	// session forever. qwen infers the OpenAI auth path from the env only
+	// when OPENAI_API_KEY, OPENAI_MODEL and OPENAI_BASE_URL are ALL set
+	// (getAuthTypeFromEnv, 0.24.0), so a session without a model — an empty
+	// Custom preset, or a headless launch with no --model — never gets there.
+	// Whenever vibeflow supplies the endpoint, say so explicitly.
+	if env["OPENAI_BASE_URL"] != "" && qwenNeedsAuthTypeFlag(baseCommand) {
+		out += " --auth-type openai"
+	}
 	if v := env["OPENAI_BASE_URL"]; v != "" {
 		out += fmt.Sprintf(" --openai-base-url '%s'", strings.ReplaceAll(v, "'", `'\''`))
 	}
@@ -294,6 +344,47 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 	return out
 }
 
+// qwenNeedsAuthTypeFlag reports whether a qwen launch should be pinned to the
+// OpenAI auth path. It is left alone when the command already says so (see
+// AppendEndpointFlags), when the user asked for qwen's OAuth mode through the
+// environment, or when they have completed qwen's own auth setup — those
+// users already start without the picker, and their choice must win.
+func qwenNeedsAuthTypeFlag(baseCommand string) bool {
+	if strings.Contains(baseCommand, "--auth-type") || os.Getenv("QWEN_OAUTH") != "" {
+		return false
+	}
+	return qwenSavedAuthType() == ""
+}
+
+// qwenSavedAuthType returns the auth type saved in Qwen Code's own settings
+// (security.auth.selectedType in ~/.qwen/settings.json), or "" when none is
+// set. A file that cannot be read or parsed is reported as configured, so an
+// unreadable settings file never changes an existing user's launch.
+func qwenSavedAuthType() string {
+	path, err := qwenConfigPath()
+	if err != nil {
+		return "unknown"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "" // no settings at all: qwen would show the picker
+		}
+		return "unknown"
+	}
+	var settings struct {
+		Security struct {
+			Auth struct {
+				SelectedType string `json:"selectedType"`
+			} `json:"auth"`
+		} `json:"security"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return "unknown"
+	}
+	return settings.Security.Auth.SelectedType
+}
+
 // applyQwenModelPassthrough copies OPENAI_MODEL from the calling shell into
 // the session env for qwen launches when it isn't already set. Wizard-driven
 // launches carry the model via WizardResult.EnvVars, but headless launches
@@ -301,6 +392,8 @@ func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) 
 // the shell export is the only model source — copying it in lets
 // AppendQwenAPIFlags emit an explicit `--model` flag on those paths too.
 func applyQwenModelPassthrough(providerKey string, sessionEnv map[string]string) {
+	// Skip non-qwen-binary providers, and never override a model the
+	// session already carries (wizard, --model flag, or stored metadata).
 	if providerKey != "qwen" || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
 		return
 	}

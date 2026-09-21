@@ -78,6 +78,8 @@ func bootstrapAgents() []bootstrapAgent {
 		{key: "claude-desktop", label: "Claude Desktop", path: claudeDesktopConfigPath, entry: claudeDesktopEntry},
 		{key: "kiro", label: "Kiro CLI", path: kiroConfigPath, entry: jsonHTTPEntry("http", true)},
 		{key: "copilot", label: "GitHub Copilot CLI", path: copilotConfigPath, entry: copilotEntry},
+		// Qwen Code — needed for VibeFlow sessions on the qwen harness.
+		{key: "qwen", label: "Qwen Code", path: qwenConfigPath, entry: qwenEntry},
 	}
 }
 
@@ -95,6 +97,7 @@ var agentAliases = map[string]string{
 	"kiro-cli":       "kiro",
 	"copilot-cli":    "copilot",
 	"github-copilot": "copilot",
+	"qwen-code":      "qwen",
 }
 
 func normalizeAgentKey(key string) string {
@@ -241,6 +244,33 @@ func copilotEntry(url, apiKey string) map[string]any {
 	return entry
 }
 
+// qwenConfigPath returns Qwen Code's user-level settings file
+// (~/.qwen/settings.json), the file `qwen mcp add -s user` writes. Like the
+// other resolvers, bootstrap writes user-level config so one run covers every
+// project. The file also holds unrelated qwen settings; the shared JSON writer
+// only touches mcpServers[name].
+func qwenConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".qwen", "settings.json"), nil
+}
+
+// qwenEntry builds the mcpServers entry for Qwen Code in its own format:
+// streamable HTTP is declared with `httpUrl` (a plain `url` means SSE), exactly
+// as `qwen mcp add -t http` writes it — verified on qwen 0.24.0, where
+// `qwen mcp list` reports the server Connected and ${MCP_TOKEN} expands from
+// the session env. The timeout matches the other agents so a long
+// wait_for_work poll is never cut short.
+func qwenEntry(url, _ string) map[string]any {
+	return map[string]any{
+		"httpUrl": url,
+		"headers": map[string]any{"Authorization": mcpBearerRef},
+		"timeout": mcpClientTimeoutMS,
+	}
+}
+
 // codexBootstrapConfigPath reuses CodexConfigPath so a custom --root keeps the
 // codex MCP config isolated under the root directory, matching the existing
 // codex session-launch behavior.
@@ -345,12 +375,64 @@ func readJSONObject(path string) (map[string]any, error) {
 	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		// Gemini CLI and Qwen Code both accept comments in settings.json and
+		// users do annotate these files, so a commented file must not stop
+		// bootstrap. Retry without the comments; anything still invalid
+		// reports the original parse error.
+		stripped := stripJSONComments(data)
+		if len(stripped) == len(data) || json.Unmarshal(stripped, &root) != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		// Writing the file back re-encodes it, which drops the comments. The
+		// previous file is kept (see writeConfigFileWithBackup).
+		warnf("%s contains comments; they are not preserved when vibeflow rewrites the file (the previous version is backed up under %s)", path, filepath.Join(RootDir(), ".backup"))
 	}
 	if root == nil {
 		root = map[string]any{}
 	}
 	return root, nil
+}
+
+// stripJSONComments removes // line and /* */ block comments from JSONC,
+// leaving comment markers inside strings alone (a URL's "//", say). Returns
+// the input unchanged when it holds no comments.
+func stripJSONComments(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString, escaped := false, false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if inString {
+			out = append(out, c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch {
+		case c == '"':
+			inString = true
+			out = append(out, c)
+		case c == '/' && i+1 < len(data) && data[i+1] == '/':
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+			i-- // the loop's i++ re-reads the newline, keeping line breaks
+		case c == '/' && i+1 < len(data) && data[i+1] == '*':
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			i++ // skip the closing "/"
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func writeJSONObject(path string, root map[string]any) (string, error) {

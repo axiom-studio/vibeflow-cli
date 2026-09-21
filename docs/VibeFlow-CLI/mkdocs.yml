@@ -25,6 +25,7 @@ nav:
   - Interactive TUI: tui.md
   - CLI reference: cli-reference.md
   - Providers: providers.md
+  - Routing matrix: routing-matrix.md
   - Session wizard: session-wizard.md
   - Worktrees & session files: worktrees-session-files.md
   - VibeFlow server & personas: vibeflow-server.md

@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestWizardView_BreadcrumbMatchesCurrentStep(t *testing.T) {
 	}{
 		{StepProvider, "Provider"},
 		{StepEnvToken, "Env"},
-		{StepLLMGateway, "Gateway"},
+		{StepLLMGateway, "Routing"},
 		{StepQwenLaunchConfig, "Qwen"},
 		{StepBranch, "Branch"},
 		{StepWorktree, "Worktree"},
@@ -847,6 +848,61 @@ func TestPostProviderConfigStep_RoutingMatrix(t *testing.T) {
 	}
 }
 
+// TestGatewayOfferedOnlyWhereItSetsSomething keeps the Routing step honest:
+// every built-in harness offered the gateway must actually get gateway
+// variables, or the session would silently run direct (issue #5269).
+func TestGatewayOfferedOnlyWhereItSetsSomething(t *testing.T) {
+	keys := []string{"mycli", ""} // custom provider keys are supported too
+	for key := range DefaultConfig().Providers {
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
+		offered := providerSupportsGateway(key)
+		sets := len(BuildLLMGatewayEnv(key, "https://cloud.example.test", "tok")) > 0
+		if offered != sets {
+			t.Errorf("provider %q: gateway offered = %v but BuildLLMGatewayEnv sets something = %v", key, offered, sets)
+		}
+		// Whatever cannot use it must be able to say why.
+		if !offered && gatewayUnsupportedReason(key, "Some CLI") == "" {
+			t.Errorf("provider %q has no reason text for the dimmed row", key)
+		}
+	}
+}
+
+// TestWizard_CustomProviderCannotSelectTheGateway covers issue #5306: a
+// provider added in config.yaml has no gateway wiring, so the row must be
+// present but unselectable rather than silently routing direct.
+func TestWizard_CustomProviderCannotSelectTheGateway(t *testing.T) {
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	clearShellEndpoints(t)
+	cfg := &Config{APIToken: "tok", Providers: map[string]Provider{"mycli": {Name: "My CLI", Binary: "sh"}}}
+	w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+	w.selectedSessionType = 1 // vibeflow with a token: the gateway row applies
+	w.selectedProvider = providerIdxByKey(t, w, "mycli")
+	w.enterRoutingStep()
+
+	gateway := w.routingOptions()[0]
+	if gateway.mode != RoutingGateway {
+		t.Fatalf("first option = %q, want the gateway row", gateway.mode)
+	}
+	if gateway.enabled {
+		t.Error("a custom provider must not be able to select the gateway")
+	}
+	if want := "not supported by My CLI"; gateway.note != want {
+		t.Errorf("gateway note = %q, want %q", gateway.note, want)
+	}
+	// Selecting it does nothing.
+	w.cursor = 0
+	if got, _ := w.advance(); got.step != StepLLMGateway || got.routingChosen {
+		t.Errorf("disabled gateway row was accepted: step=%v", got.step)
+	}
+	// And the headless flag is rejected for the same provider.
+	if err := validateRoutingFlags("mycli", RoutingGateway, false, "", "", ""); err == nil ||
+		!strings.Contains(err.Error(), "cannot route through the Axiom Studio AI Gateway") {
+		t.Errorf("--routing gateway --provider mycli: err = %v", err)
+	}
+}
+
 func TestProviderSupportsGateway(t *testing.T) {
 	tests := []struct {
 		key  string
@@ -855,10 +911,14 @@ func TestProviderSupportsGateway(t *testing.T) {
 		{"claude", true},
 		{"codex", true},
 		{"gemini", true},
-		{"qwen", false},
+		{"qwen", true},    // BuildLLMGatewayEnv has a qwen case
+		{"copilot", true}, // BYOK, pointed at the gateway (issue #5330)
 		{"cursor", false},
-		{"copilot", false},                    // talks only to GitHub's model routing
-		{"some-future-custom-provider", true}, // default: gateway-eligible
+		{"kiro", false}, // own KIRO_API_KEY; no BuildLLMGatewayEnv case
+		// A custom provider from config.yaml has no BuildLLMGatewayEnv case,
+		// so the gateway must not be offered for it (issue #5306).
+		{"some-future-custom-provider", false},
+		{"", false},
 	}
 	for _, tt := range tests {
 		if got := providerSupportsGateway(tt.key); got != tt.want {
@@ -890,7 +950,7 @@ func TestShouldShowGatewayStep(t *testing.T) {
 		{"claude vibeflow+token shows", 1, tokenCfg, "claude", true},
 		{"codex vibeflow+token shows", 1, tokenCfg, "codex", true},
 		{"gemini vibeflow+token shows", 1, tokenCfg, "gemini", true},
-		{"qwen vibeflow+token hidden", 1, tokenCfg, "qwen", false},
+		{"qwen vibeflow+token shows", 1, tokenCfg, "qwen", true},
 		{"cursor vibeflow+token hidden", 1, tokenCfg, "cursor", false},
 		{"claude vanilla session hidden", 0, tokenCfg, "claude", false},
 		{"claude no api token hidden", 1, &Config{}, "claude", false},
@@ -911,39 +971,58 @@ func TestShouldShowGatewayStep(t *testing.T) {
 	}
 }
 
-// TestWizardAdvance_SkipsGatewayForQwenAndCursor proves the forward flow: qwen
-// and cursor jump straight past StepLLMGateway (qwen → its launch config,
-// cursor → branch) and a stale gateway "yes" carried in from a prior provider
-// is forced back off, while claude still lands on the gateway step.
-func TestWizardAdvance_SkipsGatewayForQwenAndCursor(t *testing.T) {
+// TestWizardAdvance_RoutingStepForEveryHarness proves the forward flow: every
+// harness lands on the Routing step, the gateway is only offered where it
+// works (claude here, not qwen or cursor), and a stale gateway "yes" carried
+// in from a prior provider cannot select the gateway where it isn't offered.
+func TestWizardAdvance_RoutingStepForEveryHarness(t *testing.T) {
 	providers := gatewayTestProviders()
 	tests := []struct {
 		name          string
 		provider      string
-		wantStep      WizardStep
+		wantGateway   bool       // gateway offered on the Routing step
+		wantAfter     WizardStep // step after accepting the default choice
 		wantGatewayOn bool
 	}{
-		{"claude shows gateway step", "claude", StepLLMGateway, true},
-		{"cursor skips to branch", "cursor", StepBranch, false},
-		{"qwen skips to qwen launch config", "qwen", StepQwenLaunchConfig, false},
+		{"claude offers gateway", "claude", true, StepBranch, true},
+		{"qwen offers gateway", "qwen", true, StepQwenLaunchConfig, true},
+		{"cursor cannot use it and routes direct", "cursor", false, StepBranch, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("VIBEFLOW_ROOT", t.TempDir()) // the gateway choice is saved
+			clearShellEndpoints(t)                 // the host shell may export one
 			idx := providerIdxByKey(t, WizardModel{providers: providers}, tt.provider)
 			w := WizardModel{
 				selectedSessionType: 1,
 				// qwen reads OPENAI_API_KEY via ResolveProviderEnvVars; provide it
-				// so the flow reaches the gateway decision instead of StepEnvToken.
+				// so direct routing continues instead of asking for the key.
 				config:            &Config{APIToken: "tok", SavedEnvVars: map[string]string{"OPENAI_API_KEY": "x"}},
 				providers:         providers,
 				selectedProvider:  idx,
 				cursor:            idx,
 				step:              StepProvider,
+				routing:           RoutingGateway,
 				llmGatewayEnabled: true, // stale "yes" from a previous provider
 			}
 			got, _ := w.advance()
-			if got.step != tt.wantStep {
-				t.Errorf("step after advance = %v, want %v", got.step, tt.wantStep)
+			if got.step != StepLLMGateway {
+				t.Fatalf("step after provider = %v, want the Routing step", got.step)
+			}
+			// The gateway row is always present for a VibeFlow session with a
+			// token; harnesses that cannot use it show it disabled.
+			gateway := got.routingOptions()[0]
+			if gateway.mode != RoutingGateway {
+				t.Fatalf("first option = %q, want the gateway row", gateway.mode)
+			}
+			if gateway.enabled != tt.wantGateway {
+				t.Errorf("gateway selectable = %v, want %v (note %q)", gateway.enabled, tt.wantGateway, gateway.note)
+			}
+			// Accept the preselected choice: the saved gateway where offered,
+			// direct otherwise.
+			got, _ = got.advance()
+			if got.step != tt.wantAfter {
+				t.Errorf("step after routing = %v, want %v", got.step, tt.wantAfter)
 			}
 			if got.llmGatewayEnabled != tt.wantGatewayOn {
 				t.Errorf("llmGatewayEnabled = %v, want %v", got.llmGatewayEnabled, tt.wantGatewayOn)
@@ -952,10 +1031,10 @@ func TestWizardAdvance_SkipsGatewayForQwenAndCursor(t *testing.T) {
 	}
 }
 
-// TestWizardGoBack_SkipsGatewayForQwenAndCursor proves back-navigation stays
-// symmetric: qwen and cursor never land on StepLLMGateway when reversing, while
-// claude does.
-func TestWizardGoBack_SkipsGatewayForQwenAndCursor(t *testing.T) {
+// TestWizardGoBack_ReturnsToRouting proves back-navigation stays symmetric
+// with the forward flow: steps after Routing return to it, and qwen's
+// launch config sits between Routing and branch.
+func TestWizardGoBack_ReturnsToRouting(t *testing.T) {
 	providers := gatewayTestProviders()
 	tokenCfg := &Config{APIToken: "tok"}
 	tests := []struct {
@@ -964,10 +1043,11 @@ func TestWizardGoBack_SkipsGatewayForQwenAndCursor(t *testing.T) {
 		fromStep WizardStep
 		wantStep WizardStep
 	}{
-		{"claude back from branch hits gateway", "claude", StepBranch, StepLLMGateway},
-		{"cursor back from branch skips gateway", "cursor", StepBranch, StepProvider},
+		{"claude back from branch hits routing", "claude", StepBranch, StepLLMGateway},
+		{"cursor back from branch hits routing", "cursor", StepBranch, StepLLMGateway},
 		{"qwen back from branch hits qwen config", "qwen", StepBranch, StepQwenLaunchConfig},
-		{"qwen back from qwen config skips gateway", "qwen", StepQwenLaunchConfig, StepProvider},
+		{"qwen back from qwen config hits routing", "qwen", StepQwenLaunchConfig, StepLLMGateway},
+		{"back from routing hits provider", "cursor", StepLLMGateway, StepProvider},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1271,4 +1351,143 @@ func TestWizardStepTeam_PersonaRowsAlignConsistently(t *testing.T) {
 				i, col, baseCol, line)
 		}
 	}
+}
+
+// TestWizard_BinaryPathDoesNotFollowToAnotherProvider drives the real wizard
+// through the reported sequence: type a binary path for an uninstalled
+// provider, go back, then pick an installed one. The typed path must not
+// launch (or be saved as) the second provider's binary.
+func TestWizard_BinaryPathDoesNotFollowToAnotherProvider(t *testing.T) {
+	// /bin/true does not exist on macOS, and the wizard rejects a path that is
+	// not executable, so resolve a real one for this host.
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("true not installed")
+	}
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	clearShellEndpoints(t)
+	cfg := &Config{Providers: map[string]Provider{
+		"kiro":    {Name: "Kiro CLI", Binary: t.TempDir() + "/not-installed"},
+		"copilot": {Name: "GitHub Copilot CLI", Binary: "sh"},
+	}}
+	w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+	w.selectedSessionType = 0 // vanilla
+	w.step = StepProvider
+	w.branches = []string{"[+] Create new branch", "main"}
+	w.filteredBranches = []int{0, 1}
+
+	// 1. Select the uninstalled provider and type a real executable path.
+	w.cursor = providerIdxByKey(t, w, "kiro")
+	w, _ = w.advance()
+	if !w.editingBinary {
+		t.Fatal("an uninstalled provider must prompt for a binary path")
+	}
+	w = typeText(w, truePath)
+	w = press(w, keyEnter)
+	if w.step != StepLLMGateway || w.binaryPath != truePath {
+		t.Fatalf("step=%v path=%q, want the Routing step with the typed path", w.step, w.binaryPath)
+	}
+
+	// 2. Go back and select the installed provider instead.
+	w, _ = w.goBack()
+	if w.step != StepProvider {
+		t.Fatalf("back from routing: step = %v, want StepProvider", w.step)
+	}
+	w.cursor = providerIdxByKey(t, w, "copilot")
+	w, _ = w.advance()
+	if w.binaryPath != "" {
+		t.Errorf("binary path %q followed to another provider", w.binaryPath)
+	}
+
+	// 3. Finish: the result must not carry the path, and copilot's binary
+	// (which executeLaunch would persist to config.yaml) stays untouched.
+	w.step = StepConfirm
+	w.selectedBranch = 1
+	w.worktreeOpts = []string{"Current directory"}
+	w.permissionOpts = []string{"Yes", "No"}
+	w, _ = w.advance()
+	if !w.done {
+		t.Fatal("wizard did not finish")
+	}
+	if w.result.CustomBinaryPath != "" || w.result.Provider.Binary != "sh" {
+		t.Errorf("result binary = %q / custom %q, want copilot's own binary", w.result.Provider.Binary, w.result.CustomBinaryPath)
+	}
+
+	// Re-selecting the provider the path was typed for keeps it.
+	w2 := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+	w2.selectedSessionType = 0
+	w2.step = StepProvider
+	w2.branches, w2.filteredBranches = w.branches, w.filteredBranches
+	w2.cursor = providerIdxByKey(t, w2, "kiro")
+	w2, _ = w2.advance()
+	w2 = typeText(w2, truePath)
+	w2 = press(w2, keyEnter)
+	w2, _ = w2.goBack()
+	w2.cursor = providerIdxByKey(t, w2, "kiro")
+	w2, _ = w2.advance()
+	if w2.binaryPath != truePath {
+		t.Errorf("path for the same provider was dropped: %q", w2.binaryPath)
+	}
+}
+
+// TestProviderRowsCarryNoColourDot pins the removal of the provider dot: the
+// provider name is the identity, and the only bullet on a session row is the
+// status indicator. providerColors covered four harnesses and gave every
+// other one the same fallback colour, so it distinguished nothing.
+func TestProviderRowsCarryNoColourDot(t *testing.T) {
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	clearShellEndpoints(t)
+	cfg := &Config{Providers: map[string]Provider{
+		"copilot": {Name: "GitHub Copilot CLI", Binary: "sh"},
+		"kiro":    {Name: "Kiro CLI", Binary: t.TempDir() + "/not-installed"},
+	}}
+
+	t.Run("wizard provider list", func(t *testing.T) {
+		w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+		w.step = StepProvider
+		view := stripANSI(w.View())
+		if strings.Contains(view, "●") {
+			t.Errorf("provider list still renders a bullet:\n%s", view)
+		}
+		if !strings.Contains(view, "GitHub Copilot CLI") {
+			t.Errorf("provider list lost a name:\n%s", view)
+		}
+		// Availability is still conveyed, without a dot.
+		if !strings.Contains(view, "Kiro CLI (not installed)") {
+			t.Errorf("provider list lost the not-installed marker:\n%s", view)
+		}
+	})
+
+	t.Run("team provider matrix", func(t *testing.T) {
+		w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+		row := stripANSI(w.renderTeamProviderRow(1, "developer", providerIdxByKey(t, w, "copilot"), false))
+		if strings.Contains(row, "●") {
+			t.Errorf("team row still renders a bullet: %q", row)
+		}
+		if !strings.Contains(row, "GitHub Copilot CLI") {
+			t.Errorf("team row lost the provider name: %q", row)
+		}
+	})
+
+	t.Run("session row keeps only the status indicator", func(t *testing.T) {
+		m := Model{config: cfg}
+		var b strings.Builder
+		m.renderSessionRow(&b, SessionRow{Name: "session-1", Provider: "copilot", Status: "running"}, 0, 0, 100, "")
+		row := stripANSI(b.String())
+		if got := strings.Count(row, "●"); got != 1 {
+			t.Errorf("session row has %d bullets, want only the status indicator: %q", got, row)
+		}
+		if strings.Contains(row, "  session-1") {
+			t.Errorf("session row left a gap where the dot was: %q", row)
+		}
+	})
+
+	t.Run("detail line", func(t *testing.T) {
+		if got := stripANSI(renderProvider("copilot")); got != "copilot" {
+			t.Errorf("renderProvider = %q, want the bare name", got)
+		}
+		if got := stripANSI(renderProvider("")); !strings.Contains(got, "-") {
+			t.Errorf("renderProvider(\"\") = %q, want the placeholder", got)
+		}
+	})
 }
