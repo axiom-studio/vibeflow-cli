@@ -1722,13 +1722,6 @@ func (w WizardModel) View() string {
 				name := pe.provider.Name
 				if !pe.available {
 					name = lipgloss.NewStyle().Foreground(dimColor).Render(name + " (not installed)")
-				} else {
-					color, ok := providerColors[pe.key]
-					if !ok {
-						color = accentColor
-					}
-					dot := lipgloss.NewStyle().Foreground(color).Render("●")
-					name = fmt.Sprintf("%s %s", name, dot)
 				}
 				b.WriteString(fmt.Sprintf("%s%s\n", cursor, name))
 			}
@@ -2751,12 +2744,7 @@ func (w WizardModel) renderTeamProviderRow(rowIdx int, label string, providerIdx
 		cursor = "> "
 	}
 	pe := w.providers[providerIdx]
-	color, ok := providerColors[pe.key]
-	if !ok {
-		color = accentColor
-	}
-	dot := lipgloss.NewStyle().Foreground(color).Render("●")
-	providerName := fmt.Sprintf("%s %s", pe.provider.Name, dot)
+	providerName := pe.provider.Name
 	suffix := ""
 	if inherits {
 		suffix = lipgloss.NewStyle().Foreground(dimColor).Render(" (team default)")
