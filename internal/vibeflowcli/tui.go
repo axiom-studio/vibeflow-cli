@@ -2515,7 +2515,7 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	if s.ManagedReview != nil {
 		name = ansi.Truncate(displayName, nameMax, "…")
 	}
-	line := fmt.Sprintf("%s %s%s%s%s", indStyle.Render(indicator), provDot, name, recoveredBadge, healthBadge)
+	line := fmt.Sprintf("%s %s%s%s", indStyle.Render(indicator), name, recoveredBadge, healthBadge)
 
 	if pos == cursor {
 		b.WriteString(selectedStyle.Width(width).Render(iconActive + " " + indent + line))
