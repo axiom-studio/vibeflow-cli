@@ -1037,13 +1037,14 @@ func TestGatewayEnabledForProvider(t *testing.T) {
 		// Direct-only providers: never enabled even when requested. Warn ONLY when
 		// the user explicitly passed the flag; a config-only preference stays silent.
 		{"cursor_flag_warns", true, false, "cursor", false, true},
-		{"copilot_flag_warns", true, false, "copilot", false, true},
 		{"kiro_flag_warns", true, false, "kiro", false, true},
 		{"cursor_config_silent", false, true, "cursor", false, false},
-		{"copilot_config_silent", false, true, "copilot", false, false},
-		// Qwen Code has gateway wiring (BuildLLMGatewayEnv), so it routes.
+		// Qwen Code and Copilot CLI have gateway wiring (BuildLLMGatewayEnv),
+		// so they route.
 		{"qwen_flag_enables", true, false, "qwen", true, false},
 		{"qwen_config_enables", false, true, "qwen", true, false},
+		{"copilot_flag_enables", true, false, "copilot", true, false},
+		{"copilot_config_enables", false, true, "copilot", true, false},
 		// Flag set AND config set for a direct-only provider still warns (flag is explicit).
 		{"cursor_flag_and_config", true, true, "cursor", false, true},
 	}

@@ -910,10 +910,10 @@ func TestProviderSupportsGateway(t *testing.T) {
 		{"claude", true},
 		{"codex", true},
 		{"gemini", true},
-		{"qwen", true}, // BuildLLMGatewayEnv has a qwen case
+		{"qwen", true},    // BuildLLMGatewayEnv has a qwen case
+		{"copilot", true}, // BYOK, pointed at the gateway (issue #5330)
 		{"cursor", false},
-		{"copilot", false}, // talks only to GitHub's model routing
-		{"kiro", false},    // own KIRO_API_KEY; no BuildLLMGatewayEnv case
+		{"kiro", false}, // own KIRO_API_KEY; no BuildLLMGatewayEnv case
 		// A custom provider from config.yaml has no BuildLLMGatewayEnv case,
 		// so the gateway must not be offered for it (issue #5306).
 		{"some-future-custom-provider", false},
