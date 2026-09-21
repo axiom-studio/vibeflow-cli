@@ -2362,15 +2362,6 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 		indStyle = statusError
 	}
 
-	provDot := ""
-	if s.Provider != "" {
-		color, ok := providerColors[s.Provider]
-		if !ok {
-			color = accentColor
-		}
-		provDot = lipgloss.NewStyle().Foreground(color).Render("●") + " "
-	}
-
 	recoveredBadge := ""
 	if s.Recovered {
 		recoveredBadge = lipgloss.NewStyle().Foreground(warningColor).Render(" (recovered)")
@@ -2401,7 +2392,7 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 		nameMax = 8
 	}
 	name := truncate(s.Name, nameMax)
-	line := fmt.Sprintf("%s %s%s%s%s", indStyle.Render(indicator), provDot, name, recoveredBadge, healthBadge)
+	line := fmt.Sprintf("%s %s%s%s", indStyle.Render(indicator), name, recoveredBadge, healthBadge)
 
 	if pos == cursor {
 		b.WriteString(selectedStyle.Width(width).Render(iconActive + " " + indent + line))
@@ -2472,7 +2463,7 @@ func (m Model) renderDetailPanel(width, height int) string {
 	b.WriteString(renderStatus(s.Status))
 	b.WriteString("\n")
 
-	// Provider (uses styled render with color dot).
+	// Provider.
 	if s.Provider != "" {
 		b.WriteString(labelStyle.Render("Provider"))
 		b.WriteString(renderProvider(s.Provider))
@@ -2677,25 +2668,15 @@ func (m Model) renderHelpPopup() string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, popup)
 }
 
-// Provider color-coded dots — distinct hues drawn from the Ocean palette
-// (theme.go). The provider glyph plus these keep providers distinguishable.
-var providerColors = map[string]lipgloss.Color{
-	"claude": oceanWarning,   // sandy
-	"codex":  oceanAccent,    // seafoam
-	"cursor": oceanPrimary,   // sky
-	"gemini": oceanSecondary, // deep blue
-}
-
+// renderProvider renders a session's provider name. Providers used to carry a
+// colour-coded dot, but the colours only covered four of them — every other
+// harness shared one fallback colour — so it distinguished nothing the name
+// did not already say.
 func renderProvider(provider string) string {
 	if provider == "" {
 		return helpStyle.Render("-")
 	}
-	color, ok := providerColors[provider]
-	if !ok {
-		color = accentColor
-	}
-	dot := lipgloss.NewStyle().Foreground(color).Render("●")
-	return fmt.Sprintf("%s %s", provider, dot)
+	return provider
 }
 
 func renderBranch(branch, worktreePath string) string {

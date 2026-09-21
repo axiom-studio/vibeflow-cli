@@ -1422,3 +1422,65 @@ func TestWizard_BinaryPathDoesNotFollowToAnotherProvider(t *testing.T) {
 		t.Errorf("path for the same provider was dropped: %q", w2.binaryPath)
 	}
 }
+
+// TestProviderRowsCarryNoColourDot pins the removal of the provider dot: the
+// provider name is the identity, and the only bullet on a session row is the
+// status indicator. providerColors covered four harnesses and gave every
+// other one the same fallback colour, so it distinguished nothing.
+func TestProviderRowsCarryNoColourDot(t *testing.T) {
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	clearShellEndpoints(t)
+	cfg := &Config{Providers: map[string]Provider{
+		"copilot": {Name: "GitHub Copilot CLI", Binary: "sh"},
+		"kiro":    {Name: "Kiro CLI", Binary: t.TempDir() + "/not-installed"},
+	}}
+
+	t.Run("wizard provider list", func(t *testing.T) {
+		w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+		w.step = StepProvider
+		view := stripANSI(w.View())
+		if strings.Contains(view, "●") {
+			t.Errorf("provider list still renders a bullet:\n%s", view)
+		}
+		if !strings.Contains(view, "GitHub Copilot CLI") {
+			t.Errorf("provider list lost a name:\n%s", view)
+		}
+		// Availability is still conveyed, without a dot.
+		if !strings.Contains(view, "Kiro CLI (not installed)") {
+			t.Errorf("provider list lost the not-installed marker:\n%s", view)
+		}
+	})
+
+	t.Run("team provider matrix", func(t *testing.T) {
+		w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+		row := stripANSI(w.renderTeamProviderRow(1, "developer", providerIdxByKey(t, w, "copilot"), false))
+		if strings.Contains(row, "●") {
+			t.Errorf("team row still renders a bullet: %q", row)
+		}
+		if !strings.Contains(row, "GitHub Copilot CLI") {
+			t.Errorf("team row lost the provider name: %q", row)
+		}
+	})
+
+	t.Run("session row keeps only the status indicator", func(t *testing.T) {
+		m := Model{config: cfg}
+		var b strings.Builder
+		m.renderSessionRow(&b, SessionRow{Name: "session-1", Provider: "copilot", Status: "running"}, 0, 0, 100, "")
+		row := stripANSI(b.String())
+		if got := strings.Count(row, "●"); got != 1 {
+			t.Errorf("session row has %d bullets, want only the status indicator: %q", got, row)
+		}
+		if strings.Contains(row, "  session-1") {
+			t.Errorf("session row left a gap where the dot was: %q", row)
+		}
+	})
+
+	t.Run("detail line", func(t *testing.T) {
+		if got := stripANSI(renderProvider("copilot")); got != "copilot" {
+			t.Errorf("renderProvider = %q, want the bare name", got)
+		}
+		if got := stripANSI(renderProvider("")); !strings.Contains(got, "-") {
+			t.Errorf("renderProvider(\"\") = %q, want the placeholder", got)
+		}
+	})
+}
