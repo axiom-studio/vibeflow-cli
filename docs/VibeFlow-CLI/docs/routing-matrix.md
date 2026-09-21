@@ -51,6 +51,8 @@ These are shown in the wizard with the reason rather than hidden, so the mode is
 
 **`Forwarded from your shell` variables do reach the endpoint.** They are passed through as-is whenever you have them exported — this is how shell routing sends your own credential to the endpoint you chose. If you do not want a credential to leave your machine, unset it before launching, or use a different routing mode.
 
+**Live-verified** records a real session against the real agent, with the agent version it was run against. The tests prove the right variables are set; only a live run proves the far end accepts them, so `not yet` means exactly that and should not be read as a failure. Treat a record older than 6 months as needing a re-run — these agents ship often, and a routing defect has been version-specific before.
+
 | Agent | Mode | Wire format | Set | Blanked | Forwarded from your shell | Live-verified |
 |---|---|---|---|---|---|---|
 | `claude` | `direct` | — | — | `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_BASE_URL` | — | not yet |

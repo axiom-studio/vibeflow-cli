@@ -89,9 +89,22 @@ type RoutingCell struct {
 	// VerifiedVersion and VerifiedOn record a live run against the real
 	// harness. Unit tests prove the right variables are set; only a live run
 	// proves the far end accepts them. Empty means not yet live-verified.
+	//
+	// The two travel together and TestRoutingMatrixVerificationRecords
+	// enforces it: a date alone ages into a claim about whatever version the
+	// harness is on today, which is how a stale record reads as a current
+	// one. Recording the version keeps the claim bounded to what was run.
 	VerifiedVersion string
 	VerifiedOn      string // YYYY-MM-DD
 }
+
+// reverifyAfterMonths is how long a live verification is treated as current.
+// The harnesses ship frequently and a routing defect has already been
+// version-specific once, so a record older than this should be re-run rather
+// than trusted. Documented on the generated page; deliberately NOT computed
+// into it, because a page that changes with the calendar would fail its own
+// drift guard every day without anyone editing the code.
+const reverifyAfterMonths = 6
 
 // RoutingModes lists every routing mode, in the order the document renders
 // them. Kept next to the matrix so a new mode is one edit away from being
@@ -463,6 +476,11 @@ func writeMatrixVerification(b *strings.Builder) {
 	b.WriteString("as-is whenever you have them exported — this is how shell routing sends your own credential ")
 	b.WriteString("to the endpoint you chose. If you do not want a credential to leave your machine, unset it ")
 	b.WriteString("before launching, or use a different routing mode.\n\n")
+	fmt.Fprintf(b, "**Live-verified** records a real session against the real agent, with the agent version "+
+		"it was run against. The tests prove the right variables are set; only a live run proves the far end "+
+		"accepts them, so `not yet` means exactly that and should not be read as a failure. Treat a record "+
+		"older than %d months as needing a re-run — these agents ship often, and a routing defect has been "+
+		"version-specific before.\n\n", reverifyAfterMonths)
 	b.WriteString("| Agent | Mode | Wire format | Set | Blanked | Forwarded from your shell | Live-verified |\n|---|---|---|---|---|---|---|\n")
 
 	for _, provider := range matrixProviders() {
