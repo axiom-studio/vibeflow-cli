@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // updateRoutingDoc regenerates the committed routing-matrix page instead of
@@ -309,6 +310,38 @@ func TestRoutingMatrixDoc(t *testing.T) {
 	if string(want) != got {
 		t.Errorf("%s is out of date — regenerate it with:\n"+
 			"\tgo test ./internal/vibeflowcli -run TestRoutingMatrixDoc -update", path)
+	}
+}
+
+// TestRoutingMatrixVerificationRecords keeps every live-verification record
+// self-describing: a date and the agent version it was run against travel
+// together, and the date is a real date.
+//
+// Without this, a cell could carry a bare date that silently ages into a
+// claim about whatever version the agent ships today — the failure mode of a
+// verified column that nobody re-runs.
+func TestRoutingMatrixVerificationRecords(t *testing.T) {
+	for _, c := range RoutingMatrix {
+		name := c.Provider + "/" + c.Routing
+		switch {
+		case c.VerifiedOn == "" && c.VerifiedVersion == "":
+			continue // not yet live-verified, which is an honest state
+		case c.VerifiedOn == "":
+			t.Errorf("%s records VerifiedVersion %q with no VerifiedOn — a version without a date "+
+				"cannot be judged for staleness", name, c.VerifiedVersion)
+		case c.VerifiedVersion == "":
+			t.Errorf("%s records VerifiedOn %q with no VerifiedVersion — a bare date ages into a claim "+
+				"about whichever version ships today", name, c.VerifiedOn)
+		default:
+			if _, err := time.Parse("2006-01-02", c.VerifiedOn); err != nil {
+				t.Errorf("%s has VerifiedOn %q, want YYYY-MM-DD: %v", name, c.VerifiedOn, err)
+			}
+		}
+		// Only a cell that actually works can have been verified against a
+		// live endpoint; a gap or an unsupported mode has nothing to run.
+		if c.Status != Supported && (c.VerifiedOn != "" || c.VerifiedVersion != "") {
+			t.Errorf("%s is %s but carries a live-verification record", name, c.Status)
+		}
 	}
 }
 
