@@ -58,7 +58,7 @@ These are shown in the wizard with the reason rather than hidden, so the mode is
 | `claude` | `endpoint` | Anthropic-compatible, Messages API | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL` | `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS` | — | not yet |
 | `claude` | `shell` | Anthropic-compatible, Messages API | `ANTHROPIC_BASE_URL` | — | `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL` | not yet |
 | `codex` | `direct` | — | — | `OPENAI_BASE_URL` | — | not yet |
-| `codex` | `gateway` | OpenAI-compatible | `GATEWAY_API_KEY`, `OPENAI_BASE_URL` | — | — | not yet |
+| `codex` | `gateway` | OpenAI-compatible | `GATEWAY_API_KEY`, `OPENAI_BASE_URL` | `OPENAI_API_KEY` | — | not yet |
 | `codex` | `endpoint` | OpenAI-compatible, Responses API | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | — | not yet |
 | `codex` | `shell` | OpenAI-compatible, Responses API | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `OPENAI_API_KEY` | not yet |
 | `copilot` | `direct` | — | — | `COPILOT_PROVIDER_BASE_URL` | — | not yet |
@@ -78,4 +78,5 @@ These are shown in the wizard with the reason rather than hidden, so the mode is
 
 ### Before you choose
 
+- **`claude` / `gateway`** — An `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` exported in your shell is inherited by the session and presented to the gateway, which does not need it — the gateway authenticates with its own key in a custom header. Every other agent's gateway mode masks the equivalent variable. Unset yours before launching if you do not want the gateway to receive it.
 - **`claude` / `shell`** — If neither `ANTHROPIC_AUTH_TOKEN` nor `ANTHROPIC_API_KEY` is set, Claude Code sends your subscription login to this URL instead. The wizard warns about this and does not pre-select the detected endpoint in that case, and restart and quick-switch warn too.

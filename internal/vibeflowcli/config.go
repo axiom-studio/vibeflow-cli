@@ -536,6 +536,13 @@ func CheckServerReachable(serverURL string) error {
 // endpoint via qwen-code's custom-API-key mechanism (the var NAME encodes
 // the protocol + endpoint URL; the VALUE is the bearer token), so gateway
 // routing works even where qwen-code ignores the OPENAI_* env pair.
+// INVARIANT for every case below: every variable the harness reads for
+// credentials must be WRITTEN here — overwritten with the gateway token, or
+// masked with a placeholder or an empty value. A pane inherits the tmux
+// server's environment, so a variable this function does not write is one the
+// user's shell supplies, and it travels to the gateway. "Not injecting it" is
+// not the same as the process not having it. The matrix's BlanksEnv guard
+// enforces this per harness.
 func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]string {
 	env := make(map[string]string)
 	if apiToken == "" || serverURL == "" {
@@ -549,6 +556,14 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	case "codex":
 		env["GATEWAY_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
+		// The gateway provider flags set requires_openai_auth, so codex
+		// presents this alongside the x-axiom-api-key header built from
+		// GATEWAY_API_KEY. Left unwritten it would be inherited from the
+		// user's shell, sending their real OpenAI key to a gateway that
+		// neither needs nor should hold it. Blanked rather than given a
+		// placeholder because the gateway key is the credential here, so an
+		// empty value is the same state as a user who exports no key at all.
+		env["OPENAI_API_KEY"] = ""
 	case "gemini":
 		env["GEMINI_API_KEY"] = apiToken
 		env["GOOGLE_GEMINI_BASE_URL"] = gatewayBaseURL

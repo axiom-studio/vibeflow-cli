@@ -135,7 +135,19 @@ var RoutingMatrix = []RoutingCell{
 		WireFormat: "Anthropic-compatible, Messages API",
 		// The gateway key rides in a custom header so the standard auth
 		// headers stay free for the user's own OAuth token.
+		//
+		// Deliberately NOT masking ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN,
+		// unlike every other gateway case: the header split above reads as an
+		// intentional decision to let the user's own Anthropic credential ride
+		// along, and masking it would break anyone relying on that. Whether
+		// the gateway consumes or forwards those headers is unconfirmed —
+		// until its owner answers, changing this would be a guess. See the
+		// caveat below, which publishes the uncertainty rather than hiding it.
 		RequiresEnv: []string{"ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BASE_URL"},
+		Caveat: "An `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` exported in your shell is inherited by " +
+			"the session and presented to the gateway, which does not need it — the gateway authenticates " +
+			"with its own key in a custom header. Every other agent's gateway mode masks the equivalent " +
+			"variable. Unset yours before launching if you do not want the gateway to receive it.",
 	},
 	{
 		Provider: "claude", Routing: RoutingEndpoint, Status: Supported,
@@ -177,6 +189,10 @@ var RoutingMatrix = []RoutingCell{
 		Provider: "codex", Routing: RoutingGateway, Status: Supported,
 		WireFormat:  "OpenAI-compatible",
 		RequiresEnv: []string{"GATEWAY_API_KEY", "OPENAI_BASE_URL"},
+		// The gateway authenticates with GATEWAY_API_KEY through the
+		// x-axiom-api-key header, so the user's own OpenAI key is not needed
+		// and is masked instead of being inherited and presented.
+		BlanksEnv: []string{"OPENAI_API_KEY"},
 	},
 	{
 		Provider: "codex", Routing: RoutingEndpoint, Status: Supported,
