@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -1357,6 +1358,12 @@ func TestWizardStepTeam_PersonaRowsAlignConsistently(t *testing.T) {
 // provider, go back, then pick an installed one. The typed path must not
 // launch (or be saved as) the second provider's binary.
 func TestWizard_BinaryPathDoesNotFollowToAnotherProvider(t *testing.T) {
+	// /bin/true does not exist on macOS, and the wizard rejects a path that is
+	// not executable, so resolve a real one for this host.
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("true not installed")
+	}
 	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
 	clearShellEndpoints(t)
 	cfg := &Config{Providers: map[string]Provider{
@@ -1375,9 +1382,9 @@ func TestWizard_BinaryPathDoesNotFollowToAnotherProvider(t *testing.T) {
 	if !w.editingBinary {
 		t.Fatal("an uninstalled provider must prompt for a binary path")
 	}
-	w = typeText(w, "/bin/true")
+	w = typeText(w, truePath)
 	w = press(w, keyEnter)
-	if w.step != StepLLMGateway || w.binaryPath != "/bin/true" {
+	if w.step != StepLLMGateway || w.binaryPath != truePath {
 		t.Fatalf("step=%v path=%q, want the Routing step with the typed path", w.step, w.binaryPath)
 	}
 
@@ -1413,12 +1420,12 @@ func TestWizard_BinaryPathDoesNotFollowToAnotherProvider(t *testing.T) {
 	w2.branches, w2.filteredBranches = w.branches, w.filteredBranches
 	w2.cursor = providerIdxByKey(t, w2, "kiro")
 	w2, _ = w2.advance()
-	w2 = typeText(w2, "/bin/true")
+	w2 = typeText(w2, truePath)
 	w2 = press(w2, keyEnter)
 	w2, _ = w2.goBack()
 	w2.cursor = providerIdxByKey(t, w2, "kiro")
 	w2, _ = w2.advance()
-	if w2.binaryPath != "/bin/true" {
+	if w2.binaryPath != truePath {
 		t.Errorf("path for the same provider was dropped: %q", w2.binaryPath)
 	}
 }
