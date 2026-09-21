@@ -19,6 +19,12 @@ The `--root` flag enables fully isolated parallel instances with independent con
 
 ## Common settings
 
+The first-launch server/API-key setup is saved here and is not repeated on later TUI launches.
+The independent **Launch PR review runner for this session?** prompt appears on every interactive launch.
+Its Yes/No answer is never persisted or coupled to authentication setup.
+Choosing Yes reuses `default_project`, `default_work_dir` (or the launch directory), and `default_provider`, asking only for unresolved review inputs.
+The runner stops with that TUI; use explicit `review-watch --background` only for a detached runner.
+
 Example structure (not exhaustive):
 
 ```yaml
@@ -96,6 +102,7 @@ All paths below are resolved relative to the root directory (default `~/.vibeflo
 | `<root>/sessions.json` | Session metadata (file-locked) |
 | `<root>/session_cache.json` | Cache for restart-after-exit; persists full launch parameters so `vibeflow restart` works after a session exits tmux |
 | `<root>/vibeflow.pid` | PID lock so only one TUI instance runs per root |
+| `<root>/review-runner-preferences.json` | Non-secret review inputs scoped to the server, config and defaults; never stores launch consent or rewrites authentication YAML |
 
 ### Internal fields
 
