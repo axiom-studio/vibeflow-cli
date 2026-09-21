@@ -218,6 +218,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 	}
 	defer model.logger.Close()
+	// Warnings raised while launching or restarting go to the log: writing
+	// them to the terminal would corrupt the TUI's own rendering.
+	SetWarnWriter(model.logger)
+	defer SetWarnWriter(nil)
 	// Alt-screen, focus reporting, and mouse mode are set on the View in
 	// Bubble Tea v2 (see Model.View) rather than as program options here.
 	p := tea.NewProgram(model, tea.WithContext(ctx), tea.WithoutSignalHandler())

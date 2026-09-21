@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -131,6 +132,71 @@ type Config struct {
 	SavedEnvVars      map[string]string   `yaml:"saved_env_vars,omitempty"`
 	LLMGatewayEnabled bool                `yaml:"llm_gateway_enabled,omitempty"`
 	MCPToolName       string              `yaml:"mcp_tool_name,omitempty"`
+	OpenAICompat      OpenAICompatConfig  `yaml:"openai_compatible,omitempty"`
+}
+
+// OpenAICompatConfig remembers compatible endpoints entered in the wizard so
+// the endpoint step can offer them again. They are offered, never filled in:
+// an endpoint entered for one harness may not even speak the API another one
+// needs. API keys are not kept here — they live in SavedEnvVars under
+// OPENAI_COMPAT_API_KEY_<VENDOR>.
+type OpenAICompatConfig struct {
+	// Recent holds the last endpoint used with each harness, keyed by
+	// provider key.
+	Recent map[string]EndpointRecord `yaml:"recent,omitempty"`
+	// LastProvider is the harness the most recent endpoint was used with.
+	LastProvider string `yaml:"last_provider,omitempty"`
+	// The fields below are what pre-release builds wrote: a single endpoint
+	// with no harness. They are still read, so an upgrade keeps the entry.
+	LastBaseURL string `yaml:"last_base_url,omitempty"`
+	LastVendor  string `yaml:"last_vendor,omitempty"`
+	LastModel   string `yaml:"last_model,omitempty"`
+}
+
+// EndpointRecord is one remembered compatible endpoint. The API key is never
+// part of it.
+type EndpointRecord struct {
+	BaseURL string `yaml:"base_url,omitempty"`
+	Vendor  string `yaml:"vendor,omitempty"`
+	Model   string `yaml:"model,omitempty"`
+}
+
+// RememberEndpoint records the endpoint a harness was just launched with, so
+// the next run can offer it.
+func (c *Config) RememberEndpoint(providerKey, baseURL, vendor, model string) {
+	if c == nil || providerKey == "" {
+		return
+	}
+	if c.OpenAICompat.Recent == nil {
+		c.OpenAICompat.Recent = make(map[string]EndpointRecord)
+	}
+	c.OpenAICompat.Recent[providerKey] = EndpointRecord{BaseURL: baseURL, Vendor: vendor, Model: model}
+	c.OpenAICompat.LastProvider = providerKey
+	// Keep the legacy fields in step so a downgrade still finds an endpoint.
+	c.OpenAICompat.LastBaseURL, c.OpenAICompat.LastVendor, c.OpenAICompat.LastModel = baseURL, vendor, model
+}
+
+// RecentEndpoint returns an endpoint to offer for providerKey: the one last
+// used with that harness, else the most recent from any harness. The second
+// result names the harness it came from ("" when a pre-release record has no
+// harness recorded), and ok is false when there is nothing to offer.
+func (c *Config) RecentEndpoint(providerKey string) (rec EndpointRecord, usedWith string, ok bool) {
+	if c == nil {
+		return EndpointRecord{}, "", false
+	}
+	if rec, found := c.OpenAICompat.Recent[providerKey]; found && rec.BaseURL != "" {
+		return rec, providerKey, true
+	}
+	if last := c.OpenAICompat.LastProvider; last != "" {
+		if rec, found := c.OpenAICompat.Recent[last]; found && rec.BaseURL != "" {
+			return rec, last, true
+		}
+	}
+	if c.OpenAICompat.LastBaseURL != "" {
+		legacy := EndpointRecord{BaseURL: c.OpenAICompat.LastBaseURL, Vendor: c.OpenAICompat.LastVendor, Model: c.OpenAICompat.LastModel}
+		return legacy, c.OpenAICompat.LastProvider, true
+	}
+	return EndpointRecord{}, "", false
 }
 
 // AddDirectoryToHistory adds a directory to the front of the history list,
@@ -403,6 +469,14 @@ func migrateProviders(cfg *Config, path string) {
 		cfg.Providers[key] = prov
 	}
 
+	// A compatible endpoint is a routing option now, not a provider. Drop the
+	// "openai-compatible" provider entry that pre-release builds wrote, along
+	// with any session values those builds persisted into its env.
+	if _, ok := cfg.Providers[legacyOpenAICompatProvider]; ok {
+		delete(cfg.Providers, legacyOpenAICompatProvider)
+		dirty = true
+	}
+
 	// Add any built-in providers the user's config is missing. Lets users on
 	// pre-cursor / pre-qwen configs see new built-ins without nuking their file.
 	for key, defProv := range defaults.Providers {
@@ -462,6 +536,13 @@ func CheckServerReachable(serverURL string) error {
 // endpoint via qwen-code's custom-API-key mechanism (the var NAME encodes
 // the protocol + endpoint URL; the VALUE is the bearer token), so gateway
 // routing works even where qwen-code ignores the OPENAI_* env pair.
+// INVARIANT for every case below: every variable the harness reads for
+// credentials must be WRITTEN here — overwritten with the gateway token, or
+// masked with a placeholder or an empty value. A pane inherits the tmux
+// server's environment, so a variable this function does not write is one the
+// user's shell supplies, and it travels to the gateway. "Not injecting it" is
+// not the same as the process not having it. The matrix's BlanksEnv guard
+// enforces this per harness.
 func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]string {
 	env := make(map[string]string)
 	if apiToken == "" || serverURL == "" {
@@ -475,6 +556,14 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 	case "codex":
 		env["GATEWAY_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
+		// The gateway provider flags set requires_openai_auth, so codex
+		// presents this alongside the x-axiom-api-key header built from
+		// GATEWAY_API_KEY. Left unwritten it would be inherited from the
+		// user's shell, sending their real OpenAI key to a gateway that
+		// neither needs nor should hold it. Blanked rather than given a
+		// placeholder because the gateway key is the credential here, so an
+		// empty value is the same state as a user who exports no key at all.
+		env["OPENAI_API_KEY"] = ""
 	case "gemini":
 		env["GEMINI_API_KEY"] = apiToken
 		env["GOOGLE_GEMINI_BASE_URL"] = gatewayBaseURL
@@ -482,6 +571,18 @@ func BuildLLMGatewayEnv(providerKey, serverURL, apiToken string) map[string]stri
 		env["OPENAI_API_KEY"] = apiToken
 		env["OPENAI_BASE_URL"] = gatewayBaseURL + "/v1"
 		env[QwenCustomAPIKeyEnvName("OPENAI", gatewayBaseURL+"/v1")] = apiToken
+	case "copilot":
+		// Copilot CLI BYOK: setting COPILOT_PROVIDER_BASE_URL switches it off
+		// GitHub's model routing and onto the gateway's OpenAI-compatible
+		// surface, the same wiring endpoint routing uses.
+		env["COPILOT_PROVIDER_BASE_URL"] = gatewayBaseURL + "/v1"
+		env["COPILOT_PROVIDER_TYPE"] = "openai"
+		env["COPILOT_PROVIDER_API_KEY"] = apiToken
+		// Blanked, not merely left unset: a pane inherits the tmux server's
+		// environment, so a bearer token or wire-API override exported in the
+		// user's shell would otherwise travel to the gateway alongside the key.
+		env["COPILOT_PROVIDER_BEARER_TOKEN"] = ""
+		env["COPILOT_PROVIDER_WIRE_API"] = ""
 	}
 	return env
 }
@@ -654,6 +755,118 @@ func parseCodexBearerTokenEnvVar(content string) string {
 // [...] or "..." from config files or documentation.
 func cleanEnvToken(val string) string {
 	return strings.Trim(val, "[]\"' \t\n\r")
+}
+
+// legacyOpenAICompatProvider is the provider key pre-release builds used for
+// compatible endpoints; migrateProviders removes it from existing configs.
+const legacyOpenAICompatProvider = "openai-compatible"
+
+// openAICompatKeyPrefix names the per-vendor API key slots used by endpoint
+// routing, e.g. OPENAI_COMPAT_API_KEY_MY_PROXY.
+const openAICompatKeyPrefix = "OPENAI_COMPAT_API_KEY_"
+
+// OpenAICompatKeyEnvName returns the env var / saved-config name holding the
+// endpoint API key for vendor. The vendor is encoded like qwen's
+// endpoint segment: uppercased, each run of non-alphanumerics becomes one
+// underscore ("my-proxy.local" → OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL).
+// The vendor is an optional display label: when it is empty (or has no
+// letters or digits) the key lives in the single default slot
+// OPENAI_COMPAT_API_KEY.
+func OpenAICompatKeyEnvName(vendor string) string {
+	// Encode the vendor into an env-var-safe suffix.
+	enc := encodeQwenEnvSegment(vendor)
+	// No usable suffix → the default slot shared by unlabelled endpoints.
+	if enc == "" {
+		return openAICompatDefaultKey
+	}
+	return openAICompatKeyPrefix + enc
+}
+
+// openAICompatDefaultKey holds the endpoint API key when no vendor is set.
+const openAICompatDefaultKey = "OPENAI_COMPAT_API_KEY"
+
+// ResolveOpenAICompatKey returns the API key for vendor: the shell env var
+// wins over the saved config value. Returns "" when neither is set (keyless
+// endpoint). It never reads the shared OPENAI_API_KEY slot.
+func ResolveOpenAICompatKey(cfg *Config, vendor string) string {
+	name := OpenAICompatKeyEnvName(vendor)
+	// 1. Shell export, e.g. OPENAI_COMPAT_API_KEY_MY_PROXY=... vibeflow launch.
+	if val := cleanEnvToken(os.Getenv(name)); val != "" {
+		return val
+	}
+	// 2. Value saved by the wizard in config.yaml.
+	if cfg != nil {
+		return cleanEnvToken(cfg.SavedEnvVars[name])
+	}
+	return ""
+}
+
+// SaveOpenAICompatKey stores key in vendor's own SavedEnvVars slot. An empty
+// key or unusable vendor is a no-op, so a keyless endpoint never overwrites
+// a key saved earlier. The caller persists the config (SaveConfig).
+func (c *Config) SaveOpenAICompatKey(vendor, key string) {
+	name := OpenAICompatKeyEnvName(vendor)
+	key = cleanEnvToken(key)
+	// An empty key never overwrites one saved earlier.
+	if key == "" {
+		return
+	}
+	// Lazily create the map for configs that have never saved an env var.
+	if c.SavedEnvVars == nil {
+		c.SavedEnvVars = make(map[string]string)
+	}
+	c.SavedEnvVars[name] = key
+}
+
+// ValidateOpenAICompatEndpoint checks the inputs of an endpoint-routed
+// session (wizard step and `vibeflow launch` flags share it). It returns the
+// first problem as a user-facing message, or nil when all three are usable.
+func ValidateOpenAICompatEndpoint(baseURL, vendor, model string) error {
+	// The base URL must be an absolute http(s) URL with a host.
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("base URL must be an http(s) URL, e.g. http://localhost:4000/v1")
+	}
+	// The base URL reaches the qwen command line (readable by every local
+	// user), the logs and config, so it must not carry credentials. A query
+	// or fragment is never part of an API base URL either.
+	if u.User != nil {
+		return fmt.Errorf("base URL must not contain credentials (user:password@) — use the API key field or OPENAI_COMPAT_API_KEY_<VENDOR>")
+	}
+	if u.RawQuery != "" || u.Fragment != "" || strings.Contains(baseURL, "?") || strings.Contains(baseURL, "#") {
+		return fmt.Errorf("base URL must not contain a query string or fragment — put an API key in the API key field or OPENAI_COMPAT_API_KEY_<VENDOR>")
+	}
+	// The vendor is an optional label, so it is not validated here.
+	// The model id is passed verbatim to the endpoint.
+	if strings.TrimSpace(model) == "" {
+		return fmt.Errorf("model is required")
+	}
+	return nil
+}
+
+// openAICompatNoKey is sent as the API key to keyless endpoints (e.g. a local
+// proxy with no auth). qwen 0.24.0 refuses to start with OPENAI_API_KEY unset
+// or empty, and a keyless server ignores the bearer value. Session env only;
+// it is never saved to config.
+const openAICompatNoKey = "no-key"
+
+// applyOpenAICompatEnv writes the endpoint, model and API key of an
+// qwen session routed to a compatible endpoint into sessionEnv. All three are ALWAYS set: a pane
+// inherits the tmux server's global env, so leaving one unset would let a
+// shell-exported OPENAI_API_KEY (often a real OpenAI key) or OPENAI_BASE_URL
+// reach the session. Callers pass the base URL / vendor / model captured by
+// the wizard, --base-url/--vendor/--model, or stored session metadata.
+func applyOpenAICompatEnv(sessionEnv map[string]string, cfg *Config, vendor, baseURL, model string) {
+	// Endpoint and model the user chose for this session.
+	sessionEnv["OPENAI_BASE_URL"] = baseURL
+	sessionEnv["OPENAI_MODEL"] = model
+	// The vendor's own key when one is saved/exported, otherwise the
+	// placeholder so qwen starts and no inherited key is sent.
+	key := ResolveOpenAICompatKey(cfg, vendor)
+	if key == "" {
+		key = openAICompatNoKey
+	}
+	sessionEnv["OPENAI_API_KEY"] = key
 }
 
 // ResolveProviderEnvVars returns the environment variables needed for the

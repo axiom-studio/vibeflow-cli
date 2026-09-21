@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -1036,9 +1037,14 @@ func TestGatewayEnabledForProvider(t *testing.T) {
 		// Direct-only providers: never enabled even when requested. Warn ONLY when
 		// the user explicitly passed the flag; a config-only preference stays silent.
 		{"cursor_flag_warns", true, false, "cursor", false, true},
-		{"qwen_flag_warns", true, false, "qwen", false, true},
+		{"kiro_flag_warns", true, false, "kiro", false, true},
 		{"cursor_config_silent", false, true, "cursor", false, false},
-		{"qwen_config_silent", false, true, "qwen", false, false},
+		// Qwen Code and Copilot CLI have gateway wiring (BuildLLMGatewayEnv),
+		// so they route.
+		{"qwen_flag_enables", true, false, "qwen", true, false},
+		{"qwen_config_enables", false, true, "qwen", true, false},
+		{"copilot_flag_enables", true, false, "copilot", true, false},
+		{"copilot_config_enables", false, true, "copilot", true, false},
 		// Flag set AND config set for a direct-only provider still warns (flag is explicit).
 		{"cursor_flag_and_config", true, true, "cursor", false, true},
 	}
@@ -1327,4 +1333,144 @@ func TestDefaultConfig_OutboundEndpoints(t *testing.T) {
 			t.Errorf("provider %q has hardcoded URL in LaunchTemplate: %s", name, p.LaunchTemplate)
 		}
 	}
+}
+
+func TestOpenAICompatKeyEnvName(t *testing.T) {
+	tests := []struct {
+		vendor string
+		want   string
+	}{
+		{"example", "OPENAI_COMPAT_API_KEY_EXAMPLE"},                // lowercase is uppercased
+		{"ExampleVendor", "OPENAI_COMPAT_API_KEY_EXAMPLEVENDOR"},    // mixed case
+		{"my-proxy.local", "OPENAI_COMPAT_API_KEY_MY_PROXY_LOCAL"},  // punctuation → underscore
+		{"  my  proxy -- v2 ", "OPENAI_COMPAT_API_KEY_MY_PROXY_V2"}, // runs collapse, ends trimmed
+		{"", "OPENAI_COMPAT_API_KEY"},                               // no vendor → default slot
+		{"--", "OPENAI_COMPAT_API_KEY"},                             // no letters/digits → default slot
+	}
+	for _, tt := range tests {
+		if got := OpenAICompatKeyEnvName(tt.vendor); got != tt.want {
+			t.Errorf("OpenAICompatKeyEnvName(%q) = %q, want %q", tt.vendor, got, tt.want)
+		}
+	}
+}
+
+func TestSaveOpenAICompatKey_UsesVendorSlotNotSharedKey(t *testing.T) {
+	cfg := &Config{SavedEnvVars: map[string]string{"OPENAI_API_KEY": "sk-shared"}}
+	cfg.SaveOpenAICompatKey("example-vendor", " sk-vendor ")
+	if got := cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR"]; got != "sk-vendor" {
+		t.Errorf("vendor slot = %q, want sk-vendor (trimmed)", got)
+	}
+	if got := cfg.SavedEnvVars["OPENAI_API_KEY"]; got != "sk-shared" {
+		t.Errorf("shared OPENAI_API_KEY slot changed to %q", got)
+	}
+}
+
+func TestSaveOpenAICompatKey_EmptyInputs(t *testing.T) {
+	// An empty key is a no-op.
+	cfg := &Config{}
+	cfg.SaveOpenAICompatKey("example-vendor", "")
+	if len(cfg.SavedEnvVars) != 0 {
+		t.Errorf("SavedEnvVars = %v, want empty", cfg.SavedEnvVars)
+	}
+
+	// No vendor: the key goes to the default slot.
+	cfg.SaveOpenAICompatKey("", "sk-default")
+	if got := cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY"]; got != "sk-default" {
+		t.Errorf("default slot = %q, want sk-default", got)
+	}
+
+	// A keyless relaunch must not wipe a key saved earlier.
+	cfg.SaveOpenAICompatKey("example-vendor", "sk-vendor")
+	cfg.SaveOpenAICompatKey("example-vendor", "")
+	if got := cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR"]; got != "sk-vendor" {
+		t.Errorf("vendor slot = %q after empty save, want sk-vendor", got)
+	}
+}
+
+func TestResolveOpenAICompatKey(t *testing.T) {
+	const name = "OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR"
+	saved := &Config{SavedEnvVars: map[string]string{name: "sk-saved"}}
+
+	t.Run("shell env wins over saved config", func(t *testing.T) {
+		t.Setenv(name, "sk-shell")
+		if got := ResolveOpenAICompatKey(saved, "example-vendor"); got != "sk-shell" {
+			t.Errorf("got %q, want sk-shell", got)
+		}
+	})
+	t.Run("falls back to saved config", func(t *testing.T) {
+		t.Setenv(name, "")
+		if got := ResolveOpenAICompatKey(saved, "example-vendor"); got != "sk-saved" {
+			t.Errorf("got %q, want sk-saved", got)
+		}
+	})
+	t.Run("never reads the shared OPENAI_API_KEY", func(t *testing.T) {
+		t.Setenv(name, "")
+		t.Setenv("OPENAI_API_KEY", "sk-shared")
+		cfg := &Config{SavedEnvVars: map[string]string{"OPENAI_API_KEY": "sk-shared"}}
+		if got := ResolveOpenAICompatKey(cfg, "example-vendor"); got != "" {
+			t.Errorf("got %q, want empty (keyless)", got)
+		}
+	})
+	t.Run("keys are isolated per vendor", func(t *testing.T) {
+		t.Setenv(name, "")
+		if got := ResolveOpenAICompatKey(saved, "other-vendor"); got != "" {
+			t.Errorf("other-vendor got %q, want empty", got)
+		}
+	})
+	t.Run("nil config and unusable vendor are safe", func(t *testing.T) {
+		if got := ResolveOpenAICompatKey(nil, "example-vendor"); got != "" {
+			t.Errorf("nil cfg got %q", got)
+		}
+		if got := ResolveOpenAICompatKey(saved, ""); got != "" {
+			t.Errorf("empty vendor got %q", got)
+		}
+	})
+}
+
+func TestApplyOpenAICompatEnv(t *testing.T) {
+	const keyVar = "OPENAI_COMPAT_API_KEY_EXAMPLE_VENDOR"
+
+	t.Run("sets endpoint, model and vendor key", func(t *testing.T) {
+		t.Setenv(keyVar, "")
+		cfg := &Config{SavedEnvVars: map[string]string{keyVar: "sk-vendor"}}
+		env := map[string]string{}
+		applyOpenAICompatEnv(env, cfg, "example-vendor", "http://llm-proxy.local/v1", "some-model")
+		want := map[string]string{
+			"OPENAI_BASE_URL": "http://llm-proxy.local/v1",
+			"OPENAI_MODEL":    "some-model",
+			"OPENAI_API_KEY":  "sk-vendor",
+		}
+		if !reflect.DeepEqual(env, want) {
+			t.Errorf("env = %v, want %v", env, want)
+		}
+	})
+
+	t.Run("keyless vendor gets the placeholder, never persisted", func(t *testing.T) {
+		t.Setenv(keyVar, "")
+		cfg := &Config{}
+		env := map[string]string{}
+		applyOpenAICompatEnv(env, cfg, "example-vendor", "http://llm-proxy.local/v1", "some-model")
+		if env["OPENAI_API_KEY"] != openAICompatNoKey {
+			t.Errorf("OPENAI_API_KEY = %q, want %q", env["OPENAI_API_KEY"], openAICompatNoKey)
+		}
+		if len(cfg.SavedEnvVars) != 0 {
+			t.Errorf("placeholder leaked into SavedEnvVars: %v", cfg.SavedEnvVars)
+		}
+	})
+
+	t.Run("inherited shell OPENAI_* values are overridden", func(t *testing.T) {
+		// A pane inherits the tmux server env; the explicit values must win
+		// over a real OpenAI key and base URL exported in the user's shell.
+		t.Setenv(keyVar, "")
+		t.Setenv("OPENAI_API_KEY", "sk-shell-openai")
+		t.Setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+		env := map[string]string{"OPENAI_API_KEY": "sk-shell-openai"}
+		applyOpenAICompatEnv(env, &Config{}, "example-vendor", "http://llm-proxy.local/v1", "some-model")
+		if env["OPENAI_API_KEY"] == "sk-shell-openai" {
+			t.Error("shell OPENAI_API_KEY reached the endpoint session")
+		}
+		if env["OPENAI_BASE_URL"] != "http://llm-proxy.local/v1" {
+			t.Errorf("OPENAI_BASE_URL = %q, want the session's endpoint", env["OPENAI_BASE_URL"])
+		}
+	})
 }

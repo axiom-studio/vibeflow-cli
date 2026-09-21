@@ -44,6 +44,9 @@ type SessionMeta struct {
 	CloudDispatch          bool             `json:"cloud_dispatch,omitempty"`
 	SkipPermissions        bool             `json:"skip_permissions,omitempty"`
 	Model                  string           `json:"model,omitempty"`
+	Vendor                 string           `json:"vendor,omitempty"`   // endpoint routing: label that selects the OPENAI_COMPAT_API_KEY_<VENDOR> slot on restart (the key itself is never stored)
+	BaseURL                string           `json:"base_url,omitempty"` // endpoint routing: endpoint a restart reconnects to
+	Routing                string           `json:"routing,omitempty"`  // "direct" | "gateway" | "endpoint"; empty on older records (see routingForMeta)
 	LLMGatewayEnabled      bool             `json:"llm_gateway_enabled,omitempty"`
 	MCPToolName            string           `json:"mcp_tool_name,omitempty"`
 	OpenShell              *OpenShellConfig `json:"openshell,omitempty"`

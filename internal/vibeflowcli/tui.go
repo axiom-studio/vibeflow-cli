@@ -1694,6 +1694,30 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 
 // executeLaunch performs the actual session creation after conflict resolution.
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
+	// How the harness reaches its model. The gateway only applies to
+	// VibeFlow sessions, as before.
+	routing := resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled)
+
+	// An endpoint launch without a usable endpoint (e.g. a quick switch or
+	// team override from a session with other routing) cannot start. Fail
+	// before creating any worktree or session.
+	if routing == RoutingEndpoint {
+		if !providerSupportsEndpoint(result.ProviderKey) {
+			return sessionsMsg{err: fmt.Errorf("%s cannot connect to a compatible endpoint", result.ProviderKey)}
+		}
+		if err := ValidateOpenAICompatEndpoint(result.BaseURL, result.Vendor, result.Model); err != nil {
+			return sessionsMsg{err: fmt.Errorf("%s session needs a compatible endpoint — use New Session to enter it: %w", result.ProviderKey, err)}
+		}
+	}
+	// Shell routing needs the endpoint to still be configured in this
+	// environment; otherwise the session would silently go direct.
+	var shellURL string
+	if routing == RoutingShell {
+		var err error
+		if shellURL, err = ResolveShellEndpoint(result.ProviderKey); err != nil {
+			return sessionsMsg{err: err}
+		}
+	}
 	workDir, worktreePath, err := m.resolveSessionWorkDir(result)
 	if err != nil {
 		return sessionsMsg{err: err}
@@ -1738,6 +1762,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		ServerURL:       m.config.ServerURL,
 		SessionID:       vibeflowSessionID,
 		SkipPermissions: result.SkipPermissions,
+		Model:           result.Model, // set only for endpoint routing; passes the model flag
 		Binary:          result.Provider.Binary,
 	})
 	if err == nil && cmd != "" {
@@ -1745,6 +1770,11 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	} else {
 		command = result.Provider.Binary
 	}
+
+	// Work on a private copy of the provider env: the map is shared with
+	// m.config.Providers, and the config is saved after launch, so writing
+	// session values (keys, tokens, endpoints) into it would persist them.
+	result.Provider.Env = cloneStringMap(result.Provider.Env)
 
 	// Merge wizard-resolved env vars (e.g. codex bearer token) into provider env.
 	if result.EnvVars != nil {
@@ -1759,7 +1789,7 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	// If LLM gateway is enabled, inject gateway env vars for the provider.
 	// Otherwise, explicitly clear gateway-related vars to prevent inheritance
 	// from the parent shell environment.
-	if result.SessionType == "vibeflow" && result.LLMGatewayEnabled {
+	if routing == RoutingGateway {
 		if result.Provider.Env == nil {
 			result.Provider.Env = make(map[string]string)
 		}
@@ -1774,12 +1804,44 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 			result.Provider.Env[k] = v
 		}
 	}
+	// Direct routing chosen over an endpoint detected in the shell: make
+	// sure the harness doesn't pick that endpoint up anyway.
+	if routing == RoutingDirect {
+		for k, v := range ClearShellEndpointEnv(provider) {
+			result.Provider.Env[k] = v
+		}
+	}
+	// Shell routing: pass the shell's endpoint and related vars through.
+	if routing == RoutingShell {
+		// Quick switch and group edit inherit shell routing without showing
+		// the Routing or Confirm screens, so the warning is recorded here.
+		if shellEndpointSendsLogin(provider) {
+			warnf("%s: %s", provider, shellLoginWarning)
+		}
+		for k, v := range BuildShellEndpointEnv(provider, shellURL) {
+			result.Provider.Env[k] = v
+		}
+	}
 	result.Provider.Env = WithMCPTokenEnv(result.Provider.Env, m.config)
+
+	// Endpoint routing: point the harness at the endpoint/model chosen in
+	// the wizard and inject the vendor's key (or the keyless placeholder).
+	if routing == RoutingEndpoint {
+		for k, v := range BuildEndpointEnv(provider, m.config, result.Vendor, result.BaseURL, result.Model) {
+			result.Provider.Env[k] = v
+		}
+	}
 
 	// Mirror Codex gateway config and qwen routed env vars onto the command
 	// line so each provider sees the explicit launch-time configuration it
 	// expects.
 	command = AppendCodexGatewayProviderFlags(command, provider, result.Provider.Env)
+	if routing == RoutingEndpoint {
+		command = AppendEndpointFlags(command, provider, result.BaseURL)
+	}
+	if routing == RoutingShell {
+		command = AppendShellEndpointFlags(command, provider, shellURL)
+	}
 	// For qwen, env vars alone don't always drive model reporting.
 	// Must run after env merging and before the init-prompt append so the
 	// flags land between the base command and the seed prompt argument.
@@ -1791,7 +1853,16 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	// vibeflow sessions — even if session_init failed, the agent has MCP
 	// access and will call session_init itself on startup.
 	if result.SessionType == "vibeflow" {
-		initPrompt := BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona)
+		// Tell the agent the exact values to register with (session ID,
+		// harness, model, repo) so it never has to guess them.
+		initPrompt := WithSessionIdentity(BuildVibeflowInitPrompt(m.config.MCPToolName, projectName, result.Persona), SessionIdentity{
+			SessionID:    name,
+			AgentType:    provider,
+			AgentModel:   result.Model,
+			GitBranch:    branch,
+			GitRemoteURL: GetGitRemoteURL(workDir),
+			WorkingDir:   workDir,
+		})
 		command = AppendVibeflowInitPrompt(command, provider, initPrompt)
 	}
 	command, err = WrapOpenShellCommand(command, m.config.OpenShell)
@@ -1862,6 +1933,10 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		VibeFlowSessionID: vibeflowSessionID,
 		SessionType:       result.SessionType,
 		SkipPermissions:   result.SkipPermissions,
+		Model:             result.Model,   // endpoint routing: restored on restart
+		Vendor:            result.Vendor,  // endpoint routing: selects the key slot on restart
+		BaseURL:           result.BaseURL, // endpoint routing: restored on restart
+		Routing:           routing,        // restart reconnects the same way
 		LLMGatewayEnabled: result.LLMGatewayEnabled,
 		MCPToolName:       m.config.MCPToolName,
 		OpenShell:         openShellMeta(m.config.OpenShell),
@@ -2403,15 +2478,6 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 		indStyle = statusError
 	}
 
-	provDot := ""
-	if s.Provider != "" {
-		color, ok := providerColors[s.Provider]
-		if !ok {
-			color = accentColor
-		}
-		provDot = lipgloss.NewStyle().Foreground(color).Render("●") + " "
-	}
-
 	recoveredBadge := ""
 	if s.Recovered {
 		recoveredBadge = lipgloss.NewStyle().Foreground(warningColor).Render(" (recovered)")
@@ -2449,7 +2515,7 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	if s.ManagedReview != nil {
 		name = ansi.Truncate(displayName, nameMax, "…")
 	}
-	line := fmt.Sprintf("%s %s%s%s%s", indStyle.Render(indicator), provDot, name, recoveredBadge, healthBadge)
+	line := fmt.Sprintf("%s %s%s%s", indStyle.Render(indicator), name, recoveredBadge, healthBadge)
 
 	if pos == cursor {
 		b.WriteString(selectedStyle.Width(width).Render(iconActive + " " + indent + line))
@@ -2527,7 +2593,7 @@ func (m Model) renderDetailPanel(width, height int) string {
 	b.WriteString(renderStatus(s.Status))
 	b.WriteString("\n")
 
-	// Provider (uses styled render with color dot).
+	// Provider.
 	if s.Provider != "" {
 		b.WriteString(labelStyle.Render("Provider"))
 		b.WriteString(renderProvider(s.Provider))
@@ -2735,25 +2801,15 @@ func (m Model) renderHelpPopup() string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, popup)
 }
 
-// Provider color-coded dots — distinct hues drawn from the Ocean palette
-// (theme.go). The provider glyph plus these keep providers distinguishable.
-var providerColors = map[string]lipgloss.Color{
-	"claude": oceanWarning,   // sandy
-	"codex":  oceanAccent,    // seafoam
-	"cursor": oceanPrimary,   // sky
-	"gemini": oceanSecondary, // deep blue
-}
-
+// renderProvider renders a session's provider name. Providers used to carry a
+// colour-coded dot, but the colours only covered four of them — every other
+// harness shared one fallback colour — so it distinguished nothing the name
+// did not already say.
 func renderProvider(provider string) string {
 	if provider == "" {
 		return helpStyle.Render("-")
 	}
-	color, ok := providerColors[provider]
-	if !ok {
-		color = accentColor
-	}
-	dot := lipgloss.NewStyle().Foreground(color).Render("●")
-	return fmt.Sprintf("%s %s", provider, dot)
+	return provider
 }
 
 func renderBranch(branch, worktreePath string) string {
