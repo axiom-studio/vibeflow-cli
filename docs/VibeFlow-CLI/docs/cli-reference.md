@@ -256,7 +256,10 @@ Remove session metadata and session file; may interact with worktree cleanup per
 
 ### `vibeflow restart <session-name>`
 
-Kill the existing tmux session and re-launch the agent with the same provider, branch, worktree, working directory, environment, and **stored `SkipPermissions` value** — so an autonomous session stays autonomous after restart. Looks the session up in the active store first, then falls back to the session cache for dead sessions.
+Re-launch the agent with the same provider, branch, worktree, working directory, environment, and **stored `SkipPermissions` value** so an autonomous session stays autonomous after restart.
+Exited panes are reused in place; a running session is stopped and replaced.
+The command looks the session up in the active store first, then falls back to the session cache.
+For recovery directly inside an exited pane, press **Enter** to resume its exact conversation or open the harness's history picker.
 
 | Flag | Description |
 |------|-------------|

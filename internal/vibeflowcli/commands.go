@@ -41,6 +41,7 @@ func initSubcommands(root *cobra.Command) {
 	root.AddCommand(killCmd())
 	root.AddCommand(deleteCmd())
 	root.AddCommand(restartCmd())
+	root.AddCommand(resumePaneCmd())
 	root.AddCommand(worktreesCmd())
 	root.AddCommand(checkCmd())
 	root.AddCommand(configCmd())
@@ -862,10 +863,15 @@ func deleteCmd() *cobra.Command {
 
 // --- restart ---
 
-// RestartSession kills any existing tmux session and re-launches it using
-// the stored metadata. Used by both the CLI restart command and the TUI
-// dead-session restart popup. Returns the updated SessionMeta on success.
+// RestartSession re-launches a session using stored metadata. Exited panes
+// are resumed in place so attached clients and workbench layouts survive.
 func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Store, cache *SessionCache, registry *ProviderRegistry) (SessionMeta, error) {
+	return restartSession(meta, cfg, tmux, store, cache, registry, "")
+}
+
+// recoveryPane selects in-pane recovery: require a dead pane, and open the
+// harness's history picker when no exact conversation ID is available.
+func restartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Store, cache *SessionCache, registry *ProviderRegistry, recoveryPane string) (SessionMeta, error) {
 	provider := meta.Provider
 	if provider == "" {
 		provider = cfg.DefaultProvider
@@ -910,14 +916,37 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	}
 	branch := effectiveBranch(workDir, meta.Branch)
 
-	conversationID := tmux.ResumeConversationID(meta)
+	target := meta.TmuxSession
+	if recoveryPane != "" {
+		target = recoveryPane
+	}
+	if target == "" {
+		return SessionMeta{}, fmt.Errorf("stored tmux session name is missing")
+	}
+	pane, _ := tmux.agentPaneID(target)
+	dead := ""
+	if pane != "" {
+		var err error
+		dead, err = tmux.run("display-message", "-p", "-t", pane, "#{pane_dead}")
+		if err != nil {
+			return SessionMeta{}, err
+		}
+	}
+	if recoveryPane != "" && strings.TrimSpace(dead) != "1" {
+		return SessionMeta{}, fmt.Errorf("pane %q has not exited", recoveryPane)
+	}
+	identity := meta
+	identity.Provider = provider
+	identity.TmuxSession = target
+	conversationID := tmux.ResumeConversationID(identity)
+	picker := recoveryPane != "" && conversationID == ""
 	command, err := renderResumeCommand(prov.LaunchTemplate, LaunchTemplateVars{
 		WorkDir:         workDir,
 		ServerURL:       cfg.ServerURL,
 		SkipPermissions: meta.SkipPermissions,
 		Model:           meta.Model,
 		Binary:          prov.Binary,
-	}, provider, conversationID)
+	}, provider, conversationID, picker)
 	if err != nil {
 		return SessionMeta{}, err
 	}
@@ -1004,7 +1033,7 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	if projectName == "" {
 		projectName = cfg.DefaultProject
 	}
-	if meta.SessionType == "vibeflow" {
+	if meta.SessionType == "vibeflow" && !picker {
 		// Re-register with the same identity the session was launched with.
 		registeredID := meta.VibeFlowSessionID
 		if registeredID == "" {
@@ -1050,8 +1079,8 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	// Preserve the old pane before replacing it, including recovery hints for
 	// providers whose exact-ID resume is not supported here.
 	previousOutput := meta.PreviousOutputPath
-	if tmux.HasSession(meta.TmuxSession) {
-		output, err := tmux.CapturePaneOutput(meta.TmuxSession, 10000)
+	if pane != "" {
+		output, err := tmux.CapturePaneOutput(pane, 10000)
 		if err != nil {
 			return SessionMeta{}, err
 		}
@@ -1082,13 +1111,17 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 			return SessionMeta{}, fmt.Errorf("save restart identity: %w", err)
 		}
 	}
-	if tmux.HasSession(meta.TmuxSession) {
+	respawnPane := ""
+	if strings.TrimSpace(dead) == "1" {
+		respawnPane = pane
+	} else if tmux.HasSession(meta.TmuxSession) {
 		if err := tmux.KillSession(meta.TmuxSession); err != nil {
 			return SessionMeta{}, err
 		}
 	}
 
 	if err := tmux.CreateSessionWithOpts(SessionOpts{
+		PaneID:       respawnPane,
 		Name:         meta.Name,
 		Provider:     provider,
 		WorkDir:      workDir,
@@ -1105,7 +1138,9 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	tmuxName := tmux.FullSessionName(provider, meta.Name)
 
 	// Re-bind session keys.
-	_ = tmux.BindSessionKeys(tmuxName)
+	if tmux.HasSession(tmuxName) {
+		_ = tmux.BindSessionKeys(tmuxName)
+	}
 
 	if (meta.CloudDispatch || meta.DispatchMode == "cloud_queue") && meta.ProjectID == 0 {
 		projectInfo, err := ensureCloudDispatchProject(cfg, projectName)
@@ -1253,12 +1288,63 @@ func openShellValue(cfg *OpenShellConfig) OpenShellConfig {
 	return *cfg
 }
 
+// resumePaneCmd is invoked by tmux's Enter binding, including in a workbench
+// where the original tmux session no longer exists but the pane still does.
+func resumePaneCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "resume-pane <pane-id>", Hidden: true, Args: cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfgPath, _ := cmd.Flags().GetString("config")
+			cfg, tmux, store, _, registry, err := loadComponents(cfgPath)
+			if err != nil {
+				return err
+			}
+			pane := args[0]
+			if !strings.HasPrefix(pane, "%") || strings.Trim(pane[1:], "0123456789") != "" || len(pane) < 2 {
+				return fmt.Errorf("invalid pane ID %q", pane)
+			}
+			name, err := tmux.run("show-options", "-p", "-v", "-t", pane, "@vibeflow_session")
+			if err != nil {
+				return fmt.Errorf("read pane identity: %w", err)
+			}
+			originalSession := strings.TrimSpace(name)
+			name = strings.TrimPrefix(originalSession, sessionPrefix+ParseSessionProvider(originalSession)+"-")
+			meta, found, err := store.Get(name)
+			if err != nil {
+				return err
+			}
+			cache := NewSessionCache()
+			if !found {
+				entries, err := cache.List()
+				if err != nil {
+					return err
+				}
+				for _, entry := range entries {
+					if entry.Name == name {
+						meta, found = entry, true
+						break
+					}
+				}
+			}
+			if !found {
+				return fmt.Errorf("session %q not found in store or cache", name)
+			}
+			if meta.TmuxSession != originalSession || meta.Provider != ParseSessionProvider(originalSession) {
+				return fmt.Errorf("session %q no longer matches this pane; the original output has been preserved", name)
+			}
+			_, err = restartSession(meta, cfg, tmux, store, cache, registry, pane)
+			return err
+		},
+	}
+}
+
 func restartCmd() *cobra.Command {
 	var skipPermissions bool
 
 	cmd := &cobra.Command{
 		Use:   "restart <session-name>",
-		Short: "Restart a session (kill and re-launch with same settings)",
+		Short: "Restart a session with the same settings (exited panes stay in place)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
