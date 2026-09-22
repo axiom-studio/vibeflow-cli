@@ -353,7 +353,9 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			}
 		}
 		// A heartbeat failure must not hide unresolved provider cleanup.
-		if cleanupErr := w.providerCleanupPending(w.state.Pending); errors.Is(cleanupErr, errReviewCleanupUnverified) {
+		cleanupErr := w.providerCleanupPending(w.state.Pending)
+		quarantined := errors.Is(cleanupErr, errReviewCleanupUnverified)
+		if quarantined {
 			nextStatus = cleanupErr.Error()
 		}
 		if status != nextStatus {
@@ -367,7 +369,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 		if err != nil {
 			var response *reviewHTTPError
-			retry := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errReviewConnection) || errors.Is(err, errReviewCleanupUnverified) || (errors.As(err, &response) && (response.Status >= 500 || response.Status == 429 || (w.state.Pending != nil && (response.Status == 401 || response.Status == 403))))
+			retry := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errReviewConnection) || errors.Is(err, errReviewCleanupUnverified) || (errors.As(err, &response) && (response.Status >= 500 || response.Status == 429 || ((w.state.Pending != nil || quarantined) && (response.Status == 401 || response.Status == 403))))
 			if w.options.Once || !retry {
 				return err
 			}
