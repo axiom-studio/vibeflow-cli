@@ -151,7 +151,7 @@ func TestReviewSessionsHTTPAndTUIReadOnlyHistory(t *testing.T) {
 	}
 	t.Log("Managed review view:\n" + stripANSI(view))
 	// The real HTTP projection must never acquire ordinary interactive behavior.
-	for _, key := range []string{"enter", "d", "b", "e", "m"} {
+	for _, key := range []string{"d", "b", "e", "m"} {
 		next, cmd := m.Update(tea.KeyPressMsg{Code: []rune(key)[0], Text: key})
 		got := next.(Model)
 		if cmd != nil || got.confirmDelete || got.activeView != ViewSessions {
@@ -213,7 +213,7 @@ func TestReviewSessionsHTTPAndTUIReadOnlyHistory(t *testing.T) {
 	m.groupMode = true
 	m.buildGroups()
 	m.cursor = 2 // review group header after ordinary header+row.
-	if m.groupOrder[1] != reviewSessionsGroup {
+	if !strings.HasPrefix(m.groupOrder[1], reviewSessionsGroup+":") {
 		t.Errorf("unexpected managed group: %v", m.groupOrder)
 	}
 	if _, names := m.selectedProjectSessions(); len(names) != 0 {

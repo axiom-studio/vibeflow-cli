@@ -109,6 +109,7 @@ const (
 	ViewHelp
 	ViewRestart
 	ViewReviewRunners
+	ViewReviewDetail
 )
 
 // Model is the Bubble Tea model for vibeflow-cli.
@@ -146,24 +147,28 @@ type Model struct {
 	cache            *SessionCache      // session cache for restart-without-intervention
 	restartSelect    RestartSelectModel // dead-session restart multiselect
 
-	reviewAfter            string
-	craEnabled             bool
-	reviewNext             string
-	reviewWarning          string
-	reviewUnconfigured     bool // no project resolved; managed reviews cannot load
-	reviewReadStarted      time.Time
-	reviewSupervisor       *reviewSupervisor
-	reviewStatuses         []reviewRunnerStatus
-	reviewPaths            []string
-	reviewPreferences      map[string]string
-	reviewDiscoveryBusy    bool
-	reviewDiscoveryAgain   bool
-	reviewDiscoveryKey     string
-	reviewDiscoveryWarning string
-	reviewRunnerCursor     int
-	reviewCheckout         *reviewStartupModel
-	reviewCheckoutID       string
-	reviewCheckoutError    string
+	reviewAfter             string
+	reviewProjects          map[int64]reviewProjectPage
+	reviewReadSlots         chan struct{}
+	reviewProjectGeneration uint64
+	reviewDetail            reviewDetailState
+	craEnabled              bool
+	reviewNext              string
+	reviewWarning           string
+	reviewUnconfigured      bool // no project resolved; managed reviews cannot load
+	reviewReadStarted       time.Time
+	reviewSupervisor        *reviewSupervisor
+	reviewStatuses          []reviewRunnerStatus
+	reviewPaths             []string
+	reviewPreferences       map[string]string
+	reviewDiscoveryBusy     bool
+	reviewDiscoveryAgain    bool
+	reviewDiscoveryKey      string
+	reviewDiscoveryWarning  string
+	reviewRunnerCursor      int
+	reviewCheckout          *reviewStartupModel
+	reviewCheckoutID        string
+	reviewCheckoutError     string
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -526,7 +531,8 @@ func (m *Model) buildGroups() {
 	for i, s := range m.sessions {
 		root := m.getRepoRoot(s.WorkingDir)
 		if s.ManagedReview != nil {
-			root = reviewSessionsGroup
+			r := s.ManagedReview
+			root = fmt.Sprintf("%s:%d:%s:%s:%d", reviewSessionsGroup, r.ProjectID, r.Provider, r.ProviderHost, r.RepositoryLinkID)
 		}
 		if root == "" {
 			root = "(unknown)"
@@ -783,7 +789,7 @@ func cacheGCTickCmd() tea.Cmd {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshSessions,
-		m.craReviewSessions(),
+		m.craReviewSummaries(),
 		captureTickCmd(),
 		tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		cacheGCTickCmd(),
@@ -794,6 +800,9 @@ func (m Model) Init() tea.Cmd {
 
 // Update handles messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if next, cmd, handled := m.updateReviewReads(msg); handled {
+		return next, cmd
+	}
 	// Global handlers — process regardless of active view so ticks and
 	// session refreshes continue while sub-views (wizard, conflict modal,
 	// worktree list) are active.
@@ -839,10 +848,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so the diff-based renderer doesn't skip lines it assumes are unchanged.
 		return m, tea.ClearScreen
 	case tickMsg:
+		var detail tea.Cmd
+		if m.activeView == ViewReviewDetail {
+			detail = m.requestReviewDetail()
+		}
 		return m, tea.Batch(
 			m.refreshSessions,
-			m.craReviewSessions(),
+			m.craReviewSummaries(),
 			m.reviewSnapshotCmd(),
+			detail,
 			tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		)
 	case sessionsMsg:
@@ -1044,6 +1058,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateWorktreeList(msg)
 	case ViewReviewRunners:
 		return m.updateReviewRunners(msg)
+	case ViewReviewDetail:
+		if key, ok := msg.(tea.KeyPressMsg); !ok || (key.String() != "q" && key.String() != "ctrl+c") {
+			return m.updateReviewDetail(msg)
+		}
+		m.activeView = ViewSessions
 	case ViewHelp:
 		// Any keypress closes the help popup.
 		if _, ok := msg.(tea.KeyPressMsg); ok {
@@ -1062,7 +1081,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if m.selectedReview() != nil {
 			switch msg.String() {
-			case "enter", "d", "b", "e", "m":
+			case "d", "b", "e", "m":
 				return m, nil
 			}
 		}
@@ -1139,10 +1158,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if sessionIdx >= 0 && sessionIdx < len(m.sessions) {
-					return m, m.attachSessionCmd(m.sessions[sessionIdx].Name)
+					return m.activateSession(m.sessions[sessionIdx].Name)
 				}
 			} else if m.cursor < len(m.sessions) {
-				return m, m.attachSessionCmd(m.sessions[m.cursor].Name)
+				return m.activateSession(m.sessions[m.cursor].Name)
 			}
 		case "g":
 			m.groupMode = !m.groupMode
@@ -1221,6 +1240,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeView = ViewWizard
 			return m, nil
 		case "]":
+			if len(m.reviewProjects) > 0 {
+				return m.pageReviewProject(true)
+			}
 			if !m.craEnabled {
 				return m, nil
 			}
@@ -1231,6 +1253,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "[":
+			if len(m.reviewProjects) > 0 {
+				return m.pageReviewProject(false)
+			}
 			if !m.craEnabled {
 				return m, nil
 			}
@@ -1240,7 +1265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			discovery := m.requestReviewDiscovery()
 			if m.selectedReview() != nil {
-				return m, tea.Batch(m.craReviewSessions(), discovery)
+				return m, tea.Batch(m.craReviewSummaries(), discovery)
 			}
 			// Manual recovery retry for failed sessions, otherwise refresh.
 			idx := m.selectedSessionIdx()
@@ -1251,7 +1276,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, discovery
 				}
 			}
-			return m, tea.Batch(m.refreshSessions, m.craReviewSessions(), discovery)
+			return m, tea.Batch(m.refreshSessions, m.craReviewSummaries(), discovery)
 		case "R":
 			if !m.craEnabled {
 				return m, nil
@@ -2134,12 +2159,12 @@ func (m Model) handleListClick(x, y int) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if alreadySelected && sessionIdx >= 0 && sessionIdx < len(m.sessions) {
-				return m, m.attachSessionCmd(m.sessions[sessionIdx].Name)
+				return m.activateSession(m.sessions[sessionIdx].Name)
 			}
 			return m, nil
 		}
 		if alreadySelected && span.pos < len(m.sessions) {
-			return m, m.attachSessionCmd(m.sessions[span.pos].Name)
+			return m.activateSession(m.sessions[span.pos].Name)
 		}
 		return m, nil
 	}
@@ -2177,6 +2202,8 @@ func (m Model) viewContent() string {
 		return m.worktreeList.View()
 	case ViewReviewRunners:
 		return m.viewReviewRunners()
+	case ViewReviewDetail:
+		return m.viewReviewDetail()
 	case ViewHelp:
 		return m.renderHelpPopup()
 	case ViewRestart:
@@ -2257,7 +2284,7 @@ func (m Model) viewContent() string {
 	case m.confirmDetach:
 		helpBar = warnStyle.Render(fmt.Sprintf("Detach? %d local session(s) remain open. (y/n)", m.localSessionCount()))
 	case m.reviewSelection():
-		helpBar = helpStyle.Render("Read-only review  r: refresh  ]: older  [: latest  g: group  q: quit")
+		helpBar = helpStyle.Render("Read-only review  enter: details  r: refresh  ]: older  [: latest  g: group  q: quit")
 	default:
 		enterHint := "attach"
 		if m.groupMode {
@@ -2547,6 +2574,10 @@ func (m Model) buildGroupedRows(width int) []listRow {
 		}
 		// Shorten long paths.
 		displayRoot := root
+		if len(indices) > 0 && m.sessions[indices[0]].ManagedReview != nil {
+			r := m.sessions[indices[0]].ManagedReview
+			displayRoot = fmt.Sprintf("%s (%d) / %s", reviewDisplay(m.reviewProjects[r.ProjectID].Name), r.ProjectID, reviewDisplay(r.RepositoryName))
+		}
 		if len(displayRoot) > width-12 {
 			displayRoot = "..." + displayRoot[len(displayRoot)-(width-15):]
 		}
@@ -2843,7 +2874,7 @@ func (m Model) renderDetailPanel(width, height int) string {
 // renderHelpPopup renders a centered help overlay with categorized keyboard shortcuts.
 func (m Model) renderHelpPopup() string {
 	if m.reviewSelection() {
-		return reviewSessionLabel + "\n\nRead-only status and retained review history.\nr: refresh   ]: older reviews   [: latest reviews\nUse AxiomCloud for review controls and findings.\n\nEsc: back"
+		return reviewSessionLabel + "\n\nRead-only status and retained review history.\nEnter: details   r: refresh   ]: older   [: latest\nDetails: o: PR   c: AxiomCloud   [/]: attempts\nUse AxiomCloud for review controls.\n\nEsc: back"
 	}
 	width := m.width
 	if width < 40 {
