@@ -80,7 +80,7 @@ func TestReviewCommandTerminalShutdown(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer log.Close()
-			cmd := exec.Command(binary, "--root", root, "--config", config, "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "signal-test", "--once")
+			cmd := exec.Command(binary, "--cra", "--root", root, "--config", config, "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "signal-test", "--once")
 			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "USER=review-test"}
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			cmd.Stdout, cmd.Stderr = log, log

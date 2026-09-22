@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -741,6 +742,9 @@ func listCmd() *cobra.Command {
 			}
 			// Best-effort: the local listing above stands even when the review
 			// API is offline or refuses this user, so warn and keep exit 0.
+			if !flagCRA {
+				return nil
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()
 			if err := printReviewSessions(ctx, cmd.OutOrStdout(), cfg, project, after); err != nil {
@@ -1408,49 +1412,120 @@ func restartCmd() *cobra.Command {
 
 // --- worktrees ---
 
+// cleanOrphanWorktrees removes every orphaned worktree that has no uncommitted
+// changes, reporting what happened to each managed worktree (and why) to w.
+func cleanOrphanWorktrees(wm *WorktreeManager, store *Store, w io.Writer) error {
+	// Prune first so records of already-deleted directories do not show up as
+	// orphans that then fail the dirty check.
+	if err := wm.Prune(); err != nil {
+		return err
+	}
+	managed, err := wm.Managed(store) // on error we cannot tell what is in use; remove nothing
+	if err != nil {
+		return err
+	}
+	if len(managed) == 0 {
+		fmt.Fprintln(w, "No worktrees to clean.")
+		return nil
+	}
+	var removed, kept, inUse int
+	inspect := ""
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for _, wt := range managed {
+		action, detail := "removed", "branch kept"
+		if wt.Session != "" {
+			action, detail = "in use", "session "+wt.Session
+			inUse++
+		} else if err := wm.RemoveIfClean(wt.Path); err != nil {
+			action, detail = "kept", err.Error()
+			kept++
+			if inspect == "" {
+				inspect = wm.DisplayPath(wt.Path)
+			}
+		} else {
+			removed++
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", action, wm.DisplayPath(wt.Path), worktreeBranchLabel(wt.Worktree), detail)
+	}
+	tw.Flush()
+	fmt.Fprintf(w, "\n%d removed, %d kept, %d in use.\n", removed, kept, inUse)
+	if inspect != "" {
+		fmt.Fprintf(w, "Kept worktrees hold uncommitted work. Inspect one with: git -C %s status\n", inspect)
+	}
+	return nil
+}
+
+// worktreeBranchLabel returns the branch name, or a marker for a worktree
+// that has none.
+func worktreeBranchLabel(wt Worktree) string {
+	switch {
+	case wt.Bare:
+		return "(bare)"
+	case wt.Detached:
+		return "(detached)"
+	}
+	return wt.Branch
+}
+
 func worktreesCmd() *cobra.Command {
-	return &cobra.Command{
+	var clean bool
+	cmd := &cobra.Command{
 		Use:     "worktrees",
 		Short:   "List git worktrees",
 		Aliases: []string{"wt"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgPath, _ := cmd.Flags().GetString("config")
-			_, _, _, wm, _, err := loadComponents(cfgPath)
+			_, _, store, wm, _, err := loadComponents(cfgPath)
 			if err != nil {
 				return err
 			}
 			if wm == nil {
 				return fmt.Errorf("not in a git repository")
 			}
+			w := cmd.OutOrStdout()
+			if clean {
+				return cleanOrphanWorktrees(wm, store, w)
+			}
 
 			wts, err := wm.List()
 			if err != nil {
 				return err
 			}
-			if len(wts) == 0 {
-				fmt.Println("No worktrees.")
-				return nil
+			// Session lookup is best effort: the listing is still useful without it.
+			status := make(map[string]string)
+			orphans := 0
+			if managed, err := wm.Managed(store); err == nil {
+				for _, mw := range managed {
+					status[mw.Path] = mw.Session
+					if mw.Session == "" {
+						status[mw.Path] = "orphaned"
+						orphans++
+					}
+				}
 			}
 
-			fmt.Printf("%-50s %-20s %-10s\n", "PATH", "BRANCH", "HEAD")
-			fmt.Println(strings.Repeat("-", 82))
+			tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "PATH\tBRANCH\tHEAD\tSESSION")
 			for _, wt := range wts {
 				head := wt.HEAD
 				if len(head) > 8 {
 					head = head[:8]
 				}
-				branch := wt.Branch
-				if wt.Detached {
-					branch = "(detached)"
+				session := status[wt.Path]
+				if session == "" {
+					session = "-"
 				}
-				if wt.Bare {
-					branch = "(bare)"
-				}
-				fmt.Printf("%-50s %-20s %-10s\n", wt.Path, branch, head)
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", wm.DisplayPath(wt.Path), worktreeBranchLabel(wt), head, session)
+			}
+			tw.Flush()
+			if orphans > 0 {
+				fmt.Fprintf(w, "\n%d orphaned. Remove the clean ones with: vibeflow worktrees --clean\n", orphans)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&clean, "clean", false, "Remove worktrees no session uses (keeps any with uncommitted changes) and prune stale records")
+	return cmd
 }
 
 // --- check ---

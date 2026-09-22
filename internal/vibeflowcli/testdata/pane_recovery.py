@@ -73,7 +73,11 @@ while True:
                         os.read(master, 65536)
                     if predicate():
                         return
-                raise AssertionError(message + "\n" + tm("capture-pane", "-p", "-J", "-t", pane))
+                version = subprocess.check_output(["tmux", "-V"], text=True).strip()
+                state = tm("display-message", "-p", "-t", pane,
+                           "dead=#{pane_dead} status=#{pane_dead_status} signal=#{pane_dead_signal} "
+                           "time=#{pane_dead_time} size=#{pane_width}x#{pane_height}")
+                raise AssertionError(f"{message} ({version}, {provider}, {state})\n" + captures())
 
             def captures():
                 return tm("capture-pane", "-p", "-J", "-t", pane, "-S", "-40")
@@ -93,8 +97,9 @@ while True:
                 before = len(record.read_text().splitlines())
                 os.write(master, b"\x03")
                 wait_for(lambda: tm("display-message", "-p", "-t", pane, "#{pane_dead}") == "1", "Ctrl+C did not exit agent")
+                # tmux can report a dead pane before it renders the exit banner.
+                wait_for(lambda: "Press Enter to resume" in captures(), "recovery hint did not appear")
                 exited_output = captures()
-                assert "Press Enter to resume" in exited_output, exited_output
                 os.write(master, b"\r")
                 wait_for(lambda: len(record.read_text().splitlines()) > before, "Enter did not resume agent")
                 args = json.loads(record.read_text().splitlines()[-1])

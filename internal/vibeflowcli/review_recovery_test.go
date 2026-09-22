@@ -18,6 +18,12 @@ import (
 )
 
 func TestReviewSavedResultSurvivesLostResponseWithoutRelaunch(t *testing.T) {
+	for _, status := range []int{0, 401, 403} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) { testReviewSavedResultRetry(t, status) })
+	}
+}
+
+func testReviewSavedResultRetry(t *testing.T, status int) {
 	_, execution := reviewTestRepo(t)
 	root := t.TempDir()
 	receipt := &reviewReceipt{JobID: execution.Review.ID, RequestID: reviewUUID(), Execution: execution, Result: json.RawMessage(`{"schema_version":1,"summary":"saved result"}`)}
@@ -39,6 +45,10 @@ func TestReviewSavedResultSurvivesLostResponseWithoutRelaunch(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		bodies = append(bodies, string(body))
 		if len(bodies) == 1 {
+			if status != 0 {
+				w.WriteHeader(status)
+				return
+			}
 			conn, _, err := w.(http.Hijacker).Hijack()
 			if err != nil {
 				t.Error(err)
@@ -69,6 +79,12 @@ func TestReviewSavedResultSurvivesLostResponseWithoutRelaunch(t *testing.T) {
 	}
 	if recovered.state.Pending == nil {
 		t.Fatal("pending result was lost")
+	}
+	if recovered.state.Pending.Completed || string(recovered.state.Pending.Result) != string(receipt.Result) {
+		t.Fatal("unacknowledged receipt was altered or completed")
+	}
+	if _, err := os.Stat(filepath.Join(root, "last-receipt.json")); !os.IsNotExist(err) {
+		t.Fatal("unacknowledged result was finalized")
 	}
 	if err = recovered.advance(context.Background(), false); err != nil {
 		t.Fatal(err)
@@ -201,5 +217,70 @@ func TestReviewExecutionHeartbeatsRunnerBeforeRenewal(t *testing.T) {
 	case <-renewed:
 	default:
 		t.Fatal("attempt was not renewed")
+	}
+}
+
+func TestReviewSubmissionDeadlineRetriesSavedReceipt(t *testing.T) {
+	previousRoot := rootDir
+	SetRootDir(t.TempDir())
+	t.Cleanup(func() { rootDir = previousRoot })
+	_, execution := reviewTestRepo(t)
+	p := &reviewReceipt{JobID: execution.Review.ID, RequestID: reviewUUID(), Execution: execution, Result: json.RawMessage(`{"schema_version":1,"summary":"same receipt"}`)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var submissions atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			body["user_id"] = 1
+			json.NewEncoder(out).Encode(body)
+		case strings.HasSuffix(r.URL.Path, "/result"):
+			body, _ := io.ReadAll(r.Body)
+			if string(body) != string(p.Result) {
+				t.Error("saved result changed")
+			}
+			if submissions.Add(1) == 1 {
+				start := time.Now()
+				<-r.Context().Done()
+				if time.Since(start) < 29*time.Second {
+					t.Error("did not reach the actual local submission deadline")
+				}
+				return
+			}
+			out.WriteHeader(204)
+			cancel()
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"), r.Method == "DELETE":
+			out.WriteHeader(204)
+		default:
+			t.Errorf("recovery launched or claimed work: %s", r.URL.Path)
+			out.WriteHeader(400)
+		}
+	}))
+	defer server.Close()
+	identity := fmt.Sprintf("%s\n1\n7\ngithub\nlocal\ndeadline", server.URL)
+	digest := sha256.Sum256([]byte(identity))
+	dir := filepath.Join(RootDir(), "review-runners", hex.EncodeToString(digest[:16]))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveReviewJSON(filepath.Join(dir, "state.json"), reviewRunnerState{ID: execution.Attempt.RunnerID, OwnerID: 1, Pending: p}); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(server.URL, "token")
+	client.httpClient.Timeout = time.Minute // The submission context, not the transport, expires.
+	w := &reviewWatch{client: client, output: io.Discard, options: reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "deadline", PollInterval: time.Second}}
+	done := make(chan error, 1)
+	go func() { done <- w.run(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil || submissions.Load() != 2 {
+			t.Fatalf("runner stopped instead of replaying saved result: submissions=%d err=%v", submissions.Load(), err)
+		}
+	case <-time.After(40 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("saved result was not retried after local deadline")
 	}
 }
