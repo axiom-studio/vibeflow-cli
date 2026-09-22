@@ -1,7 +1,7 @@
 # Multi-repository CLI reviews and GitHub progress
 
 Date: 2026-09-22
-Status: In-chat design approved; written specification awaiting user review.
+Status: Written specification approved by the user on 2026-09-22.
 Repositories: `vibeflow-cli` and `axiomcloud`.
 
 ## Intent and approved outcome
