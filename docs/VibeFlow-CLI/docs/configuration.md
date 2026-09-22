@@ -15,14 +15,18 @@ vibeflow --config /path/to/config.yaml
 vibeflow --root /path/to/custom-root   # config at <root>/config.yaml, sessions at <root>/sessions.json, etc.
 ```
 
-The `--root` flag enables fully isolated parallel instances with independent config, sessions, logs, PID lock, tmux socket, and session cache — useful for running multiple vibeflow-cli installations from different repository checkouts without interference.
+The `--root` flag enables fully isolated parallel instances with independent config, sessions, logs, PID lock, tmux socket, and session cache - useful for running multiple vibeflow-cli installations from different repository checkouts without interference.
 
 ## Common settings
 
 The first-launch server/API-key setup is saved here and is not repeated on later TUI launches.
-The independent **Launch PR review runner for this session?** prompt appears on every interactive launch.
-Its Yes/No answer is never persisted or coupled to authentication setup.
-Choosing Yes reuses `default_project`, `default_work_dir` (or the launch directory), and `default_provider`, asking only for unresolved review inputs.
+The independent **Run PR reviews while this CLI is open?** prompt appears on every interactive launch.
+Its **Run reviews** / **Not now** answer is never persisted or coupled to authentication setup, and **Not now** is the default.
+Choosing **Run reviews** reuses `default_project` and `default_provider`, asking only for unresolved review inputs.
+Checkout selection first reuses a matching remembered path, `default_work_dir`, or launch directory.
+If that path does not match the selected project's linked repositories, the CLI also checks `directory_history` and checkout paths in this root's saved sessions.
+One matching repository checkout is selected automatically; multiple distinct checkouts use a picker, and manual entry remains available when needed.
+Known paths are validated against Git remote identity, without changing the selected project or reading another root's history.
 The runner stops with that TUI; use explicit `review-watch --background` only for a detached runner.
 
 Example structure (not exhaustive):
