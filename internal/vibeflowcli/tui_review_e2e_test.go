@@ -82,6 +82,8 @@ func TestReviewTUIBinaryConsent(t *testing.T) {
 			fmt.Fprint(w, `[]`)
 		case r.Method == "GET" && r.URL.Path == "/rest/v1/vibeflow/projects/66/pr-review-sessions":
 			fmt.Fprint(w, `{"sessions":[]}`)
+		case r.Method == "GET" && (r.URL.Path == "/rest/v1/vibeflow/projects/66/pr-review-summaries" || r.URL.Path == "/rest/v1/vibeflow/projects/67/pr-review-summaries"):
+			fmt.Fprint(w, `{"summaries":[]}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

@@ -28,7 +28,7 @@ It blinks and moves gently while waiting; press Space to pause or resume the ani
 Smaller terminals show a compact owl, and terminals without color retain a monochrome drawing.
 
 Choose **Run reviews** to discover every accessible project's linked repositories and start all resolved local runners owned by this TUI.
-`default_project` continues to select ordinary sessions and review history; it does not filter runner discovery.
+`default_project` continues to select ordinary sessions and headless review history; it appears first in TUI review browsing but does not filter accessible projects.
 Startup uses one shared provider/model selection for the entire runner group.
 A valid remembered checkout wins; otherwise discovery checks `default_work_dir`, the launch directory, `directory_history`, and this root's saved session paths against existing GitHub, GitHub Enterprise, or Bitbucket links.
 The checkout's origin determines eligibility, not the saved session's project label.
@@ -43,7 +43,12 @@ Older servers returning a capped 200-project list show an incomplete-coverage wa
 Native reviews use the provider's default model; gateway reviews require an explicit model.
 There is no persona or model question when a PR arrives: each review starts a fresh Principal Engineer automatically.
 
-The TUI displays runner status and retained review attempts.
+With `--cra`, the TUI displays review jobs across accessible projects, including queued jobs without an attempt, even when runner consent is declined.
+Select a review to preview it, then press Enter or click it again to open its read-only detail.
+Details show revision, runner, progress checklist, findings, publication status, and retained attempt history.
+Use `o` for the PR, `c` for AxiomCloud, `r` to refresh, arrows or PageUp/PageDown to scroll, and Esc to return.
+Use `]` and `[` for older and latest jobs in the selected project, or attempt history inside detail; `n` and `p` page findings inside detail.
+Local diagnostics appear only for a matching attempt owned by this TUI; provider transcripts are unavailable.
 Normal exit, Ctrl-C, termination, or loss of the TUI process closes its owned runners and active review processes, preserving pending receipts and history.
 An independently started runner is never adopted or stopped by this TUI.
 Separate `--root` instances remain independent, and `--root` is not the repository checkout.

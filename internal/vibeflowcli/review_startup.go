@@ -80,11 +80,20 @@ func validReviewStartupRepository(repo reviewStartupRepository) bool {
 }
 
 func discoverReviewBindings(ctx context.Context, cfg *Config, paths []string, preferred map[string]string) (reviewDiscovery, error) {
-	d := reviewDiscovery{Problems: map[int64]string{}, Revoked: map[int64]bool{}}
 	if cfg == nil || cfg.ServerURL == "" || strings.TrimSpace(cfg.APIToken) == "" {
-		return d, fmt.Errorf("connect VibeFlow before starting review runners")
+		return reviewDiscovery{Problems: map[int64]string{}, Revoked: map[int64]bool{}}, fmt.Errorf("connect VibeFlow before starting review runners")
 	}
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
+	d, err := listReviewProjects(ctx, client)
+	if err != nil {
+		return d, err
+	}
+	return discoverReviewProjectBindings(ctx, cfg, client, d, paths, preferred)
+}
+
+// Shared read-only enumeration also serves browsing without runner consent.
+func listReviewProjects(ctx context.Context, client *Client) (reviewDiscovery, error) {
+	d := reviewDiscovery{Problems: map[int64]string{}, Revoked: map[int64]bool{}}
 	seenProjects, seenCursors := map[int64]bool{}, map[string]bool{}
 	cursor := ""
 	for {
@@ -134,6 +143,10 @@ func discoverReviewBindings(ctx context.Context, cfg *Config, paths []string, pr
 		seenCursors[page.Next] = true
 		cursor = page.Next
 	}
+	return d, nil
+}
+
+func discoverReviewProjectBindings(ctx context.Context, cfg *Config, client *Client, d reviewDiscovery, paths []string, preferred map[string]string) (reviewDiscovery, error) {
 	base := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
 	base.Name, _ = os.Hostname()
 	if !reviewStartupText(base.Name, 100) {
