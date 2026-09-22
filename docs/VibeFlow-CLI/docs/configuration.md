@@ -20,14 +20,15 @@ The `--root` flag enables fully isolated parallel instances with independent con
 ## Common settings
 
 The first-launch server/API-key setup is saved here and is not repeated on later TUI launches.
-The independent **Run PR reviews while this CLI is open?** prompt appears on every interactive launch.
+The PR review preview is disabled unless the command includes `--cra`; this temporary rollout flag is not saved in configuration.
+The independent **Run PR reviews while this CLI is open?** prompt appears on every interactive `vibeflow --cra` launch.
 Its **Run reviews** / **Not now** answer is never persisted or coupled to authentication setup, and **Not now** is the default.
-Choosing **Run reviews** reuses `default_project` and `default_provider`, asking only for unresolved review inputs.
-Checkout selection first reuses a matching remembered path, `default_work_dir`, or launch directory.
-If that path does not match the selected project's linked repositories, the CLI also checks `directory_history` and checkout paths in this root's saved sessions.
-One matching repository checkout is selected automatically; multiple distinct checkouts use a picker, and manual entry remains available when needed.
-Known paths are validated against Git remote identity, without changing the selected project or reading another root's history.
-The runner stops with that TUI; use explicit `review-watch --background` only for a detached runner.
+Choosing **Run reviews** discovers all accessible projects, independently of `default_project`, and reuses `default_provider` with one shared provider/model setup when needed.
+Checkout selection reuses a valid remembered path for each stable repository binding, then checks `default_work_dir`, the launch directory, `directory_history`, and this root's saved session paths.
+One matching checkout is selected automatically; press `R` then Enter to resolve multiple clones or enter a missing checkout without blocking normal TUI use.
+Paths are validated against Git origin identity; aliases and worktrees sharing a common Git directory are deduplicated.
+Discovery refreshes on `r`, newly known paths, and every minute without changing ordinary queue polling.
+Only runners created by this TUI stop with it; use explicit `vibeflow --cra review-watch --background` for a detached runner.
 
 Example structure (not exhaustive):
 
@@ -115,7 +116,7 @@ All paths below are resolved relative to the root directory (default `~/.vibeflo
 | `<root>/sessions.json` | Session metadata (file-locked) |
 | `<root>/session_cache.json` | Cache for restart-after-exit; persists full launch parameters so `vibeflow restart` works after a session exits tmux |
 | `<root>/vibeflow.pid` | PID lock so only one TUI instance runs per root |
-| `<root>/review-runner-preferences.json` | Non-secret review inputs scoped to the server, config and defaults; never stores launch consent or rewrites authentication YAML |
+| `<root>/review-runner-preferences.json` | Reusable provider/model and checkout choices keyed by stable binding identity, scoped to server/config/provider/directory context; migrates the old single-choice format and never stores consent or credentials |
 
 ### Internal fields
 

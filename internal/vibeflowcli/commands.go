@@ -742,6 +742,9 @@ func listCmd() *cobra.Command {
 			}
 			// Best-effort: the local listing above stands even when the review
 			// API is offline or refuses this user, so warn and keep exit 0.
+			if !flagCRA {
+				return nil
+			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()
 			if err := printReviewSessions(ctx, cmd.OutOrStdout(), cfg, project, after); err != nil {

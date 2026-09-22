@@ -6,6 +6,13 @@ Repositories: `vibeflow-cli` and `axiomcloud`.
 
 ## Intent and approved outcome
 
+Rollout amendment approved by the user on 2026-09-22: temporarily gate the entire public CRA feature behind `--cra` until the related AxiomCloud capability is deployed to production.
+Without `--cra`, normal CLI usage must not show a CRA consent prompt, fetch CRA discovery/review data, start runners, or expose CRA-specific rows and controls.
+With `--cra`, retain the explicit session-only consent prompt; the flag itself is not consent to run reviews.
+Public `review-watch` commands also require the flag, while private owned-runner, managed-runner, and review-child invocations remain available to opted-in parents.
+Use one simple removable entry-point gate, not a persisted preference or a new feature-flag service.
+Removing that gate and enabling the startup consent prompt by default is a later rollout change, not part of this implementation.
+
 A developer should be able to leave one VibeFlow TUI open and have eligible PR reviews start automatically for multiple linked repositories and projects with known local checkouts.
 The selected default project must not restrict that runner coverage.
 The developer should be able to open a review from the TUI and see its progress, while GitHub shows receipt of the request, an updating checklist, and the result or an actionable failure.

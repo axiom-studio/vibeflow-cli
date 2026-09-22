@@ -268,7 +268,7 @@ func TestReviewOwnedBinaryLifetime(t *testing.T) {
 		t.Fatal(err)
 	}
 	runDetached := func(args ...string) (string, error) {
-		cmd := exec.Command(binary, append([]string{"--root", root1, "--config", configPath, "review-watch"}, args...)...)
+		cmd := exec.Command(binary, append([]string{"--cra", "--root", root1, "--config", configPath, "review-watch"}, args...)...)
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
 		out, err := cmd.CombinedOutput()
 		return string(out), err

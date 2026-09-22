@@ -33,6 +33,7 @@ var (
 	flagProject     string
 	flagMCPToolName string
 	flagTmuxSocket  string
+	flagCRA         bool
 
 	buildVersion = "dev"
 	buildCommit  = "none"
@@ -52,10 +53,18 @@ var rootCmd = &cobra.Command{
 	Long: `vibeflow-cli is a terminal-based session manager for VibeFlow.
 It provides a Bubble Tea TUI to launch, monitor, and manage multiple
 Claude Code agent sessions via tmux.`,
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if cmd.Name() == "review-watch" && !flagCRA {
+			owned, _ := cmd.Flags().GetBool("owned-runner")
+			managed, _ := cmd.Flags().GetString("managed-runner")
+			if !owned && managed == "" {
+				return fmt.Errorf("PR reviews are preview-only; pass --cra to enable them")
+			}
+		}
 		if flagRootDir != "" {
 			SetRootDir(flagRootDir)
 		}
+		return nil
 	},
 	RunE: runTUI,
 }
@@ -69,6 +78,7 @@ var versionCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.PersistentFlags().BoolVar(&flagCRA, "cra", false, "Enable the PR review preview (still asks for session consent)")
 	rootCmd.PersistentFlags().StringVar(&flagRootDir, "root", "", "Root directory for config, sessions, and logs (default: ~/.vibeflow-cli)")
 	rootCmd.PersistentFlags().StringVar(&flagConfigPath, "config", "", "Path to config file (default: <root>/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&flagMCPToolName, "mcp", "", "MCP server tool name used in the agent init prompt (default: vibeflow)")
@@ -151,19 +161,31 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Unlike the first-run authentication wizard, consent is requested on
 	// every interactive launch. No detached runner is adopted or auto-started.
 	cwd, _ := os.Getwd()
-	startup := newReviewStartupModel(ctx, cfg, cfgPath, reviewStartupOptions(cfg, cfgPath, cwd))
-	startProgram := tea.NewProgram(startup, tea.WithContext(ctx), tea.WithoutSignalHandler())
-	startResult, err := startProgram.Run()
-	if err != nil {
-		return fmt.Errorf("review runner setup: %w", err)
+	var reviewSetup reviewStartupModel
+	if flagCRA {
+		startupOptions, _ := loadReviewGroupPreferences(cfg, cfgPath, cwd)
+		startup := newReviewStartupModel(ctx, cfg, cfgPath, startupOptions)
+		startProgram := tea.NewProgram(startup, tea.WithContext(ctx), tea.WithoutSignalHandler())
+		startResult, err := startProgram.Run()
+		if err != nil {
+			return fmt.Errorf("review runner setup: %w", err)
+		}
+		var ok bool
+		reviewSetup, ok = startResult.(reviewStartupModel)
+		if !ok || reviewSetup.quit || !reviewSetup.done {
+			return nil
+		}
 	}
-	reviewSetup, ok := startResult.(reviewStartupModel)
-	if !ok || reviewSetup.quit || !reviewSetup.done {
-		return nil
-	}
-	if reviewSetup.runner != nil {
+	var supervisor *reviewSupervisor
+	if reviewSetup.enabled {
+		supervisor, err = newReviewSupervisor(ctx, cfg, cfgPath)
+		if err != nil {
+			return fmt.Errorf("review runners: %w", err)
+		}
+		supervisor.options = reviewSetup.options
+		_ = saveReviewGroupPreferences(cfg, cfgPath, supervisor.options, supervisor.preferences)
 		defer func() {
-			if err := reviewSetup.runner.Close(); err != nil {
+			if err := supervisor.Close(); err != nil {
 				fmt.Fprintf(os.Stderr, "PR review runner: %v\n", err)
 			}
 		}()
@@ -179,9 +201,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Resolve project ID if project name is set
 	var projectID int64
-	if reviewSetup.runner != nil {
-		projectID = reviewSetup.options.ProjectID
-	} else if cfg.DefaultProject != "" {
+	if cfg.DefaultProject != "" {
 		projects, err := client.ListProjects()
 		if err == nil {
 			for _, p := range projects {
@@ -202,7 +222,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Run TUI
 	model := NewModel(cfg, client, tmux, worktrees, store, cache, registry, projectID)
 	model.serverWarning = serverWarning
-	model.reviewRunner = reviewSetup.runner
+	model.craEnabled = flagCRA
+	model.reviewSupervisor = supervisor
+	if supervisor != nil {
+		model.reviewPaths = append([]string(nil), supervisor.initialPaths...)
+		model.reviewPreferences = copyReviewPreferences(supervisor.preferences)
+	}
 
 	// Detect dead sessions from cache and show restart popup if any.
 	if sessions, err := tmux.ListSessions(); err == nil {
