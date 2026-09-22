@@ -24,6 +24,8 @@ import (
 type reviewProjectPage struct {
 	Name, After, Next, Warning string
 	Generation                 uint64
+	Busy                       bool
+	RequestedAfter             string
 	Summaries                  []reviewSummary
 }
 type reviewBrowseRefreshMsg struct{}
@@ -47,6 +49,7 @@ type reviewDetailState struct {
 	Project                                                int64
 	Job                                                    string
 	Generation                                             uint64
+	Busy                                                   bool
 	Summary                                                *reviewSummary
 	Findings                                               []reviewFinding
 	FindingsAfter, FindingsNext, HistoryAfter, HistoryNext string
@@ -88,9 +91,16 @@ func (m *Model) reviewReadCommands(ids []int64) tea.Cmd {
 	requests := make([]reviewProjectRequest, 0, len(ids))
 	for _, id := range ids {
 		p := m.reviewProjects[id]
+		if p.Busy && p.RequestedAfter == p.After {
+			continue
+		}
 		p.Generation++
+		p.Busy, p.RequestedAfter = true, p.After
 		m.reviewProjects[id] = p
 		requests = append(requests, reviewProjectRequest{id, p.After, p.Generation})
+	}
+	if len(requests) == 0 {
+		return nil
 	}
 	client := m.client
 	if m.reviewReadSlots == nil {
@@ -137,6 +147,11 @@ func (m *Model) rebuildReviewRows() {
 		return ids[i] < ids[j]
 	})
 	warnings := []string{}
+	for _, warning := range []string{m.reviewBrowseWarning, m.reviewBrowseError} {
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+	}
 	for _, id := range ids {
 		p := m.reviewProjects[id]
 		for _, s := range p.Summaries {
@@ -152,6 +167,7 @@ func (m *Model) rebuildReviewRows() {
 func (m *Model) clearReviewProject(id int64) {
 	p := m.reviewProjects[id]
 	p.Generation++
+	p.Busy = false
 	p.Summaries = nil
 	p.After = ""
 	p.Next = ""
@@ -159,6 +175,7 @@ func (m *Model) clearReviewProject(id int64) {
 	m.reviewProjects[id] = p
 	if m.reviewDetail.Project == id {
 		m.reviewDetail.Generation++
+		m.reviewDetail.Busy = false
 		m.reviewDetail.Summary = nil
 		m.reviewDetail.Findings = nil
 		m.reviewDetail.History = nil
@@ -169,10 +186,11 @@ func (m *Model) clearReviewProject(id int64) {
 func (m Model) updateReviewReads(msg tea.Msg) (Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case reviewBrowseRefreshMsg:
-		if !m.craEnabled || m.client == nil {
+		if !m.craEnabled || m.client == nil || m.reviewProjectsBusy {
 			return m, nil, true
 		}
 		m.reviewProjectGeneration++
+		m.reviewProjectsBusy = true
 		generation, client := m.reviewProjectGeneration, m.client
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -184,6 +202,7 @@ func (m Model) updateReviewReads(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if !m.craEnabled || msg.generation != m.reviewProjectGeneration {
 			return m, nil, true
 		}
+		m.reviewProjectsBusy = false
 		if m.reviewProjects == nil {
 			m.reviewProjects = map[int64]reviewProjectPage{}
 		}
@@ -192,10 +211,14 @@ func (m Model) updateReviewReads(msg tea.Msg) (Model, tea.Cmd, bool) {
 				for id := range m.reviewProjects {
 					m.clearReviewProject(id)
 				}
-				m.rebuildReviewRows()
 			}
-			m.reviewWarning = "Review discovery unavailable; displayed reviews may be stale: " + reviewDisplay(msg.err.Error())
+			m.reviewBrowseError = "Review discovery unavailable; displayed reviews may be stale: " + reviewDisplay(msg.err.Error())
+			m.rebuildReviewRows()
 			return m, nil, true
+		}
+		m.reviewBrowseError = ""
+		if msg.discovery.Complete || msg.discovery.Warning != "" {
+			m.reviewBrowseWarning = reviewDisplay(msg.discovery.Warning)
 		}
 		present := map[int64]bool{}
 		ids := []int64{}
@@ -214,7 +237,6 @@ func (m Model) updateReviewReads(msg tea.Msg) (Model, tea.Cmd, bool) {
 			}
 		}
 		m.rebuildReviewRows()
-		m.reviewWarning = reviewDisplay(msg.discovery.Warning)
 		cmd := m.reviewReadCommands(ids)
 		return m, cmd, true
 	case reviewSummaryPagesMsg:
@@ -226,6 +248,7 @@ func (m Model) updateReviewReads(msg tea.Msg) (Model, tea.Cmd, bool) {
 			if !ok || p.Generation != result.request.Generation || p.After != result.request.After {
 				continue
 			}
+			p.Busy = false
 			if result.err != nil {
 				if reviewAccessDenied(result.err) {
 					m.clearReviewProject(result.request.Project)
@@ -247,6 +270,7 @@ func (m Model) updateReviewReads(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if !m.craEnabled || d.Project != msg.project || d.Job != msg.job || d.Generation != msg.generation {
 			return m, nil, true
 		}
+		d.Busy = false
 		if msg.err != nil {
 			if reviewAccessDenied(msg.err) {
 				m.clearReviewProject(msg.project)
@@ -298,6 +322,7 @@ func (m Model) pageReviewProject(older bool) (tea.Model, tea.Cmd) {
 		p.After = ""
 	}
 	p.Next = ""
+	p.Busy = false
 	m.reviewProjects[s.ProjectID] = p
 	cmd := m.reviewReadCommands([]int64{s.ProjectID})
 	return m, cmd
@@ -324,10 +349,11 @@ func (m Model) activateSession(name string) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 func (m *Model) requestReviewDetail() tea.Cmd {
-	if !m.craEnabled || m.client == nil {
+	if !m.craEnabled || m.client == nil || m.reviewDetail.Busy {
 		return nil
 	}
 	m.reviewDetail.Generation++
+	m.reviewDetail.Busy = true
 	d := m.reviewDetail
 	client := m.client
 	supervisor := m.reviewSupervisor
@@ -450,6 +476,7 @@ func (m Model) updateReviewDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.activeView = ViewSessions
 		m.reviewDetail.Generation++
+		m.reviewDetail.Busy = false
 		return m, nil
 	case "down", "j":
 		m.reviewDetail.Scroll++
@@ -467,21 +494,25 @@ func (m Model) updateReviewDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "]":
 		if m.reviewDetail.HistoryNext != "" {
 			m.reviewDetail.HistoryAfter = m.reviewDetail.HistoryNext
+			m.reviewDetail.Busy = false
 			cmd := m.requestReviewDetail()
 			return m, cmd
 		}
 	case "[":
 		m.reviewDetail.HistoryAfter = ""
+		m.reviewDetail.Busy = false
 		cmd := m.requestReviewDetail()
 		return m, cmd
 	case "n":
 		if m.reviewDetail.FindingsNext != "" {
 			m.reviewDetail.FindingsAfter = m.reviewDetail.FindingsNext
+			m.reviewDetail.Busy = false
 			cmd := m.requestReviewDetail()
 			return m, cmd
 		}
 	case "p":
 		m.reviewDetail.FindingsAfter = ""
+		m.reviewDetail.Busy = false
 		cmd := m.requestReviewDetail()
 		return m, cmd
 	case "o", "c":
