@@ -129,6 +129,7 @@ type Model struct {
 	wizard           WizardModel
 	conflictModal    ConflictModal
 	worktreeList     WorktreeListModel
+	orphanWorktrees  int                // worktrees no session uses; hinted in the help bar
 	pendingWizard    *WizardResult      // wizard result waiting for conflict resolution
 	switchMeta       *SessionMeta       // non-nil during quick branch switch flow
 	groupEditRunning []SessionMeta      // non-nil during group edit flow: the running group being reshaped
@@ -256,6 +257,7 @@ type tickMsg time.Time
 // sessionsMsg carries refreshed session data.
 type sessionsMsg struct {
 	sessions []SessionRow
+	orphans  int // worktrees no session uses; shown as a hint in the help bar
 	err      error
 }
 
@@ -330,13 +332,13 @@ func (m Model) safeRemoveWorktree(worktreePath, sessionName string) bool {
 	if m.isWorktreeInUseByOthers(worktreePath, sessionName) {
 		return false
 	}
-	if isDirtyGit(worktreePath) {
+	if err := m.worktrees.RemoveIfClean(worktreePath); err != nil {
+		// A kept worktree becomes an orphan, which the help bar then surfaces.
 		if m.logger != nil {
-			m.logger.Warn("keeping dirty worktree %s — has uncommitted changes", worktreePath)
+			m.logger.Warn("keeping worktree %s: %v", worktreePath, err)
 		}
 		return false
 	}
-	_ = m.worktrees.Remove(worktreePath, true)
 	return true
 }
 
@@ -453,7 +455,26 @@ func (m Model) refreshSessions() tea.Msg {
 		}
 	}
 
-	return sessionsMsg{sessions: rows}
+	return sessionsMsg{sessions: rows, orphans: m.countOrphanWorktrees()}
+}
+
+// countOrphanWorktrees returns how many managed worktrees no stored session
+// references. Any failure counts as zero: the hint is advisory only.
+func (m Model) countOrphanWorktrees() int {
+	if m.worktrees == nil || m.store == nil {
+		return 0
+	}
+	managed, err := m.worktrees.Managed(m.store)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, wt := range managed {
+		if wt.Session == "" {
+			n++
+		}
+	}
+	return n
 }
 
 func sessionStatus(attached, paneDead bool) string {
@@ -788,6 +809,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.replaceSessionRows(rows)
+		m.orphanWorktrees = msg.orphans
 		return m, nil
 	case reviewSessionsMsg:
 		if msg.after != m.reviewAfter || msg.started.Before(m.reviewReadStarted) {
@@ -1377,7 +1399,11 @@ func (m Model) updateWorktreeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.worktreeList = wl
 
 	if wl.Deleted() && m.worktrees != nil {
-		_ = m.worktrees.Remove(wl.DeletedPath(), true)
+		if err := m.worktrees.RemoveIfClean(wl.DeletedPath()); err != nil {
+			m.worktreeList = NewWorktreeListModel(m.worktrees, m.store)
+			m.worktreeList.notice = fmt.Sprintf("Kept %s: %v", filepath.Base(wl.DeletedPath()), err)
+			return m, nil
+		}
 		// Stay on worktrees view — rebuild list after deletion.
 		m.worktreeList = NewWorktreeListModel(m.worktrees, m.store)
 		return m, nil
@@ -2150,7 +2176,11 @@ func (m Model) viewContent() string {
 				enterHint = "expand/collapse"
 			}
 		}
-		keys := fmt.Sprintf("n: new  enter: %s  m: project wb  M: all wb  d: delete  b: switch  e: edit grp  D: detach  g: group  w: worktrees  ?: help  q: quit", enterHint)
+		orphanHint := ""
+		if m.orphanWorktrees > 0 {
+			orphanHint = fmt.Sprintf(" (%d orphaned)", m.orphanWorktrees)
+		}
+		keys := fmt.Sprintf("n: new  enter: %s  m: project wb  M: all wb  d: delete  b: switch  e: edit grp  D: detach  g: group  w: worktrees%s  ?: help  q: quit", enterHint, orphanHint)
 		if lipgloss.Width(keys) > width {
 			keys = fmt.Sprintf("n: new  enter: %s  d: delete  ?: help  q: quit", enterHint)
 		}

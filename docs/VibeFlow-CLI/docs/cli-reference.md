@@ -271,6 +271,17 @@ See [Advanced topics](advanced-topics.md) for the session cache behavior that en
 
 List or manage git worktrees related to the tool.
 
+| Flag | Effect |
+|------|--------|
+| `--clean` | Remove orphaned worktrees and prune stale records. |
+
+An orphaned worktree is one under `worktree.base_dir` that no stored session references.
+`--clean` keeps any worktree with uncommitted changes and prints one row per worktree: `removed`, `kept` (with the number of uncommitted changes) or `in use` (with the session).
+The plain listing adds a `SESSION` column that shows the session using each worktree, or `orphaned`.
+Paths are shown relative to the repository.
+The branch of a removed worktree is always kept, so committed work is never lost.
+The TUI help bar shows the orphan count next to `w: worktrees` when there are any.
+
 ### `vibeflow check [directory]`
 
 Check for **session conflicts** (`.vibeflow-session*` files vs active tmux).
