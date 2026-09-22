@@ -108,6 +108,7 @@ const (
 	ViewWorktrees
 	ViewHelp
 	ViewRestart
+	ViewReviewRunners
 )
 
 // Model is the Bubble Tea model for vibeflow-cli.
@@ -145,12 +146,24 @@ type Model struct {
 	cache            *SessionCache      // session cache for restart-without-intervention
 	restartSelect    RestartSelectModel // dead-session restart multiselect
 
-	reviewAfter        string
-	reviewNext         string
-	reviewWarning      string
-	reviewUnconfigured bool // no project resolved; managed reviews cannot load
-	reviewReadStarted  time.Time
-	reviewRunner       *reviewOwnedRunner // owned by this TUI; nil when declined
+	reviewAfter            string
+	craEnabled             bool
+	reviewNext             string
+	reviewWarning          string
+	reviewUnconfigured     bool // no project resolved; managed reviews cannot load
+	reviewReadStarted      time.Time
+	reviewSupervisor       *reviewSupervisor
+	reviewStatuses         []reviewRunnerStatus
+	reviewPaths            []string
+	reviewPreferences      map[string]string
+	reviewDiscoveryBusy    bool
+	reviewDiscoveryAgain   bool
+	reviewDiscoveryKey     string
+	reviewDiscoveryWarning string
+	reviewRunnerCursor     int
+	reviewCheckout         *reviewStartupModel
+	reviewCheckoutID       string
+	reviewCheckoutError    string
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -770,10 +783,12 @@ func cacheGCTickCmd() tea.Cmd {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshSessions,
-		m.refreshReviewSessions,
+		m.craReviewSessions(),
 		captureTickCmd(),
 		tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		cacheGCTickCmd(),
+		func() tea.Msg { return reviewDiscoveryRefreshMsg{} },
+		reviewDiscoveryTickCmd(),
 	)
 }
 
@@ -783,6 +798,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// session refreshes continue while sub-views (wizard, conflict modal,
 	// worktree list) are active.
 	switch msg := msg.(type) {
+	case reviewDiscoveryRefreshMsg:
+		cmd := m.requestReviewDiscovery()
+		return m, cmd
+	case reviewDiscoveryTickMsg:
+		cmd := m.requestReviewDiscovery()
+		return m, tea.Batch(cmd, reviewDiscoveryTickCmd())
+	case reviewDiscoveryMsg:
+		m.reviewDiscoveryBusy = false
+		if msg.key == m.reviewPathsKey() {
+			m.reviewStatuses = msg.statuses
+			m.reviewDiscoveryWarning = msg.warning
+		}
+		if m.reviewDiscoveryAgain || msg.key != m.reviewPathsKey() {
+			m.reviewDiscoveryAgain = false
+			cmd := m.requestReviewDiscovery()
+			return m, cmd
+		}
+		return m, nil
+	case reviewRunnerSnapshotMsg:
+		if !m.reviewDiscoveryBusy {
+			m.reviewStatuses = msg.statuses
+		}
+		return m, nil
+	case reviewCheckoutSavedMsg:
+		if msg.err != nil {
+			m.reviewCheckoutError = msg.err.Error()
+			if m.reviewCheckout != nil {
+				m.reviewCheckout.busy = false
+			}
+			return m, nil
+		}
+		m.reviewPreferences[msg.id] = msg.path
+		m.reviewCheckout = nil
+		m.reviewCheckoutError = ""
+		cmd := m.requestReviewDiscovery()
+		return m, cmd
 	case tea.FocusMsg:
 		// Pane regained focus (e.g. tmux pane switch). Force a full repaint
 		// so the diff-based renderer doesn't skip lines it assumes are unchanged.
@@ -790,7 +841,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tea.Batch(
 			m.refreshSessions,
-			m.refreshReviewSessions,
+			m.craReviewSessions(),
+			m.reviewSnapshotCmd(),
 			tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		)
 	case sessionsMsg:
@@ -810,6 +862,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.replaceSessionRows(rows)
 		m.orphanWorktrees = msg.orphans
+		if m.reviewSupervisor != nil {
+			var metas []SessionMeta
+			for _, row := range msg.sessions {
+				metas = append(metas, SessionMeta{WorkingDir: row.WorkingDir, WorktreePath: row.WorktreePath})
+			}
+			paths := knownReviewCheckoutPaths(m.reviewSupervisor.cfg, "", metas)
+			paths = append(paths, m.reviewSupervisor.initialPaths...)
+			m.reviewPaths = paths
+			if m.reviewPathsKey() != m.reviewDiscoveryKey {
+				cmd := m.requestReviewDiscovery()
+				return m, cmd
+			}
+		}
 		return m, nil
 	case reviewSessionsMsg:
 		if msg.after != m.reviewAfter || msg.started.Before(m.reviewReadStarted) {
@@ -977,6 +1042,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateConflict(msg)
 	case ViewWorktrees:
 		return m.updateWorktreeList(msg)
+	case ViewReviewRunners:
+		return m.updateReviewRunners(msg)
 	case ViewHelp:
 		// Any keypress closes the help popup.
 		if _, ok := msg.(tea.KeyPressMsg); ok {
@@ -1154,6 +1221,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeView = ViewWizard
 			return m, nil
 		case "]":
+			if !m.craEnabled {
+				return m, nil
+			}
 			if m.reviewNext != "" {
 				m.reviewAfter = m.reviewNext
 				m.reviewNext = ""
@@ -1161,12 +1231,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "[":
+			if !m.craEnabled {
+				return m, nil
+			}
 			m.reviewAfter = ""
 			m.reviewNext = ""
 			return m, m.refreshReviewSessions
 		case "r":
+			discovery := m.requestReviewDiscovery()
 			if m.selectedReview() != nil {
-				return m, m.refreshReviewSessions
+				return m, tea.Batch(m.craReviewSessions(), discovery)
 			}
 			// Manual recovery retry for failed sessions, otherwise refresh.
 			idx := m.selectedSessionIdx()
@@ -1174,10 +1248,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if sh := m.healthMonitor.GetHealth(m.sessions[idx].Name); sh != nil && sh.Status == HealthFailed {
 					m.healthMonitor.ResetSession(m.sessions[idx].Name)
 					m.logger.Info("health: manual recovery reset for session %s", m.sessions[idx].Name)
-					return m, nil
+					return m, discovery
 				}
 			}
-			return m, tea.Batch(m.refreshSessions, m.refreshReviewSessions)
+			return m, tea.Batch(m.refreshSessions, m.craReviewSessions(), discovery)
+		case "R":
+			if !m.craEnabled {
+				return m, nil
+			}
+			m.activeView = ViewReviewRunners
+			return m, m.reviewSnapshotCmd()
 		case "m":
 			// Project workbench: compose the selected session's project (its
 			// repo-root group) into one natively interactive tmux view. One
@@ -2095,6 +2175,8 @@ func (m Model) viewContent() string {
 		return m.conflictModal.View()
 	case ViewWorktrees:
 		return m.worktreeList.View()
+	case ViewReviewRunners:
+		return m.viewReviewRunners()
 	case ViewHelp:
 		return m.renderHelpPopup()
 	case ViewRestart:
@@ -2134,15 +2216,22 @@ func (m Model) viewContent() string {
 	} else if m.serverWarning != "" {
 		warnBannerStyle := lipgloss.NewStyle().Foreground(warningColor)
 		errLine = warnBannerStyle.Render("⚠ " + m.serverWarning + " — local sessions still available")
-	} else if m.reviewRunner != nil {
-		status := "PR review runner online - fresh Principal Engineer per review"
-		select {
-		case <-m.reviewRunner.Done():
-			status = "PR review runner stopped - reopen the CLI to retry"
-			if err := m.reviewRunner.Err(); err != nil {
-				status = "PR review runner: " + err.Error()
+	} else if m.reviewSupervisor != nil || len(m.reviewStatuses) > 0 {
+		online, needs := 0, 0
+		for _, row := range m.reviewStatuses {
+			if row.State == "online" {
+				online++
 			}
-		default:
+			if row.State == "needs_checkout" {
+				needs++
+			}
+		}
+		status := fmt.Sprintf("PR review runners: %d online, %d need checkout - R: runners", online, needs)
+		if m.reviewDiscoveryBusy {
+			status += " (discovering)"
+		}
+		if m.reviewDiscoveryWarning != "" {
+			status = "PR review runners: " + m.reviewDiscoveryWarning + " - R: runners"
 		}
 		errLine = lipgloss.NewStyle().Foreground(dimColor).Render(truncate(status, width))
 	}

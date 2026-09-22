@@ -186,22 +186,28 @@ func TestReviewStartupDetectedCheckoutPicker(t *testing.T) {
 	}
 }
 
-func TestReviewStartupShowsSelectedProject(t *testing.T) {
+func TestReviewStartupShowsAllProjects(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.DefaultProject = "vscode-vibeflow"
 	for _, selection := range []string{"", "12"} {
 		m := newReviewStartupModel(context.Background(), cfg, "config.yaml", reviewWatchOptions{Project: selection})
 		view := m.View().Content
-		want := selection
-		if want == "" {
-			want = "vscode-vibeflow"
+		if !strings.Contains(view, "All accessible projects") {
+			t.Fatal("consent hides multi-project scope")
 		}
-		if !strings.Contains(view, "Project: "+want) {
-			t.Fatal("consent prompt hides the selected project")
-		}
-		if selection != "" && strings.Contains(view, "vscode-vibeflow") {
-			t.Fatal("consent prompt shows the saved default instead of the selected project")
-		}
+	}
+}
+
+func TestReviewStartupConsentDoesNotWaitForCheckout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Providers["claude"] = Provider{Binary: "/bin/sh"}
+	m := newReviewStartupModel(context.Background(), cfg, "config.yaml", reviewWatchOptions{Provider: "claude"})
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = next.(reviewStartupModel)
+	next, _ = m.Update(cmd())
+	m = next.(reviewStartupModel)
+	if !m.done || !m.enabled || m.input != nil {
+		t.Fatalf("checkout blocked main UI: %+v", m)
 	}
 }
 
@@ -295,19 +301,16 @@ func TestReviewStartupFitsNarrowTerminal(t *testing.T) {
 }
 
 func TestReviewRunnerStatusKeepsFooterVisible(t *testing.T) {
-	runner := &reviewOwnedRunner{done: make(chan struct{})}
-	m := Model{config: &Config{}, hitmap: &listHitmap{}, width: 100, height: 30, reviewRunner: runner}
-	for _, status := range []string{"PR review runner online", "PR review runner stopped"} {
+	m := Model{config: &Config{}, hitmap: &listHitmap{}, width: 100, height: 30}
+	for _, state := range []string{"online", "failed"} {
+		m.reviewStatuses = []reviewRunnerStatus{{State: state}}
 		content := m.View().Content
-		if !strings.Contains(content, status) || lipgloss.Height(content) != m.height {
+		if !strings.Contains(content, "PR review runners:") || lipgloss.Height(content) != m.height {
 			t.Fatalf("wrong runner status or layout: %s", content)
 		}
 		lines := strings.Split(content, "\n")
 		if !strings.Contains(lines[len(lines)-1], "q: quit") {
 			t.Fatal("runner status hid quit shortcut")
-		}
-		if status == "PR review runner online" {
-			close(runner.done)
 		}
 	}
 }

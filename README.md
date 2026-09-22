@@ -44,6 +44,13 @@ All seven agents support both **Vanilla** (standalone) and **VibeFlow** (server-
 
 ## Features
 
+PR review automation is a preview behind `vibeflow --cra` until the production backend is deployed.
+Without `--cra`, the CLI does not show review consent, review rows, or runner controls and makes no review API calls.
+With `--cra`, choose **Run reviews** once per launch to discover linked repositories across every accessible project and start runners for known local checkouts.
+Press `R` for runner status and checkout selection, or `r` to refresh discovery.
+Missing checkouts do not block the main TUI; discovery never recursively scans or clones repositories.
+The runners share `review_concurrency` slots (default `2`), and closing the TUI stops only its owned runners.
+
 - **Multi-agent TUI** - Interactive terminal UI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) for launching and managing sessions
 - **Two session modes** - *VibeFlow mode* connects agents to a VibeFlow server for autonomous task polling and execution; *Vanilla mode* launches agents standalone
 - **Persona-based sessions** - Assign specialized personas (Developer, Principal Engineer, Architect, UX Designer, QA Lead, Security Lead, Product Manager, Project Manager, Customer) to VibeFlow sessions. Multiple personas can work concurrently in the same repository without conflict.

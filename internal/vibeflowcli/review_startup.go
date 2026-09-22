@@ -3,10 +3,12 @@ package vibeflowcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +27,179 @@ type reviewStartupRepository struct {
 	Host     string `json:"provider_host"`
 	ID       int64  `json:"repository_link_id"`
 	Name     string `json:"repository_name"`
+}
+
+type reviewBinding struct {
+	Options     reviewWatchOptions
+	ProjectName string
+	Repository  reviewStartupRepository
+	Checkouts   []reviewStartupCheckout
+	Problem     string
+}
+
+type reviewDiscovery struct {
+	Projects []Project
+	Bindings []reviewBinding
+	Problems map[int64]string
+	Revoked  map[int64]bool
+	Complete bool // False for failed or legacy capped project enumeration.
+	Warning  string
+}
+
+func knownReviewCheckoutPaths(cfg *Config, cwd string, sessions []SessionMeta) []string {
+	paths := append([]string{cfg.DefaultWorkDir, cwd}, cfg.DirectoryHistory...)
+	for _, session := range sessions {
+		paths = append(paths, session.WorkingDir, session.WorktreePath)
+	}
+	seen := map[string]bool{}
+	var result []string
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		path, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		if canonical, err := filepath.EvalSymlinks(path); err == nil {
+			path = canonical
+		}
+		if !seen[path] {
+			seen[path] = true
+			result = append(result, path)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func validReviewStartupRepository(repo reviewStartupRepository) bool {
+	host, name, err := reviewRemoteIdentity("https://" + repo.Host + "/" + repo.Name)
+	owner, repository, _ := strings.Cut(repo.Name, "/")
+	return repo.ID > 0 && reviewStartupText(repo.Host, 253) && reviewStartupText(repo.Name, 512) && err == nil && owner != "." && repository != "." && host == strings.ToLower(repo.Host) && name == strings.ToLower(repo.Name) && (repo.Provider == "github" || repo.Provider == "bitbucket") && (repo.Provider != "bitbucket" || host == "bitbucket.org") && (repo.Provider != "github" || host != "bitbucket.org")
+}
+
+func discoverReviewBindings(ctx context.Context, cfg *Config, paths []string, preferred map[string]string) (reviewDiscovery, error) {
+	d := reviewDiscovery{Problems: map[int64]string{}, Revoked: map[int64]bool{}}
+	if cfg == nil || cfg.ServerURL == "" || strings.TrimSpace(cfg.APIToken) == "" {
+		return d, fmt.Errorf("connect VibeFlow before starting review runners")
+	}
+	client := NewClient(cfg.ServerURL, cfg.APIToken)
+	seenProjects, seenCursors := map[int64]bool{}, map[string]bool{}
+	cursor := ""
+	for {
+		path := "/projects?paginated=true&limit=100"
+		if cursor != "" {
+			path += "&after_id=" + cursor
+		}
+		var raw json.RawMessage
+		if err := client.reviewRequest(ctx, "GET", path, nil, &raw); err != nil {
+			var response *reviewHTTPError
+			if errors.As(err, &response) && (response.Status == 401 || response.Status == 403) {
+				d.Complete = true
+			}
+			return d, err
+		}
+		var page struct {
+			Projects []Project `json:"projects"`
+			Next     string    `json:"next_after_id"`
+		}
+		legacy := strings.HasPrefix(strings.TrimSpace(string(raw)), "[")
+		if legacy {
+			if cursor != "" || json.Unmarshal(raw, &page.Projects) != nil {
+				return d, fmt.Errorf("invalid review project page")
+			}
+		} else if json.Unmarshal(raw, &page) != nil || page.Projects == nil {
+			return d, fmt.Errorf("invalid review project page")
+		}
+		for _, project := range page.Projects {
+			if project.ID <= 0 || !reviewStartupText(project.Name, 300) || seenProjects[project.ID] {
+				return d, fmt.Errorf("invalid or duplicate review project")
+			}
+			seenProjects[project.ID] = true
+			d.Projects = append(d.Projects, project)
+		}
+		if legacy || page.Next == "" {
+			d.Complete = true
+			if legacy && len(page.Projects) >= 200 {
+				d.Complete = false
+				d.Warning = "Server returned the legacy 200-project limit; review discovery may be incomplete. Upgrade the server for full coverage."
+			}
+			break
+		}
+		next, err := strconv.ParseInt(page.Next, 10, 64)
+		if err != nil || next <= 0 || strconv.FormatInt(next, 10) != page.Next || seenCursors[page.Next] {
+			return d, fmt.Errorf("invalid or repeated review project cursor")
+		}
+		seenCursors[page.Next] = true
+		cursor = page.Next
+	}
+	base := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
+	base.Name, _ = os.Hostname()
+	if !reviewStartupText(base.Name, 100) {
+		base.Name = "Review runner"
+	}
+	// Preferences are supplied explicitly; discovery never reads session consent.
+	base.Provider, base.Project, base.Repository = cfg.DefaultProvider, "", ""
+	for _, project := range d.Projects {
+		var linked struct {
+			Repositories []reviewStartupRepository `json:"repositories"`
+		}
+		err := client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", project.ID), nil, &linked)
+		if err != nil {
+			d.Problems[project.ID] = err.Error()
+			var response *reviewHTTPError
+			if errors.As(err, &response) && (response.Status == 401 || response.Status == 403 || response.Status == 404) {
+				d.Revoked[project.ID] = true
+			}
+			continue
+		}
+		valid := linked.Repositories != nil
+		seenLinks := map[string]bool{}
+		for _, repo := range linked.Repositories {
+			key := fmt.Sprintf("%s:%d", repo.Provider, repo.ID)
+			if !validReviewStartupRepository(repo) || seenLinks[key] {
+				valid = false
+				break
+			}
+			seenLinks[key] = true
+		}
+		if !valid {
+			d.Problems[project.ID] = "invalid linked review repository response"
+			continue
+		}
+		for _, repo := range linked.Repositories {
+			o := base
+			o.ProjectID, o.Project, o.GitProvider, o.RepositoryLinkID = project.ID, strconv.FormatInt(project.ID, 10), repo.Provider, repo.ID
+			binding := reviewBinding{Options: o, ProjectName: project.Name, Repository: repo}
+			id := reviewBackgroundID(cfg.ServerURL, o)
+			if selected := findReviewStartupCheckout(ctx, preferred[id], []reviewStartupRepository{repo}); selected != nil {
+				binding.Options.Repository = selected.Path
+			}
+			seen := map[string]bool{}
+			for _, path := range paths {
+				if ctx.Err() != nil {
+					return d, ctx.Err()
+				}
+				candidate := findReviewStartupCheckout(ctx, path, []reviewStartupRepository{repo})
+				if candidate != nil && !seen[candidate.Identity] {
+					seen[candidate.Identity] = true
+					binding.Checkouts = append(binding.Checkouts, *candidate)
+				}
+			}
+			if binding.Options.Repository == "" {
+				if len(binding.Checkouts) == 1 {
+					binding.Options.Repository = binding.Checkouts[0].Path
+				} else if len(binding.Checkouts) == 0 {
+					binding.Problem = "No known checkout; press Enter to enter a path."
+				} else {
+					binding.Problem = "Choose a local checkout; press Enter."
+				}
+			}
+			d.Bindings = append(d.Bindings, binding)
+		}
+	}
+	return d, nil
 }
 
 // Numeric selections are IDs in both the ordinary TUI and review setup.
@@ -123,9 +298,7 @@ func resolveReviewStartup(ctx context.Context, cfg *Config, o reviewWatchOptions
 	}
 	var expected []string
 	for _, repo := range linked.Repositories {
-		repoHost, repoName, parseErr := reviewRemoteIdentity("https://" + repo.Host + "/" + repo.Name)
-		owner, repositoryName, _ := strings.Cut(repo.Name, "/")
-		if repo.ID <= 0 || !reviewStartupText(repo.Host, 253) || !reviewStartupText(repo.Name, 512) || parseErr != nil || owner == "." || repositoryName == "." || repoHost != strings.ToLower(repo.Host) || repoName != strings.ToLower(repo.Name) || (repo.Provider != "github" && repo.Provider != "bitbucket") || (repo.Provider == "bitbucket" && repoHost != "bitbucket.org") || (repo.Provider == "github" && repoHost == "bitbucket.org") {
+		if !validReviewStartupRepository(repo) {
 			return o, nil, fmt.Errorf("invalid linked review repository response")
 		}
 		if len(expected) < 5 {
@@ -272,6 +445,7 @@ func reviewStartupText(value string, limit int) bool {
 
 // These are reusable inputs only. Consent and credentials never enter this file.
 type reviewStartupPreferences struct {
+	Checkouts        map[string]string              `json:"checkouts,omitempty"`
 	Context          reviewStartupPreferenceContext `json:"context"`
 	Project          string                         `json:"project"`
 	Provider         string                         `json:"provider"`
@@ -279,6 +453,63 @@ type reviewStartupPreferences struct {
 	GitProvider      string                         `json:"git_provider"`
 	RepositoryLinkID int64                          `json:"repository_link_id"`
 	Model            string                         `json:"model,omitempty"`
+}
+
+func loadReviewGroupPreferences(cfg *Config, configPath, cwd string) (reviewWatchOptions, map[string]string) {
+	o := reviewStartupOptions(cfg, configPath, cwd)
+	choices := map[string]string{}
+	key, err := reviewStartupContext(cfg, configPath, cwd)
+	if err != nil {
+		return o, choices
+	}
+	data, err := os.ReadFile(filepath.Join(RootDir(), "review-runner-preferences.json"))
+	var prefs reviewStartupPreferences
+	if err != nil || len(data) > 4<<20 || json.Unmarshal(data, &prefs) != nil {
+		return o, choices
+	}
+	// default_project only scopes ordinary sessions, never the runner group.
+	prefs.Context.Project, key.Project = "", ""
+	if prefs.Context != key {
+		return o, choices
+	}
+	if prefs.Provider == "claude" || prefs.Provider == "codex" {
+		o.Provider, o.Model = prefs.Provider, prefs.Model
+	}
+	for id, path := range prefs.Checkouts {
+		choices[id] = path
+	}
+	if prefs.Repository != "" {
+		legacy := o
+		legacy.ProjectID, _ = strconv.ParseInt(prefs.Project, 10, 64)
+		legacy.RepositoryLinkID, legacy.GitProvider = prefs.RepositoryLinkID, prefs.GitProvider
+		if legacy.ProjectID > 0 && legacy.RepositoryLinkID > 0 {
+			choices[reviewBackgroundID(cfg.ServerURL, legacy)] = prefs.Repository
+		}
+	}
+	return o, choices
+}
+
+func saveReviewGroupPreferences(cfg *Config, configPath string, o reviewWatchOptions, choices map[string]string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	key, err := reviewStartupContext(cfg, configPath, cwd)
+	if err != nil {
+		return err
+	}
+	key.Project = ""
+	server, err := url.Parse(key.ServerURL)
+	if err != nil || server.Host == "" || server.User != nil || server.RawQuery != "" || server.Fragment != "" {
+		return fmt.Errorf("invalid review server URL")
+	}
+	if (o.Provider != "claude" && o.Provider != "codex") || (o.Model != "" && !reviewStartupText(o.Model, 200)) {
+		return fmt.Errorf("invalid review provider or model")
+	}
+	if err := os.MkdirAll(RootDir(), 0700); err != nil {
+		return err
+	}
+	return saveReviewJSON(filepath.Join(RootDir(), "review-runner-preferences.json"), reviewStartupPreferences{Context: key, Provider: o.Provider, Model: o.Model, Checkouts: choices})
 }
 
 type reviewStartupPreferenceContext struct {

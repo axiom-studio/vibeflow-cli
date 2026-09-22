@@ -14,6 +14,144 @@ import (
 	"testing"
 )
 
+func TestReviewDiscoveryIgnoresDefaultProject(t *testing.T) {
+	repo, _ := reviewTestRepo(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/v1/vibeflow/projects":
+			if r.URL.Query().Get("paginated") != "true" || r.URL.Query().Get("limit") != "100" {
+				t.Error("missing pagination opt-in")
+			}
+			fmt.Fprint(w, `[{"id":66,"name":"A"},{"id":67,"name":"66"}]`)
+		case "/rest/v1/vibeflow/projects/66/pr-review-repositories", "/rest/v1/vibeflow/projects/67/pr-review-repositories":
+			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"}]}`)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject = server.URL, "fixture", "66"
+	got, err := discoverReviewBindings(context.Background(), cfg, []string{repo}, nil)
+	if err != nil || len(got.Bindings) != 2 {
+		t.Fatalf("coverage: %+v %v", got, err)
+	}
+	if got.Bindings[0].Options.ProjectID == got.Bindings[1].Options.ProjectID || got.Bindings[0].Options.Repository != repo || got.Bindings[1].Options.Repository != repo {
+		t.Fatalf("lost binding identity: %+v", got)
+	}
+}
+
+func TestReviewDiscoveryPagesAndPartialFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name                                           string
+		duplicate, repeated, legacy, denied, malformed bool
+	}{
+		{name: "pages"}, {name: "duplicate", duplicate: true}, {name: "repeated cursor", repeated: true}, {name: "legacy cap", legacy: true}, {name: "project denied", denied: true}, {name: "malformed link", malformed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/rest/v1/vibeflow/projects" {
+					requests++
+					if tc.legacy {
+						projects := make([]Project, 200)
+						for i := range projects {
+							projects[i] = Project{ID: int64(i + 1), Name: "A"}
+						}
+						_ = json.NewEncoder(w).Encode(projects)
+						return
+					}
+					if r.URL.Query().Get("after_id") == "" {
+						fmt.Fprint(w, `{"projects":[{"id":67,"name":"66"}],"next_after_id":"67"}`)
+						return
+					}
+					if r.URL.Query().Get("after_id") != "67" {
+						t.Error("wrong cursor")
+					}
+					if tc.duplicate {
+						fmt.Fprint(w, `{"projects":[{"id":67,"name":"66"}],"next_after_id":""}`)
+					} else if tc.repeated {
+						fmt.Fprint(w, `{"projects":[{"id":66,"name":"B"}],"next_after_id":"67"}`)
+					} else {
+						fmt.Fprint(w, `{"projects":[{"id":66,"name":"B"}],"next_after_id":""}`)
+					}
+					return
+				}
+				if strings.Contains(r.URL.Path, "/67/") && tc.denied {
+					w.WriteHeader(403)
+					return
+				}
+				if strings.Contains(r.URL.Path, "/67/") && tc.malformed {
+					fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":0,"repository_name":"acme/repo"}]}`)
+					return
+				}
+				fmt.Fprint(w, `{"repositories":[]}`)
+			}))
+			defer server.Close()
+			cfg := DefaultConfig()
+			cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
+			d, err := discoverReviewBindings(context.Background(), cfg, nil, nil)
+			if tc.duplicate || tc.repeated {
+				if err == nil {
+					t.Fatal("accepted invalid page sequence")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.legacy {
+				if requests != 1 || d.Complete || d.Warning == "" || len(d.Projects) != 200 {
+					t.Fatalf("legacy coverage %+v requests=%d", d, requests)
+				}
+				return
+			}
+			if requests != 2 || len(d.Projects) != 2 || !d.Complete {
+				t.Fatalf("incomplete pages: %+v requests=%d", d, requests)
+			}
+			if tc.denied && (!d.Revoked[67] || d.Problems[67] == "") {
+				t.Fatal("revocation lost")
+			}
+			if tc.malformed && (d.Problems[67] == "" || d.Revoked[67]) {
+				t.Fatal("malformed response treated as authoritative revocation")
+			}
+		})
+	}
+}
+
+func TestReviewDiscoveryCheckoutIdentityAndPreferences(t *testing.T) {
+	repo, _ := reviewTestRepo(t)
+	other, _ := reviewTestRepo(t)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(repo, alias); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/v1/vibeflow/projects" {
+			fmt.Fprint(w, `[{"id":66,"name":"A"}]`)
+		} else {
+			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"}]}`)
+		}
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
+	d, err := discoverReviewBindings(context.Background(), cfg, []string{repo, alias}, nil)
+	if err != nil || len(d.Bindings) != 1 || len(d.Bindings[0].Checkouts) != 1 || d.Bindings[0].Options.Repository == "" {
+		t.Fatalf("alias duplicated checkout: %+v %v", d, err)
+	}
+	id := reviewBackgroundID(cfg.ServerURL, d.Bindings[0].Options)
+	d, err = discoverReviewBindings(context.Background(), cfg, []string{repo, other}, map[string]string{id: "/missing"})
+	if err != nil || d.Bindings[0].Options.Repository != "" || len(d.Bindings[0].Checkouts) != 2 {
+		t.Fatalf("independent clones silently selected: %+v %v", d, err)
+	}
+	d, err = discoverReviewBindings(context.Background(), cfg, []string{repo, other}, map[string]string{id: other})
+	if err != nil || d.Bindings[0].Options.Repository != other {
+		t.Fatalf("valid remembered checkout ignored: %+v %v", d, err)
+	}
+}
+
 // A public GitHub repository must never select the same name or link ID from
 // another provider or enterprise host. Resolution must not register a runner.
 func TestReviewStartupResolvesConfiguredProjectAndLocalRepository(t *testing.T) {

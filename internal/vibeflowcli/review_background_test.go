@@ -84,7 +84,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 	run := func(extraEnv []string, args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, binary, append([]string{"--root", ".", "--config", configPath, "review-watch"}, args...)...)
+		cmd := exec.CommandContext(ctx, binary, append([]string{"--cra", "--root", ".", "--config", configPath, "review-watch"}, args...)...)
 		cmd.Dir = root
 		for _, entry := range os.Environ() {
 			key, _, _ := strings.Cut(entry, "=")
@@ -255,7 +255,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 	if err := SaveConfig(cfg, configPath); err != nil {
 		t.Fatal(err)
 	}
-	foreground := exec.Command(binary, append([]string{"--root", root, "--config", configPath, "review-watch"}, append(start[1:], "--name", "trailing-runner")...)...)
+	foreground := exec.Command(binary, append([]string{"--cra", "--root", root, "--config", configPath, "review-watch"}, append(start[1:], "--name", "trailing-runner")...)...)
 	foreground.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
 	if err := foreground.Start(); err != nil {
 		t.Fatal(err)
@@ -409,7 +409,7 @@ func TestReviewBackgroundFetchUsesPinnedSSHAgent(t *testing.T) {
 	run := func(args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, binary, append([]string{"--root", root, "review-watch"}, args...)...)
+		cmd := exec.CommandContext(ctx, binary, append([]string{"--cra", "--root", root, "review-watch"}, args...)...)
 		cmd.Env = []string{"HOME=" + modelHome, "PATH=" + binDir + ":" + os.Getenv("PATH"), "SSH_AUTH_SOCK=" + socketPath}
 		out, err := cmd.CombinedOutput()
 		return string(out), err

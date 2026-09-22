@@ -14,6 +14,12 @@ Extend leased attempt renewal and existing safe summaries for progress rather th
 
 ## Global Constraints
 
+User rollout amendment: gate the entire public CRA feature behind `--cra` until production backend deployment.
+Normal usage without that flag must not show CRA prompts, call CRA discovery/review APIs, start runners, or expose CRA rows/controls.
+With the flag, retain session-only runner consent; do not persist the flag or infer consent from it.
+Task 5 owns the removable root/TUI/public-command gate, Task 9 honors it, and Task 10 verifies opt-in and default-off behavior.
+Private owned-runner, managed-runner, and review-child invocations must remain usable by opted-in parents.
+
 The approved default is two simultaneous reviews per TUI-managed runner group, configurable upward, with no fixed repository-count limit.
 Preserve one pending attempt per repository binding; additional PRs for the same binding remain queued.
 A runner obtains capacity before claiming new work, never after obtaining a server lease.
