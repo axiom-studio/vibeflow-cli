@@ -353,10 +353,8 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			}
 		}
 		// A heartbeat failure must not hide unresolved provider cleanup.
-		if w.state.Pending != nil {
-			if cleanupErr := w.providerCleanupPending(w.state.Pending); errors.Is(cleanupErr, errReviewCleanupUnverified) {
-				nextStatus = cleanupErr.Error()
-			}
+		if cleanupErr := w.providerCleanupPending(w.state.Pending); errors.Is(cleanupErr, errReviewCleanupUnverified) {
+			nextStatus = cleanupErr.Error()
 		}
 		if status != nextStatus {
 			status = nextStatus
@@ -398,7 +396,8 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 	// Recovery needs only server authorization, even if the provider was removed
 	// or logged out after a completed result was saved.
 	pending := w.state.Pending
-	needsProvider := pending == nil || (pending.Execution == nil && len(pending.Result) == 0 && pending.Failure == "")
+	cleanupErr := w.providerCleanupPending(pending)
+	needsProvider := cleanupErr == nil && (pending == nil || (pending.Execution == nil && len(pending.Result) == 0 && pending.Failure == ""))
 	if needsProvider && !w.providerReady {
 		if err := preflightReviewProvider(ctx, w.cfg, w.options.Provider, w.options.Model); err != nil {
 			return err
@@ -410,8 +409,8 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 		return err
 	}
 	admitted := true
-	var admissionErr error
-	if w.state.Pending != nil {
+	admissionErr := cleanupErr
+	if admissionErr == nil && w.state.Pending != nil {
 		admitted, admissionErr = w.acquireCapacity()
 	}
 	if w.onReady != nil {
@@ -569,10 +568,13 @@ func (w *reviewWatch) cleanup(p *reviewReceipt) error {
 	// The child guard holds this lock until every provider process has stopped.
 	deadline := time.Now().Add(8 * time.Second)
 	for {
-		lock, err := lockReviewFile(filepath.Join(dir, "child.lock"))
+		lock, err := w.lockReviewCleanup(filepath.Join(dir, "child.lock"), p)
 		if err == nil {
 			defer lock.Close()
 			return os.RemoveAll(dir)
+		}
+		if !errors.Is(err, errReviewLockBusy) {
+			return err
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("prior review child is still shutting down; restart the watcher to retry cleanup")

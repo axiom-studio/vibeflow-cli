@@ -3,17 +3,135 @@
 package vibeflowcli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
+
+func TestReviewCapacityRechecksMarkerUnderOwnership(t *testing.T) {
+	for _, target := range []string{"old-slot", "child-lock"} {
+		t.Run(target, func(t *testing.T) {
+			root := t.TempDir()
+			capacity, err := newReviewCapacity(root, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer capacity.Close()
+			dir := filepath.Join(root, "review-runners", strings.Repeat("a", 32))
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			p := &reviewReceipt{JobID: "job", RequestID: reviewUUID()}
+			w := &reviewWatch{root: dir, capacity: capacity, state: reviewRunnerState{Pending: p}}
+			if ok, err := w.acquireCapacity(); err != nil || !ok {
+				t.Fatal(err)
+			}
+			work := w.workDir(p)
+			if err := os.MkdirAll(work, 0700); err != nil {
+				t.Fatal(err)
+			}
+			input := filepath.Join(work, "input.fifo")
+			if err := syscall.Mkfifo(input, 0600); err != nil {
+				t.Fatal(err)
+			}
+			spec := reviewChildSpec{Binary: "/bin/sh", Args: []string{"-c", `echo $$; exec sleep 60`}, Env: []string{"PATH=/usr/bin:/bin"}, Dir: work, InputFile: input, DeadlineAt: time.Now().Add(time.Minute).UnixMilli(), CapacityFD: 3, Cleanup: &reviewProviderCleanup{Reservation: *p.Capacity, RequestID: p.RequestID, JobID: p.JobID, AttemptID: "attempt"}}
+			path := filepath.Join(work, "child.json")
+			if err := saveReviewJSON(path, spec); err != nil {
+				t.Fatal(err)
+			}
+			guard := exec.Command(os.Args[0], "review-child", path)
+			guard.ExtraFiles = []*os.File{w.slot}
+			control, err := guard.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer control.Close()
+			output, err := guard.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := guard.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { guard.Process.Kill(); guard.Wait() }()
+			w.releaseCapacity()
+			if _, err := control.Write([]byte{'R'}); err != nil {
+				t.Fatal(err)
+			}
+			// The real guard cannot publish its marker until its FIFO input opens.
+			// This establishes the exact stale-check boundary without a sleep.
+			if err := w.providerCleanupPending(p); err != nil {
+				t.Fatal("initial marker check", err)
+			}
+			opened := make(chan error, 1)
+			go func() {
+				f, err := os.OpenFile(input, os.O_WRONLY, 0)
+				if err == nil {
+					err = f.Close()
+				}
+				opened <- err
+			}()
+			select {
+			case err := <-opened:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("guard did not reach input barrier")
+			}
+			ready := make(chan string, 1)
+			go func() { line, _ := bufio.NewReader(output).ReadString('\n'); ready <- line }()
+			var pid int
+			select {
+			case line := <-ready:
+				pid, _ = strconv.Atoi(strings.TrimSpace(line))
+			case <-time.After(5 * time.Second):
+				t.Fatal("provider did not report readiness")
+			}
+			if pid <= 0 {
+				t.Fatal("invalid provider readiness")
+			}
+			defer syscall.Kill(pid, syscall.SIGKILL)
+			if err := guard.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			guard.Wait()
+			if syscall.Kill(pid, 0) != nil {
+				t.Fatal("fixture requires a surviving provider")
+			}
+			lockPath := filepath.Join(capacity.Directory, p.Capacity.Slot)
+			if target == "child-lock" {
+				lockPath = filepath.Join(work, "child.lock")
+			}
+			lock, err := w.lockReviewCleanup(lockPath, p)
+			if lock != nil {
+				lock.Close()
+			}
+			if !errors.Is(err, errReviewCleanupUnverified) {
+				t.Fatalf("guard published marker after precheck, but recovery accepted ownership: %v", err)
+			}
+			if err := w.cleanup(p); !errors.Is(err, errReviewCleanupUnverified) {
+				t.Fatal("standalone cleanup lost uncertainty", err)
+			}
+			if _, err := reviewCapacityReceipts(root); err != nil {
+				t.Fatal("recovery corrupted reservation/marker association", err)
+			}
+		})
+	}
+}
 
 func TestReviewCapacityAdmissionBeforeClaim(t *testing.T) {
 	root := t.TempDir()

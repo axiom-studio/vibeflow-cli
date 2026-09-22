@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -746,5 +747,110 @@ func TestReviewOwnedCleanupNoticeClearsAfterSurvivingGuard(t *testing.T) {
 	}
 	if handle.Status() != "" || failures.Load() != 1 {
 		t.Fatal("confirmed guard cleanup did not resume recovery", handle.Status())
+	}
+}
+
+func TestReviewOwnedMarkerOnlyQuarantinesBinding(t *testing.T) {
+	previousRoot := rootDir
+	SetRootDir(t.TempDir())
+	t.Cleanup(func() { rootDir = previousRoot })
+	var names sync.Map
+	claimed := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			names.Store(body["id"].(string), body["name"].(string))
+			body["user_id"] = 42
+			json.NewEncoder(out).Encode(body)
+		case strings.HasSuffix(r.URL.Path, "/work"):
+			repository := 7
+			names.Range(func(key, value any) bool {
+				if strings.Contains(r.URL.Path, "/"+key.(string)+"/") && value == "healthy" {
+					repository = 8
+				}
+				return true
+			})
+			fmt.Fprintf(out, `{"reviews":[{"id":"job","repository_link_id":%d,"provider":"github"}]}`, repository)
+		case strings.HasSuffix(r.URL.Path, "/claim"):
+			names.Range(func(key, value any) bool {
+				if strings.Contains(r.URL.Path, "/"+key.(string)+"/") {
+					claimed <- value.(string)
+				}
+				return true
+			})
+			out.WriteHeader(409)
+		default:
+			out.WriteHeader(204)
+		}
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "token"
+	provider := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\necho '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	opts := reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "quarantined", Repository: t.TempDir(), Provider: "claude", PollInterval: time.Second, Timeout: time.Minute}
+	old, err := newReviewCapacity(RootDir(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	request := reviewUUID()
+	dir := filepath.Join(RootDir(), "review-runners", reviewBackgroundID(cfg.ServerURL, opts), "work", request)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "provider-cleanup-pending.json")
+	if err := saveReviewJSON(marker, reviewProviderCleanup{Reservation: reviewReservation{Directory: old.Directory, Slot: "slot-0"}, RequestID: request, JobID: "old-job", AttemptID: "old-attempt"}); err != nil {
+		t.Fatal(err)
+	}
+	old.owner.Close()
+	capacity, err := newReviewCapacity(RootDir(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capacity.Close()
+	affected, err := startReviewOwnedWithCapacity(context.Background(), cfg, "unused", opts, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer affected.Close()
+	deadline := time.NewTimer(4 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for affected.Status() == "" {
+		select {
+		case name := <-claimed:
+			t.Fatalf("marker-only binding claimed fresh work: %s", name)
+		case <-deadline.C:
+			t.Fatal("marker-only binding did not surface cleanup notice")
+		case <-tick.C:
+		}
+	}
+	if !strings.Contains(affected.Status(), "Provider cleanup unverified: "+marker) {
+		t.Fatal(affected.Status())
+	}
+	opts.Name = "healthy"
+	opts.RepositoryLinkID = 8
+	healthy, err := startReviewOwnedWithCapacity(context.Background(), cfg, "unused", opts, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer healthy.Close()
+	select {
+	case name := <-claimed:
+		if name != "healthy" {
+			t.Fatal("quarantined binding claimed work", name)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("quarantined binding blocked healthy remaining capacity")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("cleanup evidence lost", err)
 	}
 }
