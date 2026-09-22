@@ -457,6 +457,8 @@ func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
 				}
 				t.Fatalf("admitted work before provider cleanup: %v", err)
 			}
+			runnerParent, _ := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pids[2])).Output()
+			runnerPID, _ := strconv.Atoi(strings.TrimSpace(string(runnerParent)))
 			if action == "guard-kill" {
 				if err := syscall.Kill(pids[2], syscall.SIGKILL); err != nil {
 					t.Fatal(err)
@@ -500,6 +502,28 @@ func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if unregistered.Load() != 1 || failures.Load() != 1 {
+				for _, pid := range append(append([]int{}, pids...), owner.Process.Pid, runnerPID) {
+					if pid <= 0 {
+						continue
+					}
+					state, err := exec.Command("ps", "-o", "pid=,ppid=,pgid=,stat=,etime=,comm=", "-p", strconv.Itoa(pid)).CombinedOutput()
+					t.Logf("owned fixture pid=%d signal0=%v process=%s psErr=%v", pid, syscall.Kill(pid, 0), state, err)
+				}
+				for _, pattern := range []string{"state.json", "runner.lock", "last-provider-diagnostic.json", "work/*/provider-cleanup-pending.json", "work/*/child-diagnostic.json", "work/*/child.lock"} {
+					paths, _ := filepath.Glob(filepath.Join(root, "review-runners", "*", pattern))
+					for _, path := range paths {
+						if strings.HasSuffix(path, ".lock") {
+							lock, err := lockReviewFile(path)
+							if lock != nil {
+								lock.Close()
+							}
+							t.Logf("owned fixture lock %s: %v", path, err)
+							continue
+						}
+						data, err := os.ReadFile(path)
+						t.Logf("owned fixture metadata %s: %s readErr=%v", path, data, err)
+					}
+				}
 				t.Fatalf("owner death did not cancel and preserve receipt: failures=%d unregister=%d", failures.Load(), unregistered.Load())
 			}
 			var survivors []int
@@ -751,10 +775,18 @@ func TestReviewOwnedCleanupNoticeClearsAfterSurvivingGuard(t *testing.T) {
 }
 
 func TestReviewOwnedMarkerOnlyQuarantinesBinding(t *testing.T) {
+	for _, status := range []int{401, 403} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) { testReviewOwnedMarkerOnlyQuarantinesBinding(t, status) })
+	}
+}
+
+func testReviewOwnedMarkerOnlyQuarantinesBinding(t *testing.T, status int) {
 	previousRoot := rootDir
 	SetRootDir(t.TempDir())
 	t.Cleanup(func() { rootDir = previousRoot })
 	var names sync.Map
+	var authStatus atomic.Int64
+	heartbeats := make(chan int, 16)
 	claimed := make(chan string, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
 		switch {
@@ -764,6 +796,25 @@ func TestReviewOwnedMarkerOnlyQuarantinesBinding(t *testing.T) {
 			names.Store(body["id"].(string), body["name"].(string))
 			body["user_id"] = 42
 			json.NewEncoder(out).Encode(body)
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			name := ""
+			names.Range(func(key, value any) bool {
+				if strings.Contains(r.URL.Path, "/"+key.(string)+"/") {
+					name = value.(string)
+				}
+				return true
+			})
+			code := 204
+			if name == "unauthorized" {
+				code = status
+			}
+			if denial := authStatus.Load(); name == "quarantined" && denial != 0 {
+				code = int(denial)
+			}
+			out.WriteHeader(code)
+			if name == "quarantined" {
+				heartbeats <- code
+			}
 		case strings.HasSuffix(r.URL.Path, "/work"):
 			repository := 7
 			names.Range(func(key, value any) bool {
@@ -849,6 +900,57 @@ func TestReviewOwnedMarkerOnlyQuarantinesBinding(t *testing.T) {
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("quarantined binding blocked healthy remaining capacity")
+	}
+	if err := healthy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	awaitHeartbeat := func(want int) {
+		t.Helper()
+		// Race-instrumented subprocess shutdown can allow another idle poll;
+		// the next legitimate exponential-backoff delay can therefore be 8s.
+		timer := time.NewTimer(20 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case got := <-heartbeats:
+				if got == want {
+					return
+				}
+			case <-affected.Done():
+				t.Fatalf("marker-only runner exited on heartbeat HTTP %d: %v", status, affected.Err())
+			case name := <-claimed:
+				if name == "quarantined" {
+					t.Fatal("quarantined binding claimed fresh work")
+				}
+			case <-timer.C:
+				t.Fatalf("runner did not continue heartbeat recovery after HTTP %d", status)
+			}
+		}
+	}
+	authStatus.Store(int64(status))
+	awaitHeartbeat(status)
+	awaitHeartbeat(status) // A second paced request proves the first denial was nonterminal.
+	if !strings.Contains(affected.Status(), "Provider cleanup unverified: "+marker) {
+		t.Fatal("authorization failure hid cleanup uncertainty", affected.Status())
+	}
+	authStatus.Store(0)
+	awaitHeartbeat(204)
+	select {
+	case <-affected.Done():
+		t.Fatal("restored authorization did not retain runner")
+	default:
+	}
+	if !strings.Contains(affected.Status(), "Provider cleanup unverified: "+marker) {
+		t.Fatal("authorization restoration falsely cleared cleanup uncertainty")
+	}
+	opts.Name = "unauthorized"
+	denied, err := startReviewOwnedWithCapacity(context.Background(), cfg, "unused", opts, capacity)
+	if denied != nil {
+		denied.Close()
+		t.Fatal("fresh unauthorized binding unexpectedly became ready")
+	}
+	if err == nil {
+		t.Fatal("fresh unauthorized binding did not retain terminal behavior")
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal("cleanup evidence lost", err)
