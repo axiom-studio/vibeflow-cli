@@ -39,6 +39,7 @@ default_project: my-project
 default_work_dir: /path/to/projects
 tmux_socket: vibeflow
 poll_interval_seconds: 5
+review_concurrency: 2  # positive integer; shared execution limit for TUI-managed review groups
 view_mode: flat   # flat or grouped
 
 llm_gateway_enabled: false  # optional: route LLM traffic via server gateway when supported
@@ -75,6 +76,14 @@ providers:
 ```
 
 Built-in provider keys include **`claude`**, **`codex`**, **`gemini`**, **`cursor`**, and **`qwen`**. You can add custom providers by extending the `providers` map (see [Providers](providers.md)).
+
+`review_concurrency` defaults to `2` when omitted and accepts any positive integer.
+Zero, negative, null, and noninteger values are configuration errors.
+The limit covers each TUI-managed attempt through provider shutdown and result acknowledgement, including saved results awaiting restored authorization.
+Standalone and externally owned runners are independent of a TUI's capacity group.
+An unresolved `Provider cleanup unverified` notice names a private attempt diagnostic whose reservation remains quarantined across restarts.
+A surviving child guard clears that notice only after confirming its provider process group has stopped; a free file lock alone is not cleanup evidence.
+Other available slots can continue serving healthy bindings.
 
 ## OpenShell
 

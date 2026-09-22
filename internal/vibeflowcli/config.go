@@ -121,6 +121,7 @@ type Config struct {
 	DefaultWorkDir    string              `yaml:"default_work_dir"`
 	TmuxSocket        string              `yaml:"tmux_socket"`
 	PollInterval      int                 `yaml:"poll_interval_seconds"`
+	ReviewConcurrency int                 `yaml:"review_concurrency"`
 	ClaudeBinary      string              `yaml:"claude_binary"`
 	Providers         map[string]Provider `yaml:"providers"`
 	Worktree          WorktreeConfig      `yaml:"worktree"`
@@ -253,12 +254,13 @@ func (c *Config) ResolveWorkDir(explicit string) string {
 // Three built-in providers are included; user config merges on top.
 func DefaultConfig() *Config {
 	return &Config{
-		ServerURL:       "https://cloud.axiomstudio.ai",
-		TmuxSocket:      "vibeflow",
-		PollInterval:    5,
-		ClaudeBinary:    "claude",
-		DefaultProvider: "claude",
-		MCPToolName:     DefaultMCPToolName,
+		ServerURL:         "https://cloud.axiomstudio.ai",
+		TmuxSocket:        "vibeflow",
+		PollInterval:      5,
+		ReviewConcurrency: 2,
+		ClaudeBinary:      "claude",
+		DefaultProvider:   "claude",
+		MCPToolName:       DefaultMCPToolName,
 		Worktree: WorktreeConfig{
 			BaseDir:       ".claude/worktrees",
 			AutoCreate:    true,
@@ -420,8 +422,23 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if len(document.Content) > 0 {
+		mapping := document.Content[0]
+		for i := 0; i+1 < len(mapping.Content); i += 2 {
+			if mapping.Content[i].Value == "review_concurrency" && mapping.Content[i+1].Tag != "!!int" {
+				return nil, fmt.Errorf("review_concurrency must be a positive integer")
+			}
+		}
+	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if cfg.ReviewConcurrency <= 0 {
+		return nil, fmt.Errorf("review_concurrency must be a positive integer")
 	}
 
 	// Migrate built-in provider configs to current defaults.

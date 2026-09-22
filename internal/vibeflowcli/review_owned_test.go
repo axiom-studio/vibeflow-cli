@@ -46,9 +46,10 @@ func TestReviewOwnedOwnerProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fixture struct {
-		Root    string
-		Config  *Config
-		Options reviewWatchOptions
+		Root     string
+		Config   *Config
+		Options  reviewWatchOptions
+		Capacity *reviewCapacity
 	}
 	if json.Unmarshal(line, &fixture) != nil {
 		t.Fatal("invalid fixture")
@@ -56,7 +57,7 @@ func TestReviewOwnedOwnerProcess(t *testing.T) {
 	SetRootDir(fixture.Root)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	handle, err := startReviewOwned(ctx, fixture.Config, "does-not-exist.yaml", fixture.Options)
+	handle, err := startReviewOwnedWithCapacity(ctx, fixture.Config, "does-not-exist.yaml", fixture.Options, fixture.Capacity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,13 +309,18 @@ func TestReviewOwnedBinaryLifetime(t *testing.T) {
 }
 
 func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
-	for _, action := range []string{"close", "cancel", "kill", "relative-paths"} {
+	for _, action := range []string{"close", "cancel", "kill", "relative-paths", "guard-kill"} {
 		t.Run(action, func(t *testing.T) {
 			repo, execution := reviewTestRepo(t)
 			root := t.TempDir()
+			capacity, err := newReviewCapacity(root, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer capacity.Close()
 			pidPath := filepath.Join(root, "provider.pids")
 			provider := filepath.Join(t.TempDir(), "claude")
-			script := "#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = 'owned-model-$literal' ] || exit 7\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\ntrap '' TERM INT\nsleep 60 &\nprintf '%s %s\\n' \"$$\" \"$!\" > " + shellQuote(pidPath) + "\nwait\n"
+			script := "#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = 'owned-model-$literal' ] || exit 7\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\ntrap '' TERM INT\nsleep 60 &\nprintf '%s %s %s\\n' \"$$\" \"$!\" \"$PPID\" > " + shellQuote(pidPath) + "\nwait\n"
 			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -404,7 +410,7 @@ func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
 					syscall.Kill(pid, syscall.SIGKILL)
 				}
 			})
-			if err := json.NewEncoder(input).Encode(map[string]any{"Root": root, "Config": cfg, "Options": opts}); err != nil {
+			if err := json.NewEncoder(input).Encode(map[string]any{"Root": root, "Config": cfg, "Options": opts, "Capacity": capacity}); err != nil {
 				t.Fatal(err)
 			}
 			ready := make(chan bool, 1)
@@ -431,7 +437,7 @@ func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
 			for time.Now().Before(deadline) {
 				data, _ := os.ReadFile(pidPath)
 				fields := strings.Fields(string(data))
-				if len(fields) == 2 {
+				if len(fields) == 3 {
 					for _, field := range fields {
 						pid, _ := strconv.Atoi(field)
 						pids = append(pids, pid)
@@ -440,9 +446,46 @@ func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-			if len(pids) != 2 || pids[0] <= 0 || pids[1] <= 0 {
+			if len(pids) != 3 || pids[0] <= 0 || pids[1] <= 0 || pids[2] <= 0 {
 				boundary, _ := os.ReadFile(filepath.Join(root, "environment-check-failed"))
 				t.Fatalf("provider descendants did not start; environment boundary %s", boundary)
+			}
+			if slot, err := capacity.tryAcquire(); err != nil || slot != nil {
+				if slot != nil {
+					slot.Close()
+				}
+				t.Fatalf("admitted work before provider cleanup: %v", err)
+			}
+			if action == "guard-kill" {
+				if err := syscall.Kill(pids[2], syscall.SIGKILL); err != nil {
+					t.Fatal(err)
+				}
+				fmt.Fprintln(input, "close")
+				if err := owner.Wait(); err != nil {
+					t.Fatal("owner could not stop quarantined runner", err)
+				}
+				if failures.Load() != 0 || unregistered.Load() != 0 {
+					t.Fatal("unverified provider cleanup was finalized")
+				}
+				markers, _ := filepath.Glob(filepath.Join(root, "review-runners", "*", "work", "*", "provider-cleanup-pending.json"))
+				if len(markers) != 1 {
+					t.Fatal("guard death lost durable cleanup uncertainty")
+				}
+				if err := capacity.Close(); err == nil {
+					t.Fatal("removed quarantined capacity group")
+				}
+				restarted, err := newReviewCapacity(root, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer restarted.Close()
+				if slot, err := restarted.tryAcquire(); err != nil || slot != nil {
+					if slot != nil {
+						slot.Close()
+					}
+					t.Fatal("guard death capacity silently restored", err)
+				}
+				return
 			}
 			if action == "kill" {
 				if err := owner.Process.Kill(); err != nil {
@@ -578,4 +621,130 @@ func TestReviewOwnedCancellationWhileStartupHandleIsUnavailable(t *testing.T) {
 		t.Fatal("cancelled startup retained runner ownership", err)
 	}
 	lock.Close()
+}
+
+func TestReviewOwnedCleanupNoticeClearsAfterSurvivingGuard(t *testing.T) {
+	previousRoot := rootDir
+	SetRootDir(t.TempDir())
+	t.Cleanup(func() { rootDir = previousRoot })
+	_, execution := reviewTestRepo(t)
+	var beats, failures atomic.Int64
+	var refuseHeartbeat atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			body["user_id"] = 42
+			json.NewEncoder(out).Encode(body)
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			beats.Add(1)
+			if refuseHeartbeat.Load() {
+				out.WriteHeader(401)
+				return
+			}
+			out.WriteHeader(204)
+		case strings.HasSuffix(r.URL.Path, "/fail"):
+			failures.Add(1)
+			out.WriteHeader(204)
+		case strings.HasSuffix(r.URL.Path, "/work"):
+			fmt.Fprint(out, `{"reviews":[]}`)
+		case r.Method == "DELETE":
+			out.WriteHeader(204)
+		default:
+			t.Errorf("unexpected recovery request %s", r.URL.Path)
+			out.WriteHeader(400)
+		}
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "token"
+	// Capability check succeeds after recovery without launching inference.
+	provider := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\necho '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	opts := reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "notice", Repository: t.TempDir(), Provider: "claude", PollInterval: time.Second, Timeout: time.Minute}
+	identity := fmt.Sprintf("%s\n1\n7\ngithub\nlocal\nnotice", server.URL)
+	digest := sha256.Sum256([]byte(identity))
+	dir := filepath.Join(RootDir(), "review-runners", hex.EncodeToString(digest[:16]))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	capacity, err := newReviewCapacity(RootDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capacity.Close()
+	p := &reviewReceipt{JobID: execution.Review.ID, RequestID: reviewUUID(), Execution: execution}
+	w := &reviewWatch{root: dir, capacity: capacity, state: reviewRunnerState{ID: execution.Attempt.RunnerID, OwnerID: 42, Pending: p}}
+	if ok, err := w.acquireCapacity(); err != nil || !ok {
+		t.Fatal(err)
+	}
+	work := w.workDir(p)
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(work, "input")
+	if err := os.WriteFile(input, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := reviewChildSpec{Binary: "/bin/sh", Args: []string{"-c", "sleep 60"}, Env: []string{"PATH=/usr/bin:/bin"}, Dir: work, InputFile: input, DeadlineAt: time.Now().Add(time.Minute).UnixMilli(), CapacityFD: 3, Cleanup: &reviewProviderCleanup{Reservation: *p.Capacity, JobID: p.JobID, RequestID: p.RequestID, AttemptID: execution.Attempt.ID}}
+	path := filepath.Join(work, "child.json")
+	if err := saveReviewJSON(path, spec); err != nil {
+		t.Fatal(err)
+	}
+	guard := exec.Command(os.Args[0], "review-child", path)
+	guard.ExtraFiles = []*os.File{w.slot}
+	pipe, err := guard.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pipe.Close()
+	if err := guard.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { guard.Process.Kill(); guard.Wait() }()
+	pipe.Write([]byte{'R'})
+	w.releaseCapacity()
+	marker := filepath.Join(work, "provider-cleanup-pending.json")
+	until := time.Now().Add(5 * time.Second)
+	for time.Now().Before(until) {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	handle, err := startReviewOwnedWithCapacity(context.Background(), cfg, "unused", opts, capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handle.Close()
+	until = time.Now().Add(5 * time.Second)
+	for time.Now().Before(until) && handle.Status() == "" {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(handle.Status(), "Provider cleanup unverified: "+marker) {
+		t.Fatal("missing private cleanup notice", handle.Status())
+	}
+	before := beats.Load()
+	refuseHeartbeat.Store(true)
+	until = time.Now().Add(4 * time.Second)
+	for time.Now().Before(until) && beats.Load() < before+2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if beats.Load() < before+2 || !strings.Contains(handle.Status(), "Provider cleanup unverified: "+marker) || failures.Load() != 0 {
+		t.Fatal("quarantine stopped heartbeats or cleared notice early")
+	}
+	refuseHeartbeat.Store(false)
+	pipe.Close()
+	guard.Wait()
+	until = time.Now().Add(8 * time.Second)
+	for time.Now().Before(until) && (handle.Status() != "" || failures.Load() != 1) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if handle.Status() != "" || failures.Load() != 1 {
+		t.Fatal("confirmed guard cleanup did not resume recovery", handle.Status())
+	}
 }
