@@ -19,12 +19,22 @@ Subcommands read `server_url` from configuration; set it during setup with boots
 ### `vibeflow` (interactive TUI)
 
 Server and API-key setup runs only for a new, uninitialized root and remains saved in `config.yaml`.
-Separately, every interactive launch asks **Launch PR review runner for this session?**
-The default is No; this choice is never saved.
+Separately, every interactive launch asks **Run PR reviews while this CLI is open?**
+The default is **Not now**; this choice is never saved.
+The prompt includes an original pixel-art owl built into the CLI, with no extra installation required.
+It blinks and moves gently while waiting; press Space to pause or resume the animation.
+Smaller terminals show a compact owl, and terminals without color retain a monochrome drawing.
 
-Choose Yes to start one local runner owned by this TUI.
-It uses the saved project, `default_work_dir` (or the current working directory), and configured model provider.
-The checkout's origin is matched against the project's existing GitHub, GitHub Enterprise, or Bitbucket repository links.
+Choose **Run reviews** to start one local runner owned by this TUI.
+The prompt shows the selected project, and startup uses its configured model provider.
+A matching remembered checkout, `default_work_dir`, or launch directory is reused first.
+Otherwise, startup checks known paths in `directory_history` and this root's saved session metadata against the project's existing GitHub, GitHub Enterprise, or Bitbucket repository links.
+The checkout's origin determines eligibility, not the saved session's project label.
+One matching checkout is selected automatically; multiple checkouts open a keyboard picker with an **Enter another path** fallback.
+Aliases and worktrees sharing the same Git repository are grouped, while separate clones remain selectable.
+If no known checkout matches, the path prompt names the selected project and expected repositories.
+A project without repository links instead asks you to link a repository in VibeFlow project settings.
+Discovery does not scan the filesystem, modify session metadata, or read another root's session history.
 Only missing, unsupported, or ambiguous details require another question.
 Native reviews use the provider's default model; gateway reviews require an explicit model.
 There is no persona or model question when a PR arrives: each review starts a fresh Principal Engineer automatically.
@@ -116,7 +126,7 @@ vibeflow review-watch --project 42 --repository-link 123 --provider claude --mod
 #### Background runner management
 
 Ordinary persona sessions do not start a review runner implicitly.
-For ordinary interactive use, choose Yes at TUI startup instead of running this command.
+For ordinary interactive use, choose **Run reviews** at TUI startup instead of running this command.
 Use explicit detached mode only when the runner must outlive the TUI, using the same root and config that contain your VibeFlow credentials.
 Stop an existing foreground watcher with Ctrl-C before enabling its background replacement.
 

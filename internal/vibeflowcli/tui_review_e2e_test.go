@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -35,6 +36,8 @@ func TestReviewTUIBinaryConsent(t *testing.T) {
 		t.Fatalf("build: %v %s", err, out)
 	}
 	repo, _ := reviewTestRepo(t)
+	launchRepo, _ := reviewTestRepo(t)
+	reviewTestGit(t, launchRepo, "remote", "set-url", "origin", "https://github.com/acme/cli.git")
 	root, binDir := t.TempDir(), t.TempDir()
 	// No sessions are needed for this scenario, and no user tmux server is used.
 	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
@@ -94,16 +97,50 @@ func TestReviewTUIBinaryConsent(t *testing.T) {
 	t.Cleanup(server.Close)
 	cfg := DefaultConfig()
 	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject = server.URL, "tui-api-canary", "66"
-	cfg.DefaultWorkDir, cfg.TmuxSocket = repo, "review-tui-test"
+	// Launching the CLI from its own checkout must still discover the project's
+	// linked checkout from directory history when no default directory is saved.
+	cfg.DefaultWorkDir, cfg.TmuxSocket = "", "review-tui-test"
+	cfg.DirectoryHistory = []string{repo}
 	cfg.Providers["claude"] = Provider{Binary: provider, Env: map[string]string{"ANTHROPIC_API_KEY": "tui-model-canary"}}
 	configPath := filepath.Join(root, "config.yaml")
 	if err := SaveConfig(cfg, configPath); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("animated_prompt_does_not_resolve_or_register", func(t *testing.T) {
+		before, links, lookups := registrations.Load(), repositories.Load(), projects.Load()
+		terminal := startReviewTUITerminal(t, binary, launchRepo, root, binDir, "CLICOLOR_FORCE=1")
+		terminal.await(t, "Run PR reviews while this CLI is open?")
+		terminal.await(t, "Run reviews")
+		terminal.await(t, "Not now")
+		initial := terminal.output.RawString()
+		// Stay on the real consent screen through a complete blink interval.
+		select {
+		case <-terminal.done:
+			t.Fatalf("TUI exited while awaiting consent: %v\n%s", terminal.err, terminal.output.String())
+		case <-time.After(5500 * time.Millisecond):
+		}
+		output := terminal.output.RawString()
+		if !regexp.MustCompile(`\x1b\[[0-9;]*48;(2|5);[0-9;]+m`).MatchString(output) {
+			t.Fatal("color-enabled owl did not render colored terminal cells")
+		}
+		if len(output) <= len(initial) {
+			t.Fatal("owl never animated while waiting for consent")
+		}
+		if registrations.Load() != before || repositories.Load() != links || projects.Load() != lookups {
+			t.Fatal("idling on the animated prompt resolved or registered a runner before consent")
+		}
+		terminal.send(t, "\r")
+		terminal.await(t, "q: quit")
+		terminal.send(t, "q")
+		terminal.wait(t, false)
+		if registrations.Load() != before {
+			t.Fatal("the animated prompt changed the default Not now choice")
+		}
+	})
 	for _, choice := range []string{"\r", "n"} {
 		t.Run(fmt.Sprintf("decline_%q", choice), func(t *testing.T) {
-			terminal := startReviewTUITerminal(t, binary, repo, root, binDir)
-			terminal.await(t, "Launch PR review runner for this session?")
+			terminal := startReviewTUITerminal(t, binary, launchRepo, root, binDir)
+			terminal.await(t, "Run PR reviews while this CLI is open?")
 			if strings.Contains(terminal.output.String(), "VibeFlow Server URL:") {
 				t.Fatal("saved YAML did not bypass authentication setup")
 			}
@@ -119,8 +156,8 @@ func TestReviewTUIBinaryConsent(t *testing.T) {
 	for _, killOwner := range []bool{false, true} {
 		t.Run(fmt.Sprintf("accept_kill_%t", killOwner), func(t *testing.T) {
 			before, beats, links, lookups := registrations.Load(), heartbeats.Load(), repositories.Load(), projects.Load()
-			terminal := startReviewTUITerminal(t, binary, repo, root, binDir)
-			terminal.await(t, "Launch PR review runner for this session?")
+			terminal := startReviewTUITerminal(t, binary, launchRepo, root, binDir)
+			terminal.await(t, "Run PR reviews while this CLI is open?")
 			if registrations.Load() != before {
 				t.Fatal("a previous Yes was reused before this session's consent")
 			}
@@ -154,14 +191,62 @@ func TestReviewTUIBinaryConsent(t *testing.T) {
 	// A remembered repository/provider is reusable, but consent must still be No.
 	t.Run("decline_saved_preferences", func(t *testing.T) {
 		before := registrations.Load()
-		terminal := startReviewTUITerminal(t, binary, repo, root, binDir)
-		terminal.await(t, "Launch PR review runner for this session?")
+		terminal := startReviewTUITerminal(t, binary, launchRepo, root, binDir)
+		terminal.await(t, "Run PR reviews while this CLI is open?")
 		terminal.send(t, "\r")
 		terminal.await(t, "q: quit")
 		terminal.send(t, "q")
 		terminal.wait(t, false)
 		if registrations.Load() != before {
 			t.Fatal("saved review preferences authorized another runner")
+		}
+	})
+	t.Run("choose_second_known_checkout", func(t *testing.T) {
+		secondRepo, _ := reviewTestRepo(t)
+		pickerRoot := t.TempDir()
+		pickerConfig := *cfg
+		pickerConfig.DirectoryHistory = []string{repo, secondRepo}
+		if err := SaveConfig(&pickerConfig, filepath.Join(pickerRoot, "config.yaml")); err != nil {
+			t.Fatal(err)
+		}
+		before, beats, priorStops := registrations.Load(), heartbeats.Load(), stopped.Load()
+		terminal := startReviewTUITerminal(t, binary, launchRepo, pickerRoot, binDir)
+		terminal.await(t, "Run PR reviews while this CLI is open?")
+		terminal.send(t, "y")
+		terminal.await(t, "local checkout for")
+		terminal.await(t, "Enter another path")
+		if registrations.Load() != before {
+			t.Fatal("multiple known checkouts registered a runner before selection")
+		}
+		terminal.send(t, "\x1b[B\r")
+		terminal.await(t, "PR review runner online")
+		if registrations.Load() != before+1 || heartbeats.Load() <= beats {
+			t.Fatal("choosing the second checkout did not register and heartbeat")
+		}
+		data, err := os.ReadFile(filepath.Join(pickerRoot, "review-runner-preferences.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var preferences reviewStartupPreferences
+		if err := json.Unmarshal(data, &preferences); err != nil {
+			t.Fatal(err)
+		}
+		selected, err := filepath.EvalSymlinks(preferences.Repository)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := filepath.EvalSymlinks(secondRepo)
+		if err != nil || selected != want {
+			t.Fatalf("checkout picker saved %q; want %q: %v", selected, want, err)
+		}
+		terminal.send(t, "q")
+		terminal.wait(t, false)
+		deadline := time.Now().Add(8 * time.Second)
+		for stopped.Load() != priorStops+1 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if stopped.Load() != priorStops+1 {
+			t.Fatal("closing the TUI did not stop the selected checkout's runner")
 		}
 	})
 }
@@ -178,9 +263,13 @@ func (b *reviewTUIOutput) Write(p []byte) (int, error) {
 }
 
 func (b *reviewTUIOutput) String() string {
+	return ansi.Strip(b.RawString())
+}
+
+func (b *reviewTUIOutput) RawString() string {
 	b.Lock()
 	defer b.Unlock()
-	return ansi.Strip(b.text.String())
+	return b.text.String()
 }
 
 type reviewTUITerminal struct {
@@ -190,7 +279,7 @@ type reviewTUITerminal struct {
 	err    error
 }
 
-func startReviewTUITerminal(t *testing.T, binary, repo, root, binDir string) *reviewTUITerminal {
+func startReviewTUITerminal(t *testing.T, binary, repo, root, binDir string, env ...string) *reviewTUITerminal {
 	t.Helper()
 	command := "stty rows 30 cols 100; exec " + shellQuote(binary) + " --root " + shellQuote(root)
 	args := []string{"-q", "/dev/null", "/bin/sh", "-c", command}
@@ -200,7 +289,11 @@ func startReviewTUITerminal(t *testing.T, binary, repo, root, binDir string) *re
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	cmd := exec.CommandContext(ctx, "script", args...)
 	cmd.Dir = repo
-	cmd.Env = []string{"PATH=" + binDir + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "TERM=xterm-256color", "LANG=en_US.UTF-8", "NO_COLOR=1"}
+	cmd.Env = []string{"PATH=" + binDir + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "TERM=xterm-256color", "LANG=en_US.UTF-8"}
+	if len(env) == 0 {
+		env = []string{"NO_COLOR=1"}
+	}
+	cmd.Env = append(cmd.Env, env...)
 	terminal := &reviewTUITerminal{done: make(chan struct{})}
 	var err error
 	terminal.input, err = cmd.StdinPipe()
