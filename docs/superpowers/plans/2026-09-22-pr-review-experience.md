@@ -87,7 +87,7 @@ Use graph-first discovery and coverage checks, followed by exact-source reads wh
 **Consumes:** Existing `cleanOrphanWorktrees(wm *WorktreeManager, store *Store, out io.Writer) error`, `RemoveIfClean`, `initTestRepo(t)`, and `withTempRoot(t)` from the offered change set.
 **Produces:** The same cleanup behavior, verified and committed without personal artifacts.
 
-- [ ] **Step 1: Record the exact baseline and run the offered regression before changing it.**
+- [x] **Step 1: Record the exact baseline and run the offered regression before changing it.**
 
 ```sh
 git status --short
@@ -99,7 +99,7 @@ go test ./internal/vibeflowcli -run '^TestCleanOrphanWorktrees$' -count=1 -v
 Expected: the isolated test preserves dirty, in-use, and outside worktrees and the removed worktree's branch.
 Read all seven diffs; do not run `worktrees --clean` against the user's actual repositories.
 
-- [ ] **Step 2: Add the smallest missing safety assertion only if the offered test omits it.**
+- [x] **Step 2: Add the smallest missing safety assertion only if the offered test omits it.**
 
 For example, ensure the shared removal helper itself rejects untracked work rather than relying only on caller filtering:
 
@@ -122,7 +122,7 @@ func TestRemoveIfCleanPreservesUntrackedFile(t *testing.T) {
 
 Run this test before any corrective edit; a passing offered implementation needs no manufactured failing test.
 
-- [ ] **Step 3: Correct only demonstrated cleanup defects, then run the affected suite.**
+- [x] **Step 3: Correct only demonstrated cleanup defects, then run the affected suite.**
 
 ```sh
 go test ./internal/vibeflowcli -run 'Test(CleanOrphanWorktrees|RemoveIfClean|WorktreeManager)' -count=1
@@ -131,7 +131,7 @@ git diff --check
 
 Keep non-force Git removal, branch retention, symlink-aware scope checks, and refusal on status errors.
 
-- [ ] **Step 4: Commit exactly the seven offered tracked paths plus the scoped test edits.**
+- [x] **Step 4: Commit exactly the seven offered tracked paths plus the scoped test edits.**
 
 ```sh
 git add -- README.md docs/VibeFlow-CLI/docs/cli-reference.md internal/vibeflowcli/commands.go internal/vibeflowcli/tui.go internal/vibeflowcli/tui_worktrees.go internal/vibeflowcli/worktree.go internal/vibeflowcli/worktree_test.go
@@ -147,7 +147,7 @@ git commit -m "feat: preserve work while cleaning orphan worktrees"
 **Consumes:** The seven tracked diffs from `.claude/worktrees/cra-review-runner`.
 **Produces:** Existing proposed-in-WIP `findReviewStartupCheckout(ctx context.Context, path string, repositories []reviewStartupRepository) *reviewStartupCheckout`, project-specific missing-link errors, and the tested startup/owl UI.
 
-- [ ] **Step 1: Run the CRA tests in their source worktree and check patch applicability.**
+- [x] **Step 1: Run the CRA tests in their source worktree and check patch applicability.**
 
 ```sh
 git -C .claude/worktrees/cra-review-runner diff --check
@@ -157,13 +157,13 @@ go -C .claude/worktrees/cra-review-runner test ./internal/vibeflowcli -run 'Test
 
 Inspect any failure before copying changes; test availability is not proof that they pass.
 
-- [ ] **Step 2: Transfer only the audited tracked hunks with `apply_patch`.**
+- [x] **Step 2: Transfer only the audited tracked hunks with `apply_patch`.**
 
 Keep later-main fixes and the Task 1 documentation additions.
 Do not copy complete old files over current source or copy the source worktree's runtime files.
 The checkout helper must still use the actual Git origin plus Git common-directory identity, not session project labels.
 
-- [ ] **Step 3: Run the transferred tests on the integration branch.**
+- [x] **Step 3: Run the transferred tests on the integration branch.**
 
 ```sh
 go test ./internal/vibeflowcli -run 'TestReviewStartup|TestReviewTUIBinaryConsent|TestReviewRunnerStatus' -count=1 -v
@@ -172,7 +172,7 @@ git diff --check
 
 Require existing tests for stale remembered links, symlink/worktree deduplication, distinct clones, narrow terminals, consent, and owner death to pass.
 
-- [ ] **Step 4: Commit only those seven paths.**
+- [x] **Step 4: Commit only those seven paths.**
 
 ```sh
 git add -- docs/VibeFlow-CLI/docs/cli-reference.md docs/VibeFlow-CLI/docs/configuration.md internal/vibeflowcli/review_startup.go internal/vibeflowcli/review_startup_test.go internal/vibeflowcli/tui_review_startup.go internal/vibeflowcli/tui_review_startup_test.go internal/vibeflowcli/tui_review_e2e_test.go
@@ -212,7 +212,7 @@ Add `Capacity *reviewCapacity` to `reviewOwnedSpec`, `capacity *reviewCapacity` 
 Only `0` and `3` are valid capacity descriptor values.
 `tryAcquire` is nonblocking: `(nil, nil)` means saturation, while actual filesystem/locking errors remain errors.
 
-- [ ] **Step 1: Add failing admission tests and configuration cases.**
+- [x] **Step 1: Add failing admission tests and configuration cases.**
 
 ```go
 func TestReviewCapacityLimits(t *testing.T) {
@@ -241,7 +241,7 @@ Add table cases for omitted YAML giving `2`, positive values `1` and `4`, and re
 Check the YAML node for an explicitly present null before config migration can overwrite the invalid input.
 Run `go test ./internal/vibeflowcli -run 'TestReviewCapacity|TestReviewConcurrency' -count=1`; expect undefined new symbols initially.
 
-- [ ] **Step 2: Implement file-slot admission using existing nonblocking flock behavior.**
+- [x] **Step 2: Implement file-slot admission using existing nonblocking flock behavior.**
 
 Create a private `os.MkdirTemp` group under the CLI root, with private slot files and no new dependency or coordinator service.
 Create slot files lazily as they are considered, not by allocating all configured slots up front; cleanup visits only that group's existing validated files.
@@ -261,7 +261,7 @@ An active or submission-pending receipt retains its slot through result handoff.
 Heartbeat and work discovery remain independent of waiting for capacity.
 Recovery-bearing bindings get admission before fresh claimers during initial reconciliation.
 
-- [ ] **Step 3: Make slot lifetime include provider-group cleanup.**
+- [x] **Step 3: Make slot lifetime include provider-group cleanup.**
 
 ```go
 if w.slot != nil {
@@ -294,7 +294,7 @@ if slot, err := capacity.tryAcquire(); err != nil || slot != nil {
 In that existing test, `capacity` is the new group passed to `startReviewOwnedWithCapacity`; retain the existing real descendant fixture and readiness synchronization.
 Also restart the capacity group with an unresolved cleanup marker and assert that the quarantined slot is not silently restored.
 
-- [ ] **Step 4: Pin the submission and timeout regressions before correcting them.**
+- [x] **Step 4: Pin the submission and timeout regressions before correcting them.**
 
 Extend `TestReviewSavedResultSurvivesLostResponseWithoutRelaunch` with result-submission `401` and `403` responses followed by restored authorization.
 Assert durable `Pending`, unchanged result bytes, no completed marker, and no new provider launch before the same result is acknowledged.
@@ -313,7 +313,7 @@ if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errReviewConnectio
 Apply this after normal poll pacing, not in a tight retry loop.
 Release admission only after acknowledged receipt finalization or verified cancellation cleanup.
 
-- [ ] **Step 5: Run runner tests and commit this independently testable layer.**
+- [x] **Step 5: Run runner tests and commit this independently testable layer.**
 
 ```sh
 go test ./internal/vibeflowcli -run 'TestReview(Capacity|Concurrency|Owned|SavedResult|Submission)' -count=1 -timeout=180s
@@ -345,7 +345,7 @@ func (db *DB) ListVibeflowProjectsPage(ctx context.Context, orgID string,
     userID int64, includeArchived bool, afterID int64, limit int) (VibeflowProjectPage, error)
 ```
 
-- [ ] **Step 1: Add failing HTTP and database paging regressions.**
+- [x] **Step 1: Add failing HTTP and database paging regressions.**
 
 Use the existing project fixture to create 205 visible projects plus foreign-organization, private-other-owner, archived, rejected, and ACL-denied projects.
 Page with limits `1` and `100`; assert every visible ID appears once and excluded IDs never appear.
@@ -375,7 +375,7 @@ if len(seen) != 205 { t.Fatalf("truncated projects: %d", len(seen)) }
 
 Here `db`, `orgID`, and `userID` are the existing fixture's database and authenticated scope, after seeding the 205 projects.
 
-- [ ] **Step 2: Implement stable ID-descending keyset pagination.**
+- [x] **Step 2: Implement stable ID-descending keyset pagination.**
 
 Bind `p.id < afterID` only after the first page, order by `p.id DESC`, and fetch `limit+1` to determine whether another page exists.
 Reuse the existing access predicate and row decoding without broad project-query refactoring.
@@ -383,7 +383,7 @@ Require positive numeric cursors and limits between 1 and 100; use parameter bin
 Check `rows.Err()` and propagate context cancellation.
 Set `Cache-Control: no-store` on the new response.
 
-- [ ] **Step 3: Run both authorization and pagination tests, then commit.**
+- [x] **Step 3: Run both authorization and pagination tests, then commit.**
 
 ```sh
 go test ./database ./handlers -run 'Test.*Project.*(Page|Paginat|Access|ACL|Private)' -count=1
@@ -435,7 +435,7 @@ func (s *reviewSupervisor) Close() error
 Serialize reconciliation under that mutex; execute it outside Bubble Tea's update goroutine and return immutable status snapshots in messages.
 Cancellation precedes waiting for the mutex during `Close`, so an in-progress child startup can terminate.
 
-- [ ] **Step 1: Reproduce single-project coverage with a real-checkout HTTP fixture.**
+- [x] **Step 1: Reproduce single-project coverage with a real-checkout HTTP fixture.**
 
 ```go
 func TestReviewDiscoveryIgnoresDefaultProject(t *testing.T) {
@@ -466,7 +466,7 @@ func TestReviewDiscoveryIgnoresDefaultProject(t *testing.T) {
 Run `go test ./internal/vibeflowcli -run TestReviewDiscovery -count=1`; expect failure before implementation.
 Extend this fixture to three different repository remotes across two projects for the spec's end-user acceptance case.
 
-- [ ] **Step 2: Implement discovery as reads plus remote validation.**
+- [x] **Step 2: Implement discovery as reads plus remote validation.**
 
 Read `NewStore().readFile()` once, not mutation-capable `Store.List()`.
 Collect configured directory, CWD, history, and saved working/worktree paths; canonicalize and validate them using Task 2's helper.
@@ -479,7 +479,7 @@ For each project/repository binding, prefer a valid remembered path, deduplicate
 Isolate per-project failures and exclude `default_project` from filtering logic.
 Persist reusable checkout choices by stable binding identity without storing credentials or session consent; read the old single-choice preference format as a migration source.
 
-- [ ] **Step 3: Replace single-runner startup ownership with reconciliation.**
+- [x] **Step 3: Replace single-runner startup ownership with reconciliation.**
 
 ```go
 bindingID := reviewBackgroundID(cfg.ServerURL, binding.Options)
@@ -496,7 +496,7 @@ Retry failed starts only on a subsequent reconciliation or explicit retry, not o
 Keep healthy runners on transient discovery errors; stop accepting work for definitively removed/revoked scope.
 Close all owned liveness pipes before waiting concurrently for their exits, then clean up verified-idle capacity files.
 
-- [ ] **Step 4: Keep startup non-blocking and add runner-status actions.**
+- [x] **Step 4: Keep startup non-blocking and add runner-status actions.**
 
 After the one session-level consent, start all resolved bindings and enter the main TUI even if some checkouts are missing.
 Preserve the startup owl and accessibility behavior from Task 2.
@@ -506,7 +506,7 @@ Trigger reconciliation on startup, explicit `r` refresh, known-checkout changes,
 Queue polling retains its existing faster interval.
 Keep provider/model selection session-wide; when the configured provider needs a model or is unavailable, show one actionable setup choice without prompting once per repository.
 
-- [ ] **Step 5: Verify consent, partial failures, duplicate ownership, and shutdown.**
+- [x] **Step 5: Verify consent, partial failures, duplicate ownership, and shutdown.**
 
 Extend the real `TestReviewTUIBinaryConsent` fixture rather than introducing a second terminal harness.
 Assert zero registration after decline, three registrations after consent, continued main-screen access with a fourth missing checkout, and no extra registration after repeated refresh.
@@ -546,7 +546,7 @@ func (c *Client) CreatePRReviewCommentReaction(ctx context.Context,
     content string) (*PRReviewReaction, error)
 ```
 
-- [ ] **Step 1: Reproduce silent command receipt through signed ingress.**
+- [x] **Step 1: Reproduce silent command receipt through signed ingress.**
 
 ```go
 func TestPRReviewCommandFeedbackDeduplicatesIngress(t *testing.T) {
@@ -567,7 +567,7 @@ func TestPRReviewCommandFeedbackDeduplicatesIngress(t *testing.T) {
 Extend the current command parser/ingress fixtures for bad signature, edited comments, bot authors, extra prose, and one repository linked to two projects.
 The database row count and remote side-effect count remain one per command identity in that organization, not one per event/project.
 
-- [ ] **Step 2: Add the durable receipt and connect it to existing intake.**
+- [x] **Step 2: Add the durable receipt and connect it to existing intake.**
 
 ```sql
 CREATE TABLE vibeflow_pr_review_command_feedback (
@@ -617,7 +617,7 @@ Update the receipt in the same transaction that finalizes a command event.
 An accepted authorized job supplies its sticky comment link when available; unresolved events defer a rejection; only an entirely blocked command gets the fixed rejection response.
 Reuse publication generations, claim tokens, retry timing, and stale-write restoration semantics for both channels, named `reaction` and `reply`.
 
-- [ ] **Step 3: Add reaction delivery and marker-bound reply recovery to the existing worker.**
+- [x] **Step 3: Add reaction delivery and marker-bound reply recovery to the existing worker.**
 
 Use POST `/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions` with `{"content":"eyes"}` through `prReviewPublicationRequest`.
 Both `200` and `201` are success; retrying the same publisher/comment/content returns the existing reaction, so do not add a preflight reaction-list call.
@@ -646,7 +646,7 @@ func TestPRReviewCommandFeedbackDoesNotRenderRawErrors(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Verify lost responses, authorization rejection, and retry isolation.**
+- [x] **Step 4: Verify lost responses, authorization rejection, and retry isolation.**
 
 Extend `newPRReviewPublicationHTTP` with a reaction endpoint storing its first reaction before dropping the response, then returning the same ID with `200` on retry.
 Use its existing `loseComment`, `beforeComment`, and `afterComment` controls for reply recovery and stale-write tests.
@@ -654,7 +654,7 @@ Test absent identity, read-only repository permission, revoked project access, d
 Require unchanged review budgets, no unauthorized attempts, one reaction, one reply, preserved job publication, and no provider-error canary.
 Test `429`, `5xx`, missing Issues write permission, publisher changes, worker restarts, and out-of-order acknowledgements.
 
-- [ ] **Step 5: Run focused backend tests and commit.**
+- [x] **Step 5: Run focused backend tests and commit.**
 
 ```sh
 go test ./database ./handlers ./github -run 'TestPRReview.*(Command|Feedback|Publication)' -count=1
@@ -706,7 +706,7 @@ func (db *DB) RenewPRReviewExecution(ctx context.Context, e PRReviewExecutor,
     id, token string, progress ...*PRReviewProgressInput) (*PRReviewAttempt, error)
 ```
 
-- [ ] **Step 1: Add failing HTTP fencing and legacy-client tests.**
+- [x] **Step 1: Add failing HTTP fencing and legacy-client tests.**
 
 ```go
 func TestPRReviewExecutionHTTPProgress(t *testing.T) {
@@ -735,7 +735,7 @@ func TestPRReviewExecutionHTTPProgress(t *testing.T) {
 
 Add wrong head/base, another runner/user, expired lease, completed attempt, and superseding-revision cases to this fixture before implementing persistence.
 
-- [ ] **Step 2: Add cumulative milestone storage in the existing renewal transaction.**
+- [x] **Step 2: Add cumulative milestone storage in the existing renewal transaction.**
 
 ```sql
 ALTER TABLE vibeflow_pr_review_attempts ADD COLUMN progress_version INTEGER NOT NULL DEFAULT 0;
@@ -751,7 +751,7 @@ Ignore false flags for already-observed milestones; reject review completion wit
 The server's accepted-result transaction alone controls `ResultRecorded`.
 Accept an empty `{}` renewal without detailed progress from older clients.
 
-- [ ] **Step 3: Share one safe projection and checklist renderer.**
+- [x] **Step 3: Share one safe projection and checklist renderer.**
 
 Populate the current active round/attempt first; when none is active, use only the latest relevant terminal attempt at the current revisions.
 A fresh queued round, including a same-SHA rerun, starts with a fresh checklist rather than inheriting earlier completed milestones.
@@ -773,14 +773,14 @@ Add waiting, failure, cancellation, and unavailable annotations without checking
 Preserve existing findings, sanitization, content bounds, revision links, and check-success rules.
 Use validated repository/revision/path components for source links, not model-supplied arbitrary URLs.
 
-- [ ] **Step 4: Verify publication transitions and stale-state rejection.**
+- [x] **Step 4: Verify publication transitions and stale-state rejection.**
 
 Drive the existing `newPRReviewPublicationHTTP` fixture through claim, checkout, completed review, accepted result, and a new revision.
 Assert one sticky comment and increasing meaningful updates, unchanged generation for empty heartbeat, no stale green check, and reset state for same-SHA new rounds.
 Use existing lost-response and stale-write restoration controls and assert repeated/decreasing progress reports cannot regress timestamps.
 Test public DTO serialization for the absence of attempt tokens, prompts, model output, and environment canaries.
 
-- [ ] **Step 5: Verify both database engines and commit.**
+- [x] **Step 5: Verify both database engines and commit.**
 
 ```sh
 go test ./database ./handlers -run 'TestPRReview.*(Progress|Execution|Summary|Session|Publication)' -count=1
@@ -815,7 +815,7 @@ type reviewProgressInput struct {
 func reviewRenewBody(execution reviewExecution, checkoutPrepared, reviewCompleted bool) any
 ```
 
-- [ ] **Step 1: Write the compatibility test before touching renewal.**
+- [x] **Step 1: Write the compatibility test before touching renewal.**
 
 ```go
 func TestReviewRenewBodyCapability(t *testing.T) {
@@ -837,7 +837,7 @@ func TestReviewRenewBodyCapability(t *testing.T) {
 
 Run `go test ./internal/vibeflowcli -run TestReviewRenewBodyCapability -count=1`; expect missing symbols initially.
 
-- [ ] **Step 2: Implement capability-gated bodies and cumulative stage notification.**
+- [x] **Step 2: Implement capability-gated bodies and cumulative stage notification.**
 
 ```go
 func reviewRenewBody(e reviewExecution, prepared, completed bool) any {
@@ -859,7 +859,7 @@ Mark code review completed only after the provider exits successfully and the re
 Never mark success on process start, on an arbitrary output line, or on an error result.
 Send `{}` if the capability is absent or unsupported; do not retry a rejected progress body as legacy `{}` to mask an authorization/validation error.
 
-- [ ] **Step 3: Exercise real stage timing and lease cancellation in existing runner fixtures.**
+- [x] **Step 3: Exercise real stage timing and lease cancellation in existing runner fixtures.**
 
 Use the existing fake provider with a readiness barrier: hold it after checkout, observe prepared progress at the HTTP renewal endpoint, then release it and observe accepted completion.
 Add cases for checkout failure, malformed provider result, lost renewal response, old backend without capability, and lease rejection after a stage signal.
@@ -867,7 +867,7 @@ Assert only one renewal loop exists, the capability never enters model environme
 If an interim stage cannot be delivered before termination, preserve that uncertainty; accepted results may establish completion, but missing checkout evidence must not be fabricated.
 Keep result submission on the durable receipt path regardless of best-effort interim visibility.
 
-- [ ] **Step 4: Run the focused and race suites and commit.**
+- [x] **Step 4: Run the focused and race suites and commit.**
 
 ```sh
 go test ./internal/vibeflowcli -run 'TestReview(Renew|Progress|Lease|Execution|SavedResult)' -count=1 -timeout=180s
@@ -976,7 +976,7 @@ func (c *Client) listReviewSummaryFindings(ctx context.Context,
 Validate every finding's job identity and page bounds before rendering it through terminal sanitization.
 No detail reads may call authenticated execution/brief endpoints or put attempt fencing credentials in the UI model.
 
-- [ ] **Step 1: Replace the deliberate Enter no-op regression with safe navigation tests.**
+- [x] **Step 1: Replace the deliberate Enter no-op regression with safe navigation tests.**
 
 ```go
 func TestReviewEnterOpensReadOnlyDetail(t *testing.T) {
@@ -999,7 +999,7 @@ func TestReviewSessionNamesIncludeProject(t *testing.T) {
 Preserve the existing negative assertions for deletion, branch changes, persona controls, tmux capture, and ordinary metadata.
 Use real `tea.KeyEnter`, not text spelling that accidentally tests a different key.
 
-- [ ] **Step 2: Add per-project summary paging and immutable read results.**
+- [x] **Step 2: Add per-project summary paging and immutable read results.**
 
 Maintain cursor, next cursor, warning, and request generation separately for each project inside `Model`.
 Increment a project's generation before dispatch and include project ID, requested cursor, and generation in its result message.
@@ -1018,7 +1018,7 @@ Extend `TestReviewSessionsDelayedHTTPPageCannotWin` to two projects, with one de
 Add a queued summary with no sessions and verify it remains selectable and shows waiting for runner/checkout.
 Reject oversized pages, repeated cursors, foreign project IDs, malformed job IDs, and duplicate rows using the existing bounded request pattern.
 
-- [ ] **Step 3: Add the read-only detail view and share keyboard/mouse activation.**
+- [x] **Step 3: Add the read-only detail view and share keyboard/mouse activation.**
 
 Add `ViewReviewDetail` to `ViewState` and route both Enter and second-click activation through `activateSession`.
 For an ordinary session it returns the existing attach command; for a review it opens detail state and requests the safe summary.
@@ -1033,7 +1033,7 @@ For local diagnostics, correlate owned runner state and receipt with runner ID, 
 Render only its validated category, stage, code, signal, and duration, never the receipt or attempt token.
 Current code retains no provider transcript, so show `Review transcript unavailable` rather than adding raw-output persistence or attaching tmux.
 
-- [ ] **Step 4: Validate external links and test the opener without launching it.**
+- [x] **Step 4: Validate external links and test the opener without launching it.**
 
 ```go
 func TestReviewExternalCommandRejectsUnsafeLinks(t *testing.T) {
@@ -1056,7 +1056,7 @@ Unsupported systems receive an actionable error with the safe displayed URL.
 No shell, command substitution, or interpolated command string is involved.
 An unavailable browser command becomes a TUI notice, not a TUI exit.
 
-- [ ] **Step 5: Run navigation, history, and terminal regressions and commit.**
+- [x] **Step 5: Run navigation, history, and terminal regressions and commit.**
 
 ```sh
 go test ./internal/vibeflowcli -run 'TestReview(Enter|Session|External|Managed|TUI|List)' -count=1 -timeout=180s
@@ -1073,7 +1073,7 @@ Stage only Task 9 files; commit as `feat: open cross-project review details from
 **Extend:** `internal/vibeflowcli/tui_review_e2e_test.go`, `axiomcloud/handlers/vibeflow_pr_review_command_feedback_test.go`, and existing backend publication/execution fixtures.
 **Update:** Existing CLI reference/configuration pages with `review_concurrency`, runner-status navigation, review-detail controls, and truthful logging limitations.
 
-- [ ] **Step 1: Exercise the complete CLI flow in isolated repositories.**
+- [x] **Step 1: Exercise the complete CLI flow in isolated repositories.**
 
 Expand the existing real-PTY fixture to three repositories/two projects and a fourth missing checkout.
 Use fixture model processes with explicit start/finish barriers, not paid model calls.
@@ -1081,7 +1081,7 @@ Assert two active providers, zero early claim for the third, eventual execution 
 Exercise Enter/mouse review details, open-link command construction, current progress, quit, restart, and externally owned runner survival.
 Keep same-repository PRs serial and verify an unresolved cleanup quarantine does not become new capacity on restart.
 
-- [ ] **Step 2: Exercise the complete signed webhook/publication lifecycle.**
+- [x] **Step 2: Exercise the complete signed webhook/publication lifecycle.**
 
 Use a real migrated isolated backend database and the existing HTTP GitHub protocol fixture.
 Submit the signed recognized command, duplicate its delivery, process feedback, authorize and claim the job, renew with the Task 8 payload, accept the result, and process publication.
@@ -1090,7 +1090,7 @@ Repeat with authorization failure and an automatic PR-open policy; the first mus
 Feed the exact safe summary wire fixtures into the CLI client tests to catch cross-repository field-name or capability drift.
 This is local protocol acceptance, not proof that the changes are deployed to UAT.
 
-- [ ] **Step 3: Run final CLI checks with paid-provider acceptance disabled.**
+- [x] **Step 3: Run final CLI checks with paid-provider acceptance disabled.**
 
 ```sh
 env VIBEFLOW_REVIEW_PROVIDER_ACCEPTANCE= go test ./... -count=1
@@ -1103,7 +1103,7 @@ git diff --check
 Run commands with sufficient per-test timeouts for the explicit 30-second timeout regression.
 Report skipped PTY/process tests if their tools or platform are unavailable rather than claiming those cases passed.
 
-- [ ] **Step 4: Run backend checks with its required Go 1.26.5 toolchain.**
+- [x] **Step 4: Run backend checks with its required Go 1.26.5 toolchain.**
 
 ```sh
 env -u PR_REVIEW_POSTGRES_DSN go test ./database ./handlers ./github -count=1
@@ -1120,7 +1120,7 @@ Test fresh install, upgrade from the pinned baseline, and down/up round trips ag
 If no disposable service is available, report PostgreSQL validation as outstanding and do not claim the server changes are release-ready.
 Fix trivial failures in touched paths; report unrelated baseline failures separately without hiding them.
 
-- [ ] **Step 5: Review both complete diffs and hand off only the verified result.**
+- [x] **Step 5: Review both complete diffs and hand off only the verified result.**
 
 Run a fresh whole-branch review across both repositories, including uncommitted-work integration, process ownership, authorization, migration compatibility, and stale publication recovery.
 With subagent-driven execution, retain the per-task review gates as well as this final cross-repository check.
@@ -1139,3 +1139,25 @@ Recommended execution method: subagent-driven, with sequential ownership within 
 The task boundaries involve process lifetime, durable external writes, and authorization, so independent task reviews are worth the extra contexts.
 Native execution remains available: one implementer performs all tasks followed by a fresh whole-branch review.
 Implementation begins only after the user reviews this plan and selects the execution method.
+
+## Verified local completion
+
+All ten implementation tasks and the final cross-repository review are complete.
+CLI product and test head: `fd1636fb66b11248edbad9f32577ead034973c8b`.
+Backend head: `b073e0f875d8e1db83aadd86cc1b22c8156e42d5`.
+Both repositories retain the local `feat/pr-review-experience` branch; nothing was pushed, merged, or deployed.
+
+CLI full normal tests passed in 165.464 seconds and full race tests in 213.032 seconds, with vet, build, whitespace, real PTY capacity/navigation, and captured backend-wire checks passing.
+Backend affected-package normal and race checks passed, followed by a final full database check in 29.995 seconds after the last lifecycle fix.
+The final fix's focused race checks passed for database and handlers, and disposable PostgreSQL persistence plus migration down/up/backfill passed in 85.484 seconds.
+SQLite fresh/upgrade/down-up checks also passed.
+Optional user-checkout acceptance lacked its input variables, and installed provider/supervisor acceptance was intentionally disabled to avoid paid model calls.
+
+The final review required a private persisted pending-round marker because nested pause/provider-close transitions otherwise lose the distinction between an unclaimed rerun and a prior completed review.
+The additive SQLite/PostgreSQL migration conservatively hides ambiguous legacy stopped-current-checklist completion while retaining historical rounds and sessions.
+The original intermittent macOS parent-death observation remains unexplained; it did not recur in the final normal or race suites, and it is not claimed fixed.
+
+The temporary rollout remains default-off behind `--cra`, with separate consent on every opted-in TUI launch.
+The repository-local binary was rebuilt; the global installed CLI was not replaced.
+The original CRA worktree, personal configuration, instruction files, runtime state, and detailed local review reports are preserved.
+GitHub reactions require the application's Issues write permission, and live deployment, identity/access repair, and review-budget grants remain outside this implementation.
