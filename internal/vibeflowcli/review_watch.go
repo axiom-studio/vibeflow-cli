@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -601,6 +602,26 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	defer cancelDeadline()
 	ctx, cancel := context.WithCancelCause(deadlineCtx)
 	defer cancel(nil)
+	var progress atomic.Uint32
+	progressSignal := make(chan struct{}, 1)
+	progressAttempted := make(chan struct{}, 1)
+	var attemptedProgress atomic.Uint32
+	markProgress := func(bit uint32) {
+		for {
+			old := progress.Load()
+			if old&bit != 0 || !progress.CompareAndSwap(old, old|bit) {
+				if old&bit != 0 {
+					return
+				}
+				continue
+			}
+			select {
+			case progressSignal <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}
 	// This loop cancels the child at the last acknowledged lease expiry, even
 	// when renewal fails because the network is offline.
 	renewDone := make(chan struct{})
@@ -621,14 +642,25 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			case <-ctx.Done():
 				return
 			case <-time.After(delay):
+			case <-progressSignal:
 			}
 			callCtx, stop := context.WithDeadline(ctx, expiry)
 			var renewed reviewExecution
+			milestones := progress.Load()
 			err := w.client.reviewRequest(callCtx, "POST", w.prefix()+"/heartbeat", struct{}{}, nil)
+			renewAttempted := false
 			if err == nil {
-				err = w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", struct{}{}, &renewed)
+				renewAttempted = true
+				err = w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", reviewRenewBody(*p.Execution, milestones&1 != 0, milestones&2 != 0), &renewed)
 			}
 			stop()
+			if renewAttempted {
+				attemptedProgress.Store(milestones)
+				select {
+				case progressAttempted <- struct{}{}:
+				default:
+				}
+			}
 			if err != nil {
 				if reviewPermanent(err) {
 					cancel(errReviewLeaseRejected)
@@ -704,6 +736,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution); err != nil {
 		return nil, err
 	}
+	markProgress(1)
 	if err := os.WriteFile(filepath.Join(root, "input", "brief.json"), brief.Content, 0600); err != nil {
 		return nil, err
 	}
@@ -887,6 +920,17 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	}
 	if json.Unmarshal(envelope.Result, &result) != nil || result.Version != 1 || result.Head != p.Execution.Attempt.Round.HeadSHA || result.Base != p.Execution.Attempt.Round.BaseSHA || result.Digest != brief.Digest {
 		return nil, fmt.Errorf("review result does not match the claimed revision and brief")
+	}
+	markProgress(2)
+	for attemptedProgress.Load()&2 == 0 {
+		select {
+		case <-progressAttempted:
+		case <-ctx.Done():
+			return nil, diagnostic.failure()
+		}
+	}
+	if ctx.Err() != nil {
+		return nil, diagnostic.failure()
 	}
 	return envelope.Result, nil
 }
