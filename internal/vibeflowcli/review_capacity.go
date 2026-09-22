@@ -359,7 +359,7 @@ func (w *reviewWatch) acquireCapacity() (bool, error) {
 		if err := p.Capacity.validate(filepath.Dir(w.capacity.Directory)); err != nil {
 			return false, err
 		}
-		old, err = lockReviewFile(filepath.Join(p.Capacity.Directory, p.Capacity.Slot))
+		old, err = w.lockReviewCleanup(filepath.Join(p.Capacity.Directory, p.Capacity.Slot), p)
 		if errors.Is(err, errReviewLockBusy) {
 			return false, nil
 		}
@@ -399,15 +399,43 @@ func (w *reviewWatch) releaseCapacity() {
 	}
 }
 
+func (w *reviewWatch) lockReviewCleanup(path string, p *reviewReceipt) (*os.File, error) {
+	lock, err := lockReviewFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// The guard can publish cleanup debt between an earlier check and its
+	// death. Recheck only after acquiring the ownership it held while writing.
+	if err := w.providerCleanupPending(p); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	return lock, nil
+}
+
 func (w *reviewWatch) providerCleanupPending(p *reviewReceipt) error {
-	if len(p.RequestID) != 36 || strings.ContainsAny(p.RequestID, "/\\.\r\n\t") {
+	if p != nil && (len(p.RequestID) != 36 || strings.ContainsAny(p.RequestID, "/\\.\r\n\t")) {
 		return fmt.Errorf("unsafe review receipt directory")
 	}
-	path := filepath.Join(w.workDir(p), "provider-cleanup-pending.json")
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
+	work := filepath.Join(w.root, "work")
+	attempts, err := os.ReadDir(work)
+	if os.IsNotExist(err) {
 		return nil
-	} else if err != nil {
+	}
+	if err != nil {
 		return err
 	}
-	return fmt.Errorf("%w: %s", errReviewCleanupUnverified, path)
+	for _, attempt := range attempts {
+		if !attempt.IsDir() || len(attempt.Name()) != 36 || strings.ContainsAny(attempt.Name(), "/\\.\r\n\t") {
+			continue
+		}
+		path := filepath.Join(work, attempt.Name(), "provider-cleanup-pending.json")
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %s", errReviewCleanupUnverified, path)
+	}
+	return nil
 }
