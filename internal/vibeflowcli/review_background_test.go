@@ -380,7 +380,7 @@ func TestReviewBackgroundFetchUsesPinnedSSHAgent(t *testing.T) {
 			} else {
 				json.NewEncoder(w).Encode(map[string]any{"reviews": []reviewJob{execution.Review}})
 			}
-		case strings.HasSuffix(r.URL.Path, "/claim"):
+		case strings.HasSuffix(r.URL.Path, "/claim"), strings.HasSuffix(r.URL.Path, "/renew"):
 			json.NewEncoder(w).Encode(execution)
 		case strings.HasSuffix(r.URL.Path, "/brief"):
 			digest := sha256.Sum256([]byte("{}"))
