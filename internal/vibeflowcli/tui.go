@@ -151,6 +151,9 @@ type Model struct {
 	reviewProjects          map[int64]reviewProjectPage
 	reviewReadSlots         chan struct{}
 	reviewProjectGeneration uint64
+	reviewProjectsBusy      bool
+	reviewBrowseWarning     string
+	reviewBrowseError       string
 	reviewDetail            reviewDetailState
 	craEnabled              bool
 	reviewNext              string

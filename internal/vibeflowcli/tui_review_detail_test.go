@@ -11,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestReviewEnterOpensReadOnlyDetail(t *testing.T) {
@@ -24,6 +26,94 @@ func TestReviewEnterOpensReadOnlyDetail(t *testing.T) {
 	}
 	if m.attachSessionCmd(row.Name) != nil {
 		t.Fatal("review became attachable")
+	}
+}
+
+func TestReviewSessionsPeriodicRefreshAcceptsPendingHTTP(t *testing.T) {
+	for _, resource := range []string{"discovery", "summary", "detail"} {
+		t.Run(resource, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/findings") {
+					once.Do(func() { close(entered) })
+					<-release
+				}
+				switch resource {
+				case "discovery":
+					json.NewEncoder(w).Encode(map[string]any{"projects": []Project{{ID: 13, Name: "Project"}}})
+				case "summary":
+					json.NewEncoder(w).Encode(reviewSummariesPage{Summaries: []reviewSummary{reviewTestSummary(13, "job")}})
+				case "detail":
+					if strings.HasSuffix(r.URL.Path, "/findings") {
+						json.NewEncoder(w).Encode(reviewFindingsPage{})
+					} else {
+						json.NewEncoder(w).Encode(reviewTestSummary(13, "job"))
+					}
+				}
+			}))
+			defer server.Close()
+			defer close(release)
+			m := reviewTestModel(NewClient(server.URL, "fixture"))
+			m.reviewProjects[13] = reviewProjectPage{}
+			var cmd tea.Cmd
+			switch resource {
+			case "discovery":
+				next, c := m.Update(reviewBrowseRefreshMsg{})
+				m, cmd = next.(Model), c
+			case "summary":
+				cmd = m.reviewReadCommands([]int64{13})
+			case "detail":
+				m.activeView = ViewReviewDetail
+				m.reviewDetail = reviewDetailState{Project: 13, Job: "job"}
+				cmd = m.requestReviewDetail()
+			}
+			done := make(chan tea.Msg, 1)
+			go func() { done <- cmd() }()
+			<-entered
+			// Deliver the regular timer and its browsing message without executing
+			// unrelated local-session commands or waiting five wall-clock seconds.
+			m = reviewApply(m, tickMsg(time.Now()))
+			if resource == "discovery" {
+				m = reviewApply(m, reviewBrowseRefreshMsg{})
+			}
+			if resource == "summary" {
+				next, _ := m.Update(reviewProjectsMsg{generation: m.reviewProjectGeneration, discovery: reviewDiscovery{Projects: []Project{{ID: 13, Name: "Project"}}, Complete: true}})
+				m = next.(Model)
+			}
+			// Release with a separate channel signal so deferred cleanup is safe.
+			release <- struct{}{}
+			m = reviewApply(m, <-done)
+			switch resource {
+			case "discovery":
+				if m.reviewProjects[13].Name != "Project" || m.reviewProjectsBusy {
+					t.Fatal("periodic refresh starved discovery")
+				}
+			case "summary":
+				if len(m.sessions) != 1 || m.reviewProjects[13].Busy {
+					t.Fatal("periodic refresh starved summary")
+				}
+			case "detail":
+				if m.reviewDetail.Summary == nil || m.reviewDetail.Busy {
+					t.Fatal("periodic refresh starved detail")
+				}
+			}
+		})
+	}
+}
+
+func TestReviewSessionsIncompleteEnumerationWarningSurvivesRows(t *testing.T) {
+	m := reviewTestModel(NewClient("https://example.test", "fixture"))
+	warning := "Legacy 200-project limit; discovery may be incomplete"
+	m = reviewApply(m, reviewProjectsMsg{discovery: reviewDiscovery{Projects: []Project{{ID: 13, Name: "Project"}}, Warning: warning}})
+	p := m.reviewProjects[13]
+	m = reviewApply(m, reviewSummaryPagesMsg{{request: reviewProjectRequest{13, p.After, p.Generation}, page: reviewSummariesPage{Summaries: []reviewSummary{reviewTestSummary(13, "job")}}}})
+	if !strings.Contains(m.reviewWarning, warning) {
+		t.Fatal("healthy rows erased incomplete enumeration warning")
+	}
+	m = reviewApply(m, reviewProjectsMsg{discovery: reviewDiscovery{Projects: []Project{{ID: 13, Name: "Project"}}, Complete: true}})
+	if strings.Contains(m.reviewWarning, warning) {
+		t.Fatal("complete enumeration did not clear warning")
 	}
 }
 
