@@ -19,7 +19,8 @@ import (
 
 func reviewTestGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-c", "user.name=Review Test", "-c", "user.email=review@example.invalid", "-C", dir}, args...)...)
+	// Detached maintenance can recreate files while TempDir cleanup removes them.
+	cmd := exec.Command("git", append([]string{"-c", "maintenance.auto=false", "-c", "user.name=Review Test", "-c", "user.email=review@example.invalid", "-C", dir}, args...)...)
 	data, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v %s", args, err, data)
@@ -61,6 +62,31 @@ func reviewTestRepo(t *testing.T) (string, *reviewExecution) {
 	e.Attempt.LeaseExpiresAt = time.Now().Add(time.Minute).UnixMilli()
 	e.Attempt.Round.Details = reviewRepository{BaseRepositoryName: "acme/repo", HeadRepositoryName: "acme/repo", BaseCloneURL: "https://github.com/acme/repo.git", HeadCloneURL: "https://github.com/acme/repo.git"}
 	return dir, e
+}
+
+func TestReviewTestRepoDoesNotLaunchBackgroundMaintenance(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "git-trace.jsonl")
+	t.Setenv("GIT_TRACE2_EVENT", tracePath)
+	reviewTestRepo(t)
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	for {
+		var event struct {
+			Event string   `json:"event"`
+			Argv  []string `json:"argv"`
+		}
+		if err := decoder.Decode(&event); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if event.Event == "child_start" && strings.Contains(strings.Join(event.Argv, " "), "maintenance run") {
+			t.Fatalf("fixture launched background maintenance that can race TempDir cleanup: %v", event.Argv)
+		}
+	}
 }
 
 func TestReviewCheckoutExportsExactObjectsWithoutTouchingSource(t *testing.T) {
