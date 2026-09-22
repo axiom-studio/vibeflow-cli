@@ -16,12 +16,14 @@ import (
 )
 
 type reviewChildSpec struct {
-	Binary     string   `json:"binary"`
-	Args       []string `json:"args"`
-	Env        []string `json:"env"`
-	Dir        string   `json:"dir"`
-	InputFile  string   `json:"input_file"`
-	DeadlineAt int64    `json:"deadline_at"`
+	Binary     string                 `json:"binary"`
+	Args       []string               `json:"args"`
+	Env        []string               `json:"env"`
+	Dir        string                 `json:"dir"`
+	InputFile  string                 `json:"input_file"`
+	DeadlineAt int64                  `json:"deadline_at"`
+	CapacityFD int                    `json:"capacity_fd,omitempty"`
+	Cleanup    *reviewProviderCleanup `json:"cleanup,omitempty"`
 }
 
 func reviewResultSchema() []byte {

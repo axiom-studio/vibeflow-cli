@@ -39,12 +39,13 @@ type reviewWatchOptions struct {
 }
 
 type reviewReceipt struct {
-	JobID     string           `json:"job_id"`
-	RequestID string           `json:"request_id"`
-	Execution *reviewExecution `json:"execution,omitempty"`
-	Result    json.RawMessage  `json:"result,omitempty"`
-	Failure   string           `json:"failure,omitempty"`
-	Completed bool             `json:"completed"`
+	JobID     string             `json:"job_id"`
+	RequestID string             `json:"request_id"`
+	Execution *reviewExecution   `json:"execution,omitempty"`
+	Result    json.RawMessage    `json:"result,omitempty"`
+	Failure   string             `json:"failure,omitempty"`
+	Completed bool               `json:"completed"`
+	Capacity  *reviewReservation `json:"capacity,omitempty"`
 }
 
 type reviewRunnerState struct {
@@ -63,6 +64,9 @@ type reviewWatch struct {
 	output        io.Writer
 	providerReady bool
 	onReady       func()
+	onStatus      func(string)
+	capacity      *reviewCapacity
+	slot          *os.File
 }
 
 func reviewUUID() string {
@@ -257,6 +261,7 @@ func (w *reviewWatch) workDir(p *reviewReceipt) string {
 }
 
 func (w *reviewWatch) run(ctx context.Context) error {
+	defer w.releaseCapacity()
 	identity := fmt.Sprintf("%s\n%d\n%d\n%s\n%s\n%s", w.client.baseURL, w.options.ProjectID, w.options.RepositoryLinkID, w.options.GitProvider, w.options.Kind, w.options.Name)
 	digest := sha256.Sum256([]byte(identity))
 	// The guard and provider both change cwd. Their private paths must keep
@@ -326,6 +331,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 	}
 	backoff := w.options.PollInterval
+	status := ""
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -334,9 +340,36 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		nextStatus := status
+		if err == nil {
+			nextStatus = ""
+		}
+		if errors.Is(err, errReviewCleanupUnverified) {
+			nextStatus = err.Error() // Locally constructed private marker path only.
+		} else {
+			var response *reviewHTTPError
+			if w.state.Pending != nil && errors.As(err, &response) && (response.Status == 401 || response.Status == 403) {
+				nextStatus = fmt.Sprintf("Review result pending authorization (HTTP %d)", response.Status)
+			}
+		}
+		// A heartbeat failure must not hide unresolved provider cleanup.
+		if w.state.Pending != nil {
+			if cleanupErr := w.providerCleanupPending(w.state.Pending); errors.Is(cleanupErr, errReviewCleanupUnverified) {
+				nextStatus = cleanupErr.Error()
+			}
+		}
+		if status != nextStatus {
+			status = nextStatus
+			if w.onStatus != nil {
+				w.onStatus(status)
+			}
+			if status != "" {
+				fmt.Fprintln(w.output, status)
+			}
+		}
 		if err != nil {
 			var response *reviewHTTPError
-			retry := errors.Is(err, errReviewConnection) || (errors.As(err, &response) && (response.Status >= 500 || response.Status == 429))
+			retry := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errReviewConnection) || errors.Is(err, errReviewCleanupUnverified) || (errors.As(err, &response) && (response.Status >= 500 || response.Status == 429 || (w.state.Pending != nil && (response.Status == 401 || response.Status == 403))))
 			if w.options.Once || !retry {
 				return err
 			}
@@ -376,9 +409,20 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 	if err := w.client.reviewRequest(ctx, "POST", w.prefix()+"/heartbeat", struct{}{}, nil); err != nil {
 		return err
 	}
+	admitted := true
+	var admissionErr error
+	if w.state.Pending != nil {
+		admitted, admissionErr = w.acquireCapacity()
+	}
 	if w.onReady != nil {
 		w.onReady()
 		w.onReady = nil
+	}
+	if admissionErr != nil {
+		return admissionErr
+	}
+	if !admitted {
+		return nil
 	}
 	if w.state.Pending == nil {
 		var page struct {
@@ -392,13 +436,18 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 		if page.Next != "" && page.Next <= w.state.Cursor {
 			return fmt.Errorf("review work cursor did not advance")
 		}
-		w.state.Cursor = page.Next
 		for _, job := range page.Reviews {
 			if job.RepositoryLinkID == w.options.RepositoryLinkID && job.Provider == w.options.GitProvider {
 				w.state.Pending = &reviewReceipt{JobID: job.ID, RequestID: reviewUUID()}
+				acquired, err := w.acquireCapacity()
+				if err != nil || !acquired {
+					w.state.Pending = nil
+					return err
+				}
 				break
 			}
 		}
+		w.state.Cursor = page.Next
 		if err := w.save(); err != nil {
 			return err
 		}
@@ -472,7 +521,8 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 	} else {
 		err = w.client.reviewRequest(submitCtx, "POST", w.attemptPath(p)+"/fail", map[string]string{"reason": p.Failure}, nil)
 	}
-	if err != nil && !reviewPermanent(err) {
+	var response *reviewHTTPError
+	if err != nil && !(errors.As(err, &response) && (response.Status == 404 || response.Status == 409)) {
 		return err
 	}
 	if err != nil {
@@ -497,7 +547,12 @@ func (w *reviewWatch) finishReceipt(p *reviewReceipt) error {
 		return err
 	}
 	w.state.Pending = nil
-	return w.save()
+	if err := w.save(); err != nil {
+		w.state.Pending = p
+		return err
+	}
+	w.releaseCapacity()
+	return nil
 }
 
 func (w *reviewWatch) cleanup(p *reviewReceipt) error {
@@ -505,6 +560,9 @@ func (w *reviewWatch) cleanup(p *reviewReceipt) error {
 		return fmt.Errorf("unsafe review receipt directory")
 	}
 	dir := w.workDir(p)
+	if err := w.providerCleanupPending(p); err != nil {
+		return err
+	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
 	}
@@ -693,6 +751,10 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		return nil, err
 	}
 	spec.DeadlineAt = deadline.UnixMilli()
+	if w.slot != nil {
+		spec.CapacityFD = 3
+		spec.Cleanup = &reviewProviderCleanup{Reservation: *p.Capacity, RequestID: p.RequestID, JobID: p.JobID, AttemptID: p.Execution.Attempt.ID}
+	}
 	if err = saveReviewJSON(filepath.Join(root, "child.json"), spec); err != nil {
 		return nil, err
 	}
@@ -701,6 +763,9 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		return nil, err
 	}
 	guard := exec.Command(executable, "review-child", filepath.Join(root, "child.json"))
+	if w.slot != nil {
+		guard.ExtraFiles = []*os.File{w.slot}
+	}
 	setStage("child_guard")
 	guard.WaitDelay = 250 * time.Millisecond
 	guard.Env = []string{"PATH=" + os.Getenv("PATH")}
@@ -841,6 +906,13 @@ func reviewChildCmd() *cobra.Command {
 		if json.Unmarshal(data, &spec) != nil {
 			return fmt.Errorf("invalid review child spec")
 		}
+		capacity, err := retainReviewCapacityFD(spec.CapacityFD, spec.Cleanup)
+		if err != nil {
+			return err
+		}
+		if capacity != nil {
+			defer capacity.Close()
+		}
 		signalCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer stopSignals()
 		ctx, cancel := context.WithDeadline(signalCtx, time.UnixMilli(spec.DeadlineAt))
@@ -882,8 +954,31 @@ func reviewChildCmd() *cobra.Command {
 		child.Stdin = input
 		child.Stdout = cmd.OutOrStdout()
 		child.Stderr = cmd.ErrOrStderr()
+		marker := filepath.Join(filepath.Dir(path), "provider-cleanup-pending.json")
+		if spec.Cleanup != nil {
+			if filepath.Base(filepath.Dir(path)) != spec.Cleanup.RequestID {
+				return fmt.Errorf("invalid review cleanup identity")
+			}
+			if err := saveReviewJSON(marker, spec.Cleanup); err != nil {
+				return err
+			}
+		}
 		started := time.Now()
 		err = runReviewProcess(ctx, child)
+		if spec.Cleanup != nil && !errors.Is(err, errReviewCleanupUnverified) {
+			if removeErr := os.Remove(marker); removeErr != nil {
+				return fmt.Errorf("could not confirm provider cleanup: %w", removeErr)
+			}
+			dir, openErr := os.Open(filepath.Dir(path))
+			if openErr != nil {
+				return openErr
+			}
+			syncErr := dir.Sync()
+			dir.Close()
+			if syncErr != nil {
+				return syncErr
+			}
+		}
 		report := describeReviewProcess(ctx, child, err, started)
 		if saveErr := saveReviewJSON(filepath.Join(filepath.Dir(path), "child-diagnostic.json"), report); saveErr != nil {
 			return fmt.Errorf("could not retain private review process diagnostic")

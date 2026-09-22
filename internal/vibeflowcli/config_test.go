@@ -25,6 +25,38 @@ import (
 	"testing"
 )
 
+func TestReviewConcurrencyConfig(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  int
+	}{
+		{"", 2}, {"review_concurrency: 1\n", 1}, {"review_concurrency: 4\n", 4},
+		{"review_concurrency: 0\n", 0}, {"review_concurrency: -1\n", 0},
+		{"review_concurrency: null\n", 0}, {"review_concurrency: 1.5\n", 0},
+		{"review_concurrency: many\n", 0},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			data := []byte(tc.value + "providers: {}\n")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(path)
+			if tc.want == 0 {
+				if err == nil {
+					t.Fatal("invalid concurrency accepted")
+				}
+				after, _ := os.ReadFile(path)
+				if string(after) != string(data) {
+					t.Fatal("invalid config overwritten during migration")
+				}
+			} else if err != nil || cfg.ReviewConcurrency != tc.want {
+				t.Fatalf("config=%+v err=%v", cfg, err)
+			}
+		})
+	}
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
