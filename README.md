@@ -113,6 +113,7 @@ vibeflow kill <name>     # Kill a session
 vibeflow delete <name>   # Delete a session (alias: rm)
 vibeflow restart <name>  # Restart a session using cached parameters
 vibeflow worktrees       # List git worktrees (alias: wt)
+vibeflow worktrees --clean  # Remove worktrees no session uses (keeps dirty ones)
 vibeflow check [dir]     # Check for session conflicts
 vibeflow config          # Re-run interactive configuration setup
 vibeflow bootstrap       # Configure the VibeFlow MCP server for your coding agents

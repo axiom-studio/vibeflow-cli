@@ -277,16 +277,110 @@ func (wm *WorktreeManager) Remove(path string, force bool) error {
 	return nil
 }
 
+// dirtyWorktreeError is returned by RemoveIfClean for a worktree with
+// uncommitted changes.
+type dirtyWorktreeError struct{ changes int }
+
+func (e dirtyWorktreeError) Error() string {
+	return fmt.Sprintf("%d uncommitted change(s)", e.changes)
+}
+
+// RemoveIfClean removes a worktree unless it has uncommitted changes. The
+// branch is left in place, so committed work is never lost. Every cleanup
+// path goes through here so none of them can discard uncommitted work.
+func (wm *WorktreeManager) RemoveIfClean(path string) error {
+	out, err := exec.Command("git", "-C", path, "status", "--porcelain").Output()
+	if err != nil {
+		return fmt.Errorf("cannot read git status: %w", err) // err on the side of caution
+	}
+	if status := strings.TrimSpace(string(out)); status != "" {
+		return dirtyWorktreeError{changes: strings.Count(status, "\n") + 1}
+	}
+	return wm.Remove(path, false)
+}
+
+// Prune drops git's records of worktrees whose directory no longer exists.
+func (wm *WorktreeManager) Prune() error {
+	cmd := exec.Command("git", "-C", wm.repoRoot, "worktree", "prune")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("prune worktrees: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// ManagedWorktree is a worktree under baseDir together with the stored
+// sessions that use it. One with no session is an orphan.
+type ManagedWorktree struct {
+	Worktree
+	Session string // comma-separated session names, "" for an orphan
+}
+
+// Managed returns the worktrees under baseDir. Worktrees outside baseDir were
+// not created by vibeflow and are never reported.
+func (wm *WorktreeManager) Managed(store *Store) ([]ManagedWorktree, error) {
+	metas, err := store.List()
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	sessions := make(map[string]string, len(metas))
+	for _, meta := range metas {
+		if meta.WorktreePath == "" {
+			continue
+		}
+		p := realPath(meta.WorktreePath)
+		if sessions[p] != "" {
+			sessions[p] += ", "
+		}
+		sessions[p] += meta.Name
+	}
+	wts, err := wm.List()
+	if err != nil {
+		return nil, err
+	}
+	base := realPath(filepath.Join(wm.repoRoot, wm.baseDir)) + string(filepath.Separator)
+	var managed []ManagedWorktree
+	for _, wt := range wts {
+		p := realPath(wt.Path)
+		if wt.Bare || !strings.HasPrefix(p, base) {
+			continue
+		}
+		managed = append(managed, ManagedWorktree{Worktree: wt, Session: sessions[p]})
+	}
+	return managed, nil
+}
+
+// DisplayPath shortens a worktree path for output: relative to the repository
+// when inside it, otherwise with the home directory abbreviated to ~.
+func (wm *WorktreeManager) DisplayPath(path string) string {
+	p := realPath(path)
+	if rel, err := filepath.Rel(realPath(wm.repoRoot), p); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, home+string(filepath.Separator)) {
+		return "~" + strings.TrimPrefix(p, home)
+	}
+	return p
+}
+
+// realPath resolves symlinks so that e.g. /tmp and /private/tmp compare equal,
+// falling back to the absolute path when the target does not exist.
+func realPath(p string) string {
+	abs, _ := filepath.Abs(p)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
 // Exists reports whether a worktree at the given path is registered with git.
 func (wm *WorktreeManager) Exists(path string) bool {
 	worktrees, err := wm.List()
 	if err != nil {
 		return false
 	}
-	abs, _ := filepath.Abs(path)
+	abs := realPath(path)
 	for _, wt := range worktrees {
-		wtAbs, _ := filepath.Abs(wt.Path)
-		if wtAbs == abs {
+		if realPath(wt.Path) == abs {
 			return true
 		}
 	}

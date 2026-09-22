@@ -41,6 +41,7 @@ type WorktreeListModel struct {
 	done      bool
 	deleted   bool // set when a delete occurred (triggers refresh)
 	deletedWt string
+	notice    string // why the last delete was refused, e.g. uncommitted changes
 }
 
 // NewWorktreeListModel creates a worktree list from live data.
@@ -182,6 +183,11 @@ func (wl WorktreeListModel) View() string {
 		}
 	}
 
+	if wl.notice != "" {
+		b.WriteString("\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(warningColor).Render(wl.notice))
+		b.WriteString("\n")
+	}
 	b.WriteString("\n")
 	b.WriteString(helpStyle.Render("d: delete orphaned  j/k: navigate  esc: back"))
 
