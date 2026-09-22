@@ -130,7 +130,7 @@ func testReviewSupervisorCompletes(t *testing.T, installed bool) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), duration)
 			defer cancel()
-			command := exec.CommandContext(ctx, binary, "--root", rootArg, "review-watch", "--project", "1", "--repository-link", "7", "--git-provider", "github", "--provider", "claude", "--repo", source, "--once")
+			command := exec.CommandContext(ctx, binary, "--cra", "--root", rootArg, "review-watch", "--project", "1", "--repository-link", "7", "--git-provider", "github", "--provider", "claude", "--repo", source, "--once")
 			command.Dir = root
 			command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "USER=review-fixture", "LOGNAME=review-fixture"}
 			if installed {

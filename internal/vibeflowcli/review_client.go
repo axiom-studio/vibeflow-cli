@@ -32,10 +32,11 @@ type reviewJob struct {
 }
 
 type reviewExecution struct {
-	Version int       `json:"version"`
-	Review  reviewJob `json:"review"`
-	Prompt  string    `json:"prompt"`
-	Attempt struct {
+	Version                  int       `json:"version"`
+	ProgressReportingVersion int       `json:"progress_reporting_version,omitempty"`
+	Review                   reviewJob `json:"review"`
+	Prompt                   string    `json:"prompt"`
+	Attempt                  struct {
 		ID             string `json:"id"`
 		RunnerID       string `json:"runner_id"`
 		SessionID      string `json:"session_id"`
@@ -49,6 +50,27 @@ type reviewExecution struct {
 			Details    reviewRepository `json:"details"`
 		} `json:"round"`
 	} `json:"attempt"`
+}
+
+type reviewProgressInput struct {
+	HeadSHA          string `json:"head_sha"`
+	BaseSHA          string `json:"base_sha"`
+	CheckoutPrepared bool   `json:"checkout_prepared"`
+	ReviewCompleted  bool   `json:"review_completed"`
+}
+
+func reviewRenewBody(execution reviewExecution, checkoutPrepared, reviewCompleted bool) any {
+	if execution.ProgressReportingVersion != 1 {
+		return struct{}{}
+	}
+	return struct {
+		Progress reviewProgressInput `json:"progress"`
+	}{Progress: reviewProgressInput{
+		HeadSHA:          execution.Attempt.Round.HeadSHA,
+		BaseSHA:          execution.Attempt.Round.BaseSHA,
+		CheckoutPrepared: checkoutPrepared,
+		ReviewCompleted:  reviewCompleted,
+	}}
 }
 
 type reviewBrief struct {

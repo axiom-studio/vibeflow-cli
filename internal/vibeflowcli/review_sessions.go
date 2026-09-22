@@ -51,6 +51,185 @@ type reviewSessionsPage struct {
 	NextAfterID string          `json:"next_after_id"`
 }
 
+type reviewSummaryJob struct {
+	reviewJob
+	ProjectID int64 `json:"project_id"`
+	Number    int64 `json:"number"`
+	Details   struct {
+		URL                string `json:"url"`
+		BaseRepositoryName string `json:"base_repository_name"`
+	} `json:"details"`
+}
+type reviewProgress struct {
+	ReportingVersion   int    `json:"reporting_version"`
+	RoundID            string `json:"round_id"`
+	RoundNumber        int    `json:"round_number"`
+	AttemptNumber      int    `json:"attempt_number"`
+	HeadSHA            string `json:"head_sha"`
+	BaseSHA            string `json:"base_sha"`
+	RequestAccepted    bool   `json:"request_accepted"`
+	RunnerAssigned     bool   `json:"runner_assigned"`
+	CheckoutPreparedAt int64  `json:"checkout_prepared_at"`
+	ReviewCompletedAt  int64  `json:"review_completed_at"`
+	ResultRecorded     bool   `json:"result_recorded"`
+	State              string `json:"state"`
+}
+type reviewSummary struct {
+	Review             reviewSummaryJob `json:"review"`
+	Summary            string           `json:"summary"`
+	FindingCount       int              `json:"finding_count"`
+	UnresolvedBlockers int              `json:"unresolved_blockers"`
+	Progress           *reviewProgress  `json:"progress"`
+	ReviewSessions     []reviewSession  `json:"review_sessions"`
+	ReviewSessionsNext string           `json:"review_sessions_next_after_id"`
+	Runner             struct {
+		State  string `json:"state"`
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	} `json:"runner"`
+	Publication *struct {
+		State     string `json:"state"`
+		LastError string `json:"last_error"`
+	} `json:"publication"`
+}
+type reviewSummariesPage struct {
+	Summaries   []reviewSummary `json:"summaries"`
+	NextAfterID string          `json:"next_after_id"`
+}
+type reviewFinding struct {
+	ID           string `json:"id"`
+	JobID        string `json:"job_id"`
+	Title        string `json:"title"`
+	Severity     string `json:"severity"`
+	Path         string `json:"path"`
+	Line         int    `json:"line"`
+	State        string `json:"state"`
+	HeadSHA      string `json:"head_sha"`
+	BaseSHA      string `json:"base_sha"`
+	Trigger      string `json:"trigger"`
+	Impact       string `json:"impact"`
+	Evidence     string `json:"evidence"`
+	Verification string `json:"verification"`
+}
+type reviewFindingsPage struct {
+	Findings    []reviewFinding `json:"findings"`
+	NextAfterID string          `json:"next_after_id"`
+}
+
+func reviewPublicID(s string) bool {
+	if s == "" || len(s) > 160 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+func validReviewSummary(s reviewSummary, project int64, job string) bool {
+	if s.Review.ProjectID != project || !reviewPublicID(s.Review.ID) || (job != "" && s.Review.ID != job) || len(s.ReviewSessions) > 25 || (s.ReviewSessionsNext != "" && !reviewPublicID(s.ReviewSessionsNext)) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, v := range s.ReviewSessions {
+		if v.ProjectID != project || v.JobID != s.Review.ID || !reviewPublicID(v.SessionID) || seen[v.SessionID] {
+			return false
+		}
+		seen[v.SessionID] = true
+	}
+	if p := s.Progress; p != nil && (p.ReportingVersion < 0 || p.ReportingVersion > 1 || p.HeadSHA != s.Review.HeadSHA || p.BaseSHA != s.Review.BaseSHA || (p.RoundID != "" && !reviewPublicID(p.RoundID))) {
+		return false
+	}
+	return true
+}
+func (c *Client) listReviewSummaries(ctx context.Context, projectID int64, after string) (reviewSummariesPage, error) {
+	var page reviewSummariesPage
+	if projectID <= 0 || (after != "" && !reviewPublicID(after)) {
+		return page, fmt.Errorf("invalid review project or cursor")
+	}
+	q := url.Values{"limit": {"25"}, "after_id": {after}}
+	if err := c.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-summaries?%s", projectID, q.Encode()), nil, &page); err != nil {
+		return page, err
+	}
+	if len(page.Summaries) > 25 || (page.NextAfterID != "" && (!reviewPublicID(page.NextAfterID) || page.NextAfterID == after)) {
+		return reviewSummariesPage{}, fmt.Errorf("invalid review summary page")
+	}
+	seen := map[string]bool{}
+	for _, s := range page.Summaries {
+		if !validReviewSummary(s, projectID, "") || seen[s.Review.ID] {
+			return reviewSummariesPage{}, fmt.Errorf("invalid review summary scope")
+		}
+		seen[s.Review.ID] = true
+	}
+	return page, nil
+}
+func (c *Client) getReviewSummary(ctx context.Context, projectID int64, jobID string) (reviewSummary, error) {
+	var s reviewSummary
+	if projectID <= 0 || !reviewPublicID(jobID) {
+		return s, fmt.Errorf("invalid review identity")
+	}
+	if err := c.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-summaries/%s", projectID, jobID), nil, &s); err != nil {
+		return s, err
+	}
+	if !validReviewSummary(s, projectID, jobID) {
+		return reviewSummary{}, fmt.Errorf("invalid review summary scope")
+	}
+	return s, nil
+}
+func (c *Client) listReviewSummaryFindings(ctx context.Context, projectID int64, jobID, after string) (reviewFindingsPage, error) {
+	var page reviewFindingsPage
+	if projectID <= 0 || !reviewPublicID(jobID) || (after != "" && !reviewPublicID(after)) {
+		return page, fmt.Errorf("invalid finding identity")
+	}
+	q := url.Values{"limit": {"25"}, "after_id": {after}}
+	if err := c.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-summaries/%s/findings?%s", projectID, jobID, q.Encode()), nil, &page); err != nil {
+		return page, err
+	}
+	if len(page.Findings) > 25 || (page.NextAfterID != "" && (!reviewPublicID(page.NextAfterID) || page.NextAfterID == after)) {
+		return reviewFindingsPage{}, fmt.Errorf("invalid finding page")
+	}
+	seen := map[string]bool{}
+	for _, f := range page.Findings {
+		if f.JobID != jobID || !reviewPublicID(f.ID) || seen[f.ID] {
+			return reviewFindingsPage{}, fmt.Errorf("invalid finding scope")
+		}
+		seen[f.ID] = true
+	}
+	return page, nil
+}
+func (c *Client) listReviewJobSessions(ctx context.Context, projectID int64, jobID, after string) (reviewSessionsPage, error) {
+	var page reviewSessionsPage
+	if projectID <= 0 || !reviewPublicID(jobID) || (after != "" && !reviewPublicID(after)) {
+		return page, fmt.Errorf("invalid history identity")
+	}
+	q := url.Values{"limit": {"25"}, "job_id": {jobID}, "after_id": {after}}
+	if err := c.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-sessions?%s", projectID, q.Encode()), nil, &page); err != nil {
+		return page, err
+	}
+	if len(page.Sessions) > 25 || (page.NextAfterID != "" && (!reviewPublicID(page.NextAfterID) || page.NextAfterID == after)) {
+		return reviewSessionsPage{}, fmt.Errorf("invalid history page")
+	}
+	seen := map[string]bool{}
+	for _, s := range page.Sessions {
+		if s.ProjectID != projectID || s.JobID != jobID || !reviewPublicID(s.SessionID) || seen[s.SessionID] {
+			return reviewSessionsPage{}, fmt.Errorf("invalid history scope")
+		}
+		seen[s.SessionID] = true
+	}
+	return page, nil
+}
+func (s reviewSummary) row() SessionRow {
+	r := s.Review
+	v := reviewSession{ProjectID: r.ProjectID, JobID: r.ID, Provider: r.Provider, ProviderHost: r.ProviderHost, RepositoryLinkID: r.RepositoryLinkID, RepositoryName: r.Details.BaseRepositoryName, PRNumber: r.Number, PRURL: r.Details.URL, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA, State: r.State, RunnerName: s.Runner.Name}
+	if p := s.Progress; p != nil {
+		v.RoundID, v.RoundNumber, v.AttemptNumber = p.RoundID, p.RoundNumber, p.AttemptNumber
+	}
+	row := v.row()
+	row.Name = fmt.Sprintf("review:%d:job:%s", r.ProjectID, r.ID)
+	return row
+}
+
 func (c *Client) listReviewSessions(ctx context.Context, projectID int64, after string) (reviewSessionsPage, error) {
 	var page reviewSessionsPage
 	if projectID <= 0 || len(after) > 256 {
@@ -102,7 +281,7 @@ func (s reviewSession) progress() string {
 	return fmt.Sprintf("%s · round %d · attempt %d", reviewDisplay(s.State), s.RoundNumber, s.AttemptNumber)
 }
 func (s reviewSession) row() SessionRow {
-	return SessionRow{Name: "review:" + s.SessionID, Persona: reviewSessionLabel, Project: s.pullRequest(), Status: reviewDisplay(s.State), ManagedReview: &s}
+	return SessionRow{Name: fmt.Sprintf("review:%d:session:%s", s.ProjectID, s.SessionID), Persona: reviewSessionLabel, Project: s.pullRequest(), Status: reviewDisplay(s.State), ManagedReview: &s}
 }
 func (m Model) localSessionCount() int {
 	n := 0
@@ -128,7 +307,7 @@ func (m Model) reviewSelection() bool {
 	}
 	if m.groupMode {
 		idx, root := m.groupedCursorToSession()
-		return idx < 0 && root == reviewSessionsGroup
+		return idx < 0 && strings.HasPrefix(root, reviewSessionsGroup)
 	}
 	return false
 }
@@ -266,7 +445,7 @@ func renderReviewSession(s *reviewSession, width, height int) string {
 	if s.CompletedAt > 0 {
 		lines = append(lines, "Completed: "+time.UnixMilli(s.CompletedAt).Local().Format("Jan 2 15:04:05"))
 	}
-	lines = append(lines, reviewDisplay(s.PRURL), "Read-only. Findings and controls in AxiomCloud.")
+	lines = append(lines, reviewDisplay(s.PRURL), "Read-only. Enter: review details.")
 	if height > 0 && len(lines) > height {
 		lines = lines[:height]
 	}

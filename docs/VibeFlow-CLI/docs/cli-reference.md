@@ -6,6 +6,7 @@ The binary name is **`vibeflow`**. Root command with no subcommand runs the **TU
 
 | Flag | Description |
 |------|-------------|
+| `--cra` | Enable the PR review preview; disabled by default until production backend rollout. TUI runner startup still requires consent. |
 | `--config` | Path to config file (default `<root>/config.yaml`) |
 | `--root` | Root directory for config, sessions, and logs (default `~/.vibeflow-cli`). Also settable via `VIBEFLOW_ROOT` env var. Enables isolated parallel instances. |
 | `--mcp` | MCP server tool name used in the agent init prompt (default: `vibeflow`). Override if you run a renamed or forked MCP server. |
@@ -19,18 +20,36 @@ Subcommands read `server_url` from configuration; set it during setup with boots
 ### `vibeflow` (interactive TUI)
 
 Server and API-key setup runs only for a new, uninitialized root and remains saved in `config.yaml`.
-Separately, every interactive launch asks **Launch PR review runner for this session?**
-The default is No; this choice is never saved.
+Only `vibeflow --cra` asks **Run PR reviews while this CLI is open?**
+Without `--cra`, no review prompt, API requests, rows, or shortcuts are enabled.
+The default is **Not now**; this choice is never saved.
+The prompt includes an original pixel-art owl built into the CLI, with no extra installation required.
+It blinks and moves gently while waiting; press Space to pause or resume the animation.
+Smaller terminals show a compact owl, and terminals without color retain a monochrome drawing.
 
-Choose Yes to start one local runner owned by this TUI.
-It uses the saved project, `default_work_dir` (or the current working directory), and configured model provider.
-The checkout's origin is matched against the project's existing GitHub, GitHub Enterprise, or Bitbucket repository links.
-Only missing, unsupported, or ambiguous details require another question.
+Choose **Run reviews** to discover every accessible project's linked repositories and start all resolved local runners owned by this TUI.
+`default_project` continues to select ordinary sessions and headless review history; it appears first in TUI review browsing but does not filter accessible projects.
+Startup uses one shared provider/model selection for the entire runner group.
+A valid remembered checkout wins; otherwise discovery checks `default_work_dir`, the launch directory, `directory_history`, and this root's saved session paths against existing GitHub, GitHub Enterprise, or Bitbucket links.
+The checkout's origin determines eligibility, not the saved session's project label.
+One matching checkout is selected automatically; press `R`, select an unresolved binding, and press Enter to choose among multiple checkouts or use **Enter another path**.
+Aliases and worktrees sharing the same Git repository are grouped, while separate clones remain selectable.
+Missing checkouts never block entry to the main TUI.
+Explicit paths are validated against the selected repository, and an invalid path stays in the editor without silently selecting another checkout.
+Discovery does not recursively scan the filesystem, clone repositories, modify session metadata, or read another root's session history.
+Press `r` to refresh; newly known session paths and a separate one-minute timer also refresh discovery.
+Temporary project failures leave healthy runners online; definitive removal or access revocation stops owned runners for that scope.
+Older servers returning a capped 200-project list show an incomplete-coverage warning.
 Native reviews use the provider's default model; gateway reviews require an explicit model.
 There is no persona or model question when a PR arrives: each review starts a fresh Principal Engineer automatically.
 
-The TUI displays runner status and retained review attempts.
-Normal exit, Ctrl-C, termination, or loss of the TUI process closes its runner and active review processes, preserving pending receipts and history.
+With `--cra`, the TUI displays review jobs across accessible projects, including queued jobs without an attempt, even when runner consent is declined.
+Select a review to preview it, then press Enter or click it again to open its read-only detail.
+Details show revision, runner, progress checklist, findings, publication status, and retained attempt history.
+Use `o` for the PR, `c` for AxiomCloud, `r` to refresh, arrows or PageUp/PageDown to scroll, and Esc to return.
+Use `]` and `[` for older and latest jobs in the selected project, or attempt history inside detail; `n` and `p` page findings inside detail.
+Local diagnostics appear only for a matching attempt owned by this TUI; provider transcripts are unavailable.
+Normal exit, Ctrl-C, termination, or loss of the TUI process closes its owned runners and active review processes, preserving pending receipts and history.
 An independently started runner is never adopted or stopped by this TUI.
 Separate `--root` instances remain independent, and `--root` is not the repository checkout.
 If startup fails, Enter opens the normal CLI without a runner; `r` retries startup.
@@ -85,14 +104,16 @@ Model flags apply when the provider process starts and are stored in session met
 
 ### `vibeflow review-watch`
 
+All public forms require `--cra`, including `--background`, `--status`, and `--stop`.
+
 Keep one local or shared PR review runner online without using a model while idle.
 Each claimed attempt starts a fresh Principal Engineer process with the server's finite review prompt, exact base/head snapshots, project brief, and prior finding IDs.
 The server controls automatic and comment-triggered reviews, local priority, shared grants, cycle limits, repair tickets, and PR publication.
 
 ```bash
-vibeflow review-watch --project my-project --repo /path/to/repo --repository-link 123 --provider claude
-vibeflow review-watch --project 42 --repo /srv/repo --repository-link 123 --provider codex --runner-kind shared --name team-runner
-vibeflow review-watch --project 42 --repository-link 123 --provider claude --model anthropic/claude-sonnet --once
+vibeflow --cra review-watch --project my-project --repo /path/to/repo --repository-link 123 --provider claude
+vibeflow --cra review-watch --project 42 --repo /srv/repo --repository-link 123 --provider codex --runner-kind shared --name team-runner
+vibeflow --cra review-watch --project 42 --repository-link 123 --provider claude --model anthropic/claude-sonnet --once
 ```
 
 | Flag | Description |
@@ -116,23 +137,23 @@ vibeflow review-watch --project 42 --repository-link 123 --provider claude --mod
 #### Background runner management
 
 Ordinary persona sessions do not start a review runner implicitly.
-For ordinary interactive use, choose Yes at TUI startup instead of running this command.
+For ordinary interactive use, choose **Run reviews** at TUI startup instead of running this command.
 Use explicit detached mode only when the runner must outlive the TUI, using the same root and config that contain your VibeFlow credentials.
 Stop an existing foreground watcher with Ctrl-C before enabling its background replacement.
 
 ```bash
-vibeflow --root /path/to/cli-root review-watch --background \
+vibeflow --cra --root /path/to/cli-root review-watch --background \
   --server-url https://cloud-uat.axiomstudio.ai \
   --project 12 --repository-link 7 --git-provider github \
   --provider claude --repo /path/to/axiomcloud
-vibeflow --root /path/to/cli-root review-watch --status
-vibeflow --root /path/to/cli-root review-watch --stop <runner-ID-from-status>
+vibeflow --cra --root /path/to/cli-root review-watch --status
+vibeflow --cra --root /path/to/cli-root review-watch --stop <runner-ID-from-status>
 ```
 
 The start command waits up to 20 seconds for provider preflight and a successful server heartbeat before reporting that the runner is running.
 It stays alive after the terminal or TUI exits; idle polling makes no model calls.
 Each claimed review is still a fresh isolated Principal Engineer process, not an interactive tmux persona.
-Use the TUI's retained review sessions or `vibeflow list --project 12` to see attempts, and `review-watch --status` to see the local background supervisor.
+Use the preview TUI's retained review sessions or `vibeflow --cra list --project 12` to see attempts, and `vibeflow --cra review-watch --status` to see the local background supervisor.
 Repeated starts of the same binding do not launch another supervisor; changing an active binding requires stopping it first.
 
 The private binding under `<root>/review-runners/<ID>/background.json` saves absolute root/config/repository paths, the exact server URL, provider/model, local login sources, and a one-way VibeFlow credential fingerprint, not credential values.
@@ -213,13 +234,13 @@ vibeflow models codex
 
 ### `vibeflow list` (alias: `ls`)
 
-List local agents and managed Principal Engineer review sessions for the selected project.
+List local agents; `--cra` also includes managed Principal Engineer review sessions for the selected project.
 Use `--project <id-or-name>` or the configured default project.
 Managed reviews are read-only and include retained completed, failed, cancelled and expired attempts.
 
 ```bash
 vibeflow list --project my-project
-vibeflow list --project 42 --reviews-after <returned-cursor>
+vibeflow --cra list --project 42 --reviews-after <returned-cursor>
 ```
 
 Each page contains at most 25 managed reviews, newest first.
@@ -270,6 +291,17 @@ See [Advanced topics](advanced-topics.md) for the session cache behavior that en
 ### `vibeflow worktrees` (alias: `wt`)
 
 List or manage git worktrees related to the tool.
+
+| Flag | Effect |
+|------|--------|
+| `--clean` | Remove orphaned worktrees and prune stale records. |
+
+An orphaned worktree is one under `worktree.base_dir` that no stored session references.
+`--clean` keeps any worktree with uncommitted changes and prints one row per worktree: `removed`, `kept` (with the number of uncommitted changes) or `in use` (with the session).
+The plain listing adds a `SESSION` column that shows the session using each worktree, or `orphaned`.
+Paths are shown relative to the repository.
+The branch of a removed worktree is always kept, so committed work is never lost.
+The TUI help bar shows the orphan count next to `w: worktrees` when there are any.
 
 ### `vibeflow check [directory]`
 

@@ -21,22 +21,32 @@ var errReviewOwnedBusy = errors.New("this review runner is already active; this 
 var errReviewOwnedStopped = errors.New("review runner stopped; check provider credentials and repository binding")
 
 type reviewOwnedSpec struct {
-	Config  *Config            `json:"config"`
-	Options reviewWatchOptions `json:"options"`
+	Config   *Config            `json:"config"`
+	Options  reviewWatchOptions `json:"options"`
+	Capacity *reviewCapacity    `json:"capacity,omitempty"`
 }
 
 type reviewOwnedEvent struct {
-	Ready bool   `json:"ready,omitempty"`
-	Error string `json:"error,omitempty"`
+	Ready  bool    `json:"ready,omitempty"`
+	Error  string  `json:"error,omitempty"`
+	Status *string `json:"status,omitempty"`
 }
 
 // Only this process holds the pipe's writer. Closing it cannot signal a runner
 // started by another CLI, and OS cleanup also closes it after a crash/SIGKILL.
 type reviewOwnedRunner struct {
-	input io.WriteCloser
-	done  chan struct{}
-	once  sync.Once
-	err   error // Written before done closes; read only after receiving done.
+	input    io.WriteCloser
+	done     chan struct{}
+	once     sync.Once
+	err      error // Written before done closes; read only after receiving done.
+	statusMu sync.Mutex
+	status   string
+}
+
+func (r *reviewOwnedRunner) Status() string {
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
+	return r.status
 }
 
 func (r *reviewOwnedRunner) Done() <-chan struct{} { return r.done }
@@ -76,7 +86,11 @@ func validateReviewOwned(cfg *Config, o reviewWatchOptions) error {
 // The selected in-memory config, including explicit origin/credential
 // overrides, crosses an anonymous pipe. configPath is deliberately not reloaded:
 // TUI setup already selected these values, and no consent or secret is saved.
-func startReviewOwned(ctx context.Context, cfg *Config, _ string, options reviewWatchOptions) (*reviewOwnedRunner, error) {
+func startReviewOwned(ctx context.Context, cfg *Config, configPath string, options reviewWatchOptions) (*reviewOwnedRunner, error) {
+	return startReviewOwnedWithCapacity(ctx, cfg, configPath, options, nil)
+}
+
+func startReviewOwnedWithCapacity(ctx context.Context, cfg *Config, _ string, options reviewWatchOptions, capacity *reviewCapacity) (*reviewOwnedRunner, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -107,7 +121,7 @@ func startReviewOwned(ctx context.Context, cfg *Config, _ string, options review
 		}
 	}
 	reviewCfg := &Config{ServerURL: cfg.ServerURL, APIToken: cfg.APIToken, LLMGatewayEnabled: cfg.LLMGatewayEnabled, Providers: map[string]Provider{options.Provider: selected}, SavedEnvVars: modelEnv}
-	payload, err := json.Marshal(reviewOwnedSpec{Config: reviewCfg, Options: options})
+	payload, err := json.Marshal(reviewOwnedSpec{Config: reviewCfg, Options: options, Capacity: capacity})
 	if err != nil || len(payload) > 128<<10 {
 		return nil, fmt.Errorf("review runner configuration is too large")
 	}
@@ -157,7 +171,7 @@ func startReviewOwned(ctx context.Context, cfg *Config, _ string, options review
 	go func() {
 		var terminal error
 		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 1024), 1024)
+		scanner.Buffer(make([]byte, 1024), 8192)
 		for scanner.Scan() {
 			var event reviewOwnedEvent
 			if json.Unmarshal(scanner.Bytes(), &event) != nil {
@@ -169,6 +183,11 @@ func startReviewOwned(ctx context.Context, cfg *Config, _ string, options review
 				case ready <- struct{}{}:
 				default:
 				}
+			}
+			if event.Status != nil {
+				runner.statusMu.Lock()
+				runner.status = *event.Status
+				runner.statusMu.Unlock()
 			}
 			if event.Error == "busy" {
 				terminal = errReviewOwnedBusy
@@ -266,9 +285,23 @@ func runReviewOwned(parent context.Context, input io.Reader, output io.Writer) e
 	if err := validateReviewOwned(spec.Config, spec.Options); err != nil {
 		return err
 	}
-	watch := &reviewWatch{client: NewClient(spec.Config.ServerURL, spec.Config.APIToken), cfg: spec.Config, options: spec.Options, output: io.Discard}
+	if spec.Capacity != nil {
+		root, err := filepath.Abs(RootDir())
+		if err != nil || filepath.Dir(spec.Capacity.Directory) != root {
+			return fmt.Errorf("invalid review capacity root")
+		}
+		if err := spec.Capacity.validate(); err != nil {
+			return err
+		}
+	}
+	watch := &reviewWatch{client: NewClient(spec.Config.ServerURL, spec.Config.APIToken), cfg: spec.Config, options: spec.Options, capacity: spec.Capacity, output: io.Discard}
 	watch.onReady = func() {
 		if json.NewEncoder(output).Encode(reviewOwnedEvent{Ready: true}) != nil {
+			cancel()
+		}
+	}
+	watch.onStatus = func(status string) {
+		if json.NewEncoder(output).Encode(reviewOwnedEvent{Status: &status}) != nil {
 			cancel()
 		}
 	}

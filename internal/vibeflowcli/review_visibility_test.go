@@ -48,7 +48,7 @@ func TestReviewListCommandWithoutOrdinarySessions(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list", "--project", "13")
+	cmd := exec.CommandContext(ctx, binary, "--cra", "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list", "--project", "13")
 	out, err := cmd.CombinedOutput()
 	if err != nil || reads.Load() != 1 || !strings.Contains(string(out), "Principal Engineer · Review") || !strings.Contains(string(out), "acme/repo#57") || !strings.Contains(string(out), "--reviews-after review-visible") {
 		t.Fatalf("managed review invisible: %v reads=%d\n%s", err, reads.Load(), out)
@@ -57,10 +57,15 @@ func TestReviewListCommandWithoutOrdinarySessions(t *testing.T) {
 	if err := SaveConfig(cfg, path); err != nil {
 		t.Fatal(err)
 	}
-	cmd = exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
+	cmd = exec.CommandContext(ctx, binary, "--cra", "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
 	out, err = cmd.CombinedOutput()
 	if err != nil || reads.Load() != 2 || !strings.Contains(string(out), reviewSessionLabel) {
 		t.Fatalf("configured project ignored: %v reads=%d\n%s", err, reads.Load(), out)
+	}
+	cmd = exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list", "--project", "13", "--reviews-after", "review-visible")
+	out, err = cmd.CombinedOutput()
+	if err != nil || reads.Load() != 2 || strings.Contains(string(out), reviewSessionLabel) {
+		t.Fatalf("default list accessed CRA: %v reads=%d %s", err, reads.Load(), out)
 	}
 
 }
@@ -119,7 +124,7 @@ func TestReviewSessionsHTTPAndTUIReadOnlyHistory(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"sessions": []map[string]any{{"session_id": id, "project_id": 13, "job_id": "job", "pr_number": 57, "repository_name": "acme/repo\x1b]52;c;secret\x07\n", "provider": "github", "head_sha": strings.Repeat("a", 40), "state": state, "round_number": 2, "attempt_number": 1, "attempt_id": "fencing-secret", "claim_token": "credential", "runner_name": "shared\x1b[2J", "runner_kind": "shared", "completed_at": int64(1)}}, "next_after_id": next})
 	}))
 	defer server.Close()
-	m := Model{client: NewClient(server.URL, "fixture-token"), projectID: 13, config: DefaultConfig(), repoRootCache: map[string]string{}, collapsedGroups: map[string]bool{}, sessions: []SessionRow{{Name: "ordinary", WorkingDir: "/repo"}}}
+	m := Model{craEnabled: true, client: NewClient(server.URL, "fixture-token"), projectID: 13, config: DefaultConfig(), repoRootCache: map[string]string{}, collapsedGroups: map[string]bool{}, sessions: []SessionRow{{Name: "ordinary", WorkingDir: "/repo"}}}
 	msg := m.refreshReviewSessions()
 	next, _ := m.Update(msg)
 	m = next.(Model)
@@ -146,7 +151,7 @@ func TestReviewSessionsHTTPAndTUIReadOnlyHistory(t *testing.T) {
 	}
 	t.Log("Managed review view:\n" + stripANSI(view))
 	// The real HTTP projection must never acquire ordinary interactive behavior.
-	for _, key := range []string{"enter", "d", "b", "e", "m"} {
+	for _, key := range []string{"d", "b", "e", "m"} {
 		next, cmd := m.Update(tea.KeyPressMsg{Code: []rune(key)[0], Text: key})
 		got := next.(Model)
 		if cmd != nil || got.confirmDelete || got.activeView != ViewSessions {
@@ -208,7 +213,7 @@ func TestReviewSessionsHTTPAndTUIReadOnlyHistory(t *testing.T) {
 	m.groupMode = true
 	m.buildGroups()
 	m.cursor = 2 // review group header after ordinary header+row.
-	if m.groupOrder[1] != reviewSessionsGroup {
+	if !strings.HasPrefix(m.groupOrder[1], reviewSessionsGroup+":") {
 		t.Errorf("unexpected managed group: %v", m.groupOrder)
 	}
 	if _, names := m.selectedProjectSessions(); len(names) != 0 {
@@ -362,7 +367,7 @@ func TestReviewListCommandSurvivesReviewAPIFailure(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
+			cmd := exec.CommandContext(ctx, binary, "--cra", "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
 			var stdout, stderr strings.Builder
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			err := cmd.Run()

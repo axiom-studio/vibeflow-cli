@@ -5,6 +5,7 @@ package vibeflowcli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -15,6 +16,104 @@ import (
 	"testing"
 	"time"
 )
+
+func TestReviewCapacityGuardRetainsSlotAndQuarantinesSIGKILL(t *testing.T) {
+	root := t.TempDir()
+	c, err := newReviewCapacity(root, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	dir := filepath.Join(root, "review-runners", strings.Repeat("a", 32))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := &reviewReceipt{JobID: "job", RequestID: reviewUUID()}
+	w := &reviewWatch{root: dir, capacity: c, state: reviewRunnerState{Pending: p}}
+	if ok, err := w.acquireCapacity(); err != nil || !ok {
+		t.Fatal(err)
+	}
+	work := w.workDir(p)
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(work, "input.txt")
+	if err := os.WriteFile(input, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(work, "pid")
+	spec := reviewChildSpec{Binary: "/bin/sh", Args: []string{"-c", `[ ! -e /dev/fd/3 ] || exit 77; sleep 60 & echo "$!" > "$1"; wait`, "fixture", pidPath}, Env: []string{"PATH=/usr/bin:/bin"}, Dir: work, InputFile: input, DeadlineAt: time.Now().Add(time.Minute).UnixMilli(), CapacityFD: 3, Cleanup: &reviewProviderCleanup{Reservation: *p.Capacity, RequestID: p.RequestID, JobID: p.JobID, AttemptID: "attempt"}}
+	path := filepath.Join(work, "child.json")
+	if err := saveReviewJSON(path, spec); err != nil {
+		t.Fatal(err)
+	}
+	guard := exec.Command(os.Args[0], "review-child", path)
+	guard.ExtraFiles = []*os.File{w.slot}
+	pipe, err := guard.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pipe.Close()
+	if err := guard.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { guard.Process.Kill(); guard.Wait() }()
+	if _, err := pipe.Write([]byte{'R'}); err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	until := time.Now().Add(5 * time.Second)
+	for time.Now().Before(until) {
+		data, _ := os.ReadFile(pidPath)
+		pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		if pid > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid <= 0 {
+		t.Fatal("model did not start with capacity descriptor closed")
+	}
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	w.releaseCapacity()
+	if slot, err := lockReviewFile(filepath.Join(c.Directory, p.Capacity.Slot)); err == nil {
+		slot.Close()
+		t.Fatal("guard did not retain duplicate slot ownership")
+	}
+	marker := filepath.Join(work, "provider-cleanup-pending.json")
+	data, err := os.ReadFile(marker)
+	var cleanup reviewProviderCleanup
+	if err != nil || json.Unmarshal(data, &cleanup) != nil || cleanup.RequestID != p.RequestID {
+		t.Fatal("guard launched without durable cleanup marker", err)
+	}
+	if err := guard.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	guard.Wait()
+	if syscall.Kill(pid, 0) != nil {
+		t.Fatal("fixture needs a surviving descendant after guard SIGKILL")
+	}
+	if err := w.cleanup(p); err == nil {
+		t.Fatal("guard death was mistaken for verified cleanup")
+	}
+	c.owner.Close()
+	next, err := newReviewCapacity(root, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	first, err := next.tryAcquire()
+	if err != nil || first == nil {
+		t.Fatal("cleanup debt blocked healthy remaining capacity", err)
+	}
+	defer first.Close()
+	if second, err := next.tryAcquire(); err != nil || second != nil {
+		if second != nil {
+			second.Close()
+		}
+		t.Fatal("restart silently restored unverified slot", err)
+	}
+}
 
 func TestReviewChildGuardStopsProcessGroup(t *testing.T) {
 	for _, stop := range []string{"parent_pipe_closed", "deadline"} {
@@ -119,12 +218,8 @@ func TestReviewProcessStopsDescendantsAfterNaturalExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-	until := time.Now().Add(time.Second)
-	for time.Now().Before(until) && syscall.Kill(pid, 0) == nil {
-		time.Sleep(10 * time.Millisecond)
-	}
 	if pid <= 0 || syscall.Kill(pid, 0) == nil {
-		t.Fatal("background child survived natural parent exit")
+		t.Fatal("provider returned before background child termination was confirmed")
 	}
 }
 

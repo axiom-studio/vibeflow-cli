@@ -15,15 +15,20 @@ vibeflow --config /path/to/config.yaml
 vibeflow --root /path/to/custom-root   # config at <root>/config.yaml, sessions at <root>/sessions.json, etc.
 ```
 
-The `--root` flag enables fully isolated parallel instances with independent config, sessions, logs, PID lock, tmux socket, and session cache — useful for running multiple vibeflow-cli installations from different repository checkouts without interference.
+The `--root` flag enables fully isolated parallel instances with independent config, sessions, logs, PID lock, tmux socket, and session cache - useful for running multiple vibeflow-cli installations from different repository checkouts without interference.
 
 ## Common settings
 
 The first-launch server/API-key setup is saved here and is not repeated on later TUI launches.
-The independent **Launch PR review runner for this session?** prompt appears on every interactive launch.
-Its Yes/No answer is never persisted or coupled to authentication setup.
-Choosing Yes reuses `default_project`, `default_work_dir` (or the launch directory), and `default_provider`, asking only for unresolved review inputs.
-The runner stops with that TUI; use explicit `review-watch --background` only for a detached runner.
+The PR review preview is disabled unless the command includes `--cra`; this temporary rollout flag is not saved in configuration.
+The independent **Run PR reviews while this CLI is open?** prompt appears on every interactive `vibeflow --cra` launch.
+Its **Run reviews** / **Not now** answer is never persisted or coupled to authentication setup, and **Not now** is the default.
+Choosing **Run reviews** discovers all accessible projects, independently of `default_project`, and reuses `default_provider` with one shared provider/model setup when needed.
+Checkout selection reuses a valid remembered path for each stable repository binding, then checks `default_work_dir`, the launch directory, `directory_history`, and this root's saved session paths.
+One matching checkout is selected automatically; press `R` then Enter to resolve multiple clones or enter a missing checkout without blocking normal TUI use.
+Paths are validated against Git origin identity; aliases and worktrees sharing a common Git directory are deduplicated.
+Discovery refreshes on `r`, newly known paths, and every minute without changing ordinary queue polling.
+Only runners created by this TUI stop with it; use explicit `vibeflow --cra review-watch --background` for a detached runner.
 
 Example structure (not exhaustive):
 
@@ -35,6 +40,7 @@ default_project: my-project
 default_work_dir: /path/to/projects
 tmux_socket: vibeflow
 poll_interval_seconds: 5
+review_concurrency: 2  # positive integer; shared execution limit for TUI-managed review groups
 view_mode: flat   # flat or grouped
 
 llm_gateway_enabled: false  # optional: route LLM traffic via server gateway when supported
@@ -72,6 +78,14 @@ providers:
 
 Built-in provider keys include **`claude`**, **`codex`**, **`gemini`**, **`cursor`**, and **`qwen`**. You can add custom providers by extending the `providers` map (see [Providers](providers.md)).
 
+`review_concurrency` defaults to `2` when omitted and accepts any positive integer.
+Zero, negative, null, and noninteger values are configuration errors.
+The limit covers each TUI-managed attempt through provider shutdown and result acknowledgement, including saved results awaiting restored authorization.
+Standalone and externally owned runners are independent of a TUI's capacity group.
+An unresolved `Provider cleanup unverified` notice names a private attempt diagnostic whose reservation remains quarantined across restarts.
+A surviving child guard clears that notice only after confirming its provider process group has stopped; a free file lock alone is not cleanup evidence.
+Other available slots can continue serving healthy bindings.
+
 ## OpenShell
 
 Set `openshell.enabled: true` to wrap launched provider commands in NVIDIA OpenShell. Headless launches can also enable it per run with `vibeflow launch --openshell`. See [Providers](providers.md#openshell-sandboxes) for the full option list and generated command shape.
@@ -102,7 +116,7 @@ All paths below are resolved relative to the root directory (default `~/.vibeflo
 | `<root>/sessions.json` | Session metadata (file-locked) |
 | `<root>/session_cache.json` | Cache for restart-after-exit; persists full launch parameters so `vibeflow restart` works after a session exits tmux |
 | `<root>/vibeflow.pid` | PID lock so only one TUI instance runs per root |
-| `<root>/review-runner-preferences.json` | Non-secret review inputs scoped to the server, config and defaults; never stores launch consent or rewrites authentication YAML |
+| `<root>/review-runner-preferences.json` | Reusable provider/model and checkout choices keyed by stable binding identity, scoped to server/config/provider/directory context; migrates the old single-choice format and never stores consent or credentials |
 
 ### Internal fields
 

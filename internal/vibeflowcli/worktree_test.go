@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -239,6 +240,29 @@ func TestWorktreeManager_Remove(t *testing.T) {
 	}
 }
 
+func TestRemoveIfCleanPreservesUntrackedFile(t *testing.T) {
+	withTempRoot(t)
+	repo := initTestRepo(t)
+	wm, err := NewWorktreeManager(repo, ".claude/worktrees")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := wm.CreateBranch("dirty", "keep-dirty", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(path, "draft.txt")
+	if err := os.WriteFile(file, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := wm.RemoveIfClean(path); err == nil {
+		t.Fatal("dirty removal accepted")
+	}
+	if data, err := os.ReadFile(file); err != nil || string(data) != "keep" {
+		t.Fatalf("lost untracked work: %q %v", data, err)
+	}
+}
+
 func TestWorktreeManager_FindByBranch_NotFound(t *testing.T) {
 	repo := initTestRepo(t)
 	wm, err := NewWorktreeManager(repo, ".worktrees")
@@ -285,5 +309,58 @@ func TestWorktreeManager_Exists_NotRegistered(t *testing.T) {
 
 	if wm.Exists("/tmp/nonexistent-worktree-xyz-123") {
 		t.Error("should return false for unregistered path")
+	}
+}
+
+// TestCleanOrphanWorktrees covers the whole --clean decision: a worktree a
+// session uses and a dirty orphan survive, a clean orphan is removed (its
+// branch kept), and a worktree outside baseDir is never touched.
+func TestCleanOrphanWorktrees(t *testing.T) {
+	withTempRoot(t)
+	repo := initTestRepo(t)
+	wm, err := NewWorktreeManager(repo, ".claude/worktrees")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name string) string {
+		t.Helper()
+		p, err := wm.CreateBranch(name, "b-"+name, true, "")
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		return p
+	}
+	inUse, clean, dirty := mk("inuse"), mk("clean"), mk("dirty")
+	if err := os.WriteFile(filepath.Join(dirty, "wip.txt"), []byte("wip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outside, err := wm.CreateBranchInDir(t.TempDir(), "outside", "b-outside", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore()
+	if err := store.Add(SessionMeta{Name: "s", TmuxSession: "vibeflow_s", WorktreePath: inUse}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := cleanOrphanWorktrees(wm, store, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	for path, want := range map[string]bool{inUse: true, dirty: true, outside: true, clean: false} {
+		if got := wm.Exists(path); got != want {
+			t.Errorf("Exists(%s) = %v, want %v\noutput:\n%s", path, got, want, out.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dirty, "wip.txt")); err != nil {
+		t.Errorf("uncommitted file in dirty worktree was lost: %v", err)
+	}
+	if err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "b-clean").Run(); err != nil {
+		t.Errorf("branch of the removed worktree should survive: %v", err)
+	}
+	if !strings.Contains(out.String(), "1 removed, 1 kept, 1 in use.") {
+		t.Errorf("unexpected summary:\n%s", out.String())
 	}
 }
