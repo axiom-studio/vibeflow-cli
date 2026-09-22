@@ -93,8 +93,9 @@ while True:
                 before = len(record.read_text().splitlines())
                 os.write(master, b"\x03")
                 wait_for(lambda: tm("display-message", "-p", "-t", pane, "#{pane_dead}") == "1", "Ctrl+C did not exit agent")
+                # tmux can report a dead pane before it renders the exit banner.
+                wait_for(lambda: "Press Enter to resume" in captures(), "recovery hint did not appear")
                 exited_output = captures()
-                assert "Press Enter to resume" in exited_output, exited_output
                 os.write(master, b"\r")
                 wait_for(lambda: len(record.read_text().splitlines()) > before, "Enter did not resume agent")
                 args = json.loads(record.read_text().splitlines()[-1])
