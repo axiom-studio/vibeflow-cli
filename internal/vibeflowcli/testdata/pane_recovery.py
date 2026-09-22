@@ -73,7 +73,11 @@ while True:
                         os.read(master, 65536)
                     if predicate():
                         return
-                raise AssertionError(message + "\n" + tm("capture-pane", "-p", "-J", "-t", pane))
+                version = subprocess.check_output(["tmux", "-V"], text=True).strip()
+                state = tm("display-message", "-p", "-t", pane,
+                           "dead=#{pane_dead} status=#{pane_dead_status} signal=#{pane_dead_signal} "
+                           "time=#{pane_dead_time} size=#{pane_width}x#{pane_height}")
+                raise AssertionError(f"{message} ({version}, {provider}, {state})\n" + captures())
 
             def captures():
                 return tm("capture-pane", "-p", "-J", "-t", pane, "-S", "-40")
