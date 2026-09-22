@@ -604,8 +604,6 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	defer cancel(nil)
 	var progress atomic.Uint32
 	progressSignal := make(chan struct{}, 1)
-	progressAttempted := make(chan struct{}, 1)
-	var attemptedProgress atomic.Uint32
 	markProgress := func(bit uint32) {
 		for {
 			old := progress.Load()
@@ -648,19 +646,10 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			var renewed reviewExecution
 			milestones := progress.Load()
 			err := w.client.reviewRequest(callCtx, "POST", w.prefix()+"/heartbeat", struct{}{}, nil)
-			renewAttempted := false
 			if err == nil {
-				renewAttempted = true
 				err = w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", reviewRenewBody(*p.Execution, milestones&1 != 0, milestones&2 != 0), &renewed)
 			}
 			stop()
-			if renewAttempted {
-				attemptedProgress.Store(milestones)
-				select {
-				case progressAttempted <- struct{}{}:
-				default:
-				}
-			}
 			if err != nil {
 				if reviewPermanent(err) {
 					cancel(errReviewLeaseRejected)
@@ -922,16 +911,6 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		return nil, fmt.Errorf("review result does not match the claimed revision and brief")
 	}
 	markProgress(2)
-	for attemptedProgress.Load()&2 == 0 {
-		select {
-		case <-progressAttempted:
-		case <-ctx.Done():
-			return nil, diagnostic.failure()
-		}
-	}
-	if ctx.Err() != nil {
-		return nil, diagnostic.failure()
-	}
 	return envelope.Result, nil
 }
 
