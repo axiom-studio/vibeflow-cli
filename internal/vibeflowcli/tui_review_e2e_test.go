@@ -5,6 +5,8 @@ package vibeflowcli
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -344,6 +346,306 @@ func TestReviewTUIBinaryConsent(t *testing.T) {
 			t.Fatal("closing the TUI did not stop the selected checkout's runner")
 		}
 	})
+}
+
+func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("native script unavailable; real PTY required")
+	}
+	binary := filepath.Join(t.TempDir(), "vibeflow")
+	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/vibeflow").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v %s", err, out)
+	}
+	root, binDir, barriers := t.TempDir(), t.TempDir(), t.TempDir()
+	var repos []string
+	var executions []*reviewExecution
+	var queuedSiblings []string
+	for i, name := range []string{"repo", "two", "three"} {
+		repo, e := reviewTestRepo(t)
+		reviewTestGit(t, repo, "remote", "set-url", "origin", "https://github.com/acme/"+name+".git")
+		e.Review.RepositoryLinkID, e.Review.State = int64(7+i), "queued"
+		e.ProgressReportingVersion, e.Prompt = 1, strconv.Itoa(i)
+		e.Attempt.Round.Details = reviewRepository{BaseRepositoryName: "acme/" + name, HeadRepositoryName: "acme/" + name, BaseCloneURL: "https://github.com/acme/" + name + ".git", HeadCloneURL: "https://github.com/acme/" + name + ".git"}
+		e.Attempt.Round.DeadlineAt = time.Now().Add(2 * time.Minute).UnixMilli()
+		e.Attempt.LeaseExpiresAt = e.Attempt.Round.DeadlineAt
+		repos, executions = append(repos, repo), append(executions, e)
+		queuedSiblings = append(queuedSiblings, reviewUUID())
+	}
+	content := json.RawMessage("{\"findings\":[]}")
+	digest := sha256.Sum256(content)
+	briefDigest := hex.EncodeToString(digest[:])
+	for i, e := range executions {
+		result := map[string]any{"schema_version": 1, "brief_digest": briefDigest, "head_sha": e.Review.HeadSHA, "base_sha": e.Review.BaseSHA, "outcome": "clean", "summary": "PTY review complete", "new_findings": []any{}, "reconciliations": []any{}}
+		if err := saveReviewJSON(filepath.Join(barriers, fmt.Sprintf("%d.result", i)), map[string]any{"structured_output": map[string]any{"result": result, "failure_reason": nil}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\nIFS= read -r task_id < ../prompt.txt\nprintf '%s\\n' \"$$\" > " + shellQuote(barriers) + "/\"$task_id\".started\nwhile [ ! -f " + shellQuote(barriers) + "/\"$task_id\".release ]; do sleep 0.02; done\ncat " + shellQuote(barriers) + "/\"$task_id\".result\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	opened := filepath.Join(barriers, "opened")
+	for _, opener := range []string{"open", "xdg-open"} {
+		if err := os.WriteFile(filepath.Join(binDir, opener), []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+shellQuote(opened)+"\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mu sync.Mutex
+	runners := map[string]int{}
+	var claims, results [3]int
+	var progress [3]reviewProgress
+	var detailReads atomic.Int64
+	summary := func(i int) reviewSummary {
+		project := int64(66)
+		if i == 2 {
+			project = 67
+		}
+		e := executions[i]
+		s := reviewTestSummary(project, e.Review.ID)
+		s.Review.reviewJob = e.Review
+		s.Review.Details.BaseRepositoryName = e.Attempt.Round.Details.BaseRepositoryName
+		s.Review.Details.URL = "https://github.com/" + s.Review.Details.BaseRepositoryName + "/pull/7"
+		p := progress[i]
+		p.HeadSHA, p.BaseSHA, p.RequestAccepted = e.Review.HeadSHA, e.Review.BaseSHA, true
+		if p.State == "" {
+			p.State = "queued"
+		}
+		s.Progress, s.Summary = &p, "PTY review"
+		return s
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "HEAD" {
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer tui-api-canary" {
+			t.Error("missing isolated API credential")
+			w.WriteHeader(401)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		path := strings.TrimPrefix(r.URL.Path, "/rest/v1/vibeflow")
+		switch {
+		case path == "/projects":
+			json.NewEncoder(w).Encode([]Project{{ID: 66, Name: "First"}, {ID: 67, Name: "Second"}})
+		case strings.HasSuffix(path, "/pr-review-repositories"):
+			items := []map[string]any{}
+			start, end := 0, 2
+			if strings.Contains(path, "/67/") {
+				start, end = 2, 4
+			}
+			for i := start; i < end; i++ {
+				name := "acme/missing"
+				if i < 3 {
+					name = executions[i].Attempt.Round.Details.BaseRepositoryName
+				}
+				items = append(items, map[string]any{"provider": "github", "provider_host": "github.com", "repository_link_id": 7 + i, "repository_name": name})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"repositories": items})
+		case strings.HasSuffix(path, "/sessions"):
+			fmt.Fprint(w, "[]")
+		case strings.HasSuffix(path, "/pr-review-sessions"):
+			fmt.Fprint(w, "{\"sessions\":[]}")
+		case strings.Contains(path, "/pr-review-summaries"):
+			if strings.HasSuffix(path, "/pr-review-summaries") {
+				items := []reviewSummary{summary(0), summary(1)}
+				if strings.Contains(path, "/67/") {
+					items = []reviewSummary{summary(2)}
+				}
+				json.NewEncoder(w).Encode(reviewSummariesPage{Summaries: items})
+			} else if strings.HasSuffix(path, "/findings") {
+				json.NewEncoder(w).Encode(reviewFindingsPage{})
+			} else {
+				for i, e := range executions {
+					if strings.HasSuffix(path, "/"+e.Review.ID) {
+						detailReads.Add(1)
+						json.NewEncoder(w).Encode(summary(i))
+						return
+					}
+				}
+				w.WriteHeader(404)
+			}
+		case r.Method == "POST" && strings.HasSuffix(path, "/pr-review-runners"):
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+				return
+			}
+			i := int(body["repository_link_id"].(float64)) - 7
+			if i < 0 || i > 2 {
+				t.Error("unexpected runner binding")
+				w.WriteHeader(400)
+				return
+			}
+			id := body["id"].(string)
+			runners[id], executions[i].Attempt.RunnerID, body["user_id"] = i, id, 42
+			json.NewEncoder(w).Encode(body)
+		case strings.HasSuffix(path, "/heartbeat"), r.Method == "DELETE":
+			w.WriteHeader(204)
+		default:
+			parts := strings.Split(path, "/")
+			if len(parts) < 6 {
+				t.Errorf("unexpected API %s", path)
+				w.WriteHeader(404)
+				return
+			}
+			i, ok := runners[parts[4]]
+			if !ok {
+				t.Errorf("unknown runner %s", path)
+				w.WriteHeader(404)
+				return
+			}
+			e := executions[i]
+			switch {
+			case strings.HasSuffix(path, "/work"):
+				jobs := []reviewJob{}
+				if results[i] == 0 {
+					jobs = append(jobs, e.Review)
+					next := e.Review
+					next.ID, next.State = queuedSiblings[i], "queued"
+					jobs = append(jobs, next)
+				}
+				json.NewEncoder(w).Encode(map[string]any{"reviews": jobs})
+			case strings.HasSuffix(path, "/claim"):
+				if !strings.Contains(path, "/jobs/"+e.Review.ID+"/") {
+					t.Error("same-repository queued PR claimed while its first review was pending")
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
+				claims[i]++
+				e.Review.State = "reviewing"
+				progress[i] = reviewProgress{ReportingVersion: 1, RoundID: e.Attempt.Round.ID, RoundNumber: 1, AttemptNumber: 1, RunnerAssigned: true, State: "reviewing"}
+				json.NewEncoder(w).Encode(e)
+			case strings.HasSuffix(path, "/renew"):
+				var body struct{ Progress reviewProgressInput }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				if body.Progress.HeadSHA != e.Review.HeadSHA || body.Progress.BaseSHA != e.Review.BaseSHA {
+					t.Error("revision progress mismatch")
+				}
+				if body.Progress.CheckoutPrepared {
+					progress[i].CheckoutPreparedAt = time.Now().UnixMilli()
+				}
+				if body.Progress.ReviewCompleted {
+					progress[i].ReviewCompletedAt = time.Now().UnixMilli()
+				}
+				json.NewEncoder(w).Encode(e)
+			case strings.HasSuffix(path, "/brief"):
+				json.NewEncoder(w).Encode(reviewBrief{RoundID: e.Attempt.Round.ID, Digest: briefDigest, Content: content})
+			case strings.HasSuffix(path, "/result"):
+				results[i]++
+				e.Review.State = "clean"
+				progress[i].ResultRecorded, progress[i].State = true, "completed"
+				w.WriteHeader(204)
+			case strings.HasSuffix(path, "/fail"):
+				t.Errorf("provider failed: %s", path)
+				w.WriteHeader(204)
+			default:
+				t.Errorf("unexpected API %s", path)
+				w.WriteHeader(404)
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject = server.URL, "tui-api-canary", "66"
+	cfg.DirectoryHistory, cfg.PollInterval, cfg.ReviewConcurrency = repos, 1, 2
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, filepath.Join(root, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	terminal := startReviewTUITerminal(t, binary, repos[0], root, binDir)
+	terminal.await(t, "Run PR reviews while this CLI is open?")
+	terminal.send(t, "y")
+	wait := func(want string, condition func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(12 * time.Second)
+		for time.Now().Before(deadline) {
+			if condition() {
+				return
+			}
+			select {
+			case <-terminal.done:
+				t.Fatalf("TUI ended before %s: %v\n%s", want, terminal.err, terminal.output.String())
+			default:
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		mu.Lock()
+		counts, completed := claims, results
+		mu.Unlock()
+		t.Fatalf("missing %s: claims=%v results=%v\n%s", want, counts, completed, terminal.output.String())
+	}
+	started := func() []int {
+		var ids []int
+		for i := range executions {
+			if _, err := os.Stat(filepath.Join(barriers, fmt.Sprintf("%d.started", i))); err == nil {
+				ids = append(ids, i)
+			}
+		}
+		return ids
+	}
+	wait("two provider start barriers", func() bool { return len(started()) == 2 })
+	active := started()
+	mu.Lock()
+	initialClaims := claims
+	mu.Unlock()
+	if initialClaims[0]+initialClaims[1]+initialClaims[2] != 2 {
+		t.Fatalf("third repository claimed before capacity: %v", initialClaims)
+	}
+	terminal.send(t, "R")
+	terminal.await(t, "acme/missing [needs_checkout]")
+	terminal.send(t, "R"+strings.Repeat("j", active[0])+"\r")
+	terminal.await(t, "o: PR  c: cloud")
+	terminal.await(t, "[x] Checkout prepared")
+	terminal.send(t, "oc")
+	wait("literal browser links", func() bool {
+		data, _ := os.ReadFile(opened)
+		return strings.Contains(string(data), "https://github.com/acme/") && strings.Contains(string(data), server.URL+"/ai/vibeflow?project=66")
+	})
+	terminal.output.Lock()
+	terminal.output.text.Reset()
+	terminal.output.Unlock()
+	terminal.send(t, "\x1b")
+	terminal.await(t, "Sessions (flat)")
+	// At 100x30, the first flat session follows the title, border and header.
+	before := detailReads.Load()
+	terminal.send(t, "\x1b[<0;5;11M\x1b[<0;5;11m\x1b[<0;5;11M\x1b[<0;5;11m")
+	terminal.await(t, "o: PR  c: cloud")
+	wait("mouse-opened review detail", func() bool { return detailReads.Load() > before })
+	if err := os.WriteFile(filepath.Join(barriers, fmt.Sprintf("%d.release", active[0])), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	wait("third provider after slot release", func() bool { return len(started()) == 3 })
+	mu.Lock()
+	afterClaims, afterResults := claims, results
+	mu.Unlock()
+	if afterClaims != [3]int{1, 1, 1} || afterResults[active[0]] != 1 {
+		t.Fatalf("capacity handoff: claims=%v results=%v", afterClaims, afterResults)
+	}
+	for i := range executions {
+		if err := os.WriteFile(filepath.Join(barriers, fmt.Sprintf("%d.release", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wait("three accepted results", func() bool { mu.Lock(); defer mu.Unlock(); return results == [3]int{1, 1, 1} })
+	terminal.send(t, "r")
+	// Bubble Tea updates an existing checkbox with cursor-addressed fragments.
+	// Reopen detail to assert its complete rendered line rather than raw deltas.
+	terminal.output.Lock()
+	terminal.output.text.Reset()
+	terminal.output.Unlock()
+	terminal.send(t, "\x1b")
+	terminal.await(t, "Sessions (flat)")
+	terminal.send(t, "\r")
+	terminal.await(t, "[x] Result recorded")
+	terminal.send(t, "q")
+	terminal.wait(t, false)
 }
 
 type reviewTUIOutput struct {

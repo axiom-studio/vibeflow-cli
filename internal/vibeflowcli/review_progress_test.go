@@ -47,10 +47,13 @@ func TestReviewRenewBodyCapability(t *testing.T) {
 }
 
 func TestReviewProgressLostRenewalKeepsDurableResult(t *testing.T) {
-	for _, capability := range []int{1, 0} {
-		t.Run(fmt.Sprintf("capability=%d", capability), func(t *testing.T) {
+	for _, tc := range []struct {
+		capability int
+		failure    string
+	}{{1, "renew"}, {0, "renew"}, {1, "heartbeat"}, {0, "heartbeat"}} {
+		t.Run(fmt.Sprintf("capability=%d/failure=%s", tc.capability, tc.failure), func(t *testing.T) {
 			source, execution := reviewTestRepo(t)
-			execution.ProgressReportingVersion = capability
+			execution.ProgressReportingVersion = tc.capability
 			content := json.RawMessage(`{"findings":[]}`)
 			digest := sha256.Sum256(content)
 			brief := reviewBrief{RoundID: execution.Attempt.Round.ID, Digest: hex.EncodeToString(digest[:]), Content: content}
@@ -78,6 +81,14 @@ func TestReviewProgressLostRenewalKeepsDurableResult(t *testing.T) {
 				case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/brief"):
 					json.NewEncoder(w).Encode(brief)
 				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/heartbeat"):
+					if tc.failure == "heartbeat" {
+						if err := os.WriteFile(release, nil, 0600); err != nil {
+							t.Error(err)
+						}
+						time.Sleep(250 * time.Millisecond)
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/renew"):
 					renewals.Add(1)
@@ -107,7 +118,7 @@ func TestReviewProgressLostRenewalKeepsDurableResult(t *testing.T) {
 			if err := watch.advance(context.Background(), true); err != nil {
 				t.Fatal(err)
 			}
-			if submissions.Load() != 1 || renewals.Load() == 0 || len(receipt.Result) == 0 || receipt.Failure != "" {
+			if submissions.Load() != 1 || (tc.failure == "renew" && renewals.Load() == 0) || (tc.failure == "heartbeat" && renewals.Load() != 0) || len(receipt.Result) == 0 || receipt.Failure != "" {
 				t.Fatalf("validated result was not retained: submissions=%d renewals=%d result=%s failure=%q", submissions.Load(), renewals.Load(), receipt.Result, receipt.Failure)
 			}
 		})

@@ -66,7 +66,7 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 					json.NewEncoder(w).Encode(registration)
 				case strings.HasSuffix(r.URL.Path, "/work"):
 					json.NewEncoder(w).Encode(map[string]any{"reviews": []reviewJob{execution.Review}})
-				case strings.HasSuffix(r.URL.Path, "/claim"):
+				case strings.HasSuffix(r.URL.Path, "/claim"), strings.HasSuffix(r.URL.Path, "/renew"):
 					json.NewEncoder(w).Encode(execution)
 				case strings.HasSuffix(r.URL.Path, "/brief"):
 					digest := sha256.Sum256([]byte("{}"))
@@ -93,7 +93,7 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, binary, "--root", root, "--config", config, "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "diagnostic", "--once")
+			cmd := exec.CommandContext(ctx, binary, "--cra", "--root", root, "--config", config, "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "diagnostic", "--once")
 			output, err := cmd.CombinedOutput()
 			if err != nil || !strings.Contains(reason, tc.category) || !strings.Contains(reason, tc.httpStatus) {
 				t.Errorf("provider cause lost: %v reason=%q output=%s", err, reason, output)
