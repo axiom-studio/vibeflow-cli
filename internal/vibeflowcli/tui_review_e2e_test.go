@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -460,7 +461,7 @@ func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
 			} else if strings.HasSuffix(path, "/findings") {
 				page := reviewFindingsPage{}
 				if strings.Contains(path, "/"+executions[0].Review.ID+"/") {
-					page.Findings = []reviewFinding{{ID: "finding", JobID: executions[0].Review.ID, Title: "Complete evidence", Evidence: strings.Repeat("context ", 90) + "PTY_FINAL_EVIDENCE\nPTY_SOURCE_LINE"}}
+					page.Findings = []reviewFinding{{ID: "finding", JobID: executions[0].Review.ID, Title: "Complete evidence", Evidence: strings.Repeat("context line\n", 100) + "PTY_FINAL_EVIDENCE\nPTY_SOURCE_LINE"}}
 				}
 				json.NewEncoder(w).Encode(page)
 			} else {
@@ -602,14 +603,32 @@ func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
 	if initialClaims[0]+initialClaims[1]+initialClaims[2] != 2 {
 		t.Fatalf("third repository claimed before capacity: %v", initialClaims)
 	}
+	wait("checkout progress", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return progress[active[0]].CheckoutPreparedAt > 0
+	})
+	terminal.send(t, "r")
+	wait("backend checkout milestone in active row", func() bool {
+		return strings.Contains(reviewVisibleScreen(terminal.output.RawString(), 100, 30), "Reviewing · checkout prepared")
+	})
 	terminal.send(t, "R")
 	terminal.await(t, "acme/missing [needs_checkout]")
 	terminal.send(t, "R"+strings.Repeat("j", active[0])+"\r")
 	terminal.await(t, "o: PR  c: Cloud project")
-	terminal.await(t, "[x] Checkout prepared")
-	terminal.send(t, strings.Repeat("j", 80))
+	terminal.send(t, strings.Repeat("j", 120))
 	terminal.await(t, "PTY_FINAL_EVIDENCE")
 	terminal.await(t, "PTY_SOURCE_LINE")
+	var visible string
+	wait("final evidence on visible PTY screen", func() bool {
+		visible = reviewVisibleScreen(terminal.output.RawString(), 100, 30)
+		return strings.Contains(visible, "PTY_FINAL_EVIDENCE")
+	})
+	for _, want := range []string{"acme/", "#7", "Reviewing", "0 findings", "0 blockers"} {
+		if !strings.Contains(visible, want) {
+			t.Fatalf("scrolled PTY screen lost %q:\n%s", want, visible)
+		}
+	}
 	terminal.send(t, "oc")
 	wait("literal browser links", func() bool {
 		data, _ := os.ReadFile(opened)
@@ -650,7 +669,18 @@ func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
 	terminal.send(t, "\x1b")
 	terminal.await(t, "Sessions (flat)")
 	terminal.send(t, "\r")
-	terminal.await(t, "[x] Result recorded")
+	terminal.await(t, "Evidence: context line")
+	scrollBatches := 0
+	wait("recorded result on visible PTY screen", func() bool {
+		if strings.Contains(reviewVisibleScreen(terminal.output.RawString(), 100, 30), "[x] Result recorded") {
+			return true
+		}
+		if scrollBatches < 40 {
+			terminal.send(t, "jjjjj")
+			scrollBatches++
+		}
+		return false
+	})
 	terminal.send(t, "q")
 	terminal.wait(t, false)
 }
@@ -658,6 +688,140 @@ func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
 type reviewTUIOutput struct {
 	sync.Mutex
 	text strings.Builder
+}
+
+// Replays the PTY's cursor writes so assertions inspect the current display,
+// not text retained in earlier terminal frames.
+func reviewVisibleScreen(raw string, width, height int) string {
+	cells := make([][]rune, height)
+	for i := range cells {
+		cells[i] = make([]rune, width)
+		for j := range cells[i] {
+			cells[i][j] = ' '
+		}
+	}
+	x, y := 0, 0
+	for i := 0; i < len(raw); {
+		if raw[i] == '\x1b' && i+1 < len(raw) {
+			if raw[i+1] == '[' {
+				start := i + 2
+				i = start
+				for i < len(raw) && (raw[i] < '@' || raw[i] > '~') {
+					i++
+				}
+				if i == len(raw) {
+					break
+				}
+				command, params := raw[i], strings.Split(raw[start:i], ";")
+				i++
+				number := func(index, fallback int) int {
+					if index >= len(params) {
+						return fallback
+					}
+					v, err := strconv.Atoi(params[index])
+					if err != nil || v == 0 {
+						return fallback
+					}
+					return v
+				}
+				switch command {
+				case 'H', 'f':
+					y, x = number(0, 1)-1, number(1, 1)-1
+				case 'A':
+					y -= number(0, 1)
+				case 'B':
+					y += number(0, 1)
+				case 'C':
+					x += number(0, 1)
+				case 'D':
+					x -= number(0, 1)
+				case 'G':
+					x = number(0, 1) - 1
+				case 'd':
+					y = number(0, 1) - 1
+				case 'J':
+					from := max(0, y)
+					if number(0, 0) == 2 {
+						from = 0
+					}
+					for row := from; row < height; row++ {
+						startCol := 0
+						if row == y && number(0, 0) != 2 {
+							startCol = max(0, x)
+						}
+						for col := startCol; col < width; col++ {
+							cells[row][col] = ' '
+						}
+					}
+				case 'K':
+					if y >= 0 && y < height {
+						for col := max(0, x); col < width; col++ {
+							cells[y][col] = ' '
+						}
+					}
+				case 'X':
+					if y >= 0 && y < height {
+						for col := max(0, x); col < min(width, x+number(0, 1)); col++ {
+							cells[y][col] = ' '
+						}
+					}
+				case 'P':
+					if y >= 0 && y < height && x >= 0 && x < width {
+						count := min(number(0, 1), width-x)
+						copy(cells[y][x:], cells[y][x+count:])
+						for col := width - count; col < width; col++ {
+							cells[y][col] = ' '
+						}
+					}
+				}
+				continue
+			}
+			if raw[i+1] == ']' {
+				i += 2
+				for i < len(raw) && raw[i] != '\a' && !(raw[i] == '\x1b' && i+1 < len(raw) && raw[i+1] == '\\') {
+					i++
+				}
+				if i < len(raw) && raw[i] == '\x1b' {
+					i += 2
+				} else if i < len(raw) {
+					i++
+				}
+				continue
+			}
+			i += 2
+			continue
+		}
+		switch raw[i] {
+		case '\r':
+			x, i = 0, i+1
+			continue
+		case '\n':
+			y, i = y+1, i+1
+			if y == height {
+				copy(cells, cells[1:])
+				cells[height-1] = make([]rune, width)
+				for col := range cells[height-1] {
+					cells[height-1][col] = ' '
+				}
+				y--
+			}
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(raw[i:])
+		i += size
+		if r < 32 {
+			continue
+		}
+		if y >= 0 && y < height && x >= 0 && x < width {
+			cells[y][x] = r
+		}
+		x += ansi.StringWidth(string(r))
+	}
+	lines := make([]string, height)
+	for i := range cells {
+		lines[i] = strings.TrimRight(string(cells[i]), " ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (b *reviewTUIOutput) Write(p []byte) (int, error) {

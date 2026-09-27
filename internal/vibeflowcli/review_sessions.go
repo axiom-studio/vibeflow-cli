@@ -230,11 +230,30 @@ func (s reviewSummary) row() SessionRow {
 	v := reviewSession{ProjectID: r.ProjectID, JobID: r.ID, Provider: r.Provider, ProviderHost: r.ProviderHost, RepositoryLinkID: r.RepositoryLinkID, RepositoryName: r.Details.BaseRepositoryName, PRNumber: r.Number, PRURL: r.Details.URL, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA, State: r.State, RunnerName: s.Runner.Name, Title: r.Details.Title, FindingCount: s.FindingCount, BlockerCount: s.UnresolvedBlockers, CountsKnown: true}
 	if p := s.Progress; p != nil {
 		v.RoundID, v.RoundNumber, v.AttemptNumber = p.RoundID, p.RoundNumber, p.AttemptNumber
-		v.Stage = p.State
+		v.Stage = reviewProgressStage(p)
 	}
 	row := v.row()
 	row.Name = fmt.Sprintf("review:%d:job:%s", r.ProjectID, r.ID)
 	return row
+}
+
+func reviewProgressStage(p *reviewProgress) string {
+	switch {
+	case p.State == "contact_lost":
+		return "contact lost"
+	case p.ResultRecorded:
+		return "result recorded"
+	case p.ReviewCompletedAt > 0:
+		return "review complete"
+	case p.CheckoutPreparedAt > 0:
+		return "checkout prepared"
+	case p.RunnerAssigned:
+		return "runner assigned"
+	case p.RequestAccepted:
+		return "waiting for runner"
+	default:
+		return ""
+	}
 }
 
 func (c *Client) listReviewSessions(ctx context.Context, projectID int64, after string) (reviewSessionsPage, error) {
