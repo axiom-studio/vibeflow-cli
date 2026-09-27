@@ -150,7 +150,8 @@ func TestReviewRowShowsTitleAndCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.FindingCount, s.UnresolvedBlockers = 3, 1
-	s.Review.State, s.Progress.State = "reviewing", "checkout_prepared"
+	s.Review.State, s.Progress.State = "reviewing", "reviewing"
+	s.Progress.RunnerAssigned, s.Progress.CheckoutPreparedAt = true, 123
 	m := reviewTestModel(nil)
 	var b strings.Builder
 	m.renderSessionRow(&b, s.row(), 0, 0, 120, "")
@@ -159,6 +160,65 @@ func TestReviewRowShowsTitleAndCounts(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestReviewRowStagesFollowBackendProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		progress *reviewProgress
+		want     string
+		avoid    string
+	}{
+		{"unknown", nil, "reviewing", " · "},
+		{"waiting", &reviewProgress{State: "reviewing", RequestAccepted: true}, "waiting for runner", "checkout prepared"},
+		{"assigned", &reviewProgress{State: "reviewing", RunnerAssigned: true}, "runner assigned", "checkout prepared"},
+		{"checkout", &reviewProgress{State: "reviewing", RunnerAssigned: true, CheckoutPreparedAt: 123}, "checkout prepared", "review complete"},
+		{"completed", &reviewProgress{State: "reviewing", RunnerAssigned: true, CheckoutPreparedAt: 123, ReviewCompletedAt: 456}, "review complete", "result recorded"},
+		{"recorded", &reviewProgress{State: "completed", RunnerAssigned: true, CheckoutPreparedAt: 123, ReviewCompletedAt: 456, ResultRecorded: true}, "result recorded", "contact lost"},
+		{"contact lost", &reviewProgress{State: "contact_lost", RunnerAssigned: true, CheckoutPreparedAt: 123, ReviewCompletedAt: 456}, "contact lost", "review complete"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := reviewTestSummary(13, "job")
+			s.Review.State = "reviewing"
+			s.Progress = tc.progress
+			got := strings.ToLower(s.row().ManagedReview.progress())
+			if !strings.Contains(got, tc.want) || tc.avoid != "" && strings.Contains(got, tc.avoid) {
+				t.Fatalf("progress %q: want %q, avoid %q", got, tc.want, tc.avoid)
+			}
+		})
+	}
+}
+
+func TestReviewDetailPinsContextAcrossScrollAndResize(t *testing.T) {
+	m := reviewTestModel(nil)
+	m.width, m.height = 40, 8
+	s := reviewTestSummary(13, "job")
+	s.Review.Details.Title = "Preserve complete findings"
+	s.Review.State = "reviewing"
+	s.FindingCount, s.UnresolvedBlockers = 3, 1
+	m.reviewDetail = reviewDetailState{Project: 13, Job: "job", Summary: &s, Findings: []reviewFinding{{Evidence: strings.Repeat("evidence line\n", 40)}}}
+	m.activeView = ViewReviewDetail
+	for range 100 {
+		m = reviewApply(m, tea.KeyPressMsg{Code: 'j'})
+	}
+	for _, size := range []struct{ width, height int }{{40, 8}, {100, 30}} {
+		m.width, m.height = size.width, size.height
+		m.clampReviewDetailScroll()
+		view := m.viewReviewDetail()
+		for _, want := range []string{"acme/repo#7", "Preserve complete", "Reviewing", "3 findings", "1 blocker"} {
+			if !strings.Contains(view, want) {
+				t.Fatalf("%dx%d scrolled detail lost %q:\n%s", size.width, size.height, want, view)
+			}
+		}
+		if lines := strings.Split(view, "\n"); len(lines) > size.height {
+			t.Fatalf("%dx%d detail too tall: %d", size.width, size.height, len(lines))
+		}
+	}
+	s.Review.Details.BaseRepositoryName = "acme/a-very-long-repository-name"
+	m.width, m.height = 40, 8
+	if got := m.viewReviewDetail(); !strings.Contains(got, "#7: Preserve complete") {
+		t.Fatalf("long repository hid the PR title:\n%s", got)
 	}
 }
 

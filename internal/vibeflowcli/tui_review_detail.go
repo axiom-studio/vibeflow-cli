@@ -586,13 +586,21 @@ func (m Model) reviewDetailLayout() (header, body, footer []string) {
 		add(d.Notice)
 	}
 	if s := d.Summary; s != nil {
-		add(fmt.Sprintf("Repository: %s #%d", s.Review.Details.BaseRepositoryName, s.Review.Number))
+		repo := ansi.Truncate(reviewDisplay(s.Review.Details.BaseRepositoryName), max(8, width/3), "…")
+		identity := fmt.Sprintf("%s#%d", repo, s.Review.Number)
 		if s.Review.Details.Title != "" {
-			add("PR: " + s.Review.Details.Title)
+			identity += ": " + s.Review.Details.Title
 		}
-		add("Status: " + reviewStateLabel(s.Review.State))
+		findings, blockers := "findings", "blockers"
+		if s.FindingCount == 1 {
+			findings = "finding"
+		}
+		if s.UnresolvedBlockers == 1 {
+			blockers = "blocker"
+		}
+		header = []string{identity, fmt.Sprintf("%s · %d %s · %d %s", reviewStateLabel(s.Review.State), s.FindingCount, findings, s.UnresolvedBlockers, blockers)}
+		add(fmt.Sprintf("%s · Project: %s (%d)", reviewSessionLabel, m.reviewProjects[d.Project].Name, d.Project))
 		add("Summary: " + s.Summary)
-		add(fmt.Sprintf("Findings: %d (%d blockers)", s.FindingCount, s.UnresolvedBlockers))
 		for _, f := range d.Findings {
 			add(fmt.Sprintf("%s %s: %s", f.Severity, f.State, f.Title))
 			if f.Path != "" {
