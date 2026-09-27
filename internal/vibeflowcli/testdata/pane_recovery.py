@@ -1,16 +1,22 @@
 """Exercise real terminal keys against tmux with recording agents, without API calls."""
 
+import fcntl
 import json
 import os
 import pathlib
 import pty
 import select
+import shlex
+import struct
+import shutil
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 
 binary = str(pathlib.Path(sys.argv[1]).resolve())
+test_binary = str(pathlib.Path(sys.argv[2]).resolve())
 conversation = "ab838172-840b-4d32-bf24-d22dd2b0fe6c"
 
 for provider in ["claude", "codex"]:
@@ -66,21 +72,71 @@ while True:
                 os.environ["TERM"] = "xterm-256color"
                 os.execvp("tmux", ["tmux", "-L", socket, "attach-session", "-t", session])
 
+            recent_client = bytearray()
+            terminal_output = bytearray()
+            screen_width, screen_height = 100, 30
+
+            def visible_screen():
+                env = dict(os.environ, VIBEFLOW_PANE_RECOVERY_HELPER="screen",
+                           VIBEFLOW_PANE_RECOVERY_WIDTH=str(screen_width),
+                           VIBEFLOW_PANE_RECOVERY_HEIGHT=str(screen_height))
+                return subprocess.run([test_binary, "-test.run=^TestPaneRecoveryHelperProcess$"],
+                                      env=env, input=bytes(terminal_output), capture_output=True,
+                                      check=True).stdout.decode(errors="replace")
+
             def wait_for(predicate, message):
                 deadline = time.monotonic() + 8
                 while time.monotonic() < deadline:
                     if select.select([master], [], [], 0.03)[0]:
-                        os.read(master, 65536)
+                        chunk = os.read(master, 65536)
+                        recent_client.extend(chunk)
+                        terminal_output.extend(chunk)
+                        del recent_client[:-8192]
                     if predicate():
                         return
                 version = subprocess.check_output(["tmux", "-V"], text=True).strip()
                 state = tm("display-message", "-p", "-t", pane,
                            "dead=#{pane_dead} status=#{pane_dead_status} signal=#{pane_dead_signal} "
                            "time=#{pane_dead_time} size=#{pane_width}x#{pane_height}")
-                raise AssertionError(f"{message} ({version}, {provider}, {state})\n" + captures())
+                extra = ""
+                if message == "recovery hint did not appear":
+                    pane_pid = tm("display-message", "-p", "-t", pane, "#{pane_pid}")
+                    process = subprocess.run(["ps", "-o", "stat=,comm=", "-p", pane_pid],
+                                             capture_output=True, text=True) if pane_pid.isdecimal() else None
+                    fmt = tm("show-options", "-p", "-v", "-t", pane, "remain-on-exit-format")
+                    extra = (f" server={tm('display-message', '-p', '-t', pane, '#{version}')}"
+                             f" tmux_bin={shutil.which('tmux')}"
+                             f" remain={tm('show-options', '-p', '-v', '-t', pane, 'remain-on-exit')}"
+                             f" format_has_hint={'Press Enter to resume' in fmt}"
+                             f" pane_pid={pane_pid} pane_process={process.stdout.strip() if process and process.returncode == 0 else 'gone'}"
+                             f" attached_hint_emitted={b'Press Enter to resume' in recent_client}")
+                raise AssertionError(f"{message} ({version}, {provider}, {state}{extra})\n" + captures())
 
             def captures():
                 return tm("capture-pane", "-p", "-J", "-t", pane, "-S", "-40")
+
+            def resume_with_enter(before):
+                command = tm("show-options", "-p", "-v", "-t", pane, "@vibeflow_resume")
+                marker = f"vf-resume-{os.getpid()}-{provider}-{before}"
+                result = root / f"resume-{before}.status"
+                script = (f'{command} "$1"; status=$?; '
+                          f'printf "%s" "$status" > {shlex.quote(str(result))}; '
+                          f'tmux -L {shlex.quote(socket)} wait-for -S {shlex.quote(marker)}; '
+                          'exit "$status"')
+                tm("set-option", "-p", "-t", pane, "@vibeflow_resume",
+                   "sh -c " + shlex.quote(script) + " --")
+                waiter = subprocess.Popen(["tmux", "-L", socket, "wait-for", marker],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    os.write(master, b"\r")
+                    wait_for(lambda: len(record.read_text().splitlines()) > before,
+                             "Enter did not resume agent")
+                    assert waiter.wait(timeout=8) == 0, "resume command did not complete"
+                    assert result.read_text() == "0", "resume command failed"
+                finally:
+                    if waiter.poll() is None:
+                        waiter.kill()
+                        waiter.wait()
 
             wait_for(lambda: "READY" in captures() and tm("list-clients", "-F", "#{client_pid}") != "", "agent/client did not start")
             client = tm("list-clients", "-F", "#{client_pid}")
@@ -89,22 +145,60 @@ while True:
             wait_for(lambda: "LIVE_ENTER" in captures(), "Enter was swallowed for live agent")
             for workbench in [False, True]:
                 if workbench:
-                    tm("new-session", "-d", "-s", "workbench", "sleep 300")
-                    sibling = tm("display-message", "-p", "-t", "workbench", "#{pane_id}")
-                    tm("switch-client", "-c", client_name, "-t", "workbench")
-                    tm("join-pane", "-s", pane, "-t", "workbench")
+                    tm("set-option", "-g", "detach-on-destroy", "off")
+                    sibling_session = f"vibeflow_{provider}-sibling"
+                    tm("new-session", "-d", "-s", sibling_session, "sleep 300")
+                    sibling = tm("display-message", "-p", "-t", sibling_session, "#{pane_id}")
+                    env = dict(os.environ, VIBEFLOW_PANE_RECOVERY_HELPER="compose",
+                               VIBEFLOW_PANE_RECOVERY_SOCKET=socket,
+                               VIBEFLOW_PANE_RECOVERY_SESSIONS=f"{session},{sibling_session}")
+                    subprocess.run([test_binary, "-test.run=^TestPaneRecoveryHelperProcess$"],
+                                   env=env, check=True, capture_output=True)
+                    tm("switch-client", "-c", client_name, "-t", "vibeflow_workbench")
                     tm("select-pane", "-t", pane)
                 before = len(record.read_text().splitlines())
+                recent_client.clear()
+                wait_for(lambda: "Press Enter to resume" not in visible_screen(),
+                         "live pane retained recovery hint")
+                assert "Press Enter to resume" not in tm("display-message", "-p", "-t", pane,
+                                                          "-F", "#{E:status-left}"), "live pane advertised recovery"
+                # Exercise the fallback without relying on tmux's native exit banner.
+                subprocess.run(["tmux", "-L", socket, "set-option", "-p", "-t", pane,
+                                "remain-on-exit-format", ""], capture_output=True)
+                exited_pid = tm("display-message", "-p", "-t", pane, "#{pane_pid}")
                 os.write(master, b"\x03")
                 wait_for(lambda: tm("display-message", "-p", "-t", pane, "#{pane_dead}") == "1", "Ctrl+C did not exit agent")
-                # tmux can report a dead pane before it renders the exit banner.
-                wait_for(lambda: "Press Enter to resume" in captures(), "recovery hint did not appear")
+                wait_for(lambda: "Press Enter to resume" in visible_screen(), "recovery hint did not appear")
+                if workbench:
+                    tm("select-pane", "-t", sibling)
+                    assert tm("display-message", "-p", "-t", sibling,
+                              "#{@vibeflow_resume}") == "", "sibling acquired recovery identity"
+                    wait_for(lambda: "Ctrl-t" in visible_screen() and
+                             "Press Enter to resume" not in visible_screen(),
+                             "live sibling showed recovery hint")
+                    tm("select-pane", "-t", pane)
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
+                    wait_for(lambda: tm("display-message", "-p", "-t", pane,
+                                        "#{window_width}") == "40", "workbench did not narrow")
+                    screen_width, screen_height = 40, 12
+                    terminal_output.clear()
+                    tm("refresh-client", "-t", client_name)
+                    wait_for(lambda: "Press Enter to resume" in visible_screen(),
+                             "narrow workbench lost recovery hint")
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+                    wait_for(lambda: tm("display-message", "-p", "-t", pane,
+                                        "#{window_width}") == "100", "workbench did not widen")
+                    screen_width, screen_height = 100, 30
+                    terminal_output.clear()
+                    tm("refresh-client", "-t", client_name)
                 exited_output = captures()
-                os.write(master, b"\r")
-                wait_for(lambda: len(record.read_text().splitlines()) > before, "Enter did not resume agent")
+                resume_with_enter(before)
                 args = json.loads(record.read_text().splitlines()[-1])
                 assert conversation in args, (args, exited_output)
                 assert tm("display-message", "-p", "-t", pane, "#{pane_dead}") == "0"
+                wait_for(lambda: subprocess.run(["ps", "-p", exited_pid, "-o", "stat="],
+                                               capture_output=True).returncode != 0,
+                         "resumed pane left its old process unreaped")
                 assert tm("list-clients", "-F", "#{client_pid}") == client, "client detached"
                 if workbench:
                     assert tm("display-message", "-p", "-t", sibling, "#{pane_dead}") == "0", "sibling stopped"

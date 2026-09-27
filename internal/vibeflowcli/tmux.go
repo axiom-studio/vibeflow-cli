@@ -32,6 +32,13 @@ import (
 
 const sessionPrefix = "vibeflow_"
 const deadPaneRecoveryHint = "Press Enter to resume | Ctrl+Q: menu"
+const recoverablePaneCondition = "#{&&:#{pane_dead},#{!=:#{@vibeflow_resume},}}"
+
+// Older tmux builds can miss SIGCHLD during libutempter cleanup: the pane is
+// dead but its native exit banner never renders. Keep recovery discoverable
+// from the same pane state that enables Enter, without waiting for exit status.
+// Upstream: https://github.com/tmux/tmux/issues/4559.
+const paneRecoveryStatus = "#{?" + recoverablePaneCondition + ",#[bold]Press Enter to resume#[nobold] | ,}"
 
 // TmuxManager handles tmux session lifecycle.
 type TmuxManager struct {
@@ -620,7 +627,7 @@ func isWorkbenchHolder(fullName string) bool {
 // default tmux status bar).
 var workbenchStatusKeys = []string{
 	"status", "status-style", "status-left", "status-right",
-	"status-left-length", "status-right-length",
+	"status-left-length", "status-right-length", "status-interval",
 }
 
 // workbenchSource records a session whose active pane was moved into the
@@ -884,8 +891,9 @@ func (tm *TmuxManager) configureWorkbenchChrome(holder, hint string) {
 		{"status-position", "top"},
 		{"status-style", "fg=" + oceanHexForeground + ",bg=" + oceanHexBackground},
 		{"status-left-length", "220"},
-		{"status-left", hint},
+		{"status-left", paneRecoveryStatus + hint},
 		{"status-right", ""},
+		{"status-interval", "1"},
 	} {
 		_, _ = tm.run("set-option", "-t", holder, opt.key, opt.val)
 	}
@@ -1155,7 +1163,7 @@ func (tm *TmuxManager) BindSessionKeys(sessionName string) error {
 	// Live agents receive Enter normally. The command is stored on the pane,
 	// so moving it into a workbench does not change which session is recovered.
 	if _, err := tm.run("bind-key", "-T", "root", "Enter", "if-shell", "-F",
-		"#{&&:#{pane_dead},#{!=:#{@vibeflow_resume},}}",
+		recoverablePaneCondition,
 		`run-shell -b -t "#{pane_id}" "#{@vibeflow_resume} #{pane_id}"`,
 		"send-keys Enter"); err != nil {
 		return fmt.Errorf("bind pane recovery: %w", err)
@@ -1413,6 +1421,7 @@ func buildStatusBarSettings(opts StatusBarOpts) map[string]string {
 	const sep = "#[fg=#576574]|#[fg=#c8d6e5] "
 
 	var left strings.Builder
+	left.WriteString(paneRecoveryStatus)
 	fmt.Fprintf(&left, "#[fg=#0b1929,bg=#00d4aa,bold] vibeflow #[fg=#00d4aa,bg=#152d45,nobold] %s ", identity)
 	left.WriteString(tmuxWidthAtLeast(statusTierProject, sep+project+" "))
 	left.WriteString(tmuxWidthAtLeast(statusTierBranch, sep+branch+worktree+" "))
@@ -1434,10 +1443,11 @@ func buildStatusBarSettings(opts StatusBarOpts) map[string]string {
 		"#[fg=#576574]Ctrl+q:#[fg=#c8d6e5]Menu #[fg=#576574]|#[fg=#576574] Ctrl+\\:#[fg=#c8d6e5]Menu ")
 
 	return map[string]string{
-		"status":       "on",
-		"status-style": "fg=#c8d6e5,bg=#0b1929",
-		"status-left":  statusLeft,
-		"status-right": statusRight,
+		"status":          "on",
+		"status-style":    "fg=#c8d6e5,bg=#0b1929",
+		"status-left":     statusLeft,
+		"status-right":    statusRight,
+		"status-interval": "1",
 		// Generous: the value is a FORMAT, and its conditionals expand to far more
 		// characters than they render. tmux clips to the real window width anyway.
 		"status-left-length":  "400",

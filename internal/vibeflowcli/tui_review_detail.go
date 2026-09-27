@@ -292,6 +292,7 @@ func (m Model) updateReviewReads(msg tea.Msg) (Model, tea.Cmd, bool) {
 			d.FindingsAfter = ""
 			d.Scroll = 0
 		}
+		m.clampReviewDetailScroll()
 		return m, nil, true
 	case reviewOpenMsg:
 		if m.craEnabled && m.reviewDetail.Project == msg.project && m.reviewDetail.Job == msg.job && msg.err != nil {
@@ -470,6 +471,7 @@ func reviewExternalCommand(goos, rawURL string) (*exec.Cmd, error) {
 func (m Model) updateReviewDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
+		m.clampReviewDetailScroll()
 		return m, nil
 	}
 	switch key.String() {
@@ -494,24 +496,28 @@ func (m Model) updateReviewDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "]":
 		if m.reviewDetail.HistoryNext != "" {
 			m.reviewDetail.HistoryAfter = m.reviewDetail.HistoryNext
+			m.reviewDetail.Scroll = 0
 			m.reviewDetail.Busy = false
 			cmd := m.requestReviewDetail()
 			return m, cmd
 		}
 	case "[":
 		m.reviewDetail.HistoryAfter = ""
+		m.reviewDetail.Scroll = 0
 		m.reviewDetail.Busy = false
 		cmd := m.requestReviewDetail()
 		return m, cmd
 	case "n":
 		if m.reviewDetail.FindingsNext != "" {
 			m.reviewDetail.FindingsAfter = m.reviewDetail.FindingsNext
+			m.reviewDetail.Scroll = 0
 			m.reviewDetail.Busy = false
 			cmd := m.requestReviewDetail()
 			return m, cmd
 		}
 	case "p":
 		m.reviewDetail.FindingsAfter = ""
+		m.reviewDetail.Scroll = 0
 		m.reviewDetail.Busy = false
 		cmd := m.requestReviewDetail()
 		return m, cmd
@@ -547,22 +553,80 @@ func (m Model) updateReviewDetail(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return reviewOpenMsg{project, job, err}
 		}
 	}
+	m.clampReviewDetailScroll()
 	return m, nil
 }
-func (m Model) viewReviewDetail() string {
+func reviewBodyLines(value string, width int) []string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = ansi.Strip(value)
+	value = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n':
+			return '\n'
+		case '\t':
+			return '\t'
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, value)
+	value = strings.ReplaceAll(value, "\t", "    ")
+	return strings.Split(ansi.Wrap(value, max(1, width), ""), "\n")
+}
+func (m Model) reviewDetailLayout() (header, body, footer []string) {
 	d := m.reviewDetail
-	lines := []string{reviewSessionLabel, fmt.Sprintf("Project: %s (%d)", reviewDisplay(m.reviewProjects[d.Project].Name), d.Project)}
+	width := max(1, m.width)
+	add := func(text string) { body = append(body, reviewBodyLines(text, width)...) }
+	header = []string{reviewSessionLabel, fmt.Sprintf("Project: %s (%d)", reviewDisplay(m.reviewProjects[d.Project].Name), d.Project)}
 	if d.Warning != "" {
-		lines = append(lines, d.Warning)
+		add(d.Warning)
 	}
 	if d.Notice != "" {
-		lines = append(lines, d.Notice)
+		add(d.Notice)
 	}
 	if s := d.Summary; s != nil {
-		lines = append(lines, fmt.Sprintf("Repository: %s #%d", s.Review.Details.BaseRepositoryName, s.Review.Number), "Head: "+s.Review.HeadSHA, "Base: "+s.Review.BaseSHA, "Runner: "+s.Runner.Name+" "+s.Runner.State+" "+s.Runner.Reason)
+		repo := ansi.Truncate(reviewDisplay(s.Review.Details.BaseRepositoryName), max(8, width/3), "…")
+		identity := fmt.Sprintf("%s#%d", repo, s.Review.Number)
+		if s.Review.Details.Title != "" {
+			identity += ": " + s.Review.Details.Title
+		}
+		findings, blockers := "findings", "blockers"
+		if s.FindingCount == 1 {
+			findings = "finding"
+		}
+		if s.UnresolvedBlockers == 1 {
+			blockers = "blocker"
+		}
+		header = []string{identity, fmt.Sprintf("%s · %d %s · %d %s", reviewStateLabel(s.Review.State), s.FindingCount, findings, s.UnresolvedBlockers, blockers)}
+		add(fmt.Sprintf("%s · Project: %s (%d)", reviewSessionLabel, m.reviewProjects[d.Project].Name, d.Project))
+		add("Summary: " + s.Summary)
+		for _, f := range d.Findings {
+			add(fmt.Sprintf("%s %s: %s", f.Severity, f.State, f.Title))
+			if f.Path != "" {
+				add(fmt.Sprintf("%s:%d", f.Path, f.Line))
+			}
+			if f.Trigger != "" {
+				add("Trigger: " + f.Trigger)
+			}
+			if f.Impact != "" {
+				add("Impact: " + f.Impact)
+			}
+			if f.Evidence != "" {
+				add("Evidence: " + f.Evidence)
+			}
+			if f.Verification != "" {
+				add("Verification: " + f.Verification)
+			}
+		}
+		add("Head: " + s.Review.HeadSHA)
+		add("Base: " + s.Review.BaseSHA)
+		if s.Runner.Name != "" || s.Runner.State != "" || s.Runner.Reason != "" {
+			add("Runner: " + s.Runner.Name + " " + s.Runner.State + " " + s.Runner.Reason)
+		}
 		p := s.Progress
 		if p != nil {
-			lines = append(lines, fmt.Sprintf("Round %d / attempt %d: %s", p.RoundNumber, p.AttemptNumber, p.State))
+			add(fmt.Sprintf("Round %d / attempt %d: %s", p.RoundNumber, p.AttemptNumber, p.State))
 			for _, stage := range []struct {
 				name string
 				done bool
@@ -571,43 +635,73 @@ func (m Model) viewReviewDetail() string {
 				if stage.done {
 					mark = "x"
 				}
-				lines = append(lines, "["+mark+"] "+stage.name)
+				add("[" + mark + "] " + stage.name)
 			}
 			if !p.RunnerAssigned {
-				lines = append(lines, "Waiting for runner")
+				add("Waiting for runner")
 			}
 			if p.CheckoutPreparedAt == 0 {
-				lines = append(lines, "Waiting for checkout confirmation")
+				add("Waiting for checkout confirmation")
 			}
 		} else {
-			lines = append(lines, "Progress unavailable", "Waiting for runner / checkout")
-		}
-		lines = append(lines, "Summary: "+s.Summary, fmt.Sprintf("Findings: %d (%d blockers)", s.FindingCount, s.UnresolvedBlockers))
-		for _, f := range d.Findings {
-			lines = append(lines, fmt.Sprintf("%s %s: %s", f.Severity, f.State, f.Title), fmt.Sprintf("%s:%d", f.Path, f.Line), "Trigger: "+f.Trigger, "Impact: "+f.Impact, "Evidence: "+f.Evidence, "Verification: "+f.Verification)
+			add("Progress unavailable")
+			add("Waiting for runner / checkout")
 		}
 		if s.Publication != nil {
-			lines = append(lines, "Publication: "+s.Publication.State, "Publication detail: "+s.Publication.LastError)
+			add("Publication: " + s.Publication.State)
+			if s.Publication.LastError != "" {
+				add("Publication detail: " + s.Publication.LastError)
+			}
 		}
-		lines = append(lines, "Attempt history")
+		add("Attempt history")
 		for _, session := range d.History {
-			lines = append(lines, session.progress()+" / "+session.RunnerName+" / "+reviewShortSHA(session.HeadSHA))
+			add(session.progress() + " / " + session.RunnerName + " / " + reviewShortSHA(session.HeadSHA))
 		}
 	} else if d.Warning == "" {
-		lines = append(lines, "Loading review...")
+		add("Loading review...")
 	}
 	if d.Diagnostic != "" {
-		lines = append(lines, d.Diagnostic)
+		add(d.Diagnostic)
 	}
-	lines = append(lines, "Review transcript unavailable")
-	width := max(1, m.width)
-	height := max(3, m.height)
-	start := min(d.Scroll, max(0, len(lines)-(height-2)))
-	end := min(len(lines), start+height-2)
-	lines = lines[start:end]
-	lines = append(lines, "o: PR  c: cloud  r: refresh  Esc: back", "[/]: history  n/p: findings  q: quit")
-	for i, line := range lines {
-		lines[i] = ansi.Truncate(reviewDisplay(line), width, "…")
+	footer = []string{"o: PR  c: Cloud project  r: refresh  Esc: back", "[: first history  ]: older  p: first findings  n: next  q: quit"}
+	if width < 70 {
+		footer = []string{"o: PR  c: Cloud project  r: refresh", "Esc: back  [: first history  ]: older", "p: first findings  n: next  q: quit"}
 	}
+	for i := range header {
+		header[i] = ansi.Truncate(reviewDisplay(header[i]), width, "…")
+	}
+	for i := range footer {
+		footer[i] = ansi.Truncate(footer[i], width, "…")
+	}
+	return header, body, footer
+}
+func (m *Model) clampReviewDetailScroll() {
+	header, body, footer := m.reviewDetailLayout()
+	height := max(1, m.height)
+	if len(header)+len(footer) >= height {
+		if height == 1 {
+			m.reviewDetail.Scroll = 0
+			return
+		}
+		header, footer = header[:1], footer[:1]
+	}
+	visible := max(0, height-len(header)-len(footer))
+	m.reviewDetail.Scroll = min(max(0, m.reviewDetail.Scroll), max(0, len(body)-visible))
+}
+func (m Model) viewReviewDetail() string {
+	header, body, footer := m.reviewDetailLayout()
+	height := max(1, m.height)
+	if len(header)+len(footer) >= height {
+		if height == 1 {
+			return header[0]
+		}
+		header = header[:1]
+		footer = footer[:1]
+	}
+	visible := max(0, height-len(header)-len(footer))
+	start := min(max(0, m.reviewDetail.Scroll), max(0, len(body)-visible))
+	end := min(len(body), start+visible)
+	lines := append(header, body[start:end]...)
+	lines = append(lines, footer...)
 	return strings.Join(lines, "\n")
 }

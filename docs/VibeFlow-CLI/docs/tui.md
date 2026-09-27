@@ -35,7 +35,9 @@ From the overlay you can jump between sessions and operations without stopping l
 ## Dead session restart
 
 If you accidentally exit an agent with **Ctrl+C**, press **Enter** in its dead pane to recover it.
-The pane shows **Press Enter to resume**, and recovery keeps the same pane and attached terminal, including inside a workbench.
+The status line shows **Press Enter to resume** when the selected agent pane has exited, including inside a workbench.
+This hint remains available on older tmux builds even when their native exit banner is missing.
+Recovery keeps the same pane and attached terminal.
 Enter continues to work normally in running agents.
 
 Claude and Codex resume the exact conversation when its ID is available in the final exit hint.

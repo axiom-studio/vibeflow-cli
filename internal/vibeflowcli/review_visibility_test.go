@@ -50,7 +50,7 @@ func TestReviewListCommandWithoutOrdinarySessions(t *testing.T) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "--cra", "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list", "--project", "13")
 	out, err := cmd.CombinedOutput()
-	if err != nil || reads.Load() != 1 || !strings.Contains(string(out), "Principal Engineer · Review") || !strings.Contains(string(out), "acme/repo#57") || !strings.Contains(string(out), "--reviews-after review-visible") {
+	if err != nil || reads.Load() != 1 || !strings.Contains(string(out), reviewSessionLabel) || !strings.Contains(string(out), "acme/repo#57") || !strings.Contains(string(out), "--reviews-after review-visible") {
 		t.Fatalf("managed review invisible: %v reads=%d\n%s", err, reads.Load(), out)
 	}
 	cfg.DefaultProject = "13"
@@ -133,7 +133,7 @@ func TestReviewSessionsHTTPAndTUIReadOnlyHistory(t *testing.T) {
 	}
 	m.cursor = 1
 	detail := m.renderDetailPanel(100, 20)
-	for _, want := range []string{reviewSessionLabel, "acme/repo", "reviewing", "round 2", "Read-only"} {
+	for _, want := range []string{reviewSessionLabel, "acme/repo", "Reviewing", "round 2", "Read-only"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("missing %q: %s", want, detail)
 		}

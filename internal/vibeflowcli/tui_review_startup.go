@@ -530,7 +530,7 @@ func (m reviewStartupModel) View() tea.View {
 		b.WriteString("\nEnter: continue  Esc: skip runner")
 	default:
 		b.WriteString("All accessible projects, known checkouts.\n")
-		b.WriteString("Fresh Principal Engineer for each review.\n")
+		b.WriteString("Fresh Vera for each PR review.\n")
 		b.WriteString("Stops when this CLI closes.\n\n")
 		if m.yes {
 			b.WriteString(title.Render("> Run reviews") + "    Not now")
