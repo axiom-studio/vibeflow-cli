@@ -5,6 +5,7 @@ import os
 import pathlib
 import pty
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,18 +67,33 @@ while True:
                 os.environ["TERM"] = "xterm-256color"
                 os.execvp("tmux", ["tmux", "-L", socket, "attach-session", "-t", session])
 
+            recent_client = bytearray()
+
             def wait_for(predicate, message):
                 deadline = time.monotonic() + 8
                 while time.monotonic() < deadline:
                     if select.select([master], [], [], 0.03)[0]:
-                        os.read(master, 65536)
+                        recent_client.extend(os.read(master, 65536))
+                        del recent_client[:-8192]
                     if predicate():
                         return
                 version = subprocess.check_output(["tmux", "-V"], text=True).strip()
                 state = tm("display-message", "-p", "-t", pane,
                            "dead=#{pane_dead} status=#{pane_dead_status} signal=#{pane_dead_signal} "
                            "time=#{pane_dead_time} size=#{pane_width}x#{pane_height}")
-                raise AssertionError(f"{message} ({version}, {provider}, {state})\n" + captures())
+                extra = ""
+                if message == "recovery hint did not appear":
+                    pane_pid = tm("display-message", "-p", "-t", pane, "#{pane_pid}")
+                    process = subprocess.run(["ps", "-o", "stat=,comm=", "-p", pane_pid],
+                                             capture_output=True, text=True) if pane_pid.isdecimal() else None
+                    fmt = tm("show-options", "-p", "-v", "-t", pane, "remain-on-exit-format")
+                    extra = (f" server={tm('display-message', '-p', '-t', pane, '#{version}')}"
+                             f" tmux_bin={shutil.which('tmux')}"
+                             f" remain={tm('show-options', '-p', '-v', '-t', pane, 'remain-on-exit')}"
+                             f" format_has_hint={'Press Enter to resume' in fmt}"
+                             f" pane_pid={pane_pid} pane_process={process.stdout.strip() if process and process.returncode == 0 else 'gone'}"
+                             f" attached_hint_emitted={b'Press Enter to resume' in recent_client}")
+                raise AssertionError(f"{message} ({version}, {provider}, {state}{extra})\n" + captures())
 
             def captures():
                 return tm("capture-pane", "-p", "-J", "-t", pane, "-S", "-40")
@@ -95,6 +111,7 @@ while True:
                     tm("join-pane", "-s", pane, "-t", "workbench")
                     tm("select-pane", "-t", pane)
                 before = len(record.read_text().splitlines())
+                recent_client.clear()
                 os.write(master, b"\x03")
                 wait_for(lambda: tm("display-message", "-p", "-t", pane, "#{pane_dead}") == "1", "Ctrl+C did not exit agent")
                 # tmux can report a dead pane before it renders the exit banner.
