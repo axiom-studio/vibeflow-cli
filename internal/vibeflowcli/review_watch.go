@@ -491,7 +491,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		fresh = true
 	}
 	if len(p.Result) == 0 && p.Failure == "" && fresh {
-		fmt.Fprintf(w.output, "Reviewing %s at %.12s with a fresh Principal Engineer.\n", p.JobID, p.Execution.Attempt.Round.HeadSHA)
+		fmt.Fprintf(w.output, "Reviewing %s at %.12s with a fresh Vera.\n", p.JobID, p.Execution.Attempt.Round.HeadSHA)
 		result, err := w.execute(ctx, p)
 		if err != nil {
 			p.Failure = err.Error()

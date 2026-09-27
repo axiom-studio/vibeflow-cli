@@ -458,7 +458,11 @@ func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
 				}
 				json.NewEncoder(w).Encode(reviewSummariesPage{Summaries: items})
 			} else if strings.HasSuffix(path, "/findings") {
-				json.NewEncoder(w).Encode(reviewFindingsPage{})
+				page := reviewFindingsPage{}
+				if strings.Contains(path, "/"+executions[0].Review.ID+"/") {
+					page.Findings = []reviewFinding{{ID: "finding", JobID: executions[0].Review.ID, Title: "Complete evidence", Evidence: strings.Repeat("context ", 90) + "PTY_FINAL_EVIDENCE\nPTY_SOURCE_LINE"}}
+				}
+				json.NewEncoder(w).Encode(page)
 			} else {
 				for i, e := range executions {
 					if strings.HasSuffix(path, "/"+e.Review.ID) {
@@ -601,8 +605,11 @@ func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
 	terminal.send(t, "R")
 	terminal.await(t, "acme/missing [needs_checkout]")
 	terminal.send(t, "R"+strings.Repeat("j", active[0])+"\r")
-	terminal.await(t, "o: PR  c: cloud")
+	terminal.await(t, "o: PR  c: Cloud project")
 	terminal.await(t, "[x] Checkout prepared")
+	terminal.send(t, strings.Repeat("j", 80))
+	terminal.await(t, "PTY_FINAL_EVIDENCE")
+	terminal.await(t, "PTY_SOURCE_LINE")
 	terminal.send(t, "oc")
 	wait("literal browser links", func() bool {
 		data, _ := os.ReadFile(opened)
@@ -616,7 +623,7 @@ func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
 	// At 100x30, the first flat session follows the title, border and header.
 	before := detailReads.Load()
 	terminal.send(t, "\x1b[<0;5;11M\x1b[<0;5;11m\x1b[<0;5;11M\x1b[<0;5;11m")
-	terminal.await(t, "o: PR  c: cloud")
+	terminal.await(t, "o: PR  c: Cloud project")
 	wait("mouse-opened review detail", func() bool { return detailReads.Load() > before })
 	if err := os.WriteFile(filepath.Join(barriers, fmt.Sprintf("%d.release", active[0])), nil, 0600); err != nil {
 		t.Fatal(err)
