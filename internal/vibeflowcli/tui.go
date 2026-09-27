@@ -2620,13 +2620,13 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	case "running", "attached", "reviewing":
 		indicator = "●"
 		indStyle = statusRunning
-	case "waiting", "contact_lost":
+	case "waiting", "contact_lost", "queued", "paused":
 		indicator = "●"
 		indStyle = statusWaiting
 	case "exited":
 		indicator = "●"
 		indStyle = statusError
-	case "error", "failed", "expired":
+	case "error", "failed", "expired", "changes_requested", "needs_human":
 		indicator = "●"
 		indStyle = statusError
 	}
@@ -2662,7 +2662,10 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	}
 	displayName := s.Name
 	if s.ManagedReview != nil {
-		displayName = fmt.Sprintf("PE · Review #%d", s.ManagedReview.PRNumber)
+		displayName = fmt.Sprintf("PR #%d", s.ManagedReview.PRNumber)
+		if s.ManagedReview.Title != "" {
+			displayName += " " + reviewDisplay(s.ManagedReview.Title)
+		}
 	}
 	name := truncate(displayName, nameMax)
 	if s.ManagedReview != nil {
@@ -2697,6 +2700,16 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 		subtitle := strings.Join(parts, " · ")
 		if s.ManagedReview != nil {
 			subtitle = s.ManagedReview.pullRequest() + " · " + s.ManagedReview.progress()
+			if s.ManagedReview.CountsKnown {
+				findings, blockers := "findings", "blockers"
+				if s.ManagedReview.FindingCount == 1 {
+					findings = "finding"
+				}
+				if s.ManagedReview.BlockerCount == 1 {
+					blockers = "blocker"
+				}
+				subtitle += fmt.Sprintf(" · %d %s · %d %s", s.ManagedReview.FindingCount, findings, s.ManagedReview.BlockerCount, blockers)
+			}
 			subtitle = ansi.Truncate(subtitle, width-8-len(indent), "…")
 		}
 		subtitleStyle := lipgloss.NewStyle().Foreground(dimColor)

@@ -2,9 +2,11 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +24,29 @@ func TestPaneRecoveryKeyboard(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/vibeflow").CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v\n%s", err, out)
 	}
-	if out, err := exec.Command(python, "testdata/pane_recovery.py", binary).CombinedOutput(); err != nil {
+	if out, err := exec.Command(python, "testdata/pane_recovery.py", binary, os.Args[0]).CombinedOutput(); err != nil {
 		t.Fatalf("pane recovery keyboard check: %v\n%s", err, out)
+	}
+}
+
+func TestPaneRecoveryHelperProcess(t *testing.T) {
+	switch os.Getenv("VIBEFLOW_PANE_RECOVERY_HELPER") {
+	case "compose":
+		tm := NewTmuxManager(os.Getenv("VIBEFLOW_PANE_RECOVERY_SOCKET"))
+		if _, err := tm.ComposeWorkbench(strings.Split(os.Getenv("VIBEFLOW_PANE_RECOVERY_SESSIONS"), ","), nil); err != nil {
+			t.Fatal(err)
+		}
+	case "screen":
+		raw, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		width, widthErr := strconv.Atoi(os.Getenv("VIBEFLOW_PANE_RECOVERY_WIDTH"))
+		height, heightErr := strconv.Atoi(os.Getenv("VIBEFLOW_PANE_RECOVERY_HEIGHT"))
+		if widthErr != nil || heightErr != nil || width < 1 || height < 1 {
+			t.Fatal("invalid fixture screen dimensions")
+		}
+		fmt.Print(reviewVisibleScreen(string(raw), width, height))
 	}
 }
 

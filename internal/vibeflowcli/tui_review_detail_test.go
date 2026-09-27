@@ -129,6 +129,182 @@ func reviewTestModel(client *Client) Model {
 }
 func reviewApply(m Model, msg tea.Msg) Model { next, _ := m.Update(msg); return next.(Model) }
 
+func TestReviewDetailPreservesEvidence(t *testing.T) {
+	m := reviewTestModel(nil)
+	m.height = 100
+	s := reviewTestSummary(13, "job")
+	m.reviewDetail = reviewDetailState{Project: 13, Job: "job", Summary: &s, Findings: []reviewFinding{{
+		Title: "Lost evidence", Evidence: strings.Repeat("context ", 90) + "FINAL_EVIDENCE\nsource_line_two",
+	}}}
+	view := m.viewReviewDetail()
+	for _, want := range []string{"FINAL_EVIDENCE", "source_line_two"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("missing readable evidence %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestReviewRowShowsTitleAndCounts(t *testing.T) {
+	s := reviewTestSummary(13, "job")
+	if err := json.Unmarshal([]byte(`{"review":{"details":{"title":"Preserve complete findings"}}}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	s.FindingCount, s.UnresolvedBlockers = 3, 1
+	s.Review.State, s.Progress.State = "reviewing", "reviewing"
+	s.Progress.RunnerAssigned, s.Progress.CheckoutPreparedAt = true, 123
+	m := reviewTestModel(nil)
+	var b strings.Builder
+	m.renderSessionRow(&b, s.row(), 0, 0, 120, "")
+	got := ansi.Strip(b.String())
+	for _, want := range []string{"Preserve complete findings", "checkout prepared", "3 findings", "1 blocker"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestReviewRowStagesFollowBackendProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		progress *reviewProgress
+		want     string
+		avoid    string
+	}{
+		{"unknown", nil, "reviewing", " · "},
+		{"waiting", &reviewProgress{State: "reviewing", RequestAccepted: true}, "waiting for runner", "checkout prepared"},
+		{"assigned", &reviewProgress{State: "reviewing", RunnerAssigned: true}, "runner assigned", "checkout prepared"},
+		{"checkout", &reviewProgress{State: "reviewing", RunnerAssigned: true, CheckoutPreparedAt: 123}, "checkout prepared", "review complete"},
+		{"completed", &reviewProgress{State: "reviewing", RunnerAssigned: true, CheckoutPreparedAt: 123, ReviewCompletedAt: 456}, "review complete", "result recorded"},
+		{"recorded", &reviewProgress{State: "completed", RunnerAssigned: true, CheckoutPreparedAt: 123, ReviewCompletedAt: 456, ResultRecorded: true}, "result recorded", "contact lost"},
+		{"contact lost", &reviewProgress{State: "contact_lost", RunnerAssigned: true, CheckoutPreparedAt: 123, ReviewCompletedAt: 456}, "contact lost", "review complete"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := reviewTestSummary(13, "job")
+			s.Review.State = "reviewing"
+			s.Progress = tc.progress
+			got := strings.ToLower(s.row().ManagedReview.progress())
+			if !strings.Contains(got, tc.want) || tc.avoid != "" && strings.Contains(got, tc.avoid) {
+				t.Fatalf("progress %q: want %q, avoid %q", got, tc.want, tc.avoid)
+			}
+		})
+	}
+}
+
+func TestReviewDetailPinsContextAcrossScrollAndResize(t *testing.T) {
+	m := reviewTestModel(nil)
+	m.width, m.height = 40, 8
+	s := reviewTestSummary(13, "job")
+	s.Review.Details.Title = "Preserve complete findings"
+	s.Review.State = "reviewing"
+	s.FindingCount, s.UnresolvedBlockers = 3, 1
+	m.reviewDetail = reviewDetailState{Project: 13, Job: "job", Summary: &s, Findings: []reviewFinding{{Evidence: strings.Repeat("evidence line\n", 40)}}}
+	m.activeView = ViewReviewDetail
+	for range 100 {
+		m = reviewApply(m, tea.KeyPressMsg{Code: 'j'})
+	}
+	for _, size := range []struct{ width, height int }{{40, 8}, {100, 30}} {
+		m.width, m.height = size.width, size.height
+		m.clampReviewDetailScroll()
+		view := m.viewReviewDetail()
+		for _, want := range []string{"acme/repo#7", "Preserve complete", "Reviewing", "3 findings", "1 blocker"} {
+			if !strings.Contains(view, want) {
+				t.Fatalf("%dx%d scrolled detail lost %q:\n%s", size.width, size.height, want, view)
+			}
+		}
+		if lines := strings.Split(view, "\n"); len(lines) > size.height {
+			t.Fatalf("%dx%d detail too tall: %d", size.width, size.height, len(lines))
+		}
+	}
+	s.Review.Details.BaseRepositoryName = "acme/a-very-long-repository-name"
+	m.width, m.height = 40, 8
+	if got := m.viewReviewDetail(); !strings.Contains(got, "#7: Preserve complete") {
+		t.Fatalf("long repository hid the PR title:\n%s", got)
+	}
+}
+
+func TestReviewDetailScrollStopsAtBottom(t *testing.T) {
+	m := reviewTestModel(nil)
+	m.height = 8
+	s := reviewTestSummary(13, "job")
+	m.reviewDetail = reviewDetailState{Project: 13, Job: "job", Summary: &s, Findings: []reviewFinding{{Evidence: strings.Repeat("line of evidence\n", 80)}}}
+	m.activeView = ViewReviewDetail
+	for range 1000 {
+		m = reviewApply(m, tea.KeyPressMsg{Code: 'j'})
+	}
+	bottom := m.reviewDetail.Scroll
+	m = reviewApply(m, tea.KeyPressMsg{Code: 'j'})
+	if m.reviewDetail.Scroll != bottom {
+		t.Fatal("scroll advanced beyond last body line")
+	}
+	m = reviewApply(m, tea.KeyPressMsg{Code: 'k'})
+	if bottom > 0 && m.reviewDetail.Scroll != bottom-1 {
+		t.Fatal("up did not immediately leave bottom")
+	}
+}
+
+func TestReviewBodyLinesSanitizesWithoutLosingUnicode(t *testing.T) {
+	lines := reviewBodyLines("A\t界🙂\r\nsecond\x1b]52;c;CANARY\a\u202ebad\x00", 12)
+	got := strings.Join(lines, "\n")
+	for _, want := range []string{"A    界🙂", "secondbad"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "CANARY") || strings.ContainsAny(got, "\x1b\r\a\x00\t") {
+		t.Fatalf("unsafe body %q", got)
+	}
+	for _, line := range lines {
+		if ansi.StringWidth(line) > 12 {
+			t.Fatalf("body line too wide: %q", line)
+		}
+	}
+	if empty := reviewBodyLines("", 1); len(empty) != 1 || empty[0] != "" {
+		t.Fatalf("empty body changed: %q", empty)
+	}
+	longLines := reviewBodyLines(strings.Repeat("界", 20), 5)
+	for _, line := range longLines {
+		if ansi.StringWidth(line) > 5 {
+			t.Fatalf("long Unicode token overflow: %q", line)
+		}
+	}
+	long := strings.Join(longLines, "")
+	if long != strings.Repeat("界", 20) {
+		t.Fatalf("long Unicode token lost: %q", long)
+	}
+}
+
+func TestReviewDetailTinyTerminalAndOldSessionCounts(t *testing.T) {
+	m := reviewTestModel(nil)
+	m.width, m.height = 12, 3
+	s := reviewTestSummary(13, "job")
+	m.reviewDetail = reviewDetailState{Project: 13, Job: "job", Summary: &s, Scroll: 1000}
+	for _, line := range strings.Split(m.viewReviewDetail(), "\n") {
+		if ansi.StringWidth(line) > 12 {
+			t.Fatalf("tiny terminal overflow: %q", line)
+		}
+	}
+	if lines := strings.Split(m.viewReviewDetail(), "\n"); len(lines) > 3 {
+		t.Fatalf("tiny terminal too tall: %d", len(lines))
+	}
+	old := (reviewSession{ProjectID: 13, SessionID: "old", RepositoryName: "acme/repo", PRNumber: 7, State: "closed"}).row()
+	var b strings.Builder
+	m.renderSessionRow(&b, old, 0, 0, 120, "")
+	if got := ansi.Strip(b.String()); strings.Contains(got, "0 findings") || !strings.Contains(got, "Closed") {
+		t.Fatalf("old session implied counts or lost state: %q", got)
+	}
+}
+
+func TestReviewDetailNarrowControlsRemainReadable(t *testing.T) {
+	m := reviewTestModel(nil)
+	m.reviewDetail = reviewDetailState{Project: 13, Job: "job"}
+	view := m.viewReviewDetail()
+	for _, want := range []string{"o: PR", "c: Cloud project", "r: refresh", "Esc: back", "[: first history", "p: first findings"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("missing narrow control %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestReviewSessionNamesIncludeProject(t *testing.T) {
 	a := (reviewSession{ProjectID: 13, SessionID: "same"}).row()
 	b := (reviewSession{ProjectID: 14, SessionID: "same"}).row()
@@ -198,10 +374,13 @@ func TestReviewSessionsBrowseWithoutRunnerConsent(t *testing.T) {
 		t.Fatal("queued job not selectable")
 	}
 	view := m.viewContent()
-	for _, want := range []string{"Waiting for runner", "Waiting for checkout confirmation", "Review transcript unavailable", "[x] Request accepted"} {
+	for _, want := range []string{"Waiting for runner", "Waiting for checkout confirmation", "[x] Request accepted"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("missing %q in %s", want, view)
 		}
+	}
+	if strings.Contains(view, "Review transcript unavailable") {
+		t.Fatal("unoffered transcript affordance displayed")
 	}
 	if reads.Load() != 5 {
 		t.Fatalf("unexpected requests %d", reads.Load())
@@ -346,7 +525,11 @@ func TestReviewSessionsDetailSanitizedAndRoundReset(t *testing.T) {
 	}
 	newRound := reviewTestSummary(13, "job")
 	newRound.Progress.RoundID = "round-new"
-	m = reviewApply(m, reviewDetailMsg{project: 13, job: "job", generation: 2, summary: newRound})
+	m.reviewDetail.Scroll = 20
+	m = reviewApply(m, reviewDetailMsg{project: 13, job: "job", generation: 2, summary: newRound, resetPages: true})
+	if m.reviewDetail.Scroll != 0 {
+		t.Fatal("new round retained old scroll")
+	}
 	if strings.Contains(m.viewContent(), "[x] Code review completed") {
 		t.Fatal("same-SHA new round retained completed projection")
 	}

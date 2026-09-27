@@ -15,7 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-const reviewSessionLabel = "Principal Engineer · Review"
+const reviewSessionLabel = "Vera · Code Reviewer"
 const reviewSessionsGroup = "PR reviews"
 
 // Safe server projection. Attempt IDs, tokens and ordinary persona metadata
@@ -44,6 +44,11 @@ type reviewSession struct {
 	StartedAt        int64  `json:"started_at"`
 	CompletedAt      int64  `json:"completed_at"`
 	LastContactAt    int64  `json:"last_contact_at"`
+	Title            string `json:"-"`
+	FindingCount     int    `json:"-"`
+	BlockerCount     int    `json:"-"`
+	CountsKnown      bool   `json:"-"`
+	Stage            string `json:"-"`
 }
 
 type reviewSessionsPage struct {
@@ -58,6 +63,7 @@ type reviewSummaryJob struct {
 	Details   struct {
 		URL                string `json:"url"`
 		BaseRepositoryName string `json:"base_repository_name"`
+		Title              string `json:"title"`
 	} `json:"details"`
 }
 type reviewProgress struct {
@@ -221,13 +227,33 @@ func (c *Client) listReviewJobSessions(ctx context.Context, projectID int64, job
 }
 func (s reviewSummary) row() SessionRow {
 	r := s.Review
-	v := reviewSession{ProjectID: r.ProjectID, JobID: r.ID, Provider: r.Provider, ProviderHost: r.ProviderHost, RepositoryLinkID: r.RepositoryLinkID, RepositoryName: r.Details.BaseRepositoryName, PRNumber: r.Number, PRURL: r.Details.URL, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA, State: r.State, RunnerName: s.Runner.Name}
+	v := reviewSession{ProjectID: r.ProjectID, JobID: r.ID, Provider: r.Provider, ProviderHost: r.ProviderHost, RepositoryLinkID: r.RepositoryLinkID, RepositoryName: r.Details.BaseRepositoryName, PRNumber: r.Number, PRURL: r.Details.URL, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA, State: r.State, RunnerName: s.Runner.Name, Title: r.Details.Title, FindingCount: s.FindingCount, BlockerCount: s.UnresolvedBlockers, CountsKnown: true}
 	if p := s.Progress; p != nil {
 		v.RoundID, v.RoundNumber, v.AttemptNumber = p.RoundID, p.RoundNumber, p.AttemptNumber
+		v.Stage = reviewProgressStage(p)
 	}
 	row := v.row()
 	row.Name = fmt.Sprintf("review:%d:job:%s", r.ProjectID, r.ID)
 	return row
+}
+
+func reviewProgressStage(p *reviewProgress) string {
+	switch {
+	case p.State == "contact_lost":
+		return "contact lost"
+	case p.ResultRecorded:
+		return "result recorded"
+	case p.ReviewCompletedAt > 0:
+		return "review complete"
+	case p.CheckoutPreparedAt > 0:
+		return "checkout prepared"
+	case p.RunnerAssigned:
+		return "runner assigned"
+	case p.RequestAccepted:
+		return "waiting for runner"
+	default:
+		return ""
+	}
 }
 
 func (c *Client) listReviewSessions(ctx context.Context, projectID int64, after string) (reviewSessionsPage, error) {
@@ -278,7 +304,39 @@ func (s reviewSession) pullRequest() string {
 	return fmt.Sprintf("%s#%d", reviewDisplay(repo), s.PRNumber)
 }
 func (s reviewSession) progress() string {
-	return fmt.Sprintf("%s · round %d · attempt %d", reviewDisplay(s.State), s.RoundNumber, s.AttemptNumber)
+	state := reviewStateLabel(s.State)
+	if s.Stage != "" && s.Stage != s.State && (s.State == "queued" || s.State == "reviewing") {
+		state += " · " + reviewDisplay(strings.ReplaceAll(s.Stage, "_", " "))
+	}
+	if s.RoundNumber > 0 {
+		state += fmt.Sprintf(" · round %d", s.RoundNumber)
+	}
+	if s.AttemptNumber > 0 {
+		state += fmt.Sprintf(" · attempt %d", s.AttemptNumber)
+	}
+	return state
+}
+func reviewStateLabel(state string) string {
+	switch state {
+	case "queued":
+		return "Queued"
+	case "reviewing":
+		return "Reviewing"
+	case "changes_requested":
+		return "Changes requested"
+	case "clean":
+		return "Clean"
+	case "needs_human":
+		return "Needs human review"
+	case "paused":
+		return "Paused"
+	case "disabled":
+		return "Disabled"
+	case "closed":
+		return "Closed"
+	default:
+		return reviewDisplay(strings.ReplaceAll(state, "_", " "))
+	}
 }
 func (s reviewSession) row() SessionRow {
 	return SessionRow{Name: fmt.Sprintf("review:%d:session:%s", s.ProjectID, s.SessionID), Persona: reviewSessionLabel, Project: s.pullRequest(), Status: reviewDisplay(s.State), ManagedReview: &s}

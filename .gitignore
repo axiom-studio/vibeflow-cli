@@ -20,3 +20,6 @@ Thumbs.db
 
 # VibeFlow session files
 .vibeflow-session*
+
+# Isolated development worktrees
+.worktrees/
