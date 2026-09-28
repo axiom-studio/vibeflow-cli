@@ -34,6 +34,12 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	// LoadConfig lets these override the saved server and token, and spawned
+	// CLI binaries inherit them, so a developer shell's real credentials would
+	// replace fixture values. Tests that need them use t.Setenv.
+	for _, key := range []string{"VIBEFLOW_URL", "VIBEFLOW_TOKEN"} {
+		os.Unsetenv(key)
+	}
 	os.Exit(m.Run())
 }
 
