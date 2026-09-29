@@ -164,12 +164,13 @@ func TestReviewSupervisorOwnsImmutableSnapshots(t *testing.T) {
 		}
 	}
 	wg.Wait()
-	s.statuses = []reviewRunnerStatus{{State: "needs_checkout", Binding: reviewBinding{Checkouts: []reviewStartupCheckout{{Path: "/initial", Links: []reviewStartupChoice{{Value: "github:7"}}}}}}}
+	s.statuses = []reviewRunnerStatus{{State: "needs_checkout", Binding: reviewBinding{SupportedRunnerCapabilities: []string{"repository_review_v1"}, Checkouts: []reviewStartupCheckout{{Path: "/initial", Links: []reviewStartupChoice{{Value: "github:7"}}}}}}}
 	copy := s.Snapshot()
 	copy[0].Binding.Checkouts[0].Path = "changed"
 	copy[0].Binding.Checkouts[0].Links[0].Value = "changed"
+	copy[0].Binding.SupportedRunnerCapabilities[0] = "changed"
 	got := s.Snapshot()
-	if got[0].Binding.Checkouts[0].Path != "/initial" || got[0].Binding.Checkouts[0].Links[0].Value != "github:7" {
+	if got[0].Binding.Checkouts[0].Path != "/initial" || got[0].Binding.Checkouts[0].Links[0].Value != "github:7" || got[0].Binding.SupportedRunnerCapabilities[0] != "repository_review_v1" {
 		t.Fatal("returned status aliases supervisor state")
 	}
 }

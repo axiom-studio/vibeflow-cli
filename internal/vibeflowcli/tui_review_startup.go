@@ -67,10 +67,16 @@ func (m *Model) requestReviewDiscovery() tea.Cmd {
 	paths, prefs := append([]string(nil), m.reviewPaths...), copyReviewPreferences(m.reviewPreferences)
 	key := m.reviewPathsKey()
 	m.reviewDiscoveryKey = key
+	name := s.options.Name
 	return func() tea.Msg {
+		// Declined consent never scans every project; it refreshes only Vera picks.
+		only, skip := s.discoveryScope()
+		if skip {
+			return reviewDiscoveryMsg{statuses: s.Snapshot(), key: key}
+		}
 		ctx, cancel := context.WithTimeout(s.ctx, time.Minute)
 		defer cancel()
-		d, err := discoverReviewBindings(ctx, s.cfg, paths, prefs)
+		d, err := discoverReviewBindings(ctx, s.cfg, paths, prefs, name, only)
 		warning := d.Warning
 		if err != nil {
 			warning = err.Error()
@@ -147,6 +153,12 @@ func (m Model) updateReviewRunners(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			path, id, s := editor.options.Repository, m.reviewCheckoutID, m.reviewSupervisor
 			prefs := copyReviewPreferences(m.reviewPreferences)
+			// Declined startup consent leaves the coding default here; a selected
+			// Vera row carries its own review harness, which is always valid.
+			group := s.options
+			if group.Provider != "claude" && group.Provider != "codex" {
+				group.Provider, group.Model = binding.Options.Provider, binding.Options.Model
+			}
 			return m, func() tea.Msg {
 				ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
 				defer cancel()
@@ -155,7 +167,7 @@ func (m Model) updateReviewRunners(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return reviewCheckoutSavedMsg{err: fmt.Errorf("Path must match %s/%s. Enter another path or Esc.", binding.Repository.Host, binding.Repository.Name)}
 				}
 				prefs[id] = checkout.Path
-				err := saveReviewGroupPreferences(s.cfg, s.configPath, s.options, prefs)
+				err := saveReviewGroupPreferences(s.cfg, s.configPath, group, prefs)
 				return reviewCheckoutSavedMsg{id: id, path: checkout.Path, err: err}
 			}
 		}
@@ -192,6 +204,7 @@ func (m Model) updateReviewRunners(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		editor := newReviewStartupModel(m.reviewSupervisor.ctx, m.reviewSupervisor.cfg, m.reviewSupervisor.configPath, row.Binding.Options)
 		editor.width, editor.height = m.width, m.height
+		editor.title, editor.cancelHint = "Choose review checkout", "Esc: cancel"
 		message := fmt.Sprintf("%s: enter a checkout for %s/%s.", row.Binding.ProjectName, row.Binding.Repository.Host, row.Binding.Repository.Name)
 		editor.input = &reviewStartupInput{Field: "repository", Message: message}
 		if len(row.Binding.Checkouts) > 0 {
@@ -214,13 +227,15 @@ func (m Model) viewReviewRunners() string {
 			input.Message = m.reviewCheckoutError
 			editor.input = &input
 		}
-		return strings.Replace(editor.View().Content, "Run PR reviews while this CLI is open?", "Choose review checkout", 1)
+		return editor.View().Content
 	}
 	width, height := max(20, m.width), max(8, m.height)
 	var b strings.Builder
 	b.WriteString("PR review runners\n\n")
 	if m.reviewSupervisor == nil {
 		b.WriteString("Reviews were declined for this CLI session.\n")
+	} else if m.reviewSupervisor.explicitOnly && len(m.reviewStatuses) == 0 {
+		b.WriteString("All-project reviews were declined for this CLI session.\nTo run one repository, press n and choose Vera · Code Reviewer.\n")
 	}
 	if m.reviewDiscoveryWarning != "" {
 		b.WriteString(ansi.Truncate(m.reviewDiscoveryWarning, width, "…") + "\n")
@@ -236,14 +251,18 @@ func (m Model) viewReviewRunners() string {
 		if i == m.reviewRunnerCursor {
 			prefix = "> "
 		}
-		b.WriteString(ansi.Truncate(fmt.Sprintf("%s%s / %s [%s]", prefix, row.Binding.ProjectName, row.Binding.Repository.Name, row.State), width, "…") + "\n")
+		harness := row.Binding.Options.Provider
+		if model := row.Binding.Options.Model; harness != "" && model != "" {
+			harness += " " + model
+		}
+		b.WriteString(ansi.Truncate(fmt.Sprintf("%s%s / %s [%s] %s", prefix, row.Binding.ProjectName, row.Binding.Repository.Name, row.State, harness), width, "…") + "\n")
 		message := row.Message
 		if message == "" {
 			message = row.Binding.Options.Repository
 		}
 		b.WriteString(ansi.Truncate("  "+message, width, "…") + "\n")
 	}
-	if len(m.reviewStatuses) == 0 && m.reviewSupervisor != nil && !m.reviewDiscoveryBusy {
+	if len(m.reviewStatuses) == 0 && m.reviewSupervisor != nil && !m.reviewSupervisor.explicitOnly && !m.reviewDiscoveryBusy {
 		b.WriteString("No linked review repositories discovered.\n")
 	}
 	b.WriteString("\nEnter: checkout  r: refresh  Esc: sessions\n")
@@ -271,6 +290,9 @@ type reviewStartupModel struct {
 	owlFrame           int
 	owlPaused          bool
 	repositorySelected bool
+	selectedBinding    bool
+	modelSelected      bool
+	title, cancelHint  string // Explicit Vera/checkout setup; empty means startup consent.
 }
 
 type reviewOwlTickMsg struct{}
@@ -299,6 +321,21 @@ func reviewOwlTick() tea.Cmd {
 func (m reviewStartupModel) resolve() tea.Cmd {
 	return func() tea.Msg {
 		o := m.options
+		if m.selectedBinding {
+			if !m.modelSelected {
+				choices := []reviewStartupChoice{}
+				if !m.cfg.LLMGatewayEnabled {
+					choices = append(choices, reviewStartupChoice{Label: "Harness default", Value: "default"})
+				}
+				for _, model := range ModelsForProvider(o.Provider) {
+					choices = append(choices, reviewStartupChoice{Label: model.ID, Value: model.ID})
+				}
+				choices = append(choices, reviewStartupChoice{Label: "Enter another model", Value: "manual"})
+				return reviewStartupResolvedMsg{options: o, input: &reviewStartupInput{Field: "model", Message: "Choose the model for this Vera runner.", Choices: choices}}
+			}
+			o, input, err := resolveReviewStartup(m.ctx, m.cfg, o, true)
+			return reviewStartupResolvedMsg{options: o, input: input, err: err}
+		}
 		var choices []reviewStartupChoice
 		for _, name := range []string{"claude", "codex"} {
 			if binary := m.cfg.Providers[name].Binary; binary != "" {
@@ -440,6 +477,7 @@ func (m reviewStartupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.repositorySelected = false
 			case "provider":
 				m.options.Provider, m.options.Model = value, ""
+				m.modelSelected = false
 			case "repository_choice":
 				if value == "manual" {
 					m.input = &reviewStartupInput{Field: "repository", Message: m.input.ManualMessage}
@@ -452,7 +490,16 @@ func (m reviewStartupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.options.Repository, m.options.RepositoryLinkID = value, 0
 				m.repositorySelected = true
 			case "model":
+				if m.selectedBinding && value == "manual" {
+					m.input = &reviewStartupInput{Field: "model", Message: "Enter the model to use for PR reviews."}
+					m.cursor, m.text = 0, ""
+					return m, nil
+				}
+				if m.selectedBinding && value == "default" {
+					value = ""
+				}
 				m.options.Model = value
+				m.modelSelected = true
 			case "repository_link":
 				provider, id, _ := strings.Cut(value, ":")
 				m.options.GitProvider = provider
@@ -485,7 +532,14 @@ func (m reviewStartupModel) View() tea.View {
 	title := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	dim := lipgloss.NewStyle().Foreground(dimColor)
 	var b strings.Builder
-	b.WriteString(title.Render("Run PR reviews while this CLI is open?"))
+	heading, cancelHint := m.title, m.cancelHint
+	if heading == "" {
+		heading = "Run PR reviews while this CLI is open?"
+	}
+	if cancelHint == "" {
+		cancelHint = "Esc: skip runner"
+	}
+	b.WriteString(title.Render(heading))
 	b.WriteString("\n\n")
 	switch {
 	case m.busy:
@@ -507,7 +561,7 @@ func (m reviewStartupModel) View() tea.View {
 		} else {
 			// Keep the current choice visible even with many projects.
 			headingRows := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render(b.String()))
-			footerRows := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render("Enter: continue  Esc: skip runner"))
+			footerRows := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render("Enter: continue  " + cancelHint))
 			// Reserve border/padding, count, selected path, and footer spacing.
 			visible := max(1, min(5, height-headingRows-footerRows-6))
 			start := max(0, m.cursor-visible/2)
@@ -527,9 +581,10 @@ func (m reviewStartupModel) View() tea.View {
 				}
 			}
 		}
-		b.WriteString("\nEnter: continue  Esc: skip runner")
+		b.WriteString("\nEnter: continue  " + cancelHint)
 	default:
 		b.WriteString("All accessible projects, known checkouts.\n")
+		b.WriteString("Accept review requests from PR commenters on connected repositories.\n")
 		b.WriteString("Fresh Vera for each PR review.\n")
 		b.WriteString("Stops when this CLI closes.\n\n")
 		if m.yes {

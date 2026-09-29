@@ -23,6 +23,7 @@ Server and API-key setup runs only for a new, uninitialized root and remains sav
 Only `vibeflow --cra` asks **Run PR reviews while this CLI is open?**
 Without `--cra`, no review prompt, API requests, rows, or shortcuts are enabled.
 The default is **Not now**; this choice is never saved.
+**Not now** performs no repository discovery; the `R` view explains how to add Vera for one repository instead.
 The prompt includes an original pixel-art owl built into the CLI, with no extra installation required.
 It blinks and moves gently while waiting; press Space to pause or resume the animation.
 Smaller terminals show a compact owl, and terminals without color retain a monochrome drawing.
@@ -41,7 +42,19 @@ Press `r` to refresh; newly known session paths and a separate one-minute timer 
 Temporary project failures leave healthy runners online; definitive removal or access revocation stops owned runners for that scope.
 Older servers returning a capped 200-project list show an incomplete-coverage warning.
 Native reviews use the provider's default model; gateway reviews require an explicit model.
-There is no persona or model question when a PR arrives: each review starts a fresh Principal Engineer automatically.
+There is no persona or model question when a PR arrives: each review starts a fresh Vera automatically.
+
+To launch only one repository's runner, press `n`, choose its checkout and VibeFlow project, then select **Vera · Code Reviewer** in the agent picker.
+Vera is available only with `--cra`, even if you chose **Not now** at startup.
+Choose Claude or Codex and its review model; Codex requires an OpenAI API key rather than a ChatGPT subscription login.
+The chosen checkout must match a repository linked to that project; ambiguous links are explicitly selected.
+This choice opts in to repository requests for this invocation only and does not enroll other repositories.
+The harness prompt states that anyone who comments `@vibeflow review` on that repository can then request a review using your harness credentials until the CLI closes.
+Choosing Vera again for a repository whose runner is already listening with another harness or model reports the running choice instead of silently keeping it.
+Press `R` to see the runner **Listening**, running an isolated review, or reporting a failure.
+Selecting the same binding reuses or reports its existing runner; selecting another repository can start another runner within the existing capacity limits.
+Vera can be selected beside coding agents, but its harness/model setup remains separate and does not change their configuration.
+Vera never enters the coding-agent task loop, and `launch --persona code_reviewer` directs you to `review-watch` instead.
 
 With `--cra`, the TUI displays review jobs across accessible projects, including queued jobs without an attempt, even when runner consent is declined.
 Select a review to preview it, then press Enter or click it again to open its read-only detail.
@@ -103,6 +116,11 @@ vibeflow launch --provider codex --openshell --openshell-sandbox vf-main
 Model flags apply when the provider process starts and are stored in session metadata so `vibeflow restart` reuses the same model. They do not rewrite a model inside an already-running provider process. The model catalog is advisory: use `vibeflow models` to discover known ids, but launch accepts explicit model strings so new provider models work before the catalog is updated.
 
 ### `vibeflow review-watch`
+
+Passing `--cra` explicitly opts this runner into requests from commenters on its linked repository when supported by the server.
+Without the server capability, it uses legacy routing and reports that a server upgrade is needed.
+TUI-owned runners show that notice in the `R` view, and detached runners show it in `review-watch --status` and when started.
+Runner selection is configured in the project's pull request settings, using Automatic or a preferred eligible runner.
 
 All public forms require `--cra`, including `--background`, `--status`, and `--stop`.
 
@@ -166,6 +184,8 @@ After rotating the VibeFlow token, explicitly enable the runner again to approve
 
 Launching the TUI never restarts saved detached bindings or treats them as consent.
 To restart one, rerun its full `--background` command.
+Rerunning it while the runner is active reports the active runner.
+If that runner was started without repository-request routing, for example by an older CLI, the command fails and asks you to stop it with `--stop` and start it again.
 The stop command waits up to 10 seconds, then reports if shutdown is still pending; it never signals an unverified saved PID.
 `background.log` contains fixed lifecycle messages only, while `last-provider-diagnostic.json` contains sanitized failure metadata.
 No service manager, login item, deployment, or machine-boot autostart is installed.

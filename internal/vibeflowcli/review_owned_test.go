@@ -107,6 +107,8 @@ func TestReviewOwnedBinaryLifetime(t *testing.T) {
 			return
 		}
 		switch {
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+			fmt.Fprint(w, `{"repositories":[]}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
@@ -339,6 +341,8 @@ func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
 					return
 				}
 				switch {
+				case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+					fmt.Fprint(w, `{"repositories":[]}`)
 				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 					var body map[string]any
 					json.NewDecoder(r.Body).Decode(&body)

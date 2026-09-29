@@ -38,9 +38,12 @@ type reviewBackground struct {
 }
 
 type reviewBackgroundStatus struct {
-	PID    int    `json:"pid"`
-	Phase  string `json:"phase"`
-	Reason string `json:"reason,omitempty"`
+	PID     int    `json:"pid"`
+	Phase   string `json:"phase"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"` // Locally constructed runner status, never provider output.
+	// Registered with repository_review_v1; runtime fact, not saved consent.
+	RepositoryRequests bool `json:"repository_requests,omitempty"`
 }
 
 // Unlike LoadConfig, managing a runner neither migrates the file nor accepts
@@ -208,16 +211,29 @@ func startReviewBackground(ctx context.Context, cfg *Config, configPath string, 
 		return err
 	}
 	defer lock.Close()
+	// Invocation consent is never saved, so it is not part of binding identity.
+	persisted := *binding
+	persisted.Options.RepositoryRequestsApproved = false
 	active, err := reviewBackgroundActive(dir, "background.lock")
 	if err != nil {
 		return err
 	}
 	if active {
 		previous, err := readReviewBackground(dir)
-		if err != nil || *previous != *binding {
+		if err != nil || *previous != persisted {
 			return fmt.Errorf("runner is active with a different binding; stop it before enabling changes")
 		}
 		fmt.Fprintf(out, "Managed review runner %s is already active.\n", filepath.Base(dir))
+		var status reviewBackgroundStatus
+		data, _ := os.ReadFile(filepath.Join(dir, "background-status.json"))
+		if json.Unmarshal(data, &status) == nil && status.Phase == "running" && binding.Options.RepositoryRequestsApproved && binding.Options.GitProvider == "github" && !status.RepositoryRequests {
+			if status.Message != "" {
+				fmt.Fprintln(out, status.Message)
+				return nil
+			}
+			// Started before this consent (for example by an older CLI).
+			return fmt.Errorf("it is not accepting repository requests; restart it with review-watch --stop %s, then start it again", filepath.Base(dir))
+		}
 		return nil
 	}
 	active, err = reviewBackgroundActive(dir, "runner.lock")
@@ -227,7 +243,7 @@ func startReviewBackground(ctx context.Context, cfg *Config, configPath string, 
 	if active {
 		return fmt.Errorf("this review runner is already active in the foreground")
 	}
-	if err = saveReviewJSON(filepath.Join(dir, "background.json"), binding); err != nil {
+	if err = saveReviewJSON(filepath.Join(dir, "background.json"), &persisted); err != nil {
 		return fmt.Errorf("could not save managed runner binding")
 	}
 	return launchReviewBackground(ctx, dir, binding, out)
@@ -247,6 +263,9 @@ func launchReviewBackground(ctx context.Context, dir string, binding *reviewBack
 		return fmt.Errorf("could not locate review runner executable")
 	}
 	cmd := exec.Command(exe, "--root", binding.Root, "--config", binding.ConfigPath, "review-watch", "--managed-runner", filepath.Base(dir))
+	if binding.Options.RepositoryRequestsApproved {
+		cmd.Args = append(cmd.Args, "--cra")
+	}
 	cmd.Dir = binding.Root
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + binding.Home, "USER=" + binding.User, "LOGNAME=" + binding.Logname, "TMPDIR=" + os.TempDir()}
 	if binding.CodexHome != "" {
@@ -271,6 +290,9 @@ func launchReviewBackground(ctx context.Context, dir string, binding *reviewBack
 		active, _ := reviewBackgroundActive(dir, "background.lock")
 		if active && status.Phase == "running" {
 			fmt.Fprintf(out, "Managed review runner %s is running. Stop: vibeflow --root %s review-watch --stop %s\n", filepath.Base(dir), shellQuote(binding.Root), filepath.Base(dir))
+			if status.Message != "" {
+				fmt.Fprintln(out, status.Message)
+			}
 			return nil
 		}
 		if status.Phase == "failed" {
@@ -279,11 +301,13 @@ func launchReviewBackground(ctx context.Context, dir string, binding *reviewBack
 		select {
 		case <-ctx.Done():
 			binding.Enabled = false
+			binding.Options.RepositoryRequestsApproved = false
 			_ = saveReviewJSON(filepath.Join(dir, "background.json"), binding)
 			_ = os.WriteFile(filepath.Join(dir, "background.stop"), nil, 0600)
 			return ctx.Err()
 		case <-deadline.C:
 			binding.Enabled = false
+			binding.Options.RepositoryRequestsApproved = false
 			_ = saveReviewJSON(filepath.Join(dir, "background.json"), binding)
 			_ = os.WriteFile(filepath.Join(dir, "background.stop"), nil, 0600)
 			return fmt.Errorf("managed review runner startup timed out; stop requested; inspect review-watch --status")
@@ -350,15 +374,24 @@ func runReviewBackground(ctx context.Context, id string) error {
 			}
 		}
 	}()
+	binding.Options.RepositoryRequestsApproved = flagCRA
 	watch := &reviewWatch{client: NewClient(cfg.ServerURL, cfg.APIToken), cfg: cfg, options: binding.Options, output: io.Discard}
 	watch.onReady = func() {
 		status.Phase = "running"
 		status.Reason = ""
+		status.RepositoryRequests = watch.repositoryRequests
 		if saveReviewJSON(filepath.Join(dir, "background-status.json"), &status) != nil {
 			cancel()
 		}
 	}
+	watch.onStatus = func(message string) {
+		status.Message = message
+		if status.Phase == "running" && saveReviewJSON(filepath.Join(dir, "background-status.json"), &status) != nil {
+			cancel()
+		}
+	}
 	err = watch.run(ctx)
+	status.Message = ""
 	if err == nil {
 		status.Phase = "stopped"
 		status.Reason = ""
@@ -412,6 +445,15 @@ func stopReviewBackground(ctx context.Context, id string, out io.Writer) error {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func reviewBackgroundMessage(dir string) string {
+	var status reviewBackgroundStatus
+	data, err := os.ReadFile(filepath.Join(dir, "background-status.json"))
+	if err != nil || len(data) > 4096 || json.Unmarshal(data, &status) != nil {
+		return ""
+	}
+	return status.Message
 }
 
 func reviewBackgroundState(dir string) (string, error) {
@@ -471,6 +513,9 @@ func reviewBackgroundStatusList(out io.Writer) error {
 		dir := filepath.Dir(path)
 		state, _ := reviewBackgroundState(dir)
 		fmt.Fprintf(out, "%s %s\n", filepath.Base(dir), state)
+		if message := reviewBackgroundMessage(dir); state == "running" && message != "" {
+			fmt.Fprintf(out, "  status: %s\n", message)
+		}
 		if binding, err := readReviewBackground(dir); err == nil {
 			fmt.Fprintf(out, "  name=%q project=%d repository-link=%d provider=%q model=%q server=%q\n", binding.Options.Name, binding.Options.ProjectID, binding.Options.RepositoryLinkID, binding.Options.Provider, binding.Options.Model, binding.ServerURL)
 		}

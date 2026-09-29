@@ -30,11 +30,17 @@ type reviewStartupRepository struct {
 }
 
 type reviewBinding struct {
-	Options     reviewWatchOptions
-	ProjectName string
-	Repository  reviewStartupRepository
-	Checkouts   []reviewStartupCheckout
-	Problem     string
+	SupportedRunnerCapabilities []string
+	Options                     reviewWatchOptions
+	ProjectName                 string
+	Repository                  reviewStartupRepository
+	Checkouts                   []reviewStartupCheckout
+	Problem                     string
+}
+
+type reviewStartupRepositoriesResponse struct {
+	Repositories                []reviewStartupRepository `json:"repositories"`
+	SupportedRunnerCapabilities []string                  `json:"supported_runner_capabilities"`
 }
 
 type reviewDiscovery struct {
@@ -79,7 +85,8 @@ func validReviewStartupRepository(repo reviewStartupRepository) bool {
 	return repo.ID > 0 && reviewStartupText(repo.Host, 253) && reviewStartupText(repo.Name, 512) && err == nil && owner != "." && repository != "." && host == strings.ToLower(repo.Host) && name == strings.ToLower(repo.Name) && (repo.Provider == "github" || repo.Provider == "bitbucket") && (repo.Provider != "bitbucket" || host == "bitbucket.org") && (repo.Provider != "github" || host != "bitbucket.org")
 }
 
-func discoverReviewBindings(ctx context.Context, cfg *Config, paths []string, preferred map[string]string) (reviewDiscovery, error) {
+// An empty name uses the hostname; only limits projects when non-nil.
+func discoverReviewBindings(ctx context.Context, cfg *Config, paths []string, preferred map[string]string, name string, only map[int64]bool) (reviewDiscovery, error) {
 	if cfg == nil || cfg.ServerURL == "" || strings.TrimSpace(cfg.APIToken) == "" {
 		return reviewDiscovery{Problems: map[int64]string{}, Revoked: map[int64]bool{}}, fmt.Errorf("connect VibeFlow before starting review runners")
 	}
@@ -88,7 +95,16 @@ func discoverReviewBindings(ctx context.Context, cfg *Config, paths []string, pr
 	if err != nil {
 		return d, err
 	}
-	return discoverReviewProjectBindings(ctx, cfg, client, d, paths, preferred)
+	if only != nil {
+		projects := d.Projects[:0:0]
+		for _, p := range d.Projects {
+			if only[p.ID] {
+				projects = append(projects, p)
+			}
+		}
+		d.Projects = projects
+	}
+	return discoverReviewProjectBindings(ctx, cfg, client, d, paths, preferred, name)
 }
 
 // Shared read-only enumeration also serves browsing without runner consent.
@@ -146,18 +162,21 @@ func listReviewProjects(ctx context.Context, client *Client) (reviewDiscovery, e
 	return d, nil
 }
 
-func discoverReviewProjectBindings(ctx context.Context, cfg *Config, client *Client, d reviewDiscovery, paths []string, preferred map[string]string) (reviewDiscovery, error) {
+func discoverReviewProjectBindings(ctx context.Context, cfg *Config, client *Client, d reviewDiscovery, paths []string, preferred map[string]string, name string) (reviewDiscovery, error) {
 	base := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
-	base.Name, _ = os.Hostname()
+	// Runner IDs hash the name, so a long-lived TUI passes the name it started
+	// with; a later hostname change must not stop and re-key its runners.
+	base.Name = name
+	if base.Name == "" {
+		base.Name, _ = os.Hostname()
+	}
 	if !reviewStartupText(base.Name, 100) {
 		base.Name = "Review runner"
 	}
 	// Preferences are supplied explicitly; discovery never reads session consent.
 	base.Provider, base.Project, base.Repository = cfg.DefaultProvider, "", ""
 	for _, project := range d.Projects {
-		var linked struct {
-			Repositories []reviewStartupRepository `json:"repositories"`
-		}
+		var linked reviewStartupRepositoriesResponse
 		err := client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", project.ID), nil, &linked)
 		if err != nil {
 			d.Problems[project.ID] = err.Error()
@@ -184,7 +203,7 @@ func discoverReviewProjectBindings(ctx context.Context, cfg *Config, client *Cli
 		for _, repo := range linked.Repositories {
 			o := base
 			o.ProjectID, o.Project, o.GitProvider, o.RepositoryLinkID = project.ID, strconv.FormatInt(project.ID, 10), repo.Provider, repo.ID
-			binding := reviewBinding{Options: o, ProjectName: project.Name, Repository: repo}
+			binding := reviewBinding{Options: o, ProjectName: project.Name, Repository: repo, SupportedRunnerCapabilities: append([]string(nil), linked.SupportedRunnerCapabilities...)}
 			id := reviewBackgroundID(cfg.ServerURL, o)
 			if selected := findReviewStartupCheckout(ctx, preferred[id], []reviewStartupRepository{repo}); selected != nil {
 				binding.Options.Repository = selected.Path

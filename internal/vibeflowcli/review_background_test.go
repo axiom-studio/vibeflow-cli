@@ -54,12 +54,17 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 			return
 		}
 		switch {
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+			fmt.Fprint(w, `{"repositories":[],"supported_runner_capabilities":["repository_review_v1"]}`)
 		case r.URL.Path == "/rest/v1/vibeflow/projects/23/pr-review-runners":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
 			registrations.Add(1)
+			if fmt.Sprint(body["capabilities"]) != "[repository_review_v1]" {
+				t.Error("explicit background launch lost repository consent")
+			}
 			json.NewEncoder(w).Encode(map[string]any{"id": body["id"], "user_id": 42, "provider": "github", "repository_link_id": 7})
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			heartbeats.Add(1)
@@ -115,6 +120,14 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 		t.Fatalf("expected one opt-in descriptor: %v %v", dirs, err)
 	}
 	id := filepath.Base(filepath.Dir(dirs[0]))
+	data, err := os.ReadFile(dirs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var binding reviewBackground
+	if err := json.Unmarshal(data, &binding); err != nil || binding.Options.RepositoryRequestsApproved {
+		t.Fatalf("background preferences must not persist invocation consent: %v", err)
+	}
 	t.Cleanup(func() { run(nil, "--stop", id) })
 	managedPID := func() int {
 		t.Helper()
@@ -156,19 +169,39 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			run([]string{"VIBEFLOW_URL=" + server.URL}, start...)
+			if out, err := run([]string{"VIBEFLOW_URL=" + server.URL}, start...); err != nil || !strings.Contains(out, "already active") {
+				t.Errorf("identical repeated start was not reported as the active runner: %v %s", err, out)
+			}
 		}()
 	}
 	wg.Wait()
 	if registrations.Load() != 1 {
 		t.Fatalf("duplicate runner registered: %d", registrations.Load())
 	}
+	// A runner started before this consent (for example by an older CLI) is
+	// active but cannot accept repository requests; saying so beats "already active".
+	statusPath := filepath.Join(filepath.Dir(dirs[0]), "background-status.json")
+	var live reviewBackgroundStatus
+	if data, err := os.ReadFile(statusPath); err != nil || json.Unmarshal(data, &live) != nil || !live.RepositoryRequests {
+		t.Fatalf("running detached runner did not record repository routing: %v", err)
+	}
+	live.RepositoryRequests = false
+	if err := saveReviewJSON(statusPath, &live); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run([]string{"VIBEFLOW_URL=" + server.URL}, start...); err == nil || !strings.Contains(out, "--stop") {
+		t.Fatalf("legacy active runner was reported as accepting repository requests: %v %s", err, out)
+	}
+	live.RepositoryRequests = true
+	if err := saveReviewJSON(statusPath, &live); err != nil {
+		t.Fatal(err)
+	}
 	changed := append(append([]string{}, start...), "--model", "other-model")
 	if out, err := run([]string{"VIBEFLOW_URL=" + server.URL}, changed...); err == nil || !strings.Contains(out, "different binding") {
 		t.Fatalf("active binding silently changed: %v %s", err, out)
 	}
 	status, err := run([]string{"VIBEFLOW_URL=" + foreign.URL, "VIBEFLOW_TOKEN=ambient-token-canary", "ANTHROPIC_API_KEY=ambient-model-canary"}, "--status")
-	if err != nil || !strings.Contains(status, "running") || !strings.Contains(status, id) || !strings.Contains(status, server.URL) || !strings.Contains(status, "test-runner") {
+	if err != nil || !strings.Contains(status, "running") || !strings.Contains(status, id) || !strings.Contains(status, server.URL) || !strings.Contains(status, "test-runner") || strings.Contains(status, "server upgrade") {
 		t.Fatalf("live status: %v %s", err, status)
 	}
 	// A detached runner is restarted only by an explicit command.
@@ -220,7 +253,6 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 	if !strings.Contains(status, "failed") || strings.Contains(status, "running") || registrations.Load() != 4 {
 		t.Fatalf("changed account was silently used: %s", status)
 	}
-	statusPath := filepath.Join(filepath.Dir(dirs[0]), "background-status.json")
 	for _, invalid := range []string{"", "not-json", `{}`, `{"phase":"unknown"}`} {
 		if invalid == "" {
 			if err := os.Remove(statusPath); err != nil {
@@ -368,6 +400,8 @@ func TestReviewBackgroundFetchUsesPinnedSSHAgent(t *testing.T) {
 	var reason atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+			fmt.Fprint(w, `{"repositories":[]}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
@@ -420,8 +454,14 @@ func TestReviewBackgroundFetchUsesPinnedSSHAgent(t *testing.T) {
 			run("--stop", filepath.Base(filepath.Dir(path)))
 		}
 	})
-	if out, err := run("--background", "--project", "1", "--repository-link", "7", "--repo", source, "--provider", "claude", "--name", "ssh-runner", "--interval", "1s"); err != nil {
-		t.Fatalf("background SSH runner start: %v %s", err, out)
+	if out, err := run("--background", "--project", "1", "--repository-link", "7", "--repo", source, "--provider", "claude", "--name", "ssh-runner", "--interval", "1s"); err != nil || !strings.Contains(out, "server upgrade") {
+		t.Fatalf("background SSH runner start against an old server: %v %s", err, out)
+	}
+	if status, err := run("--status"); err != nil || !strings.Contains(status, "server upgrade") {
+		t.Fatalf("detached status hides the old-server routing downgrade: %v %s", err, status)
+	}
+	if out, err := run("--background", "--project", "1", "--repository-link", "7", "--repo", source, "--provider", "claude", "--name", "ssh-runner", "--interval", "1s"); err != nil || !strings.Contains(out, "already active") || !strings.Contains(out, "server upgrade") {
+		t.Fatalf("repeated start hid the old-server routing downgrade: %v %s", err, out)
 	}
 	deadline := time.Now().Add(8 * time.Second)
 	for !submitted.Load() && time.Now().Before(deadline) {

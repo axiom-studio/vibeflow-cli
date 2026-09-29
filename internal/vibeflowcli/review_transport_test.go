@@ -58,6 +58,8 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 			var reason string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+					json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}})
 				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 					var registration map[string]any
 					json.NewDecoder(r.Body).Decode(&registration)

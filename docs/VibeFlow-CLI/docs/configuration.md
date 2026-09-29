@@ -22,6 +22,9 @@ The `--root` flag enables fully isolated parallel instances with independent con
 The first-launch server/API-key setup is saved here and is not repeated on later TUI launches.
 The PR review preview is disabled unless the command includes `--cra`; this temporary rollout flag is not saved in configuration.
 The independent **Run PR reviews while this CLI is open?** prompt appears on every interactive `vibeflow --cra` launch.
+Accepting permits requests from PR commenters on the connected repositories, including commenters without a Cloud account.
+Repository routing is enabled only when the server advertises `repository_review_v1` during this launch.
+Saved preferences and detached-runner records do not grant this consent on a later launch.
 Its **Run reviews** / **Not now** answer is never persisted or coupled to authentication setup, and **Not now** is the default.
 Choosing **Run reviews** discovers all accessible projects, independently of `default_project`, and reuses `default_provider` with one shared provider/model setup when needed.
 Checkout selection reuses a valid remembered path for each stable repository binding, then checks `default_work_dir`, the launch directory, `directory_history`, and this root's saved session paths.

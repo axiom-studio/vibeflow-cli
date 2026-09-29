@@ -239,6 +239,11 @@ func defaultPersonas() []personaEntry {
 	}
 }
 
+func (w *WizardModel) enableCRA() {
+	w.personas = append(w.personas, personaEntry{"code_reviewer", reviewSessionLabel, "Reviews PRs when anyone comments @vibeflow review; fresh isolated Vera each time"})
+	w.personaProviderIdx = append(w.personaProviderIdx, -1)
+}
+
 // codeAgentKeys lists personas that modify git (only one allowed per branch).
 // Must stay in sync with GitModifyingPersonas in axiomcloud/database/vibeflow_models.go.
 var codeAgentKeys = map[string]bool{
@@ -1500,8 +1505,14 @@ func (w WizardModel) View() string {
 	if w.quickSwitch {
 		steps = []stepLabel{{StepBranch, "Branch"}, {StepWorktree, "Worktree"}}
 	}
+	// Vera alone ends at Team; its harness/model setup follows outside the wizard.
+	selected := w.selectedPersonaIndices()
+	veraOnly := len(selected) == 1 && w.personas[selected[0]].key == "code_reviewer"
 	var stepLine strings.Builder
 	for _, s := range steps {
+		if veraOnly && s.step != StepWorkDir && s.step != StepSessionType && s.step != StepProject && s.step != StepTeam {
+			continue
+		}
 		if s.step == StepQwenLaunchConfig && w.postProviderConfigStep() != StepQwenLaunchConfig {
 			continue
 		}
@@ -2241,6 +2252,14 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		}
 		if w.selectedPersona < 0 {
 			w.selectedPersona = 0 // fallback
+		}
+		if selected := w.selectedPersonaIndices(); len(selected) == 1 && w.personas[selected[0]].key == "code_reviewer" {
+			w.result = WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}, WorkDir: w.selectedWorkDir, WorktreeChoice: WorktreeCurrent}
+			if w.selectedProject < len(w.projects) {
+				w.result.ProjectID, w.result.ProjectName = w.projects[w.selectedProject].ID, w.projects[w.selectedProject].Name
+			}
+			w.done = true
+			return w, nil
 		}
 		w.step = StepProvider
 		w.cursor = 0
