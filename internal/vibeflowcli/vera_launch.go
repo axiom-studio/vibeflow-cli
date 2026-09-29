@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -18,6 +19,11 @@ type veraLaunchedMsg struct {
 func (m Model) beginVeraLaunch(result WizardResult) (tea.Model, tea.Cmd) {
 	if !m.craEnabled || m.reviewSupervisor == nil {
 		m.err = fmt.Errorf("start this CLI with --cra to launch Vera")
+		return m, nil
+	}
+	choices := reviewHarnessChoices(m.reviewSupervisor.cfg)
+	if len(choices) == 0 {
+		m.err = fmt.Errorf("install a supported coding harness (%s) and configure its binary to launch Vera", strings.Join(reviewHarnessKeys, ", "))
 		return m, nil
 	}
 	personas := result.Personas
@@ -42,7 +48,7 @@ func (m Model) beginVeraLaunch(result WizardResult) (tea.Model, tea.Cmd) {
 	setup := newReviewStartupModel(m.reviewSupervisor.ctx, m.reviewSupervisor.cfg, m.reviewSupervisor.configPath, o)
 	setup.selectedBinding, setup.repositorySelected = true, true
 	setup.title, setup.cancelHint = reviewSessionLabel, "Esc: cancel"
-	setup.input = &reviewStartupInput{Field: "provider", Message: "Vera will review PRs for anyone who comments @vibeflow review on this linked repository, using your harness credentials, until this CLI closes. Choose Vera's review harness. Claude uses its existing credentials; Codex requires an OpenAI API key, not a ChatGPT login.", Choices: []reviewStartupChoice{{Label: "Claude", Value: "claude"}, {Label: "Codex (OpenAI API key required)", Value: "codex"}}}
+	setup.input = &reviewStartupInput{Field: "provider", Message: "Vera reviews PRs for anyone who comments @vibeflow review on this linked repository until this CLI closes. Choose Vera's coding harness: it runs with your login and full permissions in a disposable worktree.", Choices: choices}
 	m.veraSetup = &setup
 	m.veraProjectName = result.ProjectName
 	m.activeView = ViewVeraLaunch

@@ -25,8 +25,10 @@ Exact labels and ordering match your installed version; the list above reflects 
 With `vibeflow --cra`, the persona picker also offers **Vera · Code Reviewer**.
 Selecting only Vera skips the coding-agent branch, worktree, routing, and permission steps.
 It validates the selected checkout against the chosen project's linked repositories, then asks for Claude or Codex and a review model.
-Codex review runners require an OpenAI API key, not a ChatGPT subscription login.
-Vera listens for repository review requests while idle and starts a fresh isolated review for each assigned PR.
+Vera can run on any configured coding harness whose binary is installed, in normal mode like the other personas: your own login and environment, with full permissions.
+Codex works with a ChatGPT subscription login as well as an API key.
+Vera listens for repository review requests while idle and starts a fresh review for each assigned PR.
+Each review runs in its own disposable git worktree of the PR head, never in your checkout, and the worktree and all review files are deleted when the review ends.
 The `R` review-runner view shows listening, running, or failed status, and closing the TUI stops only its owned runners.
 Selecting Vera with coding personas launches the review runner separately and then launches the coding agents with their original settings.
 Canceling Vera setup still continues the selected coding-agent launch.

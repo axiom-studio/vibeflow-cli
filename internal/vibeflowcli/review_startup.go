@@ -309,8 +309,8 @@ func resolveReviewStartup(ctx context.Context, cfg *Config, o reviewWatchOptions
 		return o, &reviewStartupInput{Field: "project", Message: "Choose the project for this review runner.", Choices: choices}, nil
 	}
 	o.ProjectID, o.Project = matches[0].ID, strconv.FormatInt(matches[0].ID, 10)
-	if o.Provider != "claude" && o.Provider != "codex" {
-		return o, &reviewStartupInput{Field: "provider", Message: "Choose a supported review provider.", Choices: []reviewStartupChoice{{Label: "Claude", Value: "claude"}, {Label: "Codex", Value: "codex"}}}, nil
+	if !reviewHarnessSupported(o.Provider) {
+		return o, &reviewStartupInput{Field: "provider", Message: "Choose Vera's coding harness.", Choices: reviewHarnessChoices(cfg)}, nil
 	}
 	if cfg.Providers[o.Provider].Binary == "" {
 		return o, nil, fmt.Errorf("selected review provider is not configured; set its binary in config.yaml")
@@ -504,7 +504,7 @@ func loadReviewGroupPreferences(cfg *Config, configPath, cwd string) (reviewWatc
 	if prefs.Context != key {
 		return o, choices
 	}
-	if prefs.Provider == "claude" || prefs.Provider == "codex" {
+	if reviewHarnessSupported(prefs.Provider) {
 		o.Provider, o.Model = prefs.Provider, prefs.Model
 	}
 	for id, path := range prefs.Checkouts {
@@ -535,7 +535,7 @@ func saveReviewGroupPreferences(cfg *Config, configPath string, o reviewWatchOpt
 	if err != nil || server.Host == "" || server.User != nil || server.RawQuery != "" || server.Fragment != "" {
 		return fmt.Errorf("invalid review server URL")
 	}
-	if (o.Provider != "claude" && o.Provider != "codex") || (o.Model != "" && !reviewStartupText(o.Model, 200)) {
+	if !reviewHarnessSupported(o.Provider) || (o.Model != "" && !reviewStartupText(o.Model, 200)) {
 		return fmt.Errorf("invalid review provider or model")
 	}
 	if err := os.MkdirAll(RootDir(), 0700); err != nil {
@@ -607,7 +607,7 @@ func saveReviewStartupOptions(cfg *Config, configPath string, o reviewWatchOptio
 	if err != nil || server.Host == "" || server.User != nil || server.RawQuery != "" || server.Fragment != "" {
 		return fmt.Errorf("invalid review server URL")
 	}
-	if !filepath.IsAbs(o.Repository) || o.ProjectID <= 0 || o.RepositoryLinkID <= 0 || (o.GitProvider != "github" && o.GitProvider != "bitbucket") || (o.Provider != "claude" && o.Provider != "codex") {
+	if !filepath.IsAbs(o.Repository) || o.ProjectID <= 0 || o.RepositoryLinkID <= 0 || (o.GitProvider != "github" && o.GitProvider != "bitbucket") || !reviewHarnessSupported(o.Provider) {
 		return fmt.Errorf("resolve review inputs before saving preferences")
 	}
 	prefs := reviewStartupPreferences{Context: key, Project: strconv.FormatInt(o.ProjectID, 10), Provider: o.Provider, Repository: o.Repository, GitProvider: o.GitProvider, RepositoryLinkID: o.RepositoryLinkID, Model: o.Model}

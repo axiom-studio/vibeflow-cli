@@ -21,7 +21,7 @@ func TestReviewSupervisorReconcileLifetime(t *testing.T) {
 	withTempRoot(t)
 	repo, _ := reviewTestRepo(t)
 	provider := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf '%s\\n' '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	var registrations, stops atomic.Int64

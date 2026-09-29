@@ -36,7 +36,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "runner.yaml")
 	provider := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(provider, []byte("#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = 'configured-model-canary' ] || exit 9\nprintf '%s\\n' '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = 'configured-model-canary' ] || exit 9\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	var registrations, heartbeats, wrongOrigin atomic.Int64
@@ -361,7 +361,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 }
 
 // Missing PR commits must still be fetched through the opted-in SSH agent,
-// while the isolated model process must never inherit that agent socket.
+// and the harness, running in normal mode, sees that same agent socket.
 func TestReviewBackgroundFetchUsesPinnedSSHAgent(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "vibeflow")
 	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/vibeflow").CombinedOutput(); err != nil {
@@ -392,7 +392,8 @@ func TestReviewBackgroundFetchUsesPinnedSSHAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := filepath.Join(binDir, "claude")
-	script := "#!/bin/sh\n[ -z \"$SSH_AUTH_SOCK\" ] || exit 93\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\nexit 17\n"
+	// Normal mode: the harness sees the runner's environment, including the pinned agent.
+	script := "#!/bin/sh\n[ \"$SSH_AUTH_SOCK\" = " + shellQuote(socketPath) + " ] || exit 93\nexit 17\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

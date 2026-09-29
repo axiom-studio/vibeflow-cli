@@ -39,13 +39,13 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	launchRepo, _ := reviewTestRepo(t)
 	reviewTestGit(t, launchRepo, "remote", "set-url", "origin", "https://github.com/acme/cli.git")
 	root, binDir, marks := t.TempDir(), t.TempDir(), t.TempDir()
-	newSession, helpProbe, modelRun := filepath.Join(marks, "tmux-new-session"), filepath.Join(marks, "claude-help"), filepath.Join(marks, "claude-model")
+	newSession, modelRun := filepath.Join(marks, "tmux-new-session"), filepath.Join(marks, "claude-model")
 	tmuxScript := "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = new-session ] && printf '%s\\n' \"$*\" >> " + shellQuote(newSession) + "; done\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(tmuxScript), 0700); err != nil {
 		t.Fatal(err)
 	}
 	provider := filepath.Join(binDir, "claude")
-	claudeScript := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then printf '%s\\n' \"$*\" >> " + shellQuote(helpProbe) + "; echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\nprintf '%s\\n' \"$*\" >> " + shellQuote(modelRun) + "\nexit 1\n"
+	claudeScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(modelRun) + "\nexit 1\n"
 	if err := os.WriteFile(provider, []byte(claudeScript), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject = server.URL, "vera-api-canary", "66"
 	cfg.DefaultWorkDir, cfg.TmuxSocket = "", "vera-tui-test"
 	cfg.DirectoryHistory = []string{repo, repo2}
-	cfg.Providers["claude"] = Provider{Binary: provider}
+	cfg.Providers["claude"] = Provider{Name: "Claude Code", Binary: provider}
 	if err := SaveConfig(cfg, filepath.Join(root, "config.yaml")); err != nil {
 		t.Fatal(err)
 	}
@@ -267,10 +267,10 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	terminal.send(t, "\r")
 
 	// 3. Harness, then model.
-	visible = awaitScreen("Vera · Code Reviewer", "Choose Vera", "Claude", "Codex (OpenAI API key required)")
+	visible = awaitScreen("Vera · Code Reviewer", "Choose Vera", "Claude Code", "full permissions")
 	t.Logf("harness choice:\n%s", visible)
 	checkBorder("harness", visible)
-	if !strings.Contains(visible, "> Claude") {
+	if !strings.Contains(visible, "> Claude Code") {
 		t.Fatalf("Claude is not the default harness:\n%s", visible)
 	}
 	terminal.send(t, "\r")
@@ -301,9 +301,6 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	}
 	if hb, _, _, _ := counts(); hb < 2 {
 		t.Fatalf("runner heartbeats = %d; want at least one per poll", hb)
-	}
-	if _, err := os.Stat(helpProbe); err != nil {
-		t.Fatalf("review preflight never probed the fake provider: %v", err)
 	}
 	if data, err := os.ReadFile(modelRun); err == nil {
 		t.Fatalf("idle runner started a model process: %s", data)

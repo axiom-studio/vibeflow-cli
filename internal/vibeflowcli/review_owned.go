@@ -77,7 +77,7 @@ func validateReviewOwned(cfg *Config, o reviewWatchOptions) error {
 	if o.ProjectID <= 0 || o.RepositoryLinkID <= 0 || !filepath.IsAbs(o.Repository) || (o.GitProvider != "github" && o.GitProvider != "bitbucket") || (o.Kind != "local" && o.Kind != "shared") {
 		return fmt.Errorf("select a project and linked repository before starting a review runner")
 	}
-	if (o.Provider != "claude" && o.Provider != "codex") || strings.TrimSpace(o.Name) == "" || len(o.Name) > 100 || len(o.Model) > 200 || strings.ContainsAny(o.Name+o.Model, "\x00\r\n\t") || o.Once || o.PollInterval < time.Second || o.PollInterval > time.Minute || o.Timeout < time.Minute || o.Timeout > time.Hour {
+	if !reviewHarnessSupported(o.Provider) || strings.TrimSpace(o.Name) == "" || len(o.Name) > 100 || len(o.Model) > 200 || strings.ContainsAny(o.Name+o.Model, "\x00\r\n\t") || o.Once || o.PollInterval < time.Second || o.PollInterval > time.Minute || o.Timeout < time.Minute || o.Timeout > time.Hour {
 		return fmt.Errorf("invalid review runner provider, name, model, or timing")
 	}
 	return nil
@@ -109,18 +109,10 @@ func startReviewOwnedWithCapacity(ctx context.Context, cfg *Config, _ string, op
 	if err != nil {
 		return nil, fmt.Errorf("could not resolve review provider")
 	}
-	selected := Provider{Binary: binary}
-	modelEnv := map[string]string{}
-	keys := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"}
-	if options.Provider == "codex" {
-		keys = []string{"OPENAI_API_KEY", "OPENAI_BASE_URL"}
-	}
-	for _, key := range keys {
-		if value := reviewModelEnv(cfg, provider, key); value != "" {
-			modelEnv[key] = value
-		}
-	}
-	reviewCfg := &Config{ServerURL: cfg.ServerURL, APIToken: cfg.APIToken, LLMGatewayEnabled: cfg.LLMGatewayEnabled, Providers: map[string]Provider{options.Provider: selected}, SavedEnvVars: modelEnv}
+	// Vera runs like any other persona: the selected harness keeps its
+	// configured env, and saved env vars resolve exactly as for sessions.
+	provider.Binary = binary
+	reviewCfg := &Config{ServerURL: cfg.ServerURL, APIToken: cfg.APIToken, LLMGatewayEnabled: cfg.LLMGatewayEnabled, Providers: map[string]Provider{options.Provider: provider}, SavedEnvVars: cfg.SavedEnvVars}
 	payload, err := json.Marshal(reviewOwnedSpec{Config: reviewCfg, Options: options, Capacity: capacity})
 	if err != nil || len(payload) > 128<<10 {
 		return nil, fmt.Errorf("review runner configuration is too large")
@@ -138,18 +130,21 @@ func startReviewOwnedWithCapacity(ctx context.Context, cfg *Config, _ string, op
 	}
 	cmd := exec.Command(exe, "--root", root, "review-watch", "--owned-runner")
 	cmd.Dir = root
-	cmd.Env = []string{} // A sparse parent must never turn an empty allowlist into inheritance.
-	for _, key := range []string{"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "CODEX_HOME", "SSH_AUTH_SOCK"} {
-		if value := os.Getenv(key); value != "" {
-			switch key {
-			case "HOME", "TMPDIR", "CODEX_HOME", "SSH_AUTH_SOCK":
-				value, err = filepath.Abs(value)
-				if err != nil {
-					return nil, fmt.Errorf("could not resolve review runner environment paths")
-				}
+	// Normal mode: the harness sees the user's own environment and logins. The
+	// runner starts in root, so relative login paths are made absolute first.
+	cmd.Env = []string{}
+	for _, kv := range os.Environ() {
+		key, value, _ := strings.Cut(kv, "=")
+		switch key {
+		case "HOME", "TMPDIR", "CODEX_HOME", "SSH_AUTH_SOCK":
+			if value == "" {
+				continue
 			}
-			cmd.Env = append(cmd.Env, key+"="+value)
+			if value, err = filepath.Abs(value); err != nil {
+				return nil, fmt.Errorf("could not resolve review runner environment paths")
+			}
 		}
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	input, err := cmd.StdinPipe()
 	if err != nil {

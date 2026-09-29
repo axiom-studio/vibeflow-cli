@@ -284,3 +284,74 @@ func TestReviewSubmissionDeadlineRetriesSavedReceipt(t *testing.T) {
 		t.Fatal("saved result was not retried after local deadline")
 	}
 }
+
+// A supervisor that crashed mid-review leaves its worktree behind. The next
+// start fails the attempt and removes the whole review directory first.
+func TestReviewCrashRecoveryRemovesWorktree(t *testing.T) {
+	source, execution := reviewTestRepo(t)
+	previousRoot, previousConfig := rootDir, flagConfigPath
+	t.Cleanup(func() { rootDir = previousRoot; flagConfigPath = previousConfig })
+	SetRootDir(t.TempDir())
+	receipt := &reviewReceipt{JobID: execution.Review.ID, RequestID: reviewUUID(), Execution: execution}
+	var failed atomic.Int64
+	var work string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
+			var registration map[string]any
+			json.NewDecoder(r.Body).Decode(&registration)
+			registration["user_id"] = 1
+			json.NewEncoder(w).Encode(registration)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/heartbeat"), r.Method == "DELETE":
+			w.WriteHeader(204)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/fail"):
+			if _, err := os.Stat(work); !os.IsNotExist(err) {
+				t.Error("review worktree remained during publication")
+			}
+			failed.Add(1)
+			w.WriteHeader(204)
+		default:
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(400)
+		}
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "supervisor-key"
+	flagConfigPath = filepath.Join(RootDir(), "config.yaml")
+	if err := SaveConfig(cfg, flagConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\n1\n7\ngithub\nlocal\nrecovery", server.URL)))
+	private := filepath.Join(RootDir(), "review-runners", hex.EncodeToString(digest[:16]))
+	work = filepath.Join(private, "work", receipt.RequestID)
+	if err := prepareReviewCheckout(context.Background(), source, work, execution); err != nil {
+		t.Fatal(err)
+	}
+	// Build tools can leave read-only directories inside the worktree.
+	locked := filepath.Join(work, "input", "head", "cache", "ro")
+	if err := os.MkdirAll(locked, 0700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(locked, "artifact"), []byte("x"), 0400)
+	os.Chmod(locked, 0500)
+	if err := saveReviewJSON(filepath.Join(private, "state.json"), reviewRunnerState{ID: execution.Attempt.RunnerID, OwnerID: 1, Pending: receipt}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := reviewWatchCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--project", "1", "--repository-link", "7", "--repo", source, "--provider", "claude", "--name", "recovery", "--once"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Load() != 1 {
+		t.Fatal("interrupted attempt was not failed")
+	}
+	if _, err := os.Stat(work); !os.IsNotExist(err) {
+		t.Fatalf("crash recovery left the review directory: %v", err)
+	}
+	if list := reviewTestGit(t, source, "worktree", "list", "--porcelain"); strings.Count(list, "worktree ") != 1 {
+		t.Fatalf("developer repository gained a worktree: %s", list)
+	}
+}

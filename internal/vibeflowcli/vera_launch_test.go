@@ -75,7 +75,7 @@ func newVeraFixture(t *testing.T) (*Config, string, *atomic.Int64, *atomic.Int64
 	withTempRoot(t)
 	repo, _ := reviewTestRepo(t)
 	provider := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf '%s\\n' '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	var registrations, stops atomic.Int64
@@ -415,10 +415,18 @@ func TestVeraCodexSetupPreservesHarnessAndModel(t *testing.T) {
 	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
 	next, _ := m.beginVeraLaunch(WizardResult{ProjectID: 66, WorkDir: repo, Persona: "code_reviewer"})
 	m = next.(Model)
-	if !strings.Contains(m.veraSetup.View().Content, "OpenAI API key") {
-		t.Fatal("Codex credential constraint hidden")
+	if view := m.veraSetup.View().Content; strings.Contains(view, "API key") || !strings.Contains(view, "full permissions") {
+		t.Fatalf("Vera harness copy is stale:\n%s", view)
 	}
-	m.veraSetup.cursor = 1
+	m.veraSetup.cursor = -1
+	for i, choice := range m.veraSetup.input.Choices {
+		if choice.Value == "codex" {
+			m.veraSetup.cursor = i
+		}
+	}
+	if m.veraSetup.cursor < 0 {
+		t.Fatal("configured Codex harness is not offered")
+	}
 	next, cmd := m.veraSetup.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	setup := next.(reviewStartupModel)
 	resolved := cmd().(reviewStartupResolvedMsg)

@@ -54,7 +54,7 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 			cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
 			// Hermetic preflight: CI has no installed claude.
 			provider := filepath.Join(t.TempDir(), "claude")
-			if err := os.WriteFile(provider, []byte("#!/bin/sh\nprintf '%s\\n' '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+			if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
 			cfg.Providers["claude"] = Provider{Binary: provider}
