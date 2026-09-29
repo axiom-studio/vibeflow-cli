@@ -188,6 +188,9 @@ func startReviewOwnedWithCapacity(ctx context.Context, cfg *Config, _ string, op
 				terminal = errReviewOwnedBusy
 			} else if event.Error != "" {
 				terminal = errReviewOwnedStopped
+				if event.Status != nil && strings.HasPrefix(*event.Status, "Vera stopped:") {
+					terminal = errors.New(*event.Status)
+				}
 			}
 		}
 		if err := cmd.Wait(); err != nil && terminal == nil {
@@ -306,7 +309,11 @@ func runReviewOwned(parent context.Context, input io.Reader, output io.Writer) e
 		if err.Error() == "review runner or child is already active" {
 			category = "busy"
 		}
-		_ = json.NewEncoder(output).Encode(reviewOwnedEvent{Error: category})
+		event := reviewOwnedEvent{Error: category}
+		if message := err.Error(); strings.HasPrefix(message, "Vera stopped:") {
+			event.Status = &message // Locally constructed fix for the user, never harness output.
+		}
+		_ = json.NewEncoder(output).Encode(event)
 		return errReviewOwnedStopped
 	}
 	return nil

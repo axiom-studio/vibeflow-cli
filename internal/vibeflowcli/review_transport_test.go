@@ -108,7 +108,7 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 			if (err != nil) != stops || !strings.Contains(reason, tc.category) || !strings.Contains(reason, tc.httpStatus) {
 				t.Errorf("provider cause lost: %v reason=%q output=%s", err, reason, output)
 			}
-			if stops && (!bytes.Contains(output, []byte("Vera stopped")) || !bytes.Contains(output, []byte("claude"))) {
+			if stops && (bytes.Count(output, []byte("Vera stopped")) != 1 || !bytes.Contains(output, []byte("claude")) || bytes.Contains(output, []byte("Usage:"))) {
 				t.Errorf("runner did not explain the required user action: %s", output)
 			}
 			paths, _ := filepath.Glob(filepath.Join(root, "review-runners", "*", "last-provider-diagnostic.json"))
