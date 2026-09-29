@@ -95,7 +95,7 @@ func launchCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			for _, requested := range append([]string{persona}, strings.Split(personasRaw, ",")...) {
 				if strings.TrimSpace(requested) == "code_reviewer" {
-					return fmt.Errorf("Vera runs isolated PR reviews, not the coding-agent task loop; use review-watch --cra --project <project> --repo <checkout> --repository-link <link-id> --provider claude|codex [--model <model>]")
+					return fmt.Errorf("Vera runs PR reviews in disposable worktrees, not the coding-agent task loop; use review-watch --cra --project <project> --repo <checkout> --repository-link <link-id> --provider <harness> [--model <model>]")
 				}
 			}
 			cfgPath, _ := cmd.Flags().GetString("config")

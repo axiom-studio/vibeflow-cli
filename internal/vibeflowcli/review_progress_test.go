@@ -62,15 +62,12 @@ func TestReviewProgressLostRenewalKeepsDurableResult(t *testing.T) {
 				"head_sha": execution.Review.HeadSHA, "base_sha": execution.Review.BaseSHA,
 				"outcome": "clean", "summary": "fixture", "new_findings": []any{}, "reconciliations": []any{},
 			}
-			response, err := json.Marshal(map[string]any{"structured_output": map[string]any{"result": result, "failure_reason": nil}})
-			if err != nil {
-				t.Fatal(err)
-			}
+			response := reviewResultEnvelope(t, result)
 
 			root := t.TempDir()
 			release := filepath.Join(root, "release-provider")
 			provider := filepath.Join(root, "provider")
-			script := "#!/bin/sh\nfor arg in \"$@\"; do\nif [ \"$arg\" = --help ]; then\necho '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\nexit 0\nfi\ndone\nwhile [ ! -f " + shellQuote(release) + " ]; do sleep 0.02; done\nprintf '%s\\n' " + shellQuote(string(response)) + "\n"
+			script := "#!/bin/sh\nwhile [ ! -f " + shellQuote(release) + " ]; do sleep 0.02; done\n" + reviewWriteResult(response)
 			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -136,15 +133,12 @@ func TestReviewProgressReportsCheckoutWithoutBlockingCompletion(t *testing.T) {
 		"head_sha": execution.Review.HeadSHA, "base_sha": execution.Review.BaseSHA,
 		"outcome": "clean", "summary": "fixture", "new_findings": []any{}, "reconciliations": []any{},
 	}
-	response, err := json.Marshal(map[string]any{"structured_output": map[string]any{"result": result, "failure_reason": nil}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	response := reviewResultEnvelope(t, result)
 
 	root := t.TempDir()
 	release := filepath.Join(root, "release-provider")
 	provider := filepath.Join(root, "provider")
-	script := "#!/bin/sh\nfor arg in \"$@\"; do\nif [ \"$arg\" = --help ]; then\necho '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\nexit 0\nfi\ndone\nwhile [ ! -f " + shellQuote(release) + " ]; do sleep 0.02; done\nprintf '%s\\n' " + shellQuote(string(response)) + "\n"
+	script := "#!/bin/sh\nwhile [ ! -f " + shellQuote(release) + " ]; do sleep 0.02; done\n" + reviewWriteResult(response)
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +250,7 @@ func TestReviewProgressFailuresDoNotFabricateMilestones(t *testing.T) {
 			started := filepath.Join(root, "provider-started")
 			release := filepath.Join(root, "release-provider")
 			provider := filepath.Join(root, "provider")
-			script := "#!/bin/sh\nfor arg in \"$@\"; do\nif [ \"$arg\" = --help ]; then\necho '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\nexit 0\nfi\ndone\ntouch " + shellQuote(started) + "\nwhile [ ! -f " + shellQuote(release) + " ]; do sleep 0.02; done\nprintf 'not-json\\n'\n"
+			script := "#!/bin/sh\ntouch " + shellQuote(started) + "\nwhile [ ! -f " + shellQuote(release) + " ]; do sleep 0.02; done\nprintf 'not-json\\n'\n"
 			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}

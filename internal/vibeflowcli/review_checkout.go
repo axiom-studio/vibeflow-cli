@@ -64,7 +64,8 @@ func reviewRemoteIdentity(raw string) (string, string, error) {
 func reviewGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	argv := append([]string{"-c", "core.hooksPath=/dev/null", "-c", "diff.external=", "-c", "protocol.ext.allow=never", "-C", dir}, args...)
 	cmd := exec.Command("git", argv...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1")
+	// The private object store has no remote, so LFS could never fetch content.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_LFS_SKIP_SMUDGE=1")
 	var output limitedReviewBuffer
 	output.limit = 16 << 20
 	cmd.Stdout = &output
@@ -141,8 +142,9 @@ func fetchReviewObjects(ctx context.Context, objects, remote, sha string, budget
 	return check()
 }
 
-// Object export never executes repository hooks, filters, submodules or
-// attributes. git archive would silently omit export-ignore paths.
+// Context snapshots (base, merge-base) never execute repository hooks,
+// filters, submodules or attributes. git archive would silently omit
+// export-ignore paths.
 func exportReviewTree(ctx context.Context, objects, sha, dest string) error {
 	list, err := reviewGit(ctx, objects, "ls-tree", "-rz", "--full-tree", sha)
 	if err != nil {
@@ -204,8 +206,8 @@ func exportReviewTree(ctx context.Context, objects, sha, dest string) error {
 			return fmt.Errorf("unexpected git object")
 		}
 		n, err := strconv.ParseInt(meta[2], 10, 64)
-		// Preserve checked-in dependencies in full. At most three snapshots are
-		// exported per attempt, each bounded to 512 MiB and streamed to disk.
+		// Preserve checked-in dependencies in full. At most two snapshots are
+		// exported per attempt (base and merge-base), each bounded to 512 MiB and streamed to disk.
 		if err != nil || n < 0 || n > 16<<20 || total+n > 512<<20 {
 			return fmt.Errorf("review tree exceeds bounded input size")
 		}
@@ -296,7 +298,10 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 	if err = exportReviewTree(ctx, objects, round.BaseSHA, filepath.Join(input, "base")); err != nil {
 		return err
 	}
-	if err = exportReviewTree(ctx, objects, round.HeadSHA, filepath.Join(input, "head")); err != nil {
+	// The head is a real detached worktree so Vera can build and test it. Its
+	// metadata lives in the private objects.git, never the user's repository,
+	// and removing the review directory removes both.
+	if _, err = reviewGit(ctx, objects, "worktree", "add", "--detach", filepath.Join(input, "head"), round.HeadSHA); err != nil {
 		return err
 	}
 	baselineDirectory := "base"

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -156,7 +155,7 @@ func (m Model) updateReviewRunners(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Declined startup consent leaves the coding default here; a selected
 			// Vera row carries its own review harness, which is always valid.
 			group := s.options
-			if group.Provider != "claude" && group.Provider != "codex" {
+			if !reviewHarnessSupported(group.Provider) {
 				group.Provider, group.Model = binding.Options.Provider, binding.Options.Model
 			}
 			return m, func() tea.Msg {
@@ -336,21 +335,14 @@ func (m reviewStartupModel) resolve() tea.Cmd {
 			o, input, err := resolveReviewStartup(m.ctx, m.cfg, o, true)
 			return reviewStartupResolvedMsg{options: o, input: input, err: err}
 		}
-		var choices []reviewStartupChoice
-		for _, name := range []string{"claude", "codex"} {
-			if binary := m.cfg.Providers[name].Binary; binary != "" {
-				if _, err := exec.LookPath(binary); err == nil {
-					choices = append(choices, reviewStartupChoice{Label: name, Value: name})
-				}
-			}
-		}
+		choices := reviewHarnessChoices(m.cfg)
 		available := false
 		for _, choice := range choices {
 			available = available || choice.Value == o.Provider
 		}
 		if !available {
 			if len(choices) == 0 {
-				return reviewStartupResolvedMsg{options: o, err: fmt.Errorf("install Claude or Codex and configure its binary in config.yaml, then press r")}
+				return reviewStartupResolvedMsg{options: o, err: fmt.Errorf("install a supported coding harness (%s) and configure its binary in config.yaml, then press r", strings.Join(reviewHarnessKeys, ", "))}
 			}
 			return reviewStartupResolvedMsg{options: o, input: &reviewStartupInput{Field: "provider", Message: "Choose an installed provider for all PR review runners.", Choices: choices}}
 		}

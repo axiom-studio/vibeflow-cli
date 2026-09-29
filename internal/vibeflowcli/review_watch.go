@@ -123,7 +123,7 @@ func reviewWatchCmd() *cobra.Command {
 	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
 	var background, status, owned bool
 	var stop, managed, serverURL string
-	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh, isolated PR reviews while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if owned {
 			return runReviewOwned(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout())
 		}
@@ -196,8 +196,8 @@ func reviewWatchCmd() *cobra.Command {
 		if strings.TrimSpace(o.Name) == "" || strings.ContainsAny(o.Name+o.Model, "\x00\r\n\t") || len(o.Name) > 100 || len(o.Model) > 200 {
 			return fmt.Errorf("invalid runner name or model; runner names must be 1 to 100 bytes")
 		}
-		if o.Provider != "claude" && o.Provider != "codex" {
-			return fmt.Errorf("review-watch supports --provider claude or codex")
+		if _, _, err := reviewHarnessArgs(o.Provider, "", ""); err != nil {
+			return err
 		}
 		if cfg.APIToken == "" {
 			return fmt.Errorf("connect VibeFlow before starting a review runner")
@@ -235,7 +235,7 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Repository, "repo", "", "Local checkout for the linked repository (default: current directory)")
 	cmd.Flags().Int64Var(&o.RepositoryLinkID, "repository-link", 0, "VibeFlow repository link ID")
 	cmd.Flags().StringVar(&o.GitProvider, "git-provider", "github", "Repository integration: github or bitbucket")
-	cmd.Flags().StringVar(&o.Provider, "provider", "", "Model provider: claude or codex (default: configured provider); codex needs an OpenAI API key, not a ChatGPT login")
+	cmd.Flags().StringVar(&o.Provider, "provider", "", "Coding harness for Vera: "+strings.Join(reviewHarnessKeys, ", ")+" (default: configured provider); it runs with your normal login and full permissions in a disposable worktree")
 	cmd.Flags().StringVar(&o.Model, "model", "", "Model selection; required for gateway reviews")
 	cmd.Flags().StringVar(&o.Kind, "runner-kind", "local", "local or explicitly authorized shared runner")
 	cmd.Flags().StringVar(&o.Name, "name", "", "Runner name (default: hostname)")
@@ -609,7 +609,7 @@ func (w *reviewWatch) cleanup(p *reviewReceipt) error {
 		lock, err := w.lockReviewCleanup(filepath.Join(dir, "child.lock"), p)
 		if err == nil {
 			defer lock.Close()
-			return os.RemoveAll(dir)
+			return removeReviewDir(dir)
 		}
 		if !errors.Is(err, errReviewLockBusy) {
 			return err
@@ -798,7 +798,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	}
 	setStage("provider_setup")
 	relayURL, relayToken := "", ""
-	if w.cfg.LLMGatewayEnabled {
+	if w.cfg.LLMGatewayEnabled && w.options.Provider == "claude" {
 		var closeRelay func()
 		var err error
 		relayURL, relayToken, closeRelay, err = startReviewRelay(ctx, w.client, w.options.Provider, w.options.Model)
@@ -831,9 +831,8 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	guard.WaitDelay = 250 * time.Millisecond
 	guard.Env = []string{"PATH=" + os.Getenv("PATH")}
 	guard.Dir = root
-	var stdout, stderr limitedReviewBuffer
-	stdout.limit = 8 << 20
-	stderr.limit = 64 << 10
+	// Harness output is only counted; the result comes from result.json.
+	stdout, stderr := reviewByteCounter{limit: 8 << 20}, reviewByteCounter{limit: 64 << 10}
 	guard.Stdout = &stdout
 	guard.Stderr = &stderr
 	pipe, err := guard.StdinPipe()
@@ -860,7 +859,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		pipe.Close()
 		err = <-done
 	}
-	diagnostic.StdoutBytes, diagnostic.StderrBytes = stdout.Len(), stderr.Len()
+	diagnostic.StdoutBytes, diagnostic.StderrBytes = stdout.n, stderr.n
 	if report, ok := readReviewProcessReport(filepath.Join(root, "child-diagnostic.json")); ok {
 		diagnostic.Stage = "provider"
 		stageStarted = time.Now().Add(-time.Duration(report.DurationMS) * time.Millisecond)
@@ -875,53 +874,16 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.Signal = reviewProcessSignal(guard.ProcessState)
 		diagnostic.Category = "child_guard_failed"
 	}
-	// Claude returns structured API failures even when its process exits 1.
-	// Keep only a numeric HTTP status and our category, never provider text.
-	if ctx.Err() == nil && w.options.Provider == "claude" {
-		var failure struct {
-			Error  bool `json:"is_error"`
-			Status int  `json:"api_error_status"`
-		}
-		if json.Unmarshal(stdout.Bytes(), &failure) == nil && failure.Error {
-			category := "provider_error"
-			switch failure.Status {
-			case 400:
-				category = "invalid_request"
-			case 401:
-				category = "authentication_required"
-			case 403:
-				category = "access_denied"
-			case 429:
-				category = "rate_limited"
-			default:
-				if failure.Status >= 500 && failure.Status <= 599 {
-					category = "provider_unavailable"
-				}
-			}
-			if failure.Status < 400 || failure.Status > 599 {
-				failure.Status = 0
-			}
-			diagnostic.Category, diagnostic.APIErrorStatus = category, failure.Status
-			return nil, diagnostic.failure()
-		}
-	}
 	if err != nil || ctx.Err() != nil {
 		return nil, diagnostic.failure()
 	}
 	setStage("result")
 	diagnostic.Category = "invalid_result"
-	var output []byte
-	if w.options.Provider == "codex" {
-		output, err = os.ReadFile(filepath.Join(root, "provider-result.json"))
-	} else {
-		var envelope struct {
-			Structured json.RawMessage `json:"structured_output"`
-		}
-		err = json.Unmarshal(stdout.Bytes(), &envelope)
-		output = envelope.Structured
-	}
-	if err != nil || len(output) > 256<<10 {
-		return nil, fmt.Errorf("review provider returned no bounded structured result")
+	// Every harness writes its result to the same file; a missing file after
+	// exit is an invalid result.
+	output, err := reviewReadBounded(filepath.Join(root, "result.json"), 256<<10)
+	if err != nil {
+		return nil, fmt.Errorf("review harness wrote no bounded result file")
 	}
 	var envelope struct {
 		Result  json.RawMessage `json:"result"`
@@ -1050,4 +1012,40 @@ func reviewChildCmd() *cobra.Command {
 		}
 		return nil
 	}}
+}
+
+type reviewByteCounter struct{ n, limit int }
+
+func (c *reviewByteCounter) Write(p []byte) (int, error) {
+	c.n = min(c.n+len(p), c.limit)
+	return len(p), nil
+}
+
+func reviewReadBounded(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err == nil && int64(len(data)) > limit {
+		err = fmt.Errorf("review result exceeds size limit")
+	}
+	return data, err
+}
+
+// removeReviewDir deletes a finished review, including its worktree. Tools run
+// by the harness may leave read-only directories, so it retries after making
+// every directory writable.
+func removeReviewDir(dir string) error {
+	if os.RemoveAll(dir) == nil {
+		return nil
+	}
+	filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
+			os.Chmod(path, 0700)
+		}
+		return nil
+	})
+	return os.RemoveAll(dir)
 }

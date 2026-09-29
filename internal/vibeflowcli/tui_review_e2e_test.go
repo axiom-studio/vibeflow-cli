@@ -53,7 +53,7 @@ func TestReviewTUIBinaryConsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := filepath.Join(binDir, "claude")
-	if err := os.WriteFile(provider, []byte("#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = tui-model-canary ] || exit 9\nprintf '%s\\n' '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = tui-model-canary ] || exit 9\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	var registrations, heartbeats, stopped, projects, repositories, craReads atomic.Int64
@@ -377,12 +377,12 @@ func TestReviewTUIBinaryCapacityAndDetail(t *testing.T) {
 	briefDigest := hex.EncodeToString(digest[:])
 	for i, e := range executions {
 		result := map[string]any{"schema_version": 1, "brief_digest": briefDigest, "head_sha": e.Review.HeadSHA, "base_sha": e.Review.BaseSHA, "outcome": "clean", "summary": "PTY review complete", "new_findings": []any{}, "reconciliations": []any{}}
-		if err := saveReviewJSON(filepath.Join(barriers, fmt.Sprintf("%d.result", i)), map[string]any{"structured_output": map[string]any{"result": result, "failure_reason": nil}}); err != nil {
+		if err := saveReviewJSON(filepath.Join(barriers, fmt.Sprintf("%d.result", i)), map[string]any{"result": result, "failure_reason": nil}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	provider := filepath.Join(binDir, "claude")
-	script := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\nIFS= read -r task_id < ../prompt.txt\nprintf '%s\\n' \"$$\" > " + shellQuote(barriers) + "/\"$task_id\".started\nwhile [ ! -f " + shellQuote(barriers) + "/\"$task_id\".release ]; do sleep 0.02; done\ncat " + shellQuote(barriers) + "/\"$task_id\".result\n"
+	script := "#!/bin/sh\nIFS= read -r task_id < ../../task.txt\nprintf '%s\\n' \"$$\" > " + shellQuote(barriers) + "/\"$task_id\".started\nwhile [ ! -f " + shellQuote(barriers) + "/\"$task_id\".release ]; do sleep 0.02; done\ncat " + shellQuote(barriers) + "/\"$task_id\".result > ../../result.json\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

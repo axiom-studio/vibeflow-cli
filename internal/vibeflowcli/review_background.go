@@ -134,6 +134,17 @@ func lockReviewBackgroundControl(ctx context.Context, dir string) (*os.File, err
 	}
 }
 
+// Env credentials and endpoints per harness. A background runner does not
+// inherit the shell, so these must be saved in the config to be used.
+var reviewBackgroundCredentialEnv = map[string][]string{
+	"claude":  {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"},
+	"codex":   {"OPENAI_API_KEY", "OPENAI_BASE_URL"},
+	"qwen":    {"OPENAI_API_KEY", "OPENAI_BASE_URL"},
+	"gemini":  {"GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"},
+	"copilot": {"COPILOT_PROVIDER_API_KEY", "COPILOT_PROVIDER_BEARER_TOKEN", "COPILOT_PROVIDER_BASE_URL"},
+	"cursor":  {"CURSOR_API_KEY"},
+}
+
 func startReviewBackground(ctx context.Context, cfg *Config, configPath string, o reviewWatchOptions, out io.Writer) error {
 	if o.Once {
 		return fmt.Errorf("--once cannot be used with --background")
@@ -151,10 +162,9 @@ func startReviewBackground(ctx context.Context, cfg *Config, configPath string, 
 	}
 	// Ambient-only credentials and interpolated secrets cannot survive a later
 	// TUI launch without silently choosing that new shell's account.
-	keys := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"}
-	if o.Provider == "codex" {
-		keys = []string{"OPENAI_API_KEY", "OPENAI_BASE_URL"}
-	}
+	// Logins stored by the harness itself (for example a Codex ChatGPT login
+	// under CODEX_HOME) are unaffected: the runner keeps HOME and CODEX_HOME.
+	keys := reviewBackgroundCredentialEnv[o.Provider]
 	if cfg.LLMGatewayEnabled {
 		keys = nil
 	}

@@ -1665,7 +1665,7 @@ func (m Model) launchFromWizard(result WizardResult) tea.Msg {
 	for _, persona := range personas {
 		if persona == "code_reviewer" {
 			if !m.craEnabled {
-				return sessionsMsg{err: fmt.Errorf("Vera requires --cra; use review-watch for isolated PR reviews")}
+				return sessionsMsg{err: fmt.Errorf("Vera requires --cra; use review-watch for PR reviews")}
 			}
 			return veraLaunchRequestedMsg{result: result}
 		}

@@ -39,19 +39,23 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name, response, exit, category string
 		httpStatus                     string
+		writeResult                    bool
 	}{
-		{"api_exit_0", `{"is_error":true,"api_error_status":429,"terminal_reason":"untrusted-secret","result":"untrusted-secret"}`, "exit 0", "rate_limited", "429"},
-		{"api_exit_1", `{"is_error":true,"api_error_status":429,"terminal_reason":"untrusted-secret","result":"untrusted-secret"}`, "exit 1", "rate_limited", "429"},
-		{"exit_17", "untrusted-secret", "exit 17", "provider_exit", ""},
-		{"signal", "untrusted-secret", "kill -TERM $$", "provider_signal", ""},
-		{"invalid_result", "untrusted-secret", "exit 0", "invalid_result", ""},
-		{"reported_failure", `{"structured_output":{"result":null,"failure_reason":"untrusted-secret"}}`, "exit 0", "provider_reported_failure", ""},
+		{"exit_17", "untrusted-secret", "exit 17", "provider_exit", "", true},
+		{"signal", "untrusted-secret", "kill -TERM $$", "provider_signal", "", false},
+		{"missing_result", "untrusted-secret", "exit 0", "invalid_result", "", false},
+		{"invalid_result", "untrusted-secret", "exit 0", "invalid_result", "", true},
+		{"reported_failure", `{"result":null,"failure_reason":"untrusted-secret"}`, "exit 0", "provider_reported_failure", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, execution := reviewTestRepo(t)
 			root := t.TempDir()
 			provider := filepath.Join(root, "provider")
-			script := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\nprintf '%s\\n' " + shellQuote(tc.response) + "\necho stderr-untrusted-secret >&2\n" + tc.exit + "\n"
+			script := "#!/bin/sh\nprintf '%s\\n' " + shellQuote(tc.response) + "\necho stderr-untrusted-secret >&2\n"
+			if tc.writeResult {
+				script += reviewWriteResult(tc.response)
+			}
+			script += tc.exit + "\n"
 			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -125,10 +129,7 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 			if info, err := os.Stat(paths[0]); err != nil || info.Mode().Perm() != 0600 {
 				t.Fatalf("diagnostic not private: %v", err)
 			}
-			work, _ := filepath.Glob(filepath.Join(root, "review-runners", "*", "work", "*"))
-			if len(work) != 0 {
-				t.Fatalf("provider failure left private input/auth: %v", work)
-			}
+			assertReviewCleanedUp(t, root, repo, execution.Review.HeadSHA)
 		})
 	}
 }

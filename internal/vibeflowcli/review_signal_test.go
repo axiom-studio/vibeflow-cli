@@ -34,7 +34,7 @@ func TestReviewCommandTerminalShutdown(t *testing.T) {
 			provider := filepath.Join(root, "owned-provider")
 			// A real shell process with an inherited-output descendant, both
 			// ignoring TERM, exercises the guard's forced group teardown.
-			script := "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = --help ]; then\n echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n exit 0\n fi\ndone\ntrap '' TERM INT\nsleep 60 &\nprintf '%s %s\\n' \"$$\" \"$!\" > " + shellQuote(pidPath) + "\nwait\n"
+			script := "#!/bin/sh\ntrap '' TERM INT\nsleep 60 &\nprintf '%s %s\\n' \"$$\" \"$!\" > " + shellQuote(pidPath) + "\nwait\n"
 			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}

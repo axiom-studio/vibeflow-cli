@@ -47,7 +47,7 @@ func newReviewSupervisor(ctx context.Context, cfg *Config, configPath string) (*
 		private.SavedEnvVars[key] = value
 	}
 	for key, value := range cfg.Providers {
-		provider := Provider{Binary: value.Binary, Env: map[string]string{}}
+		provider := Provider{Name: value.Name, Binary: value.Binary, Env: map[string]string{}}
 		for k, v := range value.Env {
 			provider.Env[k] = v
 		}
@@ -99,7 +99,7 @@ func (s *reviewSupervisor) snapshotLocked() []reviewRunnerStatus {
 					data, err := os.ReadFile(filepath.Join(filepath.Dir(s.capacity.Directory), "review-runners", result[i].BindingID, "state.json"))
 					var state reviewRunnerState
 					if err == nil && json.Unmarshal(data, &state) == nil && state.Pending != nil {
-						result[i].Message = "Running an isolated PR review"
+						result[i].Message = "Running a PR review"
 					}
 					if legacy {
 						result[i].Message += " (legacy routing: server upgrade required)"

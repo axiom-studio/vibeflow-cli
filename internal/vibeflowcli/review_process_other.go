@@ -15,12 +15,12 @@ func retainReviewCapacityFD(fd int, cleanup *reviewProviderCleanup) (*os.File, e
 	if fd == 0 && cleanup == nil {
 		return nil, nil
 	}
-	return nil, fmt.Errorf("isolated review runners currently require macOS or Linux")
+	return nil, fmt.Errorf("review runners currently require macOS or Linux")
 }
 
 func lockReviewFile(string) (*os.File, error) {
-	return nil, fmt.Errorf("isolated review runners currently require macOS or Linux")
+	return nil, fmt.Errorf("review runners currently require macOS or Linux")
 }
 func runReviewProcess(context.Context, *exec.Cmd) error {
-	return fmt.Errorf("isolated review runners currently require macOS or Linux")
+	return fmt.Errorf("review runners currently require macOS or Linux")
 }

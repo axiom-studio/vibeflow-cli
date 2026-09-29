@@ -46,12 +46,15 @@ There is no persona or model question when a PR arrives: each review starts a fr
 
 To launch only one repository's runner, press `n`, choose its checkout and VibeFlow project, then select **Vera · Code Reviewer** in the agent picker.
 Vera is available only with `--cra`, even if you chose **Not now** at startup.
-Choose Claude or Codex and its review model; Codex requires an OpenAI API key rather than a ChatGPT subscription login.
+Choose any configured coding harness whose binary is installed (Claude, Codex, Gemini, Qwen, Copilot, Cursor or Kiro) and its review model.
+Vera runs that harness like your other personas: your normal login and environment, with full permissions.
+Codex works with a ChatGPT subscription login as well as an API key.
 The chosen checkout must match a repository linked to that project; ambiguous links are explicitly selected.
 This choice opts in to repository requests for this invocation only and does not enroll other repositories.
 The harness prompt states that anyone who comments `@vibeflow review` on that repository can then request a review using your harness credentials until the CLI closes.
+Because Vera runs with full permissions, PR content and comments from those commenters reach an unrestricted agent on your machine; only its working directory is disposable.
 Choosing Vera again for a repository whose runner is already listening with another harness or model reports the running choice instead of silently keeping it.
-Press `R` to see the runner **Listening**, running an isolated review, or reporting a failure.
+Press `R` to see the runner **Listening**, running a review, or reporting a failure.
 Selecting the same binding reuses or reports its existing runner; selecting another repository can start another runner within the existing capacity limits.
 Vera can be selected beside coding agents, but its harness/model setup remains separate and does not change their configuration.
 Vera never enters the coding-agent task loop, and `launch --persona code_reviewer` directs you to `review-watch` instead.
@@ -125,7 +128,7 @@ Runner selection is configured in the project's pull request settings, using Aut
 All public forms require `--cra`, including `--background`, `--status`, and `--stop`.
 
 Keep one local or shared PR review runner online without using a model while idle.
-Each claimed attempt starts a fresh Principal Engineer process with the server's finite review prompt, exact base/head snapshots, project brief, and prior finding IDs.
+Each claimed attempt starts a fresh Principal Engineer process with the server's finite review prompt, a disposable git worktree of the exact head commit, the exact base snapshot, project brief, and prior finding IDs.
 The server controls automatic and comment-triggered reviews, local priority, shared grants, cycle limits, repair tickets, and PR publication.
 
 ```bash
@@ -140,7 +143,7 @@ vibeflow --cra review-watch --project 42 --repository-link 123 --provider claude
 | `--repo` | Existing checkout of the linked base repository; defaults to the current directory |
 | `--repository-link` | Required VibeFlow repository link ID |
 | `--git-provider` | `github` (including Enterprise) or `bitbucket` |
-| `--provider` | `claude` or `codex`; defaults to the configured provider |
+| `--provider` | Coding harness: `claude`, `codex`, `copilot`, `cursor`, `gemini`, `kiro` or `qwen`; defaults to the configured provider |
 | `--model` | Provider model; required when `llm_gateway_enabled` is configured |
 | `--runner-kind` | `local` or `shared`; shared execution requires an existing server grant |
 | `--name` | Stable runner name, 1 to 100 bytes; defaults to hostname |
@@ -170,15 +173,15 @@ vibeflow --cra --root /path/to/cli-root review-watch --stop <runner-ID-from-stat
 
 The start command waits up to 20 seconds for provider preflight and a successful server heartbeat before reporting that the runner is running.
 It stays alive after the terminal or TUI exits; idle polling makes no model calls.
-Each claimed review is still a fresh isolated Principal Engineer process, not an interactive tmux persona.
+Each claimed review is still a fresh Principal Engineer process, not an interactive tmux persona.
 Use the preview TUI's retained review sessions or `vibeflow --cra list --project 12` to see attempts, and `vibeflow --cra review-watch --status` to see the local background supervisor.
 Repeated starts of the same binding do not launch another supervisor; changing an active binding requires stopping it first.
 
 The private binding under `<root>/review-runners/<ID>/background.json` saves absolute root/config/repository paths, the exact server URL, provider/model, local login sources, and a one-way VibeFlow credential fingerprint, not credential values.
 Background credentials must already exist in the selected config; ambient-only `VIBEFLOW_TOKEN` is refused.
 An explicit `VIBEFLOW_URL` at opt-in is pinned, so a later shell's production URL or token cannot redirect that runner.
-Literal model credentials can come from `provider.env` or `saved_env_vars`, or from the provider's existing local login; ambient-only model secrets and interpolated provider credentials are refused.
-An existing absolute `SSH_AUTH_SOCK` is pinned for supervisor-only Git fetches and is never passed to the model process.
+Literal model credentials can come from `provider.env` or `saved_env_vars`, or from the harness's existing local login (for example a Claude login or a Codex ChatGPT login under `CODEX_HOME`); ambient-only model secrets and interpolated provider credentials are refused.
+An existing absolute `SSH_AUTH_SOCK` is pinned for Git fetches and is also available to the harness, like any other persona's environment.
 If the socket changes after login or reboot, explicitly enable the runner again with the new socket.
 After rotating the VibeFlow token, explicitly enable the runner again to approve its new credential binding.
 
@@ -190,35 +193,49 @@ The stop command waits up to 10 seconds, then reports if shutdown is still pendi
 `background.log` contains fixed lifecycle messages only, while `last-provider-diagnostic.json` contains sanitized failure metadata.
 No service manager, login item, deployment, or machine-boot autostart is installed.
 
-Use a current Claude Code or Codex CLI on macOS or Linux.
-Startup checks required isolation flags and Codex's native sandbox before claiming work.
-Claude uses its existing local login or configured model API key/OAuth token with restricted read tools and empty MCP configuration.
-Codex copies only model authentication into a private temporary home and uses a native read-only filesystem profile with tool networking disabled.
-Claude Code `2.1.268` passed native review acceptance on macOS.
-The installed Codex `0.154.0` on this macOS host allows shared `/tmp` reads and is now rejected by the capability probe before new review discovery or claim.
-Use Claude or a Codex runtime that passes the native capability probe on its host; Linux also requires a working native sandbox.
-Custom launch templates, ambient MCP servers, repository agent rules, and ordinary session restart caches are excluded from review execution.
-Custom authentication helpers or non-file Codex logins need a configured model-only API key; the runner does not copy general user configuration to make them work.
-Codex subscription (ChatGPT login) credentials are rejected before any work is claimed: the child would rotate the refresh token inside its discarded private home and leave the real login revoked.
-Use an OpenAI API key (`OPENAI_API_KEY`, the provider `env` config, or `codex login --with-api-key`) or `--provider claude`.
+Vera runs on any supported coding harness on macOS or Linux, in normal mode like the other personas.
+Startup only checks that the harness is configured and its binary is installed; it makes no model call.
+The harness gets your full environment, its configured `env`, saved env vars, and its own login and configuration, with your real `HOME` and `CODEX_HOME`.
+Codex therefore works with a ChatGPT subscription login or an API key.
+Each harness runs headless with its permission prompts disabled:
 
-Gateway mode uses an attempt-local model relay, pins `--model`, and exposes only the selected provider's inference endpoints to the child.
-The VibeFlow API token stays in the supervisor.
+| Harness | Command |
+|---------|---------|
+| `claude` | `claude -p --dangerously-skip-permissions [--model M]`, task on stdin |
+| `codex` | `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check [-m M] -`, task on stdin |
+| `gemini` | `gemini --yolo [-m M] -p <prompt>` |
+| `qwen` | `qwen --yolo [-m M] <prompt>` |
+| `copilot` | `copilot --yolo [--model M] -p <prompt>` |
+| `cursor` | `agent -p --force [--model M] <prompt>` |
+| `kiro` | `kiro-cli chat --no-interactive --trust-all-tools [--model M] <prompt>` |
+
+The binary comes from the provider's `binary` in `config.yaml`.
+For argument-prompt harnesses, `<prompt>` points the agent at the full task file, which avoids per-argument size limits.
+The task tells the agent to write exactly one JSON object to the review's `result.json`, matching `schema.json`, then stop.
+A harness that exits without writing that file fails the attempt as `invalid_result`.
+Custom launch templates are not used for reviews.
+
+Gateway mode requires `--model`.
+With Claude, gateway mode uses an attempt-local model relay and exposes only Claude's inference endpoints to the harness.
+Other harnesses use their normal configuration and login, resolved like an ordinary session's environment.
+The VibeFlow API token is never placed on the harness command line.
 Provider-hosted tools, remote MCP, and saved provider conversations are rejected by the relay.
-Native model authentication and the relay transport are separate from the child's source-access boundary.
-Earlier native subscription inference succeeded with both providers, before the Codex shared `/tmp` read allowance was identified.
 Relay restrictions have real HTTP coverage, but an actual model call through the configured VibeFlow gateway remains unverified because the available credential returned HTTP 403 from its model catalog.
 
-Reviews inspect source and the complete diff; they do not execute project tests or code.
+Every review runs in its own disposable git worktree, never in the developer checkout.
+The worktree is detached at the exact head commit and is created from a private object store under `<root>/review-runners/<ID>/work/<request>/`, so the developer repository never gains a worktree entry or branch.
+Beside it are `base/`, `merge-base/` (when the target advanced), `revisions.json`, `review.diff`, `brief.json` and `prior-findings.json`.
+The agent may build and run project code and tests inside the worktree; it is told not to push, not to publish PR comments, and not to touch any other checkout.
 The developer checkout stays untouched.
 The PR diff uses the unique merge base, while the exact target tip remains separate integration context.
 `revisions.json` identifies both baselines; missing or ambiguous history fails visibly instead of producing a misleading diff.
 Exact missing commits are fetched using the host's existing Git credentials; a missing credential fails the attempt visibly.
 SSH checkouts retain their SSH authentication transport when fetching missing commits, including forks on the same verified provider host.
 GHE.com accepts both `TENANT@TENANT.ghe.com:OWNER/REPO.git` and `ssh://TENANT@TENANT.ghe.com/OWNER/REPO.git`; the username must match the tenant, and embedded passwords remain forbidden.
-Symlinks are exported as literal target text, submodules are recorded without downloading, and oversized input fails explicitly.
-Each snapshot is limited to 20,000 files and 512 MiB, with a 16 MiB per-file limit.
-Up to three snapshots use at most 1.5 GiB of exported source, plus private Git objects and review inputs.
+The head worktree is an ordinary checkout: symlinks stay symlinks, submodules are not initialized, and Git LFS content is left as pointer files.
+In the `base/` and `merge-base/` context snapshots, symlinks are exported as literal target text, submodules are recorded without downloading, and oversized input fails explicitly.
+Each context snapshot is limited to 20,000 files and 512 MiB, with a 16 MiB per-file limit.
+Up to two context snapshots use at most 1 GiB of exported source, plus the head worktree, private Git objects and review inputs.
 Private Git acquisition has a 2 GiB aggregate budget checked before and after each fetch and every 100 ms while fetching, including historical objects absent from the reviewed snapshots.
 Exceeding that budget stops the Git process group and fails the attempt before source export; ordinary receipt cleanup removes its private directory.
 This sampled guard can overshoot between checks and is not a hard disk quota; shared runner deployments that require a strict ceiling must also apply a filesystem or container storage quota.
@@ -226,7 +243,7 @@ Prior finding evidence is bounded to 20 additional pages and 2 MiB; up to 100 re
 
 Ctrl-C or SIGTERM stops the child process group and reports cancellation.
 A parent crash, expired lease, server cancellation, or deadline also stops the child.
-Owned input and temporary model credentials are removed before result publication.
+Cleanup is part of every review: on success, failure, timeout, cancellation, lease loss, and crash recovery on the next start, the whole review directory, including the worktree and its private object store, is removed before result publication.
 Private receipts under `<root>/review-runners/` preserve exact submissions across lost HTTP responses; restart with the same root, server, project, repository, kind, and name to recover.
 An interrupted conversation is never resumed.
 Saved result/failure submissions can recover even after the provider CLI is removed or logged out.

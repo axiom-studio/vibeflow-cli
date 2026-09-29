@@ -2,140 +2,149 @@ package vibeflowcli
 
 import (
 	"context"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
+	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 )
 
-func TestReviewCodexPreflightRejectsReadableTemporaryFiles(t *testing.T) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		t.Skip("native review platform")
-	}
-	if _, err := exec.LookPath("codex"); err != nil {
-		t.Skip("Codex not installed")
-	}
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "input"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := DefaultConfig()
-	cfg.Providers["codex"] = Provider{Binary: "codex", Env: map[string]string{"OPENAI_API_KEY": "unused-model-only-key"}}
-	spec, err := prepareReviewProvider(context.Background(), cfg, "codex", "", root, &reviewExecution{Prompt: "No model invocation."}, &reviewBrief{}, "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// macOS's usual per-user TempDir is denied correctly. The shared /tmp
-	// directory reproduced a separate read allowance in actual Codex exec.
-	outside, err := os.CreateTemp("/tmp", "vibeflow-review-outside-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Remove(outside.Name()) })
-	const canary = "harmless-outside-review-input\n"
-	if _, err := outside.WriteString(canary); err != nil {
-		outside.Close()
-		t.Fatal(err)
-	}
-	if err := outside.Close(); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, spec.Binary, "sandbox", "-P", "review", "-C", spec.Dir, "--", "/bin/cat", outside.Name())
-	cmd.Env = spec.Env
-	cmd.Dir = spec.Dir
-	data, err := cmd.CombinedOutput()
-	if err != nil && !strings.Contains(string(data), canary) {
-		t.Skip("installed Codex denies the shared temporary-file read")
-	}
-	if err != nil || string(data) != canary {
-		t.Fatalf("unexpected installed sandbox response: %v %q", err, data)
-	}
-
-	for _, pending := range []*reviewReceipt{nil, {JobID: reviewUUID(), RequestID: reviewUUID()}} {
-		name := "fresh_discovery"
-		if pending != nil {
-			name = "unclaimed_receipt"
+func TestReviewHarnessArgsCoverEveryProvider(t *testing.T) {
+	const prompt = "PROMPT"
+	for _, tc := range []struct {
+		key, model string
+		want       []string
+		stdin      bool
+	}{
+		{"claude", "", []string{"-p", "--dangerously-skip-permissions"}, true},
+		{"claude", "M", []string{"-p", "--dangerously-skip-permissions", "--model", "M"}, true},
+		{"codex", "", []string{"exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-"}, true},
+		{"codex", "M", []string{"exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-m", "M", "-"}, true},
+		{"gemini", "M", []string{"--yolo", "-m", "M", "-p", prompt}, false},
+		{"qwen", "M", []string{"--yolo", "-m", "M", prompt}, false},
+		{"copilot", "M", []string{"--yolo", "--model", "M", "-p", prompt}, false},
+		{"cursor", "M", []string{"-p", "--force", "--model", "M", prompt}, false},
+		{"kiro", "", []string{"chat", "--no-interactive", "--trust-all-tools", prompt}, false},
+		{"kiro", "M", []string{"chat", "--no-interactive", "--trust-all-tools", "--model", "M", prompt}, false},
+	} {
+		args, stdin, err := reviewHarnessArgs(tc.key, tc.model, prompt)
+		if err != nil || stdin != tc.stdin || !slices.Equal(args, tc.want) {
+			t.Errorf("%s %q: got %q stdin=%v err=%v", tc.key, tc.model, args, stdin, err)
 		}
-		t.Run(name, func(t *testing.T) {
-			var requests atomic.Int64
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests.Add(1)
-				http.Error(w, "review API must not be reached before capability rejection", http.StatusServiceUnavailable)
-			}))
-			defer server.Close()
-			watch := &reviewWatch{client: NewClient(server.URL, "supervisor-only-token"), cfg: cfg,
-				root: t.TempDir(), state: reviewRunnerState{ID: reviewUUID(), Pending: pending},
-				options: reviewWatchOptions{ProjectID: 1, Provider: "codex"}, output: io.Discard}
-			err := watch.poll(ctx)
-			if err == nil || !strings.Contains(err.Error(), "cannot enforce source-only review reads") {
-				t.Fatalf("unsafe runtime was not rejected by capability preflight: %v", err)
+	}
+	if _, _, err := reviewHarnessArgs("openshell", "", prompt); err == nil || !strings.Contains(err.Error(), "claude, codex, copilot, cursor, gemini, kiro, qwen") {
+		t.Fatalf("unknown harness error must name supported keys: %v", err)
+	}
+}
+
+// fakeReviewHarnesses installs an executable for every configured harness.
+func fakeReviewHarnesses(t *testing.T, cfg *Config, script string) {
+	t.Helper()
+	bin := t.TempDir()
+	for _, key := range reviewHarnessKeys {
+		path := filepath.Join(bin, key+"-harness")
+		if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+		p := cfg.Providers[key]
+		p.Binary = path
+		cfg.Providers[key] = p
+	}
+}
+
+func TestReviewProviderUsesNormalModeForEveryHarness(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("AMBIENT_USER_SETTING", "kept")
+	t.Setenv("OPENAI_API_KEY", "unselected-ambient-key")
+	cfg := DefaultConfig()
+	cfg.APIToken = "vibeflow-api-token-canary"
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	for _, key := range reviewHarnessKeys {
+		t.Run(key, func(t *testing.T) {
+			p := cfg.Providers[key]
+			p.Env = map[string]string{"HARNESS_SETTING": "$AMBIENT_USER_SETTING-configured", "OPENAI_API_KEY": "selected-model-key"}
+			cfg.Providers[key] = p
+			root := t.TempDir()
+			spec, err := prepareReviewProvider(context.Background(), cfg, key, "some-model", root, execution, &reviewBrief{Digest: strings.Repeat("a", 64)}, "", "")
+			if err != nil {
+				t.Fatal(err)
 			}
-			if requests.Load() != 0 || watch.providerReady || watch.state.Pending != pending {
-				t.Fatalf("unsafe runtime reached review discovery/claim or changed its receipt: calls=%d ready=%v", requests.Load(), watch.providerReady)
+			if spec.Binary != p.Binary || spec.Dir != filepath.Join(root, "input", "head") {
+				t.Fatalf("binary %q dir %q", spec.Binary, spec.Dir)
+			}
+			task := filepath.Join(root, "task.txt")
+			want, stdin, _ := reviewHarnessArgs(key, "some-model", "Your complete PR review task is in the file "+task+". Read that whole file first, then follow it exactly.")
+			if !slices.Equal(spec.Args, want) {
+				t.Fatalf("args %q, want %q", spec.Args, want)
+			}
+			if (stdin && spec.InputFile != task) || (!stdin && spec.InputFile != os.DevNull) {
+				t.Fatalf("input file %q", spec.InputFile)
+			}
+			for _, kv := range []string{"HOME=" + home, "CODEX_HOME=" + filepath.Join(home, ".codex"), "AMBIENT_USER_SETTING=kept", "HARNESS_SETTING=kept-configured", "OPENAI_API_KEY=selected-model-key"} {
+				if !slices.Contains(spec.Env, kv) {
+					t.Fatalf("normal-mode env lacks %s", kv)
+				}
+			}
+			if strings.Contains(strings.Join(spec.Args, " "), cfg.APIToken) {
+				t.Fatal("VibeFlow token reached argv")
+			}
+			data, err := os.ReadFile(task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{execution.Prompt, filepath.Join(root, "result.json"), filepath.Join(root, "schema.json"), "disposable git worktree", execution.Attempt.Round.HeadSHA, `"failure_reason"`} {
+				if !strings.Contains(string(data), want) {
+					t.Fatalf("task lacks %q", want)
+				}
+			}
+			for _, stale := range []string{"read-only", "do not run project code"} {
+				if strings.Contains(string(data), stale) {
+					t.Fatalf("task still says %q", stale)
+				}
 			}
 		})
 	}
 }
 
-func TestReviewCodexPreflightRefusesChatGPTLogin(t *testing.T) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		t.Skip("native review platform")
+func TestReviewPreflightRequiresOnlyAnInstalledHarness(t *testing.T) {
+	cfg := DefaultConfig()
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 1\n") // Never executed by preflight.
+	for _, key := range reviewHarnessKeys {
+		if err := preflightReviewProvider(context.Background(), cfg, key, ""); err != nil {
+			t.Fatalf("%s: %v", key, err)
+		}
 	}
-	dir := t.TempDir()
-	fake, marker := filepath.Join(dir, "codex"), filepath.Join(dir, "invoked")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\ntouch "+marker+"\nexit 1\n"), 0700); err != nil {
+	p := cfg.Providers["gemini"]
+	p.Binary = filepath.Join(t.TempDir(), "missing")
+	cfg.Providers["gemini"] = p
+	if err := preflightReviewProvider(context.Background(), cfg, "gemini", ""); err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Fatalf("missing binary: %v", err)
+	}
+	if err := preflightReviewProvider(context.Background(), cfg, "unknown", ""); err == nil {
+		t.Fatal("unknown harness accepted")
+	}
+	cfg.LLMGatewayEnabled = true
+	if err := preflightReviewProvider(context.Background(), cfg, "claude", ""); err == nil {
+		t.Fatal("gateway accepted missing model")
+	}
+}
+
+// reviewResultEnvelope is the result.json a harness writes on success.
+func reviewResultEnvelope(t *testing.T, result any) string {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"result": result, "failure_reason": nil})
+	if err != nil {
 		t.Fatal(err)
 	}
-	codexHome := filepath.Join(dir, "codex-home")
-	if err := os.Mkdir(codexHome, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","id_token":"i"},"last_refresh":"2026-01-01T00:00:00Z"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CODEX_HOME", codexHome)
-	t.Setenv("OPENAI_API_KEY", "")
-	for _, tc := range []struct {
-		name string
-		env  map[string]string
-		want string
-	}{
-		{"chatgpt_login", nil, "Codex subscription (ChatGPT login) credentials are not supported for review-watch"},
-		{"api_key", map[string]string{"OPENAI_API_KEY": "model-only-key"}, "capability check failed"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			os.Remove(marker)
-			cfg := DefaultConfig()
-			cfg.Providers["codex"] = Provider{Binary: fake, Env: tc.env}
-			var requests atomic.Int64
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests.Add(1)
-				http.Error(w, "review API must not be reached before credential rejection", http.StatusServiceUnavailable)
-			}))
-			defer server.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			watch := &reviewWatch{client: NewClient(server.URL, "supervisor-only-token"), cfg: cfg, root: t.TempDir(), state: reviewRunnerState{ID: reviewUUID()}, options: reviewWatchOptions{ProjectID: 1, Provider: "codex"}, output: io.Discard}
-			err := watch.poll(ctx)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("unexpected preflight result: %v", err)
-			}
-			_, statErr := os.Stat(marker)
-			if launched := statErr == nil; launched != (tc.env != nil) {
-				t.Fatalf("model CLI launched=%v before/after credential check", launched)
-			}
-			if requests.Load() != 0 || watch.providerReady {
-				t.Fatalf("preflight failure reached discovery/claim: calls=%d ready=%v", requests.Load(), watch.providerReady)
-			}
-		})
-	}
+	return string(data)
+}
+
+// reviewWriteResult is the fake-harness shell line that writes result.json.
+// The harness runs in <root>/input/head, so the file is two levels up.
+func reviewWriteResult(envelope string) string {
+	return "printf '%s\\n' " + shellQuote(envelope) + " > ../../result.json\n"
 }

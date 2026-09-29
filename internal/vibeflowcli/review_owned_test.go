@@ -96,7 +96,7 @@ func TestReviewOwnedBinaryLifetime(t *testing.T) {
 		t.Fatalf("build: %v %s", err, out)
 	}
 	provider := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(provider, []byte("#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = owned-model-canary ] || exit 7\nprintf '%s\\n' '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = owned-model-canary ] || exit 7\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	var registrations, heartbeats, stopped atomic.Int64
@@ -329,7 +329,7 @@ func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
 			defer capacity.Close()
 			pidPath := filepath.Join(root, "provider.pids")
 			provider := filepath.Join(t.TempDir(), "claude")
-			script := "#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = 'owned-model-$literal' ] || exit 7\nfor arg in \"$@\"; do if [ \"$arg\" = --help ]; then echo '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'; exit 0; fi; done\ntrap '' TERM INT\nsleep 60 &\nprintf '%s %s %s\\n' \"$$\" \"$!\" \"$PPID\" > " + shellQuote(pidPath) + "\nwait\n"
+			script := "#!/bin/sh\n[ \"$ANTHROPIC_API_KEY\" = 'owned-model-$literal' ] || exit 7\ntrap '' TERM INT\nsleep 60 &\nprintf '%s %s %s\\n' \"$$\" \"$!\" \"$PPID\" > " + shellQuote(pidPath) + "\nwait\n"
 			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -552,42 +552,6 @@ func TestReviewOwnedParentDeathStopsActiveDescendants(t *testing.T) {
 	}
 }
 
-func TestReviewOwnedSparseEnvironmentDoesNotOverrideSelectedCredentials(t *testing.T) {
-	provider := filepath.Join(t.TempDir(), "codex")
-	script := "#!/bin/sh\n/usr/bin/grep -q selected-model-canary \"$CODEX_HOME/auth.json\" || exit 7\n[ \"$1\" = sandbox ] && exit 0\necho '--ephemeral --ignore-rules --strict-config --output-schema'\n"
-	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
-			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
-			body["user_id"] = 42
-			json.NewEncoder(w).Encode(body)
-		case strings.HasSuffix(r.URL.Path, "/work"):
-			fmt.Fprint(w, `{"reviews":[]}`)
-		default:
-			w.WriteHeader(204)
-		}
-	}))
-	defer server.Close()
-	cfg := DefaultConfig()
-	cfg.ServerURL, cfg.APIToken = server.URL, "owned-api-canary"
-	cfg.Providers["codex"] = Provider{Binary: provider, Env: map[string]string{"OPENAI_API_KEY": "selected-model-canary"}}
-	opts := reviewWatchOptions{Project: "1", ProjectID: 1, Repository: t.TempDir(), RepositoryLinkID: 7, GitProvider: "github", Provider: "codex", Kind: "local", Name: "sparse-env", PollInterval: time.Second, Timeout: time.Minute}
-	payload, _ := json.Marshal(map[string]any{"Root": t.TempDir(), "Config": cfg, "Options": opts})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	owner := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReviewOwnedOwnerProcess$")
-	owner.Env = []string{"REVIEW_OWNED_TEST_OWNER=1", "OPENAI_API_KEY=unselected-ambient-canary"}
-	owner.Stdin = strings.NewReader(string(payload) + "\nclose\n")
-	output, err := owner.CombinedOutput()
-	if err != nil || !strings.Contains(string(output), `{"ready":true}`) {
-		t.Fatalf("sparse launch inherited unselected model credentials: %v %s", err, output)
-	}
-}
-
 func TestReviewOwnedCancellationWhileStartupHandleIsUnavailable(t *testing.T) {
 	previousRoot := rootDir
 	root := t.TempDir()
@@ -696,7 +660,7 @@ func TestReviewOwnedCleanupNoticeClearsAfterSurvivingGuard(t *testing.T) {
 	cfg.ServerURL, cfg.APIToken = server.URL, "token"
 	// Capability check succeeds after recovery without launching inference.
 	provider := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(provider, []byte("#!/bin/sh\necho '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Providers["claude"] = Provider{Binary: provider}
@@ -850,7 +814,7 @@ func testReviewOwnedMarkerOnlyQuarantinesBinding(t *testing.T, status int) {
 	cfg := DefaultConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "token"
 	provider := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(provider, []byte("#!/bin/sh\necho '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\n"), 0700); err != nil {
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Providers["claude"] = Provider{Binary: provider}

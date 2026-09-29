@@ -32,6 +32,9 @@ One matching checkout is selected automatically; press `R` then Enter to resolve
 Paths are validated against Git origin identity; aliases and worktrees sharing a common Git directory are deduplicated.
 Discovery refreshes on `r`, newly known paths, and every minute without changing ordinary queue polling.
 Only runners created by this TUI stop with it; use explicit `vibeflow --cra review-watch --background` for a detached runner.
+Vera can use any entry under `providers` whose `binary` is installed: `claude`, `codex`, `copilot`, `cursor`, `gemini`, `kiro` or `qwen`.
+It runs that harness in normal mode with the provider's `env`, `saved_env_vars` and your own login, so a Codex ChatGPT login works.
+Each review runs in a disposable git worktree under the root's `review-runners/` directory, which is removed when the review ends.
 
 Example structure (not exhaustive):
 

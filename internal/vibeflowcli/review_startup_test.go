@@ -216,7 +216,7 @@ func TestReviewStartupAsksOnlyForMissingOrAmbiguousInputs(t *testing.T) {
 	repo, _ := reviewTestRepo(t)
 	for _, tc := range []struct {
 		name, projects, repositories, project, provider, model, path, field string
-		gateway                                                             bool
+		gateway, harnesses                                                  bool
 		link                                                                int64
 		gitProvider                                                         string
 		choices                                                             []string
@@ -225,7 +225,7 @@ func TestReviewStartupAsksOnlyForMissingOrAmbiguousInputs(t *testing.T) {
 		{name: "missing project", project: "missing", field: "project", choices: []string{"66"}},
 		{name: "invalid numeric project", project: "0", field: "project", choices: []string{"66"}},
 		{name: "numeric project ID takes precedence", projects: `[{"id":66,"name":"Axiom"},{"id":67,"name":"66"}]`, project: "66"},
-		{name: "unsupported model provider", provider: "gemini", field: "provider", choices: []string{"claude", "codex"}},
+		{name: "unsupported model provider", provider: "openshell", field: "provider", choices: []string{"claude", "kiro"}, harnesses: true},
 		{name: "missing checkout", path: "missing", field: "repository"},
 		{name: "unlinked checkout", repositories: `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"other/repo"}]}`, field: "repository"},
 		{name: "ambiguous repository links", repositories: `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"},{"provider":"github","provider_host":"github.com","repository_link_id":8,"repository_name":"acme/repo"}]}`, field: "repository_link", choices: []string{"github:7", "github:8"}},
@@ -260,6 +260,9 @@ func TestReviewStartupAsksOnlyForMissingOrAmbiguousInputs(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.ServerURL, cfg.APIToken, cfg.DefaultProject, cfg.DefaultWorkDir = server.URL, "startup-api-canary", "66", repo
 			cfg.LLMGatewayEnabled = tc.gateway
+			if tc.harnesses { // Only configured, installed, supported harnesses are offered.
+				cfg.Providers = map[string]Provider{"claude": {Name: "Claude Code", Binary: "/bin/sh"}, "kiro": {Binary: "/bin/sh"}, "gemini": {Binary: filepath.Join(t.TempDir(), "missing")}, "custom": {Binary: "/bin/sh"}}
+			}
 			o := reviewWatchOptions{Project: tc.project, Provider: tc.provider, Model: tc.model, RepositoryLinkID: tc.link, GitProvider: tc.gitProvider}
 			if tc.path != "" {
 				o.Repository = filepath.Join(t.TempDir(), tc.path)

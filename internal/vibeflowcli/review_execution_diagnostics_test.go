@@ -47,7 +47,7 @@ func testReviewSupervisorCompletes(t *testing.T, installed bool) {
 		t.Run(fmt.Sprintf("relative=%v", relative), func(t *testing.T) {
 			source, execution := reviewTestRepo(t)
 			if installed {
-				execution.Prompt = "Review this owned tiny acceptance fixture using only its exported source and diff. Do not run code. Return a valid structured result with a brief summary and empty finding/reconciliation arrays if the value change has no confirmed blocker."
+				execution.Prompt = "Review this owned tiny acceptance fixture. Return a valid result with a brief summary and empty finding/reconciliation arrays if the value change has no confirmed blocker."
 				execution.Attempt.Round.DeadlineAt = time.Now().Add(90 * time.Second).UnixMilli()
 			}
 			root := t.TempDir()
@@ -59,12 +59,9 @@ func testReviewSupervisorCompletes(t *testing.T, installed bool) {
 				"head_sha": execution.Review.HeadSHA, "base_sha": execution.Review.BaseSHA,
 				"outcome": "clean", "summary": "Owned fixture review", "new_findings": []any{}, "reconciliations": []any{},
 			}
-			response, err := json.Marshal(map[string]any{"structured_output": map[string]any{"result": result, "failure_reason": nil}})
-			if err != nil {
-				t.Fatal(err)
-			}
 			provider := filepath.Join(root, "owned-provider")
-			script := "#!/bin/sh\nfor arg in \"$@\"; do\nif [ \"$arg\" = --help ]; then\necho '--safe-mode --restricted --strict-mcp-config --tools --permission-prompts --json-schema --no-session-persistence'\nexit 0\nfi\ndone\nprintf '%s\\n' " + shellQuote(string(response)) + "\n"
+			// The harness must start inside a git worktree detached at the head.
+			script := "#!/bin/sh\n[ \"$(git rev-parse HEAD)\" = " + execution.Review.HeadSHA + " ] || exit 5\n[ -z \"$(git branch --show-current)\" ] || exit 6\necho scratch > build-output.txt\n" + reviewWriteResult(reviewResultEnvelope(t, result))
 			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -146,6 +143,26 @@ func testReviewSupervisorCompletes(t *testing.T, installed bool) {
 			if results.Load() != 1 || failures.Load() != 0 {
 				t.Fatalf("real supervisor did not complete: results=%d failures=%d output=%s", results.Load(), failures.Load(), output)
 			}
+			assertReviewCleanedUp(t, root, source, execution.Review.HeadSHA)
 		})
+	}
+}
+
+// assertReviewCleanedUp proves no review directory or worktree survives and
+// that the developer's checkout gained no worktree, branch or modification.
+func assertReviewCleanedUp(t *testing.T, root, source, head string) {
+	t.Helper()
+	left, _ := filepath.Glob(filepath.Join(root, "review-runners", "*", "work", "*"))
+	if len(left) != 0 {
+		t.Fatalf("review files survived: %v", left)
+	}
+	if list := reviewTestGit(t, source, "worktree", "list", "--porcelain"); strings.Count(list, "worktree ") != 1 {
+		t.Fatalf("developer repository gained a worktree: %s", list)
+	}
+	if branches := reviewTestGit(t, source, "for-each-ref", "--format=%(refname)", "refs/heads"); strings.Count(branches, "\n") != 0 {
+		t.Fatalf("developer repository gained a branch: %s", branches)
+	}
+	if status := reviewTestGit(t, source, "status", "--porcelain"); status != "" || reviewTestGit(t, source, "rev-parse", "HEAD") != head {
+		t.Fatalf("developer checkout changed: %q", status)
 	}
 }

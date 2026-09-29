@@ -240,7 +240,7 @@ func defaultPersonas() []personaEntry {
 }
 
 func (w *WizardModel) enableCRA() {
-	w.personas = append(w.personas, personaEntry{"code_reviewer", reviewSessionLabel, "Reviews PRs when anyone comments @vibeflow review; fresh isolated Vera each time"})
+	w.personas = append(w.personas, personaEntry{"code_reviewer", reviewSessionLabel, "Reviews PRs when anyone comments @vibeflow review; fresh Vera worktree each time"})
 	w.personaProviderIdx = append(w.personaProviderIdx, -1)
 }
 

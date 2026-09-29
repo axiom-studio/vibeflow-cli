@@ -120,7 +120,7 @@ func readReviewDiagnosticJSON(path string, out any) bool {
 // diagnostics written by older versions that retained provider failure text.
 func readReviewExecutionDiagnostic(path string) (reviewExecutionDiagnostic, bool) {
 	var d reviewExecutionDiagnostic
-	if !readReviewDiagnosticJSON(path, &d) || d.Version != 1 || (d.Provider != "claude" && d.Provider != "codex") {
+	if !readReviewDiagnosticJSON(path, &d) || d.Version != 1 || !reviewHarnessSupported(d.Provider) {
 		return reviewExecutionDiagnostic{}, false
 	}
 	attempt, err := hex.DecodeString(strings.ReplaceAll(d.AttemptID, "-", ""))
