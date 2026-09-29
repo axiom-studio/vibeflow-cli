@@ -93,6 +93,11 @@ func launchCmd() *cobra.Command {
 		Use:   "launch",
 		Short: "Create and launch a new session",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			for _, requested := range append([]string{persona}, strings.Split(personasRaw, ",")...) {
+				if strings.TrimSpace(requested) == "code_reviewer" {
+					return fmt.Errorf("Vera runs isolated PR reviews, not the coding-agent task loop; use review-watch --cra --project <project> --repo <checkout> --repository-link <link-id> --provider claude|codex [--model <model>]")
+				}
+			}
 			cfgPath, _ := cmd.Flags().GetString("config")
 			cfg, tmux, store, wm, registry, err := loadComponents(cfgPath)
 			if err != nil {

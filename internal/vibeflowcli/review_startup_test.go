@@ -33,7 +33,7 @@ func TestReviewDiscoveryIgnoresDefaultProject(t *testing.T) {
 	defer server.Close()
 	cfg := DefaultConfig()
 	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject = server.URL, "fixture", "66"
-	got, err := discoverReviewBindings(context.Background(), cfg, []string{repo}, nil)
+	got, err := discoverReviewBindings(context.Background(), cfg, []string{repo}, nil, "", nil)
 	if err != nil || len(got.Bindings) != 2 {
 		t.Fatalf("coverage: %+v %v", got, err)
 	}
@@ -91,7 +91,7 @@ func TestReviewDiscoveryPagesAndPartialFailures(t *testing.T) {
 			defer server.Close()
 			cfg := DefaultConfig()
 			cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
-			d, err := discoverReviewBindings(context.Background(), cfg, nil, nil)
+			d, err := discoverReviewBindings(context.Background(), cfg, nil, nil, "", nil)
 			if tc.duplicate || tc.repeated {
 				if err == nil {
 					t.Fatal("accepted invalid page sequence")
@@ -137,16 +137,16 @@ func TestReviewDiscoveryCheckoutIdentityAndPreferences(t *testing.T) {
 	defer server.Close()
 	cfg := DefaultConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
-	d, err := discoverReviewBindings(context.Background(), cfg, []string{repo, alias}, nil)
+	d, err := discoverReviewBindings(context.Background(), cfg, []string{repo, alias}, nil, "", nil)
 	if err != nil || len(d.Bindings) != 1 || len(d.Bindings[0].Checkouts) != 1 || d.Bindings[0].Options.Repository == "" {
 		t.Fatalf("alias duplicated checkout: %+v %v", d, err)
 	}
 	id := reviewBackgroundID(cfg.ServerURL, d.Bindings[0].Options)
-	d, err = discoverReviewBindings(context.Background(), cfg, []string{repo, other}, map[string]string{id: "/missing"})
+	d, err = discoverReviewBindings(context.Background(), cfg, []string{repo, other}, map[string]string{id: "/missing"}, "", nil)
 	if err != nil || d.Bindings[0].Options.Repository != "" || len(d.Bindings[0].Checkouts) != 2 {
 		t.Fatalf("independent clones silently selected: %+v %v", d, err)
 	}
-	d, err = discoverReviewBindings(context.Background(), cfg, []string{repo, other}, map[string]string{id: other})
+	d, err = discoverReviewBindings(context.Background(), cfg, []string{repo, other}, map[string]string{id: other}, "", nil)
 	if err != nil || d.Bindings[0].Options.Repository != other {
 		t.Fatalf("valid remembered checkout ignored: %+v %v", d, err)
 	}

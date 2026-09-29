@@ -110,6 +110,7 @@ const (
 	ViewRestart
 	ViewReviewRunners
 	ViewReviewDetail
+	ViewVeraLaunch
 )
 
 // Model is the Bubble Tea model for vibeflow-cli.
@@ -161,6 +162,9 @@ type Model struct {
 	reviewUnconfigured      bool // no project resolved; managed reviews cannot load
 	reviewReadStarted       time.Time
 	reviewSupervisor        *reviewSupervisor
+	veraSetup               *reviewStartupModel
+	veraPending             *WizardResult
+	veraProjectName         string
 	reviewStatuses          []reviewRunnerStatus
 	reviewPaths             []string
 	reviewPreferences       map[string]string
@@ -810,6 +814,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// session refreshes continue while sub-views (wizard, conflict modal,
 	// worktree list) are active.
 	switch msg := msg.(type) {
+	case veraLaunchRequestedMsg:
+		return m.beginVeraLaunch(msg.result)
+	case veraLaunchedMsg:
+		if msg.err != nil {
+			if m.veraSetup != nil {
+				m.veraSetup.err, m.veraSetup.busy, m.veraSetup.done, m.veraSetup.enabled = msg.err, false, false, false
+			}
+			return m, nil
+		}
+		m.veraSetup = nil
+		m.reviewStatuses = msg.statuses
+		m.activeView = ViewReviewRunners
+		if m.veraPending != nil {
+			// The coding launch can raise a conflict modal or error, which only the
+			// sessions view handles; Vera's runner stays visible under R.
+			m.activeView = ViewSessions
+			result := *m.veraPending
+			m.veraPending = nil
+			return m, func() tea.Msg { return m.launchFromWizard(result) }
+		}
+		return m, nil
 	case reviewDiscoveryRefreshMsg:
 		cmd := m.requestReviewDiscovery()
 		return m, cmd
@@ -1053,6 +1078,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Delegate to sub-views if active.
 	switch m.activeView {
+	case ViewVeraLaunch:
+		return m.updateVeraLaunch(msg)
 	case ViewWizard:
 		return m.updateWizard(msg)
 	case ViewConflict:
@@ -1183,6 +1210,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				repoRoot = m.worktrees.RepoRoot()
 			}
 			m.wizard = NewWizardModel(m.registry, repoRoot, m.worktrees, m.client, m.config.DefaultProject, m.config.DirectoryHistory, m.config)
+			if m.craEnabled {
+				m.wizard.enableCRA()
+			}
 			m.activeView = ViewWizard
 			return m, nil
 		case "d":
@@ -1632,10 +1662,25 @@ func (m Model) launchFromWizard(result WizardResult) tea.Msg {
 	if len(personas) == 0 {
 		personas = []string{result.Persona}
 	}
+	for _, persona := range personas {
+		if persona == "code_reviewer" {
+			if !m.craEnabled {
+				return sessionsMsg{err: fmt.Errorf("Vera requires --cra; use review-watch for isolated PR reviews")}
+			}
+			return veraLaunchRequestedMsg{result: result}
+		}
+	}
 
 	// Single persona — existing behavior (no multi-spawn overhead).
 	if len(personas) == 1 {
 		result.Persona = personas[0]
+		// Solo wizard launches carry no overrides; a team reduced to one persona
+		// (for example after Vera is split out) must keep that persona's override.
+		provider, providerKey, err := ResolvePersonaProvider(result.Persona, result.PersonaProviders, result.ProviderKey, result.Provider, m.registry)
+		if err != nil {
+			return sessionsMsg{err: err}
+		}
+		result.Provider, result.ProviderKey = provider, providerKey
 		workDir := "."
 		if result.WorkDir != "" {
 			workDir = result.WorkDir
@@ -1702,9 +1747,7 @@ func (m Model) launchFromWizard(result WizardResult) tea.Msg {
 		r := result
 		r.Persona = persona
 		r.WorkDir = workDir
-		// Resolve per-persona provider override (team mode). Single-persona
-		// flow above intentionally bypasses this — solo launches use
-		// result.Provider directly.
+		// Resolve per-persona provider override (team mode).
 		provider, providerKey, err := ResolvePersonaProvider(persona, result.PersonaProviders, result.ProviderKey, result.Provider, m.registry)
 		if err != nil {
 			m.logger.Error("resolve provider for persona %s: %v", persona, err)
@@ -1828,6 +1871,9 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 
 // executeLaunch performs the actual session creation after conflict resolution.
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
+	if result.Persona == "code_reviewer" {
+		return sessionsMsg{err: fmt.Errorf("Vera is a PR review runner, not a coding agent; start it through New Agent with --cra")}
+	}
 	// How the harness reaches its model. The gateway only applies to
 	// VibeFlow sessions, as before.
 	routing := resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled)
@@ -2196,6 +2242,12 @@ func (m Model) viewContent() string {
 
 	// Delegate to sub-views if active.
 	switch m.activeView {
+	case ViewVeraLaunch:
+		if m.veraSetup != nil {
+			setup := *m.veraSetup
+			setup.width, setup.height = m.width, m.height
+			return setup.View().Content
+		}
 	case ViewWizard:
 		m.wizard.width = m.width
 		return lipgloss.NewStyle().Width(m.width).Render(m.wizard.View())
@@ -2246,7 +2298,7 @@ func (m Model) viewContent() string {
 	} else if m.serverWarning != "" {
 		warnBannerStyle := lipgloss.NewStyle().Foreground(warningColor)
 		errLine = warnBannerStyle.Render("⚠ " + m.serverWarning + " — local sessions still available")
-	} else if m.reviewSupervisor != nil || len(m.reviewStatuses) > 0 {
+	} else if (m.reviewSupervisor != nil && !m.reviewSupervisor.explicitOnly) || len(m.reviewStatuses) > 0 {
 		online, needs := 0, 0
 		for _, row := range m.reviewStatuses {
 			if row.State == "online" {

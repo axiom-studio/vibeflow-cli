@@ -177,13 +177,17 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		}
 	}
 	var supervisor *reviewSupervisor
-	if reviewSetup.enabled {
+	if flagCRA {
 		supervisor, err = newReviewSupervisor(ctx, cfg, cfgPath)
 		if err != nil {
 			return fmt.Errorf("review runners: %w", err)
 		}
 		supervisor.options = reviewSetup.options
-		_ = saveReviewGroupPreferences(cfg, cfgPath, supervisor.options, supervisor.preferences)
+		supervisor.options.RepositoryRequestsApproved = reviewSetup.enabled
+		supervisor.explicitOnly = !reviewSetup.enabled
+		if reviewSetup.enabled {
+			_ = saveReviewGroupPreferences(cfg, cfgPath, supervisor.options, supervisor.preferences)
+		}
 		defer func() {
 			if err := supervisor.Close(); err != nil {
 				fmt.Fprintf(os.Stderr, "PR review runner: %v\n", err)

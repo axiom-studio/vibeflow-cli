@@ -25,18 +25,19 @@ import (
 )
 
 type reviewWatchOptions struct {
-	Project          string
-	ProjectID        int64
-	Repository       string
-	RepositoryLinkID int64
-	GitProvider      string
-	Provider         string
-	Model            string
-	Kind             string
-	Name             string
-	Once             bool
-	PollInterval     time.Duration
-	Timeout          time.Duration
+	Project                    string
+	ProjectID                  int64
+	Repository                 string
+	RepositoryLinkID           int64
+	GitProvider                string
+	Provider                   string
+	Model                      string
+	Kind                       string
+	Name                       string
+	Once                       bool
+	PollInterval               time.Duration
+	Timeout                    time.Duration
+	RepositoryRequestsApproved bool
 }
 
 type reviewReceipt struct {
@@ -56,18 +57,22 @@ type reviewRunnerState struct {
 	Pending *reviewReceipt `json:"pending,omitempty"`
 }
 
+// Idle status for an approved runner whose server lacks repository routing.
+const reviewLegacyRoutingNotice = "Repository-request routing requires a server upgrade; running with legacy review routing."
+
 type reviewWatch struct {
-	client        *Client
-	cfg           *Config
-	options       reviewWatchOptions
-	root          string
-	state         reviewRunnerState
-	output        io.Writer
-	providerReady bool
-	onReady       func()
-	onStatus      func(string)
-	capacity      *reviewCapacity
-	slot          *os.File
+	repositoryRequests bool // Registered with repository_review_v1 for this run.
+	client             *Client
+	cfg                *Config
+	options            reviewWatchOptions
+	root               string
+	state              reviewRunnerState
+	output             io.Writer
+	providerReady      bool
+	onReady            func()
+	onStatus           func(string)
+	capacity           *reviewCapacity
+	slot               *os.File
 }
 
 func reviewUUID() string {
@@ -131,6 +136,7 @@ func reviewWatchCmd() *cobra.Command {
 		if stop != "" {
 			return stopReviewBackground(cmd.Context(), stop, cmd.OutOrStdout())
 		}
+		o.RepositoryRequestsApproved = flagCRA
 		if background && (!cmd.Flags().Changed("repo") || !cmd.Flags().Changed("project") || !cmd.Flags().Changed("repository-link")) {
 			return fmt.Errorf("background runners require explicit --repo, --project, and --repository-link")
 		}
@@ -300,7 +306,26 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		Provider         string `json:"provider"`
 		RepositoryLinkID int64  `json:"repository_link_id"`
 	}
-	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID}, &registered); err != nil {
+	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID}
+	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
+	if w.options.RepositoryRequestsApproved && w.options.GitProvider == "github" {
+		var discovery reviewStartupRepositoriesResponse
+		if err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery); err != nil {
+			return err
+		}
+		supported := false
+		for _, capability := range discovery.SupportedRunnerCapabilities {
+			if capability == "repository_review_v1" {
+				supported = true
+			}
+		}
+		if supported {
+			registration["capabilities"] = []string{"repository_review_v1"}
+		} else {
+			idleStatus = reviewLegacyRoutingNotice
+		}
+	}
+	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), registration, &registered); err != nil {
 		return err
 	}
 	if registered.ID != w.state.ID || registered.UserID <= 0 || (w.state.OwnerID != 0 && w.state.OwnerID != registered.UserID) {
@@ -312,6 +337,10 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	w.state.OwnerID = registered.UserID
 	if err = w.save(); err != nil {
 		return err
+	}
+	if _, ok := registration["capabilities"]; ok {
+		w.repositoryRequests = true
+		fmt.Fprintln(w.output, "Repository requests enabled: anyone who comments @vibeflow review on this linked repository can request a review from this runner.")
 	}
 	defer func() {
 		if w.state.Pending == nil {
@@ -332,7 +361,13 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 	}
 	backoff := w.options.PollInterval
-	status := ""
+	status := idleStatus
+	if status != "" {
+		if w.onStatus != nil {
+			w.onStatus(status)
+		}
+		fmt.Fprintln(w.output, status)
+	}
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -343,7 +378,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 		nextStatus := status
 		if err == nil {
-			nextStatus = ""
+			nextStatus = idleStatus
 		}
 		if errors.Is(err, errReviewCleanupUnverified) {
 			nextStatus = err.Error() // Locally constructed private marker path only.

@@ -20,6 +20,19 @@ Press **`n`** in the TUI (or use headless `vibeflow launch` with flags) to creat
 
 Exact labels and ordering match your installed version; the list above reflects the intended product flow.
 
+## Vera PR review runner
+
+With `vibeflow --cra`, the persona picker also offers **Vera · Code Reviewer**.
+Selecting only Vera skips the coding-agent branch, worktree, routing, and permission steps.
+It validates the selected checkout against the chosen project's linked repositories, then asks for Claude or Codex and a review model.
+Codex review runners require an OpenAI API key, not a ChatGPT subscription login.
+Vera listens for repository review requests while idle and starts a fresh isolated review for each assigned PR.
+The `R` review-runner view shows listening, running, or failed status, and closing the TUI stops only its owned runners.
+Selecting Vera with coding personas launches the review runner separately and then launches the coding agents with their original settings.
+Canceling Vera setup still continues the selected coding-agent launch.
+The selection grants consent only for this invocation and repository, without changing saved coding-agent configuration.
+Headless `launch --persona code_reviewer` is intentionally rejected with an explicit `review-watch` command instead of starting a coding-agent loop.
+
 ## Multi-persona launch
 
 When multiple personas are selected, the CLI spawns **one session per persona** so parallel agents share the same repository context with **isolated session files** (`.vibeflow-session-<persona>`).

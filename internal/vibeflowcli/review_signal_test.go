@@ -41,6 +41,8 @@ func TestReviewCommandTerminalShutdown(t *testing.T) {
 			var failures, results atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+					json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}})
 				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 					var request map[string]any
 					json.NewDecoder(r.Body).Decode(&request)

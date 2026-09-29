@@ -54,6 +54,7 @@ var personaColors = map[string]lipgloss.Color{
 	"product_manager":    lipgloss.Color("#ffd98e"), // soft sand — innovation
 	"project_manager":    oceanSecondary,            // deep blue — organization
 	"customer":           lipgloss.Color("#7bed9f"), // ocean mint — communication
+	"code_reviewer":      lipgloss.Color("#e0b3ff"), // ocean-dusk lilac — review (CRA only)
 }
 
 // personaCompactIcons maps persona keys to small Unicode glyphs for inline display.
@@ -67,6 +68,7 @@ var personaCompactIcons = map[string]string{
 	"product_manager":    "✦",
 	"project_manager":    "☰",
 	"customer":           "◈",
+	"code_reviewer":      "✓",
 }
 
 // personaLargeIcons maps persona keys to 5-line pixel art icons using Unicode block characters.
