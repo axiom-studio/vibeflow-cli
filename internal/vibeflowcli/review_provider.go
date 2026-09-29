@@ -69,7 +69,7 @@ func reviewHarnessArgs(key, model, prompt string) (args []string, stdin bool, er
 	case "copilot":
 		return append(append([]string{"--yolo"}, flag("--model")...), "-p", prompt), false, nil
 	case "cursor":
-		return append(append([]string{"-p", "--force"}, flag("--model")...), prompt), false, nil
+		return append(append([]string{"-p", "--force", "--trust"}, flag("--model")...), prompt), false, nil
 	case "kiro":
 		return append(append([]string{"chat", "--no-interactive", "--trust-all-tools"}, flag("--model")...), prompt), false, nil
 	}
@@ -124,6 +124,10 @@ func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, ro
 	}
 	for k, v := range p.Env { // Explicit provider configuration wins.
 		env[k] = os.ExpandEnv(v)
+	}
+	if provider == "gemini" {
+		// Each review worktree is new, so Gemini would refuse it as untrusted.
+		env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
 	}
 	if relayURL != "" && provider == "claude" {
 		delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
