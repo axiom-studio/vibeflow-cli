@@ -71,6 +71,7 @@ type reviewWatch struct {
 	providerReady      bool
 	onReady            func()
 	onStatus           func(string)
+	harnessFatal       error // Set when the harness cannot run on this machine until the user acts.
 	capacity           *reviewCapacity
 	slot               *os.File
 }
@@ -570,7 +571,16 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		fmt.Fprintln(w.output, "Review result accepted. The server handles tickets and PR publication.")
 	}
 	p.Completed = true
-	return w.finishReceipt(p)
+	if err := w.finishReceipt(p); err != nil {
+		return err
+	}
+	// Retrying would fail the same way and spend the review's attempts.
+	if fatal := w.harnessFatal; fatal != nil {
+		w.harnessFatal = nil
+		fmt.Fprintln(w.output, fatal)
+		return fatal
+	}
+	return nil
 }
 
 func reviewPermanent(err error) bool {
@@ -831,7 +841,8 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	guard.WaitDelay = 250 * time.Millisecond
 	guard.Env = []string{"PATH=" + os.Getenv("PATH")}
 	guard.Dir = root
-	// Harness output is only counted; the result comes from result.json.
+	// Harness output is counted and only its tail is kept, in memory, to name
+	// failures the user must fix (login, trust); it is never sent to the server.
 	stdout, stderr := reviewByteCounter{limit: 8 << 20}, reviewByteCounter{limit: 64 << 10}
 	guard.Stdout = &stdout
 	guard.Stderr = &stderr
@@ -873,6 +884,11 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.ExitCode = &code
 		diagnostic.Signal = reviewProcessSignal(guard.ProcessState)
 		diagnostic.Category = "child_guard_failed"
+	}
+	if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(filepath.Join(root, "result.json"))) {
+		diagnostic.Category = category
+		w.harnessFatal = fmt.Errorf("Vera stopped: the %s harness %s on this machine; %s, then start Vera again", w.options.Provider, reviewHarnessProblem(category), reviewHarnessLoginHint(w.options.Provider))
+		return nil, diagnostic.failure()
 	}
 	if err != nil || ctx.Err() != nil {
 		return nil, diagnostic.failure()
@@ -1014,11 +1030,74 @@ func reviewChildCmd() *cobra.Command {
 	}}
 }
 
-type reviewByteCounter struct{ n, limit int }
+type reviewByteCounter struct {
+	n, limit int
+	tail     []byte // Last 8 KiB, for local failure classification only.
+}
 
 func (c *reviewByteCounter) Write(p []byte) (int, error) {
 	c.n = min(c.n+len(p), c.limit)
+	c.tail = append(c.tail, p...)
+	if len(c.tail) > 8<<10 {
+		c.tail = append([]byte(nil), c.tail[len(c.tail)-8<<10:]...)
+	}
 	return len(p), nil
+}
+
+func reviewFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// classifyReviewHarnessOutput names failures that need the user, not a retry.
+func classifyReviewHarnessOutput(output string) string {
+	text := strings.ToLower(output)
+	for _, marker := range []string{"not running in a trusted directory", "workspace is not trusted", "folder is not trusted", "trust this folder"} {
+		if strings.Contains(text, marker) {
+			return "untrusted_workspace"
+		}
+	}
+	for _, marker := range []string{"not logged in", "authentication required", "please run 'agent login'", "please log in", "please login", "invalid access token", "token expired", "invalid api key", "invalid_api_key", "unauthorized", "401", "login required", "no credentials"} {
+		if strings.Contains(text, marker) {
+			return "authentication_required"
+		}
+	}
+	for _, marker := range []string{"ineligibletiererror", "no longer supported", "403", "access denied", "forbidden"} {
+		if strings.Contains(text, marker) {
+			return "access_denied"
+		}
+	}
+	return ""
+}
+
+func reviewHarnessProblem(category string) string {
+	switch category {
+	case "untrusted_workspace":
+		return "refused the review worktree as untrusted"
+	case "access_denied":
+		return "was refused access by its model service"
+	}
+	return "is not logged in"
+}
+
+func reviewHarnessLoginHint(provider string) string {
+	switch provider {
+	case "claude":
+		return "run claude and use /login"
+	case "codex":
+		return "run codex login"
+	case "gemini":
+		return "run gemini to sign in, or set GEMINI_API_KEY"
+	case "qwen":
+		return "run qwen and sign in again, or refresh its API key"
+	case "copilot":
+		return "run copilot and use /login"
+	case "cursor":
+		return "run agent login"
+	case "kiro":
+		return "run kiro-cli login"
+	}
+	return "sign in to the harness"
 }
 
 func reviewReadBounded(path string, limit int64) ([]byte, error) {

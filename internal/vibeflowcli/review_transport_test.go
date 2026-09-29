@@ -46,6 +46,9 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 		{"missing_result", "untrusted-secret", "exit 0", "invalid_result", "", false},
 		{"invalid_result", "untrusted-secret", "exit 0", "invalid_result", "", true},
 		{"reported_failure", `{"result":null,"failure_reason":"untrusted-secret"}`, "exit 0", "provider_reported_failure", "", true},
+		// Failures the user must fix stop the runner instead of spending every attempt.
+		{"not_logged_in", "Error: Not logged in", "exit 1", "authentication_required", "", false},
+		{"untrusted_worktree", "Gemini CLI is not running in a trusted directory", "exit 55", "untrusted_workspace", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, execution := reviewTestRepo(t)
@@ -101,8 +104,12 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, binary, "--cra", "--root", root, "--config", config, "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "diagnostic", "--once")
 			output, err := cmd.CombinedOutput()
-			if err != nil || !strings.Contains(reason, tc.category) || !strings.Contains(reason, tc.httpStatus) {
+			stops := tc.category == "authentication_required" || tc.category == "untrusted_workspace"
+			if (err != nil) != stops || !strings.Contains(reason, tc.category) || !strings.Contains(reason, tc.httpStatus) {
 				t.Errorf("provider cause lost: %v reason=%q output=%s", err, reason, output)
+			}
+			if stops && (!bytes.Contains(output, []byte("Vera stopped")) || !bytes.Contains(output, []byte("claude"))) {
+				t.Errorf("runner did not explain the required user action: %s", output)
 			}
 			paths, _ := filepath.Glob(filepath.Join(root, "review-runners", "*", "last-provider-diagnostic.json"))
 			if len(paths) != 1 {

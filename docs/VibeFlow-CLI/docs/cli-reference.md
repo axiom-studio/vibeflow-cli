@@ -128,7 +128,7 @@ Runner selection is configured in the project's pull request settings, using Aut
 All public forms require `--cra`, including `--background`, `--status`, and `--stop`.
 
 Keep one local or shared PR review runner online without using a model while idle.
-Each claimed attempt starts a fresh Principal Engineer process with the server's finite review prompt, a disposable git worktree of the exact head commit, the exact base snapshot, project brief, and prior finding IDs.
+Each claimed attempt starts a fresh Vera process with the server's finite review prompt, a disposable git worktree of the exact head commit, the exact base snapshot, project brief, and prior finding IDs.
 The server controls automatic and comment-triggered reviews, local priority, shared grants, cycle limits, repair tickets, and PR publication.
 
 ```bash
@@ -195,6 +195,8 @@ No service manager, login item, deployment, or machine-boot autostart is install
 
 Vera runs on any supported coding harness on macOS or Linux, in normal mode like the other personas.
 Startup only checks that the harness is configured and its binary is installed; it makes no model call.
+If the harness reports that it is not logged in, was refused access, or does not trust the review worktree, that attempt fails once and Vera stops with the command to fix it, instead of spending the review's remaining attempts.
+The CLI trusts each disposable review worktree for Gemini and Cursor automatically.
 The harness gets your full environment, its configured `env`, saved env vars, and its own login and configuration, with your real `HOME` and `CODEX_HOME`.
 Codex therefore works with a ChatGPT subscription login or an API key.
 Each harness runs headless with its permission prompts disabled:

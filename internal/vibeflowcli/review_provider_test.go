@@ -24,7 +24,7 @@ func TestReviewHarnessArgsCoverEveryProvider(t *testing.T) {
 		{"gemini", "M", []string{"--yolo", "-m", "M", "-p", prompt}, false},
 		{"qwen", "M", []string{"--yolo", "-m", "M", prompt}, false},
 		{"copilot", "M", []string{"--yolo", "--model", "M", "-p", prompt}, false},
-		{"cursor", "M", []string{"-p", "--force", "--model", "M", prompt}, false},
+		{"cursor", "M", []string{"-p", "--force", "--trust", "--model", "M", prompt}, false},
 		{"kiro", "", []string{"chat", "--no-interactive", "--trust-all-tools", prompt}, false},
 		{"kiro", "M", []string{"chat", "--no-interactive", "--trust-all-tools", "--model", "M", prompt}, false},
 	} {
@@ -89,6 +89,9 @@ func TestReviewProviderUsesNormalModeForEveryHarness(t *testing.T) {
 					t.Fatalf("normal-mode env lacks %s", kv)
 				}
 			}
+			if trusted := slices.Contains(spec.Env, "GEMINI_CLI_TRUST_WORKSPACE=true"); trusted != (key == "gemini") {
+				t.Fatalf("gemini workspace trust set=%v for %s", trusted, key)
+			}
 			if strings.Contains(strings.Join(spec.Args, " "), cfg.APIToken) {
 				t.Fatal("VibeFlow token reached argv")
 			}
@@ -147,4 +150,20 @@ func reviewResultEnvelope(t *testing.T, result any) string {
 // The harness runs in <root>/input/head, so the file is two levels up.
 func reviewWriteResult(envelope string) string {
 	return "printf '%s\\n' " + shellQuote(envelope) + " > ../../result.json\n"
+}
+
+// Messages observed from real harnesses on 2026-09-29.
+func TestReviewHarnessOutputNamesUserActions(t *testing.T) {
+	for output, want := range map[string]string{
+		"Gemini CLI is not running in a trusted directory. To proceed, use --skip-trust":        "untrusted_workspace",
+		"Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY": "authentication_required",
+		"[API Error: 401 invalid access token or token expired]":                                "authentication_required",
+		"Not logged in": "authentication_required",
+		"IneligibleTierError: This client is no longer supported for Gemini Code Assist": "access_denied",
+		"panic: index out of range": "",
+	} {
+		if got := classifyReviewHarnessOutput(output); got != want {
+			t.Errorf("%q: got %q want %q", output, got, want)
+		}
+	}
 }
