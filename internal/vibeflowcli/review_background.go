@@ -410,6 +410,9 @@ func runReviewBackground(ctx context.Context, id string) error {
 		if status.Reason == "" {
 			status.Reason = "runner_failed"
 		}
+		if message := err.Error(); strings.HasPrefix(message, "Vera stopped:") {
+			status.Message = message
+		}
 	}
 	return err
 }
@@ -523,7 +526,7 @@ func reviewBackgroundStatusList(out io.Writer) error {
 		dir := filepath.Dir(path)
 		state, _ := reviewBackgroundState(dir)
 		fmt.Fprintf(out, "%s %s\n", filepath.Base(dir), state)
-		if message := reviewBackgroundMessage(dir); state == "running" && message != "" {
+		if message := reviewBackgroundMessage(dir); (state == "running" || strings.HasPrefix(state, "failed")) && message != "" {
 			fmt.Fprintf(out, "  status: %s\n", message)
 		}
 		if binding, err := readReviewBackground(dir); err == nil {

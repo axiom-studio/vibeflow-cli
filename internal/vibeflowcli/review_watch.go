@@ -125,6 +125,8 @@ func reviewWatchCmd() *cobra.Command {
 	var background, status, owned bool
 	var stop, managed, serverURL string
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		// Flags parsed; runtime failures print their message, not the usage text.
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true // main prints the error once.
 		if owned {
 			return runReviewOwned(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout())
 		}
@@ -577,7 +579,6 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 	// Retrying would fail the same way and spend the review's attempts.
 	if fatal := w.harnessFatal; fatal != nil {
 		w.harnessFatal = nil
-		fmt.Fprintln(w.output, fatal)
 		return fatal
 	}
 	return nil
