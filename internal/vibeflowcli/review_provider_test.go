@@ -167,3 +167,136 @@ func TestReviewHarnessOutputNamesUserActions(t *testing.T) {
 		}
 	}
 }
+
+// Where a harness has a non-interactive status command (verified 2026-09-30
+// against claude 2.1.285, codex, cursor agent and kiro-cli), a logged-out
+// harness is refused before Vera claims a review. Copilot, Gemini and Qwen
+// have none, so they are never run.
+func TestReviewHarnessLoginCheck(t *testing.T) {
+	cfg := DefaultConfig()
+	args := filepath.Join(t.TempDir(), "args")
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\necho \"$@\" > "+shellQuote(args)+"\nexit 1\n")
+	for key, want := range map[string]string{"claude": "auth status", "codex": "login status", "cursor": "status", "kiro": "whoami"} {
+		err := checkReviewHarnessLogin(context.Background(), cfg, key)
+		if err == nil || !strings.Contains(err.Error(), "is not logged in") || !strings.Contains(err.Error(), reviewHarnessLoginHint(key)) {
+			t.Fatalf("%s: %v", key, err)
+		}
+		if data, _ := os.ReadFile(args); strings.TrimSpace(string(data)) != want {
+			t.Fatalf("%s ran %q", key, data)
+		}
+	}
+	for _, key := range []string{"copilot", "gemini", "qwen"} {
+		if err := checkReviewHarnessLogin(context.Background(), cfg, key); err != nil {
+			t.Fatalf("%s: %v", key, err)
+		}
+	}
+	// cursor's agent reports a missing login with exit status 0.
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\necho 'Not logged in'\n")
+	if err := checkReviewHarnessLogin(context.Background(), cfg, "cursor"); err == nil {
+		t.Fatal("cursor logged out accepted")
+	}
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\necho 'Logged in using ChatGPT'\n")
+	for _, key := range reviewHarnessKeys {
+		if err := checkReviewHarnessLogin(context.Background(), cfg, key); err != nil {
+			t.Fatalf("%s: %v", key, err)
+		}
+	}
+	// Gateway reviews reach Claude through the VibeFlow relay, not a login.
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 1\n")
+	cfg.LLMGatewayEnabled = true
+	if err := checkReviewHarnessLogin(context.Background(), cfg, "claude"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Claude asks whether to trust every new folder, so a review worktree is
+// pre-trusted in Claude's own config and forgotten again at cleanup, keeping
+// everything else in that file.
+func TestClaudeReviewTrust(t *testing.T) {
+	withTempRoot(t)
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	path := filepath.Join(dir, ".claude.json")
+	original := `{"numStartups": 7, "oauthAccount": {"emailAddress": "x"}, "projects": {"/keep": {"hasTrustDialogAccepted": true, "allowedTools": ["a"]}}}`
+	if err := os.WriteFile(path, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(t.TempDir(), "work", "req")
+	head := filepath.Join(work, "input", "head")
+	if err := os.MkdirAll(head, 0700); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"CLAUDE_CONFIG_DIR": dir}
+	if err := trustReviewWorktree("claude", env, head); err != nil {
+		t.Fatal(err)
+	}
+	real, _ := filepath.EvalSymlinks(head)
+	var config map[string]any
+	data, _ := os.ReadFile(path)
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	projects := config["projects"].(map[string]any)
+	if entry, _ := projects[real].(map[string]any); entry == nil || entry["hasTrustDialogAccepted"] != true {
+		t.Fatalf("worktree %s not trusted: %s", real, data)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0644 {
+		t.Fatalf("mode changed to %v", info.Mode().Perm())
+	}
+	// Claude adds its own entry for the worktree's repository while it runs.
+	projects[filepath.Join(filepath.Dir(filepath.Dir(real)), "objects.git")] = map[string]any{"hasTrustDialogAccepted": true}
+	data, _ = json.Marshal(config)
+	os.WriteFile(path, data, 0644)
+	if err := forgetReviewTrust("claude", env, work); err != nil {
+		t.Fatal(err)
+	}
+	var want, got any
+	json.Unmarshal([]byte(original), &want)
+	data, _ = os.ReadFile(path)
+	json.Unmarshal(data, &got)
+	if !equalJSON(want, got) {
+		t.Fatalf("cleanup left %s", data)
+	}
+	// Nothing to forget: the file is not rewritten.
+	before, _ := os.Stat(path)
+	if err := forgetReviewTrust("claude", env, work); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.Stat(path); !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("file rewritten without a change")
+	}
+}
+
+// Codex keeps folder trust as [projects."<path>"] tables in config.toml.
+func TestCodexReviewTrust(t *testing.T) {
+	withTempRoot(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	original := "model = \"gpt\"\n\n[projects.\"/keep\"]\ntrust_level = \"trusted\"\n\n[mcp_servers.x]\ncommand = \"y\"\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(t.TempDir(), "work", "req")
+	head := filepath.Join(work, "input", "head")
+	if err := os.MkdirAll(head, 0700); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"CODEX_HOME": dir}
+	for range 2 { // The second call finds the entry and changes nothing.
+		if err := trustReviewWorktree("codex", env, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+	real, _ := filepath.EvalSymlinks(head)
+	data, _ := os.ReadFile(path)
+	if want := original + "\n[projects.\"" + real + "\"]\ntrust_level = \"trusted\"\n"; string(data) != want {
+		t.Fatalf("config:\n%s\nwant:\n%s", data, want)
+	}
+	if err := forgetReviewTrust("codex", env, work); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if strings.TrimRight(string(data), "\n") != strings.TrimRight(original, "\n") {
+		t.Fatalf("cleanup left:\n%s", data)
+	}
+}

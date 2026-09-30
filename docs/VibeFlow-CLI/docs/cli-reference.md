@@ -178,13 +178,32 @@ No service manager, login item, deployment, or machine-boot autostart is install
 
 Vera runs on any supported coding harness on macOS or Linux, in normal mode like the other personas.
 Startup only checks that the harness is configured and its binary is installed; it makes no model call.
+In a terminal, Vera also runs the harness's own login status command before claiming any review, and refuses to start with the login command when it reports that it is not logged in: `claude auth status`, `codex login status`, `agent status` (Cursor) and `kiro-cli whoami`.
+Copilot, Gemini and Qwen have no non-interactive status command, so for them a login screen shows up in the pane instead.
+`codex login status` reads only the local credentials, so a login the server has revoked still shows Codex's sign-in screen in the pane.
 If the harness reports that it is not logged in, was refused access, or does not trust the review worktree, that attempt fails once and Vera stops with the command to fix it, instead of spending the review's remaining attempts.
-The CLI trusts each disposable review worktree for Gemini automatically, and for Cursor in headless runs; interactive Cursor can still ask to trust it.
+The CLI pre-accepts folder trust for each disposable review worktree for these harnesses:
+
+| Harness | How the worktree is trusted |
+|---------|-----------------------------|
+| `claude` | Interactive runs set `projects["<worktree>"].hasTrustDialogAccepted` in Claude's config (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`); cleanup removes every entry inside the review directory, including the one Claude adds for the worktree's repository. Headless `claude -p` does not ask. |
+| `codex` | Interactive runs add a `[projects."<worktree>"]` table with `trust_level = "trusted"` to Codex's `config.toml` (`$CODEX_HOME`, by default `~/.codex`); cleanup removes it. A `-c` override is not used because codex 0.159.2 then fails its interactive start with HTTP 401. |
+| `copilot` | The worktree is added to `trustedFolders` in `~/.copilot/config.json`, as for a persona launch. |
+| `gemini` | `GEMINI_CLI_TRUST_WORKSPACE=true`. |
+| `cursor` | `--trust` in headless runs only; interactive Cursor can still ask to trust the worktree. |
+
+Kiro and Qwen start with their permission-bypass flags and showed no folder-trust step in a 2026-09-30 check.
 The harness gets your full environment, its configured `env`, saved env vars, and its own login and configuration, with your real `HOME` and `CODEX_HOME`.
 Codex therefore works with a ChatGPT subscription login or an API key.
 In a terminal, such as a Vera session's tmux pane, each review runs the harness's normal interactive UI in the foreground of that terminal, launched with the provider's launch template in full-permission mode and the task file as its initial prompt, the same way a persona receives its init prompt (Gemini uses `-i` so its UI stays interactive).
 Keys typed into the pane reach the harness, and Vera closes it with SIGINT, then SIGTERM, then SIGKILL once a complete `result.json` exists or the deadline or lease ends, then restores the terminal.
-If an interactive harness exits within 15 seconds without a result, the pane shows its login hint; its output is not captured, so the login and trust classification below applies to headless runs.
+The harness gets the pane's own terminal device (the listener's stdin, stdout and stderr), never the `/dev/tty` alias, which macOS kqueue rejects.
+If an interactive harness exits within 15 seconds without a result, Vera fails that attempt once and stops, showing the exit code and that the harness may need a login or a trust answer; the review stays queued for when Vera starts again.
+Its output is not captured, so the login and trust classification below applies to headless runs.
+If no result exists after 60 seconds, the pane shows once that Vera is still waiting, in case the harness shows a login or trust screen to answer there.
+Ctrl-C during a review goes to the harness; when it exits without a result, the attempt is reported as cancelled and Vera waits 5 seconds, so a second Ctrl-C stops Vera instead of resuming listening.
+After each interactive review Vera takes the terminal back, restores its modes, discards unread input such as late replies to the harness's terminal queries, and continues on a fresh line.
+Stopping the listener during a review reports the attempt as cancelled (the server has no release call) and exits without announcing listening again.
 Without a terminal (detached runners, redirected output), each harness runs headless with its permission prompts disabled, and its output is never shown or relayed:
 
 | Harness | Command |
