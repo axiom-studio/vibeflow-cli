@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -375,4 +376,51 @@ func TestReviewCheckoutDiffExcludesTargetOnlyCommits(t *testing.T) {
 	if reviewTestGit(t, source, "rev-parse", "HEAD") != target {
 		t.Fatal("developer checkout was changed")
 	}
+}
+
+// The review child guard re-executes os.Executable. In this test artifact,
+// route only that exact private CLI invocation through the real command.
+func TestMain(m *testing.M) {
+	if len(os.Args) == 3 && os.Args[1] == "review-child" {
+		if err := Execute(); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	// LoadConfig lets these override the saved server and token, and spawned
+	// CLI binaries inherit them, so a developer shell's real credentials would
+	// replace fixture values. Tests that need them use t.Setenv.
+	for _, key := range []string{"VIBEFLOW_URL", "VIBEFLOW_TOKEN"} {
+		os.Unsetenv(key)
+	}
+	code := m.Run()
+	if builtCLI.dir != "" {
+		os.RemoveAll(builtCLI.dir)
+	}
+	os.Exit(code)
+}
+
+var builtCLI struct {
+	once      sync.Once
+	dir, path string
+	err       error
+}
+
+// builtVibeflow builds the real CLI once per test run, for tests that run it
+// as a separate process (inside tmux or a PTY).
+func builtVibeflow(t *testing.T) string {
+	t.Helper()
+	builtCLI.once.Do(func() {
+		if builtCLI.dir, builtCLI.err = os.MkdirTemp("", "vibeflow-cli-test-"); builtCLI.err != nil {
+			return
+		}
+		builtCLI.path = filepath.Join(builtCLI.dir, "vibeflow")
+		if out, err := exec.Command("go", "build", "-o", builtCLI.path, "../../cmd/vibeflow").CombinedOutput(); err != nil {
+			builtCLI.err = fmt.Errorf("build: %v %s", err, out)
+		}
+	})
+	if builtCLI.err != nil {
+		t.Fatal(builtCLI.err)
+	}
+	return builtCLI.path
 }

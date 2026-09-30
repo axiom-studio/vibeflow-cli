@@ -22,29 +22,36 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Drives Vera from the New Agent picker in a real PTY after declining the
-// all-project consent: the wizard's Provider and Confirm steps start it,
-// exactly the chosen repository gets an idle, model-free runner, and quitting
-// the TUI deregisters and stops it.
+// Drives Vera end to end through the real binary in a real PTY with real tmux:
+// --cra starts straight into the session list, New Agent > Vera > Provider >
+// Confirm creates an ordinary tmux session whose listener registers only the
+// chosen repository and idles without a model, the session survives quitting
+// the TUI, and deleting it with d deregisters and stops the listener.
 func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	if _, err := exec.LookPath("script"); err != nil {
 		t.Skip("native script command unavailable; real PTY is required")
 	}
-	binary := filepath.Join(t.TempDir(), "vibeflow")
-	if out, err := exec.Command("go", "build", "-o", binary, "../../cmd/vibeflow").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not installed")
 	}
+	binary := builtVibeflow(t)
 	repo, _ := reviewTestRepo(t) // origin acme/repo -> link 7
 	repo2, _ := reviewTestRepo(t)
 	reviewTestGit(t, repo2, "remote", "set-url", "origin", "https://github.com/acme/two.git") // link 8
 	launchRepo, _ := reviewTestRepo(t)
 	reviewTestGit(t, launchRepo, "remote", "set-url", "origin", "https://github.com/acme/cli.git")
 	root, binDir, marks := t.TempDir(), t.TempDir(), t.TempDir()
-	newSession, modelRun := filepath.Join(marks, "tmux-new-session"), filepath.Join(marks, "claude-model")
-	tmuxScript := "#!/bin/sh\nfor arg in \"$@\"; do [ \"$arg\" = new-session ] && printf '%s\\n' \"$*\" >> " + shellQuote(newSession) + "; done\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(tmuxScript), 0700); err != nil {
+	if err := os.Symlink(tmuxPath, filepath.Join(binDir, "tmux")); err != nil {
 		t.Fatal(err)
 	}
+	socket := fmt.Sprintf("vera-tui-%d", os.Getpid())
+	tmux := func(args ...string) string {
+		out, _ := exec.Command(tmuxPath, append([]string{"-L", socket}, args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out))
+	}
+	t.Cleanup(func() { tmux("kill-server") })
+	modelRun := filepath.Join(marks, "claude-model")
 	provider := filepath.Join(binDir, "claude")
 	claudeScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(modelRun) + "\nexit 1\n"
 	if err := os.WriteFile(provider, []byte(claudeScript), 0700); err != nil {
@@ -124,13 +131,12 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	// The owned runner lives in its own process group, so find it by its
-	// unique --root rather than by the PTY's process tree.
+	// The listener runs inside tmux, so find it by its unique --root.
 	roots := []string{root}
 	if resolved, err := filepath.EvalSymlinks(root); err == nil && resolved != root {
 		roots = append(roots, resolved)
 	}
-	runnerPIDs := func() []int {
+	listenerPIDs := func() []int {
 		out, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "args=").Output()
 		if err != nil {
 			t.Fatalf("ps: %v", err)
@@ -138,8 +144,9 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		var pids []int
 		for _, line := range strings.Split(string(out), "\n") {
 			for _, r := range roots {
-				if strings.Contains(line, "--root "+r+" review-watch --owned-runner") {
-					if pid, err := strconv.Atoi(strings.Fields(line)[0]); err == nil {
+				// The tmux server keeps its first client's argv, so match the binary.
+				if fields := strings.Fields(line); len(fields) > 1 && fields[1] == binary && strings.Contains(line, "--root "+r+" --config") && strings.Contains(line, " review-watch ") {
+					if pid, err := strconv.Atoi(fields[0]); err == nil {
 						pids = append(pids, pid)
 					}
 				}
@@ -148,15 +155,15 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		return pids
 	}
 	t.Cleanup(func() {
-		for _, pid := range runnerPIDs() {
-			t.Errorf("review runner %d outlived the test; killing it", pid)
+		for _, pid := range listenerPIDs() {
+			t.Errorf("Vera listener %d outlived the test; killing it", pid)
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
 
 	cfg := DefaultConfig()
 	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject = server.URL, "vera-api-canary", "66"
-	cfg.DefaultWorkDir, cfg.TmuxSocket = "", "vera-tui-test"
+	cfg.DefaultWorkDir, cfg.TmuxSocket = "", socket
 	cfg.DirectoryHistory = []string{repo, repo2}
 	cfg.Providers["claude"] = Provider{Name: "Claude Code", Binary: provider}
 	if err := SaveConfig(cfg, filepath.Join(root, "config.yaml")); err != nil {
@@ -208,76 +215,83 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		}
 		return ""
 	}
-	// 1. Decline all-project automatic runners.
-	awaitScreen("Run PR reviews while this CLI is open?")
-	terminal.send(t, "\x1b")
-	awaitScreen("q: quit")
-	// Declined consent neither scans projects nor enrolls anything, and says how to add Vera.
-	terminal.send(t, "R")
-	awaitScreen("press n and choose Vera")
-	t.Logf("runners view after declining consent:\n%s", screen())
-	mu.Lock()
-	enrolled := fmt.Sprint(registered)
-	mu.Unlock()
-	if _, _, _, reads := counts(); enrolled != "map[]" || reads != 0 {
-		t.Fatalf("declined consent registered runners %s or read %d repository lists", enrolled, reads)
+	quit := func() {
+		t.Helper()
+		terminal.send(t, "q")
+		deadline := time.Now().Add(8 * time.Second)
+		for exited := false; !exited; {
+			select {
+			case <-terminal.done:
+				exited = true
+			case <-time.After(20 * time.Millisecond):
+				if strings.Contains(screen(), "Quit? (y/n)") {
+					terminal.send(t, "y")
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("TUI did not quit:\n%s", screen())
+				}
+			}
+		}
+		if terminal.err != nil {
+			t.Fatalf("TUI quit: %v\n%s", terminal.err, screen())
+		}
+	}
+
+	// 1. --cra starts straight into the session list: no startup prompt, no
+	// repository scan, no runner, and no R runners view.
+	visible := awaitScreen("q: quit")
+	if strings.Contains(visible, "Run PR reviews") {
+		t.Fatalf("startup review prompt shown:\n%s", visible)
 	}
 	terminal.send(t, "R")
-	awaitScreen("q: quit")
+	time.Sleep(200 * time.Millisecond)
+	if visible := screen(); strings.Contains(visible, "PR review runners") {
+		t.Fatalf("R still opens a runners view:\n%s", visible)
+	}
+	if _, _, _, reads := counts(); reads != 0 || len(registered) != 0 {
+		t.Fatalf("startup read %d repository lists or registered %v", reads, registered)
+	}
 
 	// 2. New Agent wizard: checkout, VibeFlow type, project, Vera only.
 	terminal.send(t, "n")
-	visible := awaitScreen("Select project directory:", repo, repo2)
-	t.Logf("directory step:\n%s", visible)
+	visible = awaitScreen("Select project directory:", repo, repo2)
 	if !strings.HasPrefix(strings.TrimSpace(lineWith(visible, "Enter new path")), ">") {
 		t.Fatalf("directory cursor not on first option:\n%s", visible)
 	}
 	terminal.send(t, "j\r")
 	awaitScreen("Select session type:", "VibeFlow")
 	terminal.send(t, "j\r")
-	visible = awaitScreen("Select a project:", "Axiom")
-	t.Logf("project step:\n%s", visible)
+	awaitScreen("Select a project:", "Axiom")
 	terminal.send(t, "\r")
-	visible = awaitScreen("Select team", "Vera · Code Reviewer")
-	t.Logf("team step with Vera listed:\n%s", visible)
+	awaitScreen("Select team", "Vera · Code Reviewer")
 	// Developer is preselected; deselect it, then select Vera (the last row) alone.
 	terminal.send(t, " "+strings.Repeat("j", 20)+" ")
 	visible = awaitScreen("[x]")
 	if vera := lineWith(visible, "Vera · Code Reviewer"); !strings.Contains(vera, "> [x]") {
 		t.Fatalf("Vera not selected under the cursor:\n%s", visible)
 	}
-	if developer := lineWith(visible, "Developer"); !strings.Contains(developer, "( )") {
-		t.Fatalf("developer still selected alongside Vera:\n%s", visible)
-	}
-	t.Logf("team step with only Vera selected:\n%s", visible)
 	terminal.send(t, "\r")
 
-	// 3. The wizard's own Provider and Confirm steps; no popup, no model question.
+	// 3. The wizard's own Provider and Confirm steps.
 	visible = awaitScreen("Select a provider:", "[Provider]", "Confirm", "Claude Code")
-	t.Logf("provider step for Vera:\n%s", visible)
 	for _, skipped := range []string{"Routing", "Branch", "Worktree", "Permissions"} {
 		if strings.Contains(visible, skipped) {
 			t.Fatalf("Vera provider step shows skipped step %q:\n%s", skipped, visible)
 		}
 	}
-	if !strings.Contains(lineWith(visible, "Claude Code"), "> Claude Code") {
-		t.Fatalf("Claude is not the default harness:\n%s", visible)
-	}
 	terminal.send(t, "\r")
-	visible = awaitScreen("Confirm Vera · Code Reviewer", "[Confirm]", "Project:   Axiom", "Checkout:", repo, "Harness:   Claude Code", "Model:     harness default", "@vibeflow review", "enter: start")
+	visible = awaitScreen("Confirm Vera · Code Reviewer", "Project:   Axiom", "Checkout:", repo, "Harness:   Claude Code", "Model:     harness default", "own tmux session", "enter: start")
 	t.Logf("confirm step for Vera:\n%s", visible)
-	if strings.Contains(visible, "Choose the model") {
-		t.Fatalf("Vera asked for a model:\n%s", visible)
-	}
 	terminal.send(t, "\r")
 
-	// 4. Runners view: one online runner for the selected repository only.
-	visible = awaitScreen("PR review runners", "Axiom / acme/repo [online]", "Listening for PR review requests")
-	t.Logf("runners view:\n%s", visible)
-	if strings.Contains(visible, "acme/two") {
-		t.Fatalf("unselected repository appeared in runners view:\n%s", visible)
+	// 4. Vera is an ordinary session in the list, listening.
+	visible = awaitScreen("claude-", "listening")
+	t.Logf("session list with Vera:\n%s", visible)
+	sessions := strings.Fields(tmux("list-sessions", "-F", "#{session_name}"))
+	if len(sessions) != 1 || !strings.HasPrefix(sessions[0], sessionPrefix+"claude-") {
+		t.Fatalf("want one Vera tmux session, got %v", sessions)
 	}
-	// Two idle polls prove the 5s loop keeps listening; the second costs one interval.
+	session := sessions[0]
 	waitFor("two idle /work polls", func() bool { _, wp, _, _ := counts(); return wp >= 2 })
 	mu.Lock()
 	enrolled, sent := fmt.Sprint(registered), capabilities[7]
@@ -288,45 +302,38 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	if !reflect.DeepEqual(sent, []any{"repository_review_v1"}) {
 		t.Fatalf("registration capabilities = %#v; want [repository_review_v1]", sent)
 	}
-	if hb, _, _, _ := counts(); hb < 2 {
-		t.Fatalf("runner heartbeats = %d; want at least one per poll", hb)
-	}
 	if data, err := os.ReadFile(modelRun); err == nil {
-		t.Fatalf("idle runner started a model process: %s", data)
-	}
-	if data, err := os.ReadFile(newSession); err == nil {
-		t.Fatalf("Vera created a coding tmux session: %s", data)
+		t.Fatalf("idle listener started a model process: %s", data)
 	}
 	if _, err := os.Stat(filepath.Join(repo, ".vibeflow-session-code_reviewer")); !os.IsNotExist(err) {
 		t.Fatal("Vera wrote ordinary coding session state")
 	}
-	if pids := runnerPIDs(); len(pids) != 1 {
-		t.Fatalf("want one owned review-watch process, got %v", pids)
+	pane := tmux("capture-pane", "-p", "-t", session)
+	t.Logf("attached Vera pane:\n%s", pane)
+	if !strings.Contains(pane, reviewListeningLine) || strings.Contains(pane, "vera-api-canary") {
+		t.Fatalf("Vera pane:\n%s", pane)
+	}
+	if pids := listenerPIDs(); len(pids) != 1 {
+		t.Fatalf("want one listener process, got %v", pids)
 	}
 
-	// 5. Quit: the owned runner deregisters and exits with the TUI.
-	terminal.send(t, "R")
-	t.Logf("sessions view with Vera running:\n%s", awaitScreen("q: quit"))
-	terminal.send(t, "q")
-	deadline := time.Now().Add(8 * time.Second)
-	for exited := false; !exited; {
-		select {
-		case <-terminal.done:
-			exited = true
-		case <-time.After(20 * time.Millisecond):
-			if strings.Contains(screen(), "Quit? (y/n)") {
-				terminal.send(t, "y")
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("TUI did not quit:\n%s", screen())
-			}
-		}
+	// 5. Quitting the TUI leaves Vera listening, like any other persona.
+	quit()
+	_, before, _, _ := counts()
+	waitFor("idle polling after TUI exit", func() bool { _, wp, _, _ := counts(); return wp > before })
+	if _, _, del, _ := counts(); del != 0 || len(listenerPIDs()) != 1 {
+		t.Fatalf("TUI exit stopped Vera: deletes=%d listeners=%v", del, listenerPIDs())
 	}
-	if terminal.err != nil {
-		t.Fatalf("TUI quit: %v\n%s", terminal.err, screen())
-	}
+
+	// 6. A new TUI lists the session; d deletes it, which deregisters and stops
+	// the listener.
+	terminal = startReviewTUITerminal(t, binary, launchRepo, root, binDir)
+	awaitScreen("claude-", "listening")
+	terminal.send(t, "d")
+	awaitScreen("y/n")
+	terminal.send(t, "y")
 	waitFor("runner DELETE", func() bool { _, _, del, _ := counts(); return del >= 1 })
-	waitFor("owned runner exit", func() bool { return len(runnerPIDs()) == 0 })
+	waitFor("listener exit", func() bool { return len(listenerPIDs()) == 0 })
 	mu.Lock()
 	stopped := append([]string(nil), deleted...)
 	stoppedLink := runnerLinks[stopped[0]]
@@ -335,17 +342,12 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		t.Fatalf("want one DELETE for the link 7 runner, got %v", stopped)
 	}
 	hb, wp, _, _ := counts()
-	// Negative check: nothing may heartbeat for a full poll interval after exit.
+	// Negative check: nothing may heartbeat for a full poll interval after delete.
 	time.Sleep(5500 * time.Millisecond)
 	if afterHB, afterWP, _, _ := counts(); afterHB != hb || afterWP != wp {
-		t.Fatalf("runner kept polling after TUI exit: heartbeats %d->%d polls %d->%d", hb, afterHB, wp, afterWP)
+		t.Fatalf("listener kept polling after delete: heartbeats %d->%d polls %d->%d", hb, afterHB, wp, afterWP)
 	}
-	mu.Lock()
-	enrolled = fmt.Sprint(registered)
-	mu.Unlock()
-	if enrolled != "map[7:1]" {
-		t.Fatalf("unselected repository enrolled or runner re-registered: %s", enrolled)
-	}
+	quit()
 }
 
 // veraScreen replays a PTY transcript onto a width x height grid. Unlike

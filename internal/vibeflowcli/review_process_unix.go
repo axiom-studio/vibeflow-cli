@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/charmbracelet/x/term"
+	"golang.org/x/sys/unix"
 )
 
 func reviewProcessSignal(state *os.ProcessState) int {
@@ -78,7 +82,9 @@ func runReviewProcess(ctx context.Context, cmd *exec.Cmd) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	// Descendants can inherit stdout after the provider itself exits. Bound the
 	// copier wait so they cannot keep a completed review alive until its deadline.
 	cmd.WaitDelay = 250 * time.Millisecond
@@ -99,12 +105,21 @@ func runReviewProcess(ctx context.Context, cmd *exec.Cmd) error {
 		}
 		return err
 	case <-ctx.Done():
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		// SIGINT first lets an interactive harness close its UI cleanly.
 		waited := false
-		select {
-		case <-done:
-			waited = true
-		case <-time.After(2 * time.Second):
+		for _, stop := range []struct {
+			sig   syscall.Signal
+			grace time.Duration
+		}{{syscall.SIGINT, time.Second}, {syscall.SIGTERM, 2 * time.Second}} {
+			if waited {
+				break
+			}
+			syscall.Kill(-cmd.Process.Pid, stop.sig)
+			select {
+			case <-done:
+				waited = true
+			case <-time.After(stop.grace):
+			}
 		}
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		if !waited {
@@ -117,4 +132,47 @@ func runReviewProcess(ctx context.Context, cmd *exec.Cmd) error {
 		}
 		return ctx.Err()
 	}
+}
+
+// reviewForegroundAttr starts an interactive harness in its own process group
+// as tty's foreground group, so keys such as Ctrl-C reach the harness and not
+// the runner. For Foreground, Ctty is this (parent) process's descriptor.
+func reviewForegroundAttr(tty *os.File) *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setpgid: true, Foreground: true, Ctty: int(tty.Fd())}
+}
+
+// reviewTerminal is the runner's terminal while an interactive harness runs.
+type reviewTerminal struct {
+	file  *os.File
+	state *term.State
+}
+
+// openReviewTerminal returns the controlling terminal when out is one, which
+// is what makes a foreground runner (a Vera tmux pane) interactive.
+func openReviewTerminal(out any) *reviewTerminal {
+	f, ok := out.(*os.File)
+	if !ok || !term.IsTerminal(f.Fd()) {
+		return nil
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return nil
+	}
+	return &reviewTerminal{file: tty}
+}
+
+func (t *reviewTerminal) save() { t.state, _ = term.GetState(t.file.Fd()) }
+
+// reclaim takes the terminal back from a stopped harness: this process group
+// is the foreground again, and the saved modes and a sane screen return.
+func (t *reviewTerminal) reclaim() {
+	signal.Ignore(syscall.SIGTTOU) // Changing the terminal from the background.
+	defer signal.Reset(syscall.SIGTTOU)
+	_ = unix.IoctlSetPointerInt(int(t.file.Fd()), unix.TIOCSPGRP, syscall.Getpgrp())
+	if t.state != nil {
+		_ = term.Restore(t.file.Fd(), t.state)
+	}
+	// Leave the alternate screen; show the cursor; stop mouse, focus and
+	// bracketed-paste reporting; reset colors.
+	_, _ = t.file.WriteString("\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[0m\r\n")
 }

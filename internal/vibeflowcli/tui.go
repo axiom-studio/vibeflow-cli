@@ -108,7 +108,6 @@ const (
 	ViewWorktrees
 	ViewHelp
 	ViewRestart
-	ViewReviewRunners
 	ViewReviewDetail
 	ViewVeraLaunch
 )
@@ -161,21 +160,9 @@ type Model struct {
 	reviewWarning           string
 	reviewUnconfigured      bool // no project resolved; managed reviews cannot load
 	reviewReadStarted       time.Time
-	reviewSupervisor        *reviewSupervisor
-	veraSetup               *reviewStartupModel
+	veraPrompt              *veraPrompt
 	veraPending             *WizardResult
 	veraProjectName         string
-	reviewStatuses          []reviewRunnerStatus
-	reviewPaths             []string
-	reviewPreferences       map[string]string
-	reviewDiscoveryBusy     bool
-	reviewDiscoveryAgain    bool
-	reviewDiscoveryKey      string
-	reviewDiscoveryWarning  string
-	reviewRunnerCursor      int
-	reviewCheckout          *reviewStartupModel
-	reviewCheckoutID        string
-	reviewCheckoutError     string
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -441,6 +428,9 @@ func (m Model) refreshSessions() tea.Msg {
 		}
 		// Enrich with store metadata (provider, branch, worktree, persona).
 		if meta, ok := storeMeta[ts.Name]; ok {
+			if meta.Vera != nil {
+				row.Status, row.CurrentWork = veraRowStatus(meta, m.config.ServerURL, ts.PaneDead)
+			}
 			row.Provider = meta.Provider
 			row.Branch = meta.Branch
 			row.WorktreePath = meta.WorktreePath
@@ -800,8 +790,6 @@ func (m Model) Init() tea.Cmd {
 		captureTickCmd(),
 		tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		cacheGCTickCmd(),
-		func() tea.Msg { return reviewDiscoveryRefreshMsg{} },
-		reviewDiscoveryTickCmd(),
 	)
 }
 
@@ -819,70 +807,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case veraLaunchInputMsg:
 		return m.showVeraLaunchInput(msg)
 	case veraLaunchedMsg:
-		if msg.err != nil {
-			if m.veraSetup != nil {
-				m.veraSetup.err, m.veraSetup.busy, m.veraSetup.done, m.veraSetup.enabled = msg.err, false, false, false
-				return m, nil
-			}
-			// Started straight from the wizard: report the failure and still
-			// launch any coding personas chosen alongside Vera.
-			m.err = msg.err
-			clear := tea.Tick(10*time.Second, func(time.Time) tea.Msg { return errClearMsg{} })
-			if m.veraPending != nil {
-				result := *m.veraPending
-				m.veraPending = nil
-				return m, tea.Batch(clear, func() tea.Msg { return m.launchFromWizard(result) })
-			}
-			return m, clear
-		}
-		m.veraSetup = nil
-		m.reviewStatuses = msg.statuses
-		m.activeView = ViewReviewRunners
-		if m.veraPending != nil {
-			// The coding launch can raise a conflict modal or error, which only the
-			// sessions view handles; Vera's runner stays visible under R.
-			m.activeView = ViewSessions
-			result := *m.veraPending
-			m.veraPending = nil
-			return m, func() tea.Msg { return m.launchFromWizard(result) }
-		}
-		return m, nil
-	case reviewDiscoveryRefreshMsg:
-		cmd := m.requestReviewDiscovery()
-		return m, cmd
-	case reviewDiscoveryTickMsg:
-		cmd := m.requestReviewDiscovery()
-		return m, tea.Batch(cmd, reviewDiscoveryTickCmd())
-	case reviewDiscoveryMsg:
-		m.reviewDiscoveryBusy = false
-		if msg.key == m.reviewPathsKey() {
-			m.reviewStatuses = msg.statuses
-			m.reviewDiscoveryWarning = msg.warning
-		}
-		if m.reviewDiscoveryAgain || msg.key != m.reviewPathsKey() {
-			m.reviewDiscoveryAgain = false
-			cmd := m.requestReviewDiscovery()
-			return m, cmd
-		}
-		return m, nil
-	case reviewRunnerSnapshotMsg:
-		if !m.reviewDiscoveryBusy {
-			m.reviewStatuses = msg.statuses
-		}
-		return m, nil
-	case reviewCheckoutSavedMsg:
-		if msg.err != nil {
-			m.reviewCheckoutError = msg.err.Error()
-			if m.reviewCheckout != nil {
-				m.reviewCheckout.busy = false
-			}
-			return m, nil
-		}
-		m.reviewPreferences[msg.id] = msg.path
-		m.reviewCheckout = nil
-		m.reviewCheckoutError = ""
-		cmd := m.requestReviewDiscovery()
-		return m, cmd
+		return m.finishVeraLaunch(msg)
 	case tea.FocusMsg:
 		// Pane regained focus (e.g. tmux pane switch). Force a full repaint
 		// so the diff-based renderer doesn't skip lines it assumes are unchanged.
@@ -895,7 +820,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			m.refreshSessions,
 			m.craReviewSummaries(),
-			m.reviewSnapshotCmd(),
 			detail,
 			tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		)
@@ -916,19 +840,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.replaceSessionRows(rows)
 		m.orphanWorktrees = msg.orphans
-		if m.reviewSupervisor != nil {
-			var metas []SessionMeta
-			for _, row := range msg.sessions {
-				metas = append(metas, SessionMeta{WorkingDir: row.WorkingDir, WorktreePath: row.WorktreePath})
-			}
-			paths := knownReviewCheckoutPaths(m.reviewSupervisor.cfg, "", metas)
-			paths = append(paths, m.reviewSupervisor.initialPaths...)
-			m.reviewPaths = paths
-			if m.reviewPathsKey() != m.reviewDiscoveryKey {
-				cmd := m.requestReviewDiscovery()
-				return m, cmd
-			}
-		}
 		return m, nil
 	case reviewSessionsMsg:
 		if msg.after != m.reviewAfter || msg.started.Before(m.reviewReadStarted) {
@@ -1098,8 +1009,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateConflict(msg)
 	case ViewWorktrees:
 		return m.updateWorktreeList(msg)
-	case ViewReviewRunners:
-		return m.updateReviewRunners(msg)
 	case ViewReviewDetail:
 		if key, ok := msg.(tea.KeyPressMsg); !ok || (key.String() != "q" && key.String() != "ctrl+c") {
 			return m.updateReviewDetail(msg)
@@ -1308,9 +1217,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reviewNext = ""
 			return m, m.refreshReviewSessions
 		case "r":
-			discovery := m.requestReviewDiscovery()
 			if m.selectedReview() != nil {
-				return m, tea.Batch(m.craReviewSummaries(), discovery)
+				return m, m.craReviewSummaries()
 			}
 			// Manual recovery retry for failed sessions, otherwise refresh.
 			idx := m.selectedSessionIdx()
@@ -1318,16 +1226,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if sh := m.healthMonitor.GetHealth(m.sessions[idx].Name); sh != nil && sh.Status == HealthFailed {
 					m.healthMonitor.ResetSession(m.sessions[idx].Name)
 					m.logger.Info("health: manual recovery reset for session %s", m.sessions[idx].Name)
-					return m, discovery
+					return m, nil
 				}
 			}
-			return m, tea.Batch(m.refreshSessions, m.craReviewSummaries(), discovery)
-		case "R":
-			if !m.craEnabled {
-				return m, nil
-			}
-			m.activeView = ViewReviewRunners
-			return m, m.reviewSnapshotCmd()
+			return m, tea.Batch(m.refreshSessions, m.craReviewSummaries())
 		case "m":
 			// Project workbench: compose the selected session's project (its
 			// repo-root group) into one natively interactive tmux view. One
@@ -2255,10 +2157,8 @@ func (m Model) viewContent() string {
 	// Delegate to sub-views if active.
 	switch m.activeView {
 	case ViewVeraLaunch:
-		if m.veraSetup != nil {
-			setup := *m.veraSetup
-			setup.width, setup.height = m.width, m.height
-			return setup.View().Content
+		if m.veraPrompt != nil {
+			return m.veraPrompt.View(m.width, m.height)
 		}
 	case ViewWizard:
 		m.wizard.width = m.width
@@ -2267,8 +2167,6 @@ func (m Model) viewContent() string {
 		return m.conflictModal.View()
 	case ViewWorktrees:
 		return m.worktreeList.View()
-	case ViewReviewRunners:
-		return m.viewReviewRunners()
 	case ViewReviewDetail:
 		return m.viewReviewDetail()
 	case ViewHelp:
@@ -2310,24 +2208,6 @@ func (m Model) viewContent() string {
 	} else if m.serverWarning != "" {
 		warnBannerStyle := lipgloss.NewStyle().Foreground(warningColor)
 		errLine = warnBannerStyle.Render("⚠ " + m.serverWarning + " — local sessions still available")
-	} else if (m.reviewSupervisor != nil && !m.reviewSupervisor.explicitOnly) || len(m.reviewStatuses) > 0 {
-		online, needs := 0, 0
-		for _, row := range m.reviewStatuses {
-			if row.State == "online" {
-				online++
-			}
-			if row.State == "needs_checkout" {
-				needs++
-			}
-		}
-		status := fmt.Sprintf("PR review runners: %d online, %d need checkout - R: runners", online, needs)
-		if m.reviewDiscoveryBusy {
-			status += " (discovering)"
-		}
-		if m.reviewDiscoveryWarning != "" {
-			status = "PR review runners: " + m.reviewDiscoveryWarning + " - R: runners"
-		}
-		errLine = lipgloss.NewStyle().Foreground(dimColor).Render(truncate(status, width))
 	}
 
 	// Help bar — context-sensitive based on confirmation state.
@@ -2681,13 +2561,13 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	indicator := "○"
 	indStyle := statusIdle
 	switch s.Status {
-	case "running", "attached", "reviewing":
+	case "running", "attached", "reviewing", "listening":
 		indicator = "●"
 		indStyle = statusRunning
 	case "waiting", "contact_lost", "queued", "paused":
 		indicator = "●"
 		indStyle = statusWaiting
-	case "exited":
+	case "exited", "stopped":
 		indicator = "●"
 		indStyle = statusError
 	case "error", "failed", "expired", "changes_requested", "needs_human":
@@ -2750,15 +2630,22 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 		parts = append(parts, s.Branch)
 	}
 	if s.Persona != "" {
+		label := s.Persona
+		if label == "code_reviewer" {
+			label = reviewSessionLabel
+		}
 		icon := PersonaCompactIcon(s.Persona)
 		if icon != "" {
-			parts = append(parts, lipgloss.NewStyle().Foreground(PersonaColor(s.Persona)).Render(icon)+" "+s.Persona)
+			parts = append(parts, lipgloss.NewStyle().Foreground(PersonaColor(s.Persona)).Render(icon)+" "+label)
 		} else {
-			parts = append(parts, s.Persona)
+			parts = append(parts, label)
 		}
 	}
 	if s.Project != "" {
 		parts = append(parts, s.Project)
+	}
+	if s.Persona == "code_reviewer" && s.CurrentWork != "" {
+		parts = append(parts, s.CurrentWork) // Vera: listening, reviewing PR #N or stopped.
 	}
 	if len(parts) > 0 {
 		subtitle := strings.Join(parts, " · ")

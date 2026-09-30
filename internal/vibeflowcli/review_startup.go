@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,15 +27,6 @@ type reviewStartupRepository struct {
 	Name     string `json:"repository_name"`
 }
 
-type reviewBinding struct {
-	SupportedRunnerCapabilities []string
-	Options                     reviewWatchOptions
-	ProjectName                 string
-	Repository                  reviewStartupRepository
-	Checkouts                   []reviewStartupCheckout
-	Problem                     string
-}
-
 type reviewStartupRepositoriesResponse struct {
 	Repositories                []reviewStartupRepository `json:"repositories"`
 	SupportedRunnerCapabilities []string                  `json:"supported_runner_capabilities"`
@@ -45,38 +34,8 @@ type reviewStartupRepositoriesResponse struct {
 
 type reviewDiscovery struct {
 	Projects []Project
-	Bindings []reviewBinding
-	Problems map[int64]string
-	Revoked  map[int64]bool
 	Complete bool // False for failed or legacy capped project enumeration.
 	Warning  string
-}
-
-func knownReviewCheckoutPaths(cfg *Config, cwd string, sessions []SessionMeta) []string {
-	paths := append([]string{cfg.DefaultWorkDir, cwd}, cfg.DirectoryHistory...)
-	for _, session := range sessions {
-		paths = append(paths, session.WorkingDir, session.WorktreePath)
-	}
-	seen := map[string]bool{}
-	var result []string
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-		path, err := filepath.Abs(path)
-		if err != nil {
-			continue
-		}
-		if canonical, err := filepath.EvalSymlinks(path); err == nil {
-			path = canonical
-		}
-		if !seen[path] {
-			seen[path] = true
-			result = append(result, path)
-		}
-	}
-	sort.Strings(result)
-	return result
 }
 
 func validReviewStartupRepository(repo reviewStartupRepository) bool {
@@ -85,31 +44,9 @@ func validReviewStartupRepository(repo reviewStartupRepository) bool {
 	return repo.ID > 0 && reviewStartupText(repo.Host, 253) && reviewStartupText(repo.Name, 512) && err == nil && owner != "." && repository != "." && host == strings.ToLower(repo.Host) && name == strings.ToLower(repo.Name) && (repo.Provider == "github" || repo.Provider == "bitbucket") && (repo.Provider != "bitbucket" || host == "bitbucket.org") && (repo.Provider != "github" || host != "bitbucket.org")
 }
 
-// An empty name uses the hostname; only limits projects when non-nil.
-func discoverReviewBindings(ctx context.Context, cfg *Config, paths []string, preferred map[string]string, name string, only map[int64]bool) (reviewDiscovery, error) {
-	if cfg == nil || cfg.ServerURL == "" || strings.TrimSpace(cfg.APIToken) == "" {
-		return reviewDiscovery{Problems: map[int64]string{}, Revoked: map[int64]bool{}}, fmt.Errorf("connect VibeFlow before starting review runners")
-	}
-	client := NewClient(cfg.ServerURL, cfg.APIToken)
-	d, err := listReviewProjects(ctx, client)
-	if err != nil {
-		return d, err
-	}
-	if only != nil {
-		projects := d.Projects[:0:0]
-		for _, p := range d.Projects {
-			if only[p.ID] {
-				projects = append(projects, p)
-			}
-		}
-		d.Projects = projects
-	}
-	return discoverReviewProjectBindings(ctx, cfg, client, d, paths, preferred, name)
-}
-
-// Shared read-only enumeration also serves browsing without runner consent.
+// Shared read-only enumeration for browsing managed reviews.
 func listReviewProjects(ctx context.Context, client *Client) (reviewDiscovery, error) {
-	d := reviewDiscovery{Problems: map[int64]string{}, Revoked: map[int64]bool{}}
+	var d reviewDiscovery
 	seenProjects, seenCursors := map[int64]bool{}, map[string]bool{}
 	cursor := ""
 	for {
@@ -158,78 +95,6 @@ func listReviewProjects(ctx context.Context, client *Client) (reviewDiscovery, e
 		}
 		seenCursors[page.Next] = true
 		cursor = page.Next
-	}
-	return d, nil
-}
-
-func discoverReviewProjectBindings(ctx context.Context, cfg *Config, client *Client, d reviewDiscovery, paths []string, preferred map[string]string, name string) (reviewDiscovery, error) {
-	base := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
-	// Runner IDs hash the name, so a long-lived TUI passes the name it started
-	// with; a later hostname change must not stop and re-key its runners.
-	base.Name = name
-	if base.Name == "" {
-		base.Name, _ = os.Hostname()
-	}
-	if !reviewStartupText(base.Name, 100) {
-		base.Name = "Review runner"
-	}
-	// Preferences are supplied explicitly; discovery never reads session consent.
-	base.Provider, base.Project, base.Repository = cfg.DefaultProvider, "", ""
-	for _, project := range d.Projects {
-		var linked reviewStartupRepositoriesResponse
-		err := client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", project.ID), nil, &linked)
-		if err != nil {
-			d.Problems[project.ID] = err.Error()
-			var response *reviewHTTPError
-			if errors.As(err, &response) && (response.Status == 401 || response.Status == 403 || response.Status == 404) {
-				d.Revoked[project.ID] = true
-			}
-			continue
-		}
-		valid := linked.Repositories != nil
-		seenLinks := map[string]bool{}
-		for _, repo := range linked.Repositories {
-			key := fmt.Sprintf("%s:%d", repo.Provider, repo.ID)
-			if !validReviewStartupRepository(repo) || seenLinks[key] {
-				valid = false
-				break
-			}
-			seenLinks[key] = true
-		}
-		if !valid {
-			d.Problems[project.ID] = "invalid linked review repository response"
-			continue
-		}
-		for _, repo := range linked.Repositories {
-			o := base
-			o.ProjectID, o.Project, o.GitProvider, o.RepositoryLinkID = project.ID, strconv.FormatInt(project.ID, 10), repo.Provider, repo.ID
-			binding := reviewBinding{Options: o, ProjectName: project.Name, Repository: repo, SupportedRunnerCapabilities: append([]string(nil), linked.SupportedRunnerCapabilities...)}
-			id := reviewBackgroundID(cfg.ServerURL, o)
-			if selected := findReviewStartupCheckout(ctx, preferred[id], []reviewStartupRepository{repo}); selected != nil {
-				binding.Options.Repository = selected.Path
-			}
-			seen := map[string]bool{}
-			for _, path := range paths {
-				if ctx.Err() != nil {
-					return d, ctx.Err()
-				}
-				candidate := findReviewStartupCheckout(ctx, path, []reviewStartupRepository{repo})
-				if candidate != nil && !seen[candidate.Identity] {
-					seen[candidate.Identity] = true
-					binding.Checkouts = append(binding.Checkouts, *candidate)
-				}
-			}
-			if binding.Options.Repository == "" {
-				if len(binding.Checkouts) == 1 {
-					binding.Options.Repository = binding.Checkouts[0].Path
-				} else if len(binding.Checkouts) == 0 {
-					binding.Problem = "No known checkout; press Enter to enter a path."
-				} else {
-					binding.Problem = "Choose a local checkout; press Enter."
-				}
-			}
-			d.Bindings = append(d.Bindings, binding)
-		}
 	}
 	return d, nil
 }
@@ -473,149 +338,4 @@ func reviewStartupText(value string, limit int) bool {
 		}
 	}
 	return true
-}
-
-// These are reusable inputs only. Consent and credentials never enter this file.
-type reviewStartupPreferences struct {
-	Checkouts        map[string]string              `json:"checkouts,omitempty"`
-	Context          reviewStartupPreferenceContext `json:"context"`
-	Project          string                         `json:"project"`
-	Provider         string                         `json:"provider"`
-	Repository       string                         `json:"repository"`
-	GitProvider      string                         `json:"git_provider"`
-	RepositoryLinkID int64                          `json:"repository_link_id"`
-	Model            string                         `json:"model,omitempty"`
-}
-
-func loadReviewGroupPreferences(cfg *Config, configPath, cwd string) (reviewWatchOptions, map[string]string) {
-	o := reviewStartupOptions(cfg, configPath, cwd)
-	choices := map[string]string{}
-	key, err := reviewStartupContext(cfg, configPath, cwd)
-	if err != nil {
-		return o, choices
-	}
-	data, err := os.ReadFile(filepath.Join(RootDir(), "review-runner-preferences.json"))
-	var prefs reviewStartupPreferences
-	if err != nil || len(data) > 4<<20 || json.Unmarshal(data, &prefs) != nil {
-		return o, choices
-	}
-	// default_project only scopes ordinary sessions, never the runner group.
-	prefs.Context.Project, key.Project = "", ""
-	if prefs.Context != key {
-		return o, choices
-	}
-	if reviewHarnessSupported(prefs.Provider) {
-		o.Provider, o.Model = prefs.Provider, prefs.Model
-	}
-	for id, path := range prefs.Checkouts {
-		choices[id] = path
-	}
-	if prefs.Repository != "" {
-		legacy := o
-		legacy.ProjectID, _ = strconv.ParseInt(prefs.Project, 10, 64)
-		legacy.RepositoryLinkID, legacy.GitProvider = prefs.RepositoryLinkID, prefs.GitProvider
-		if legacy.ProjectID > 0 && legacy.RepositoryLinkID > 0 {
-			choices[reviewBackgroundID(cfg.ServerURL, legacy)] = prefs.Repository
-		}
-	}
-	return o, choices
-}
-
-func saveReviewGroupPreferences(cfg *Config, configPath string, o reviewWatchOptions, choices map[string]string) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	key, err := reviewStartupContext(cfg, configPath, cwd)
-	if err != nil {
-		return err
-	}
-	key.Project = ""
-	server, err := url.Parse(key.ServerURL)
-	if err != nil || server.Host == "" || server.User != nil || server.RawQuery != "" || server.Fragment != "" {
-		return fmt.Errorf("invalid review server URL")
-	}
-	if !reviewHarnessSupported(o.Provider) || (o.Model != "" && !reviewStartupText(o.Model, 200)) {
-		return fmt.Errorf("invalid review provider or model")
-	}
-	if err := os.MkdirAll(RootDir(), 0700); err != nil {
-		return err
-	}
-	return saveReviewJSON(filepath.Join(RootDir(), "review-runner-preferences.json"), reviewStartupPreferences{Context: key, Provider: o.Provider, Model: o.Model, Checkouts: choices})
-}
-
-type reviewStartupPreferenceContext struct {
-	ServerURL  string `json:"server_url"`
-	ConfigPath string `json:"config_path"`
-	Project    string `json:"default_project"`
-	Provider   string `json:"default_provider"`
-	WorkDir    string `json:"default_work_dir"`
-	CWD        string `json:"cwd,omitempty"`
-	Gateway    bool   `json:"gateway"`
-}
-
-func reviewStartupContext(cfg *Config, configPath, cwd string) (reviewStartupPreferenceContext, error) {
-	path, err := filepath.Abs(configPath)
-	if err != nil || cfg == nil {
-		return reviewStartupPreferenceContext{}, fmt.Errorf("could not resolve review preference context")
-	}
-	if filepath.IsAbs(cfg.DefaultWorkDir) {
-		cwd = ""
-	} else if cwd, err = filepath.Abs(cwd); err != nil {
-		return reviewStartupPreferenceContext{}, fmt.Errorf("could not resolve review working directory")
-	}
-	return reviewStartupPreferenceContext{ServerURL: cfg.ServerURL, ConfigPath: path, Project: cfg.DefaultProject, Provider: cfg.DefaultProvider, WorkDir: cfg.DefaultWorkDir, CWD: cwd, Gateway: cfg.LLMGatewayEnabled}, nil
-}
-
-func reviewStartupOptions(cfg *Config, configPath, cwd string) reviewWatchOptions {
-	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
-	if cfg == nil {
-		return o
-	}
-	o.Project, o.Provider, o.Repository = cfg.DefaultProject, cfg.DefaultProvider, cfg.DefaultWorkDir
-	if o.Repository == "" {
-		o.Repository = cwd
-	}
-	o.Name, _ = os.Hostname()
-	if !reviewStartupText(o.Name, 100) {
-		o.Name = "Review runner"
-	}
-	key, err := reviewStartupContext(cfg, configPath, cwd)
-	if err != nil {
-		return o
-	}
-	data, err := os.ReadFile(filepath.Join(RootDir(), "review-runner-preferences.json"))
-	var prefs reviewStartupPreferences
-	if err != nil || len(data) > 64<<10 || json.Unmarshal(data, &prefs) != nil || prefs.Context != key {
-		return o
-	}
-	o.Project, o.Provider, o.Repository = prefs.Project, prefs.Provider, prefs.Repository
-	o.GitProvider, o.RepositoryLinkID, o.Model = prefs.GitProvider, prefs.RepositoryLinkID, prefs.Model
-	return o
-}
-
-func saveReviewStartupOptions(cfg *Config, configPath string, o reviewWatchOptions) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("could not resolve review working directory")
-	}
-	key, err := reviewStartupContext(cfg, configPath, cwd)
-	if err != nil {
-		return err
-	}
-	server, err := url.Parse(key.ServerURL)
-	if err != nil || server.Host == "" || server.User != nil || server.RawQuery != "" || server.Fragment != "" {
-		return fmt.Errorf("invalid review server URL")
-	}
-	if !filepath.IsAbs(o.Repository) || o.ProjectID <= 0 || o.RepositoryLinkID <= 0 || (o.GitProvider != "github" && o.GitProvider != "bitbucket") || !reviewHarnessSupported(o.Provider) {
-		return fmt.Errorf("resolve review inputs before saving preferences")
-	}
-	prefs := reviewStartupPreferences{Context: key, Project: strconv.FormatInt(o.ProjectID, 10), Provider: o.Provider, Repository: o.Repository, GitProvider: o.GitProvider, RepositoryLinkID: o.RepositoryLinkID, Model: o.Model}
-	if err = os.MkdirAll(RootDir(), 0700); err != nil {
-		return fmt.Errorf("could not save review preferences")
-	}
-	if err = saveReviewJSON(filepath.Join(RootDir(), "review-runner-preferences.json"), prefs); err != nil {
-		return fmt.Errorf("could not save review preferences")
-	}
-	return nil
 }

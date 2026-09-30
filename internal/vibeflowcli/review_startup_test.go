@@ -14,40 +14,12 @@ import (
 	"testing"
 )
 
-func TestReviewDiscoveryIgnoresDefaultProject(t *testing.T) {
-	repo, _ := reviewTestRepo(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/rest/v1/vibeflow/projects":
-			if r.URL.Query().Get("paginated") != "true" || r.URL.Query().Get("limit") != "100" {
-				t.Error("missing pagination opt-in")
-			}
-			fmt.Fprint(w, `[{"id":66,"name":"A"},{"id":67,"name":"66"}]`)
-		case "/rest/v1/vibeflow/projects/66/pr-review-repositories", "/rest/v1/vibeflow/projects/67/pr-review-repositories":
-			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"}]}`)
-		default:
-			t.Errorf("unexpected request %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	cfg := DefaultConfig()
-	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject = server.URL, "fixture", "66"
-	got, err := discoverReviewBindings(context.Background(), cfg, []string{repo}, nil, "", nil)
-	if err != nil || len(got.Bindings) != 2 {
-		t.Fatalf("coverage: %+v %v", got, err)
-	}
-	if got.Bindings[0].Options.ProjectID == got.Bindings[1].Options.ProjectID || got.Bindings[0].Options.Repository != repo || got.Bindings[1].Options.Repository != repo {
-		t.Fatalf("lost binding identity: %+v", got)
-	}
-}
-
 func TestReviewDiscoveryPagesAndPartialFailures(t *testing.T) {
 	for _, tc := range []struct {
-		name                                           string
-		duplicate, repeated, legacy, denied, malformed bool
+		name                        string
+		duplicate, repeated, legacy bool
 	}{
-		{name: "pages"}, {name: "duplicate", duplicate: true}, {name: "repeated cursor", repeated: true}, {name: "legacy cap", legacy: true}, {name: "project denied", denied: true}, {name: "malformed link", malformed: true},
+		{name: "pages"}, {name: "duplicate", duplicate: true}, {name: "repeated cursor", repeated: true}, {name: "legacy cap", legacy: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var requests int
@@ -78,20 +50,10 @@ func TestReviewDiscoveryPagesAndPartialFailures(t *testing.T) {
 					}
 					return
 				}
-				if strings.Contains(r.URL.Path, "/67/") && tc.denied {
-					w.WriteHeader(403)
-					return
-				}
-				if strings.Contains(r.URL.Path, "/67/") && tc.malformed {
-					fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":0,"repository_name":"acme/repo"}]}`)
-					return
-				}
-				fmt.Fprint(w, `{"repositories":[]}`)
+				t.Errorf("unexpected %s", r.URL.Path)
 			}))
 			defer server.Close()
-			cfg := DefaultConfig()
-			cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
-			d, err := discoverReviewBindings(context.Background(), cfg, nil, nil, "", nil)
+			d, err := listReviewProjects(context.Background(), NewClient(server.URL, "fixture"))
 			if tc.duplicate || tc.repeated {
 				if err == nil {
 					t.Fatal("accepted invalid page sequence")
@@ -110,45 +72,7 @@ func TestReviewDiscoveryPagesAndPartialFailures(t *testing.T) {
 			if requests != 2 || len(d.Projects) != 2 || !d.Complete {
 				t.Fatalf("incomplete pages: %+v requests=%d", d, requests)
 			}
-			if tc.denied && (!d.Revoked[67] || d.Problems[67] == "") {
-				t.Fatal("revocation lost")
-			}
-			if tc.malformed && (d.Problems[67] == "" || d.Revoked[67]) {
-				t.Fatal("malformed response treated as authoritative revocation")
-			}
 		})
-	}
-}
-
-func TestReviewDiscoveryCheckoutIdentityAndPreferences(t *testing.T) {
-	repo, _ := reviewTestRepo(t)
-	other, _ := reviewTestRepo(t)
-	alias := filepath.Join(t.TempDir(), "alias")
-	if err := os.Symlink(repo, alias); err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/rest/v1/vibeflow/projects" {
-			fmt.Fprint(w, `[{"id":66,"name":"A"}]`)
-		} else {
-			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"}]}`)
-		}
-	}))
-	defer server.Close()
-	cfg := DefaultConfig()
-	cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
-	d, err := discoverReviewBindings(context.Background(), cfg, []string{repo, alias}, nil, "", nil)
-	if err != nil || len(d.Bindings) != 1 || len(d.Bindings[0].Checkouts) != 1 || d.Bindings[0].Options.Repository == "" {
-		t.Fatalf("alias duplicated checkout: %+v %v", d, err)
-	}
-	id := reviewBackgroundID(cfg.ServerURL, d.Bindings[0].Options)
-	d, err = discoverReviewBindings(context.Background(), cfg, []string{repo, other}, map[string]string{id: "/missing"}, "", nil)
-	if err != nil || d.Bindings[0].Options.Repository != "" || len(d.Bindings[0].Checkouts) != 2 {
-		t.Fatalf("independent clones silently selected: %+v %v", d, err)
-	}
-	d, err = discoverReviewBindings(context.Background(), cfg, []string{repo, other}, map[string]string{id: other}, "", nil)
-	if err != nil || d.Bindings[0].Options.Repository != other {
-		t.Fatalf("valid remembered checkout ignored: %+v %v", d, err)
 	}
 }
 
@@ -335,89 +259,6 @@ func TestReviewStartupRejectsInvalidRepositoryDataAndHidesAPIErrors(t *testing.T
 				}
 			}
 		})
-	}
-}
-
-func TestReviewStartupPreferencesKeepSecretsAndConsentOutOfConfig(t *testing.T) {
-	previousRoot := rootDir
-	SetRootDir(t.TempDir())
-	t.Cleanup(func() { SetRootDir(previousRoot) })
-	cfg := DefaultConfig()
-	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject, cfg.DefaultProvider = "https://cloud.example", "startup-api-canary", "Axiom", "gemini"
-	cfg.SavedEnvVars = map[string]string{"TOKEN": "saved-env-canary"}
-	cwd := t.TempDir()
-	t.Chdir(cwd)
-	configPath := filepath.Join(RootDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("original-config-canary"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	initial := reviewStartupOptions(cfg, configPath, cwd)
-	if initial.Repository != cwd || initial.Provider != "gemini" || initial.Project != "Axiom" {
-		t.Fatalf("defaults: %+v", initial)
-	}
-	o := initial
-	o.Project, o.ProjectID, o.Provider, o.Model, o.RepositoryLinkID, o.GitProvider = "66", 66, "codex", "review-model", 7, "github"
-	if err := saveReviewStartupOptions(cfg, configPath, o); err != nil {
-		t.Fatal(err)
-	}
-	got := reviewStartupOptions(cfg, configPath, cwd)
-	if got.Project != "66" || got.Provider != "codex" || got.Model != "review-model" || got.RepositoryLinkID != 7 || got.GitProvider != "github" || got.Repository != cwd {
-		t.Fatalf("saved corrections lost: %+v", got)
-	}
-	data, err := os.ReadFile(filepath.Join(RootDir(), "review-runner-preferences.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, secret := range []string{"startup-api-canary", "saved-env-canary", "enabled", "consent", "APIToken"} {
-		if strings.Contains(string(data), secret) {
-			t.Fatalf("preferences persisted %s", secret)
-		}
-	}
-	var value map[string]any
-	if json.Unmarshal(data, &value) != nil {
-		t.Fatal("invalid preferences")
-	}
-	info, err := os.Stat(filepath.Join(RootDir(), "review-runner-preferences.json"))
-	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("preferences mode: %v %v", info, err)
-	}
-	config, _ := os.ReadFile(configPath)
-	if string(config) != "original-config-canary" {
-		t.Fatal("auth config was rewritten")
-	}
-	for _, change := range []string{"server", "config", "project", "provider", "workdir", "gateway"} {
-		t.Run(change, func(t *testing.T) {
-			other := *cfg
-			path := configPath
-			switch change {
-			case "server":
-				other.ServerURL += "/"
-			case "config":
-				path += ".other"
-			case "project":
-				other.DefaultProject = "Other"
-			case "provider":
-				other.DefaultProvider = "claude"
-			case "workdir":
-				other.DefaultWorkDir = t.TempDir()
-			case "gateway":
-				other.LLMGatewayEnabled = true
-			}
-			got := reviewStartupOptions(&other, path, cwd)
-			if got.RepositoryLinkID != 0 || got.Model != "" || got.Project == "66" {
-				t.Fatalf("stale context loaded preferences: %+v", got)
-			}
-		})
-	}
-	if got := reviewStartupOptions(cfg, configPath, t.TempDir()); got.RepositoryLinkID != 0 || got.Project != "Axiom" {
-		t.Fatalf("another launch directory reused saved inputs: %+v", got)
-	}
-	cfg.DefaultWorkDir = "checkout"
-	if err := saveReviewStartupOptions(cfg, configPath, o); err != nil {
-		t.Fatal(err)
-	}
-	if got := reviewStartupOptions(cfg, configPath, t.TempDir()); got.RepositoryLinkID != 0 || got.Repository != "checkout" {
-		t.Fatalf("relative configured checkout reused another launch directory: %+v", got)
 	}
 }
 

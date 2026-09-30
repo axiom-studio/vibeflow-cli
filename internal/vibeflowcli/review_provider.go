@@ -22,6 +22,8 @@ type reviewChildSpec struct {
 	DeadlineAt int64                  `json:"deadline_at"`
 	CapacityFD int                    `json:"capacity_fd,omitempty"`
 	Cleanup    *reviewProviderCleanup `json:"cleanup,omitempty"`
+	// Interactive runs the harness in the foreground of the guard's terminal.
+	Interactive bool `json:"interactive,omitempty"`
 }
 
 func reviewResultSchema() []byte {
@@ -175,6 +177,43 @@ Schema:
 		spec.Env = append(spec.Env, k+"="+env[k])
 	}
 	return spec, nil
+}
+
+// makeReviewSpecInteractive turns a prepared headless review into the
+// harness's normal interactive UI, launched exactly like a persona: its launch
+// template with full permissions, and the review task as the initial prompt.
+// The harness still writes result.json; the runner stops it once that exists.
+func makeReviewSpecInteractive(spec *reviewChildSpec, cfg *Config, provider, model, root string) error {
+	command, err := RenderLaunchCommand(cfg.Providers[provider].LaunchTemplate, LaunchTemplateVars{WorkDir: spec.Dir, SkipPermissions: true, Model: model, Binary: spec.Binary})
+	if err != nil {
+		return err
+	}
+	if command == "" {
+		command = shellQuote(spec.Binary)
+	}
+	prompt := "Your complete PR review task is in the file " + filepath.Join(root, "task.txt") + ". Read that whole file first, then follow it exactly. When result.json is written, stop and wait; VibeFlow closes this session."
+	if provider == "gemini" {
+		// AppendVibeflowInitPrompt uses gemini's headless -p; -i keeps its UI.
+		command += " -i " + shellQuote(prompt)
+	} else {
+		command = AppendVibeflowInitPrompt(command, provider, prompt)
+	}
+	env := map[string]string{}
+	for _, kv := range spec.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+	spec.Env = nil
+	for k, v := range withClaudeHardeningEnv(provider, env) {
+		spec.Env = append(spec.Env, k+"="+v)
+	}
+	sort.Strings(spec.Env)
+	if provider == "copilot" {
+		_, _ = EnsureCopilotFirstRunConfig(spec.Dir) // Same first-run pre-seed as persona launches.
+	}
+	spec.Binary, spec.Args, spec.InputFile, spec.Interactive = "/bin/sh", []string{"-c", "exec " + command}, os.DevNull, true
+	return nil
 }
 
 // Checks what can fail before claiming a server attempt, without inference.

@@ -168,6 +168,24 @@ func newReviewCapacity(root string, limit int) (*reviewCapacity, error) {
 	return &reviewCapacity{Directory: dir, Limit: limit, owner: owner}, nil
 }
 
+// sharedReviewCapacity is the one capacity group every foreground listener
+// in root joins, so separate processes (one per Vera session) share the limit.
+// It has no owner: slot locks and pending receipts alone are the reservations.
+func sharedReviewCapacity(root string, limit int) (*reviewCapacity, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("review_concurrency must be a positive integer")
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(root, "review-capacity-shared")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	return &reviewCapacity{Directory: dir, Limit: limit}, nil
+}
+
 func (c *reviewCapacity) validate() error {
 	if c.Limit <= 0 || !filepath.IsAbs(c.Directory) || filepath.Clean(c.Directory) != c.Directory || !strings.HasPrefix(filepath.Base(c.Directory), "review-capacity-") {
 		return fmt.Errorf("invalid review capacity group")
@@ -240,7 +258,9 @@ func (c *reviewCapacity) acquire(requestID string) (*os.File, error) {
 	used := len(reserved)
 	for _, entry := range entries {
 		n, err := strconv.Atoi(strings.TrimPrefix(entry.Name(), "slot-"))
-		if err != nil || n < 0 || n >= c.Limit || entry.Name() != "slot-"+strconv.Itoa(n) || !entry.Type().IsRegular() {
+		// The shared group outlives any one limit: a slot above a lowered
+		// limit still counts while a listener holds it.
+		if err != nil || n < 0 || entry.Name() != "slot-"+strconv.Itoa(n) || !entry.Type().IsRegular() {
 			return nil, fmt.Errorf("invalid review capacity slot")
 		}
 		if reserved[entry.Name()] {

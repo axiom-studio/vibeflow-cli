@@ -26,6 +26,7 @@ type reviewJob struct {
 	Provider         string `json:"provider"`
 	ProviderHost     string `json:"provider_host"`
 	RepositoryLinkID int64  `json:"repository_link_id"`
+	Number           int64  `json:"number,omitempty"` // Pull request number, for local display only.
 	HeadSHA          string `json:"head_sha"`
 	BaseSHA          string `json:"base_sha"`
 	State            string `json:"state"`

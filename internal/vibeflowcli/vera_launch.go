@@ -2,18 +2,43 @@ package vibeflowcli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+
+	"vibeflow-cli/sessionid"
 )
 
+// veraBinding is the repository a Vera session listens for. Its harness is the
+// session's Provider, its model the session's Model (empty: harness default)
+// and its checkout the session's WorkingDir.
+type veraBinding struct {
+	ProjectID        int64  `json:"project_id"`
+	RepositoryLinkID int64  `json:"repository_link_id"`
+	GitProvider      string `json:"git_provider"`
+	RunnerName       string `json:"runner_name"`
+}
+
+// veraExecutable is the CLI a Vera session's listener runs; tests substitute a
+// freshly built binary for the test executable.
+var veraExecutable = os.Executable
+
 type veraLaunchRequestedMsg struct{ result WizardResult }
+
+// veraLaunchedMsg reports a Vera session launch. existing names the live Vera
+// session that already listens for the repository, which is attached instead.
 type veraLaunchedMsg struct {
-	statuses []reviewRunnerStatus
 	err      error
+	existing string
 }
 
 // veraLaunchInputMsg means the binding needs a choice the wizard cannot make:
@@ -23,11 +48,78 @@ type veraLaunchInputMsg struct {
 	input   *reviewStartupInput
 }
 
-// beginVeraLaunch starts Vera with the harness chosen in the wizard's Provider
-// step and the harness default model. Coding personas selected alongside Vera
-// launch after it with their own settings.
+func veraOptions(meta SessionMeta) reviewWatchOptions {
+	b := meta.Vera
+	return reviewWatchOptions{Project: strconv.FormatInt(b.ProjectID, 10), ProjectID: b.ProjectID, Repository: meta.WorkingDir, RepositoryLinkID: b.RepositoryLinkID, GitProvider: b.GitProvider, Provider: meta.Provider, Model: meta.Model, Kind: "local", Name: b.RunnerName}
+}
+
+// veraListenerCommand is the foreground review-watch a Vera session runs.
+// --cra is the explicit invocation consent. Credentials come from the config
+// file, so no token appears on the command line or in the session env.
+func veraListenerCommand(meta SessionMeta) (string, error) {
+	bin, err := veraExecutable()
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(RootDir())
+	if err != nil {
+		return "", err
+	}
+	config := flagConfigPath
+	if config == "" {
+		config = ConfigPath()
+	}
+	if config, err = filepath.Abs(config); err != nil {
+		return "", err
+	}
+	o := veraOptions(meta)
+	args := []string{bin, "--cra", "--root", root, "--config", config, "review-watch", "--project", o.Project, "--repo", o.Repository, "--repository-link", strconv.FormatInt(o.RepositoryLinkID, 10), "--git-provider", o.GitProvider, "--provider", o.Provider}
+	if o.Model != "" {
+		args = append(args, "--model", o.Model)
+	}
+	args = append(args, "--name", o.Name)
+	// exec: the listener itself gets the hangup when its session is deleted.
+	return "exec " + shellJoin(args), nil
+}
+
+// veraRowStatus reads what a Vera session's listener is doing from its durable
+// runner state, the same receipt it recovers from.
+func veraRowStatus(meta SessionMeta, serverURL string, paneDead bool) (status, work string) {
+	if paneDead {
+		return "stopped", "stopped"
+	}
+	data, err := os.ReadFile(filepath.Join(RootDir(), "review-runners", reviewBackgroundID(serverURL, veraOptions(meta)), "state.json"))
+	var state reviewRunnerState
+	if err == nil && json.Unmarshal(data, &state) == nil && state.Pending != nil {
+		if e := state.Pending.Execution; e != nil {
+			return "reviewing", "reviewing " + reviewPRLabel(e.Review)
+		}
+		return "reviewing", "claiming a PR review"
+	}
+	return "listening", "listening"
+}
+
+// veraRunners maps each stored Vera session's runner ID to its binding.
+func (m Model) veraRunners() map[string]reviewWatchOptions {
+	runners := map[string]reviewWatchOptions{}
+	if m.store == nil || m.config == nil {
+		return runners
+	}
+	metas, _ := m.store.List()
+	for _, meta := range metas {
+		if meta.Vera != nil {
+			o := veraOptions(meta)
+			runners[reviewBackgroundID(m.config.ServerURL, o)] = o
+		}
+	}
+	return runners
+}
+
+// beginVeraLaunch resolves the repository binding for the harness chosen in
+// the wizard's Provider step, then starts Vera's tmux session. Coding personas
+// selected alongside Vera launch after it with their own settings.
 func (m Model) beginVeraLaunch(result WizardResult) (tea.Model, tea.Cmd) {
-	if !m.craEnabled || m.reviewSupervisor == nil {
+	if !m.craEnabled {
 		m.err = fmt.Errorf("start this CLI with --cra to launch Vera")
 		return m, nil
 	}
@@ -54,34 +146,157 @@ func (m Model) beginVeraLaunch(result WizardResult) (tea.Model, tea.Cmd) {
 		pending.Personas, pending.Persona = coding, coding[0]
 		m.veraPending = &pending
 	}
-	s, projectName := m.reviewSupervisor, result.ProjectName
-	o := reviewWatchOptions{Project: strconv.FormatInt(result.ProjectID, 10), ProjectID: result.ProjectID, Repository: result.WorkDir, Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute, Name: s.options.Name, RepositoryRequestsApproved: true, Provider: provider}
+	projectName := result.ProjectName
+	o := reviewWatchOptions{Project: strconv.FormatInt(result.ProjectID, 10), ProjectID: result.ProjectID, Repository: result.WorkDir, Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute, RepositoryRequestsApproved: true, Provider: provider}
 	if result.ProjectID <= 0 {
 		o.Project = projectName
 	}
 	m.veraProjectName = projectName
+	cfg := m.config
 	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(s.ctx, time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		resolved, input, err := resolveReviewStartup(ctx, s.cfg, o, true)
+		resolved, input, err := resolveReviewStartup(ctx, cfg, o, true)
 		if err != nil {
 			return veraLaunchedMsg{err: err}
 		}
 		if input != nil {
 			return veraLaunchInputMsg{options: resolved, input: input}
 		}
-		return startVera(ctx, s, resolved, projectName)
+		return m.launchVeraSession(resolved, projectName)
 	}
 }
 
-// showVeraLaunchInput opens the small setup popup for the one choice the
-// binding still needs; the harness and model are already settled.
+// launchVeraSession creates Vera's tmux session through the same machinery as
+// every other persona. A live Vera session for the same repository is reused.
+func (m Model) launchVeraSession(o reviewWatchOptions, projectName string) tea.Msg {
+	meta := SessionMeta{Provider: o.Provider, Project: projectName, ProjectID: o.ProjectID, Persona: "code_reviewer", WorkingDir: o.Repository, SessionType: "vibeflow", Model: o.Model, Vera: &veraBinding{ProjectID: o.ProjectID, RepositoryLinkID: o.RepositoryLinkID, GitProvider: o.GitProvider, RunnerName: o.Name}, CreatedAt: time.Now()}
+	if existing, live, ok := m.veraSessionFor(meta); ok {
+		if live {
+			if existing.Provider != meta.Provider || existing.Model != meta.Model {
+				return veraLaunchedMsg{err: fmt.Errorf("Vera is already listening for this repository with %s in %s; delete that session with d to change its harness", existing.Provider, strings.TrimPrefix(existing.TmuxSession, sessionPrefix))}
+			}
+			return veraLaunchedMsg{existing: existing.TmuxSession}
+		}
+		m.killSessionMeta(existing) // Stopped: replace it rather than list two.
+	}
+	meta.Name = sessionid.GenerateSessionID(o.Repository)
+	meta.Branch = GetGitBranch(o.Repository)
+	meta.TmuxSession = m.tmux.FullSessionName(meta.Provider, meta.Name)
+	if err := startVeraTmuxSession(m.tmux, meta, ""); err != nil {
+		return veraLaunchedMsg{err: err}
+	}
+	if m.store != nil {
+		_ = m.store.Add(meta)
+	}
+	if m.cache != nil {
+		_ = m.cache.Add(meta)
+	}
+	return veraLaunchedMsg{}
+}
+
+// startVeraTmuxSession runs the listener in meta's tmux session, or respawns
+// it in an exited pane.
+func startVeraTmuxSession(tmux *TmuxManager, meta SessionMeta, respawnPane string) error {
+	command, err := veraListenerCommand(meta)
+	if err != nil {
+		return err
+	}
+	if err := tmux.CreateSessionWithOpts(SessionOpts{PaneID: respawnPane, Name: meta.Name, Provider: meta.Provider, WorkDir: meta.WorkingDir, Command: command, Branch: meta.Branch, Project: meta.Project, Persona: meta.Persona}); err != nil {
+		return err
+	}
+	if !tmux.HasSession(meta.TmuxSession) {
+		return fmt.Errorf("session %q was not created — tmux has-session check failed", meta.TmuxSession)
+	}
+	_ = tmux.BindSessionKeys(meta.TmuxSession)
+	return nil
+}
+
+// restartVeraSession re-runs the same listener command: in place when the
+// pane exited, otherwise in a fresh session.
+func restartVeraSession(meta SessionMeta, tmux *TmuxManager, store *Store, cache *SessionCache, recoveryPane string) (SessionMeta, error) {
+	target := meta.TmuxSession
+	if recoveryPane != "" {
+		target = recoveryPane
+	}
+	respawn := ""
+	if pane, _ := tmux.agentPaneID(target); pane != "" {
+		if dead, err := tmux.run("display-message", "-p", "-t", pane, "#{pane_dead}"); err == nil && strings.TrimSpace(dead) == "1" {
+			respawn = pane
+		}
+	}
+	if recoveryPane != "" && respawn == "" {
+		return SessionMeta{}, fmt.Errorf("pane %q has not exited", recoveryPane)
+	}
+	if respawn == "" && tmux.HasSession(meta.TmuxSession) {
+		if err := tmux.KillSession(meta.TmuxSession); err != nil {
+			return SessionMeta{}, err
+		}
+	}
+	if err := startVeraTmuxSession(tmux, meta, respawn); err != nil {
+		return SessionMeta{}, err
+	}
+	if store != nil {
+		_ = store.Add(meta)
+	}
+	if cache != nil {
+		_ = cache.Add(meta)
+	}
+	return meta, nil
+}
+
+// veraSessionFor finds the stored Vera session for meta's repository and
+// whether its listener pane is still running.
+func (m Model) veraSessionFor(meta SessionMeta) (existing SessionMeta, live, ok bool) {
+	if m.store == nil {
+		return SessionMeta{}, false, false
+	}
+	metas, _ := m.store.List()
+	for _, stored := range metas {
+		if b := stored.Vera; b != nil && b.ProjectID == meta.Vera.ProjectID && b.RepositoryLinkID == meta.Vera.RepositoryLinkID && b.GitProvider == meta.Vera.GitProvider {
+			sessions, _ := m.tmux.ListSessions()
+			for _, s := range sessions {
+				if s.Name == stored.TmuxSession {
+					return stored, !s.PaneDead, true
+				}
+			}
+			return stored, false, true
+		}
+	}
+	return SessionMeta{}, false, false
+}
+
+// finishVeraLaunch returns to the session list, reports the outcome, attaches
+// an existing Vera session, and launches coding personas chosen alongside Vera.
+func (m Model) finishVeraLaunch(msg veraLaunchedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil && m.veraPrompt != nil {
+		m.veraPrompt.busy, m.veraPrompt.err = false, msg.err
+		return m, nil
+	}
+	m.veraPrompt = nil
+	if m.activeView == ViewVeraLaunch {
+		m.activeView = ViewSessions
+	}
+	cmds := []tea.Cmd{m.refreshSessions}
+	if msg.err != nil {
+		m.err = msg.err
+		cmds = append(cmds, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return errClearMsg{} }))
+	}
+	if name := msg.existing; name != "" {
+		cmds = append(cmds, func() tea.Msg { return autoAttachMsg{name: name} })
+	}
+	if m.veraPending != nil {
+		result := *m.veraPending
+		m.veraPending = nil
+		cmds = append(cmds, func() tea.Msg { return m.launchFromWizard(result) })
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// showVeraLaunchInput opens the small prompt for the one choice the binding
+// still needs; the harness and model are already settled.
 func (m Model) showVeraLaunchInput(msg veraLaunchInputMsg) (tea.Model, tea.Cmd) {
-	setup := newReviewStartupModel(m.reviewSupervisor.ctx, m.reviewSupervisor.cfg, m.reviewSupervisor.configPath, msg.options)
-	setup.selectedBinding, setup.repositorySelected = true, true
-	setup.title, setup.cancelHint = reviewSessionLabel, "Esc: cancel"
-	setup.input = msg.input
-	m.veraSetup = &setup
+	m.veraPrompt = &veraPrompt{cfg: m.config, options: msg.options, input: msg.input}
 	m.activeView = ViewVeraLaunch
 	return m, nil
 }
@@ -91,79 +306,164 @@ func (m Model) updateVeraLaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	}
-	if m.veraSetup == nil {
+	if m.veraPrompt == nil {
 		m.activeView = ViewSessions
 		return m, nil
 	}
-	if m.veraSetup.done && m.veraSetup.busy {
-		return m, nil
+	next, cmd := m.veraPrompt.Update(msg)
+	m.veraPrompt = &next
+	if next.cancelled {
+		return m.finishVeraLaunch(veraLaunchedMsg{})
 	}
-	next, cmd := m.veraSetup.Update(msg)
-	setup := next.(reviewStartupModel)
-	m.veraSetup = &setup
-	if !setup.done && !setup.quit {
-		return m, cmd
+	if next.resolved {
+		next.resolved = false // Launch once; the prompt stays busy until it reports.
+		m.veraPrompt = &next
+		o, projectName := next.options, m.veraProjectName
+		return m, func() tea.Msg { return m.launchVeraSession(o, projectName) }
 	}
-	if setup.quit {
-		m.quitting = true
-		return m, tea.Quit
-	}
-	if !setup.enabled {
-		m.veraSetup = nil
-		m.activeView = ViewSessions
-		if m.veraPending != nil {
-			result := *m.veraPending
-			m.veraPending = nil
-			return m, func() tea.Msg { return m.launchFromWizard(result) }
-		}
-		return m, nil
-	}
-	o, s, projectName := setup.options, m.reviewSupervisor, m.veraProjectName
-	m.veraSetup.busy = true
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(s.ctx, time.Minute)
+	return m, cmd
+}
+
+// veraPrompt asks for the one binding input the wizard cannot supply.
+type veraPrompt struct {
+	cfg       *Config
+	options   reviewWatchOptions
+	input     *reviewStartupInput
+	text      string
+	cursor    int
+	busy      bool
+	err       error
+	resolved  bool // The binding is complete; launch the session.
+	cancelled bool
+}
+
+type veraPromptResolvedMsg struct {
+	options reviewWatchOptions
+	input   *reviewStartupInput
+	err     error
+}
+
+func (p veraPrompt) resolve() tea.Cmd {
+	cfg, o := p.cfg, p.options
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		return startVera(ctx, s, o, projectName)
+		o, input, err := resolveReviewStartup(ctx, cfg, o, true)
+		return veraPromptResolvedMsg{options: o, input: input, err: err}
 	}
 }
 
-// startVera starts the runner for a resolved binding, refusing to silently
-// keep a runner already listening with another harness or model.
-func startVera(ctx context.Context, s *reviewSupervisor, o reviewWatchOptions, projectName string) veraLaunchedMsg {
-	binding, err := resolveVeraBinding(ctx, s.cfg, o, projectName)
-	if err != nil {
-		return veraLaunchedMsg{err: err}
+func (p veraPrompt) Update(msg tea.Msg) (veraPrompt, tea.Cmd) {
+	if paste, ok := msg.(tea.PasteMsg); ok {
+		msg = tea.KeyPressMsg{Text: paste.Content}
 	}
-	id := reviewBackgroundID(s.cfg.ServerURL, binding.Options)
-	for _, row := range s.Snapshot() {
-		if running := row.Binding.Options; row.BindingID == id && row.State == "online" && (running.Provider != o.Provider || running.Model != o.Model) {
-			model := running.Model
-			if model == "" {
-				model = "harness default"
+	switch msg := msg.(type) {
+	case veraPromptResolvedMsg:
+		p.busy, p.err = false, msg.err
+		p.options, p.input = msg.options, msg.input
+		p.cursor, p.text = 0, ""
+		if p.err == nil && p.input == nil {
+			p.resolved, p.busy = true, true
+		}
+	case tea.KeyPressMsg:
+		key := msg.String()
+		if p.busy {
+			return p, nil
+		}
+		if key == "esc" || (p.err != nil && key == "enter") {
+			p.cancelled = true
+			return p, nil
+		}
+		if p.err != nil {
+			if key == "r" {
+				p.err, p.busy = nil, true
+				return p, p.resolve()
 			}
-			return veraLaunchedMsg{err: fmt.Errorf("Vera is already listening for this repository with %s (%s); close this CLI and start Vera again to change its harness", running.Provider, model)}
+			return p, nil
 		}
+		if p.input == nil {
+			return p, nil
+		}
+		if len(p.input.Choices) > 0 {
+			switch key {
+			case "up", "k":
+				p.cursor = max(0, p.cursor-1)
+			case "down", "j":
+				p.cursor = min(len(p.input.Choices)-1, p.cursor+1)
+			case "enter":
+				p.text = p.input.Choices[p.cursor].Value
+			}
+		} else if key == "backspace" {
+			if runes := []rune(p.text); len(runes) > 0 {
+				p.text = string(runes[:len(runes)-1])
+			}
+		} else {
+			for _, r := range msg.Text {
+				if unicode.IsPrint(r) && len(p.text) < 4096 {
+					p.text += string(r)
+				}
+			}
+		}
+		value := strings.TrimSpace(p.text)
+		if key != "enter" || value == "" {
+			return p, nil
+		}
+		switch p.input.Field {
+		case "project":
+			p.options.Project, p.options.ProjectID, p.options.RepositoryLinkID = value, 0, 0
+		case "repository":
+			p.options.Repository, p.options.RepositoryLinkID = value, 0
+		case "repository_link":
+			provider, id, _ := strings.Cut(value, ":")
+			p.options.GitProvider = provider
+			p.options.RepositoryLinkID, _ = strconv.ParseInt(id, 10, 64)
+		case "model":
+			p.options.Model = value
+		default:
+			p.err = fmt.Errorf("unsupported Vera setup field")
+			return p, nil
+		}
+		p.busy = true
+		return p, p.resolve()
 	}
-	return veraLaunchedMsg{statuses: s.StartBinding(binding)}
+	return p, nil
 }
 
-func resolveVeraBinding(ctx context.Context, cfg *Config, o reviewWatchOptions, projectName string) (reviewBinding, error) {
-	if projectName == "" {
-		projectName = strconv.FormatInt(o.ProjectID, 10)
+func (p veraPrompt) View(width, height int) string {
+	if width == 0 {
+		width = 80
 	}
-	id := reviewBackgroundID(cfg.ServerURL, o)
-	d, err := discoverReviewProjectBindings(ctx, cfg, NewClient(cfg.ServerURL, cfg.APIToken), reviewDiscovery{Projects: []Project{{ID: o.ProjectID, Name: projectName}}, Problems: map[int64]string{}, Revoked: map[int64]bool{}}, []string{o.Repository}, map[string]string{id: o.Repository}, o.Name)
-	if err != nil {
-		return reviewBinding{}, err
+	if height == 0 {
+		height = 24
 	}
-	if problem := d.Problems[o.ProjectID]; problem != "" {
-		return reviewBinding{}, fmt.Errorf("could not load selected review repository: %s", problem)
-	}
-	for _, b := range d.Bindings {
-		if b.Options.ProjectID == o.ProjectID && b.Options.RepositoryLinkID == o.RepositoryLinkID && b.Options.GitProvider == o.GitProvider && b.Options.Repository != "" {
-			b.Options = o
-			return b, nil
+	popupWidth := max(1, min(64, width-6))
+	contentWidth := max(1, popupWidth-4)
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render(reviewSessionLabel) + "\n\n")
+	switch {
+	case p.busy:
+		b.WriteString("Starting Vera...")
+	case p.err != nil:
+		b.WriteString(lipgloss.NewStyle().Foreground(errorColor).Render(p.err.Error()))
+		b.WriteString("\n\nEnter: close  r: retry")
+	case p.input != nil:
+		b.WriteString(lipgloss.NewStyle().Width(contentWidth).Render(p.input.Message) + "\n\n")
+		if len(p.input.Choices) == 0 {
+			b.WriteString(ansi.TruncateLeft(p.text, max(0, lipgloss.Width(p.text)-contentWidth+1), "") + "█\n")
+		} else {
+			visible := max(1, min(5, height-12))
+			start := max(0, p.cursor-visible/2)
+			for i := start; i < min(len(p.input.Choices), start+visible); i++ {
+				prefix := "  "
+				if i == p.cursor {
+					prefix = "> "
+				}
+				b.WriteString(ansi.Truncate(prefix+p.input.Choices[i].Label, contentWidth, "…") + "\n")
+			}
+			b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render(fmt.Sprintf("%d of %d", p.cursor+1, len(p.input.Choices))) + "\n")
 		}
+		b.WriteString("\nEnter: continue  Esc: cancel")
 	}
-	return reviewBinding{}, fmt.Errorf("selected checkout no longer matches the linked repository; choose its current checkout or repository link")
+	popup := lipgloss.NewStyle().Width(popupWidth).Border(oceanBorder()).BorderForeground(accentColor).Padding(1, 2).Render(b.String())
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, popup)
 }

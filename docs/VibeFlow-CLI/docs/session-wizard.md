@@ -20,27 +20,42 @@ Press **`n`** in the TUI (or use headless `vibeflow launch` with flags) to creat
 
 Exact labels and ordering match your installed version; the list above reflects the intended product flow.
 
-## Vera PR review runner
+## Vera PR review session
 
 With `vibeflow --cra`, the persona picker also offers **Vera · Code Reviewer**.
+This is the only way to run Vera in the TUI; `--cra` starts straight into the session list with no startup prompt.
 Selecting only Vera uses the same wizard with fewer steps: **Directory > Type > Project > Team > Provider > Confirm**.
-Env, Routing, Qwen, Endpoint, Branch, Worktree and Permissions are skipped because Vera always runs in its own disposable worktree with the harness's full-permission mode.
+Env, Routing, Qwen, Endpoint, Branch, Worktree and Permissions are skipped because each review runs in its own disposable worktree with the harness's full-permission mode.
 The **Provider** step is the ordinary provider list; harnesses Vera cannot run are shown dimmed and cannot be selected, and uninstalled ones show **(not installed)**.
 Vera can run Claude, Codex, Copilot, Cursor, Gemini, Kiro or Qwen, in normal mode like the other personas: your own login, environment, MCP servers and credentials, with full permissions.
 Codex works with a ChatGPT subscription login as well as an API key.
 There is no model question: Vera uses the harness default model.
-The **Confirm** step shows the project, checkout, harness and "harness default" model, and states that Vera listens for `@vibeflow review` on the linked repository until this CLI closes and runs with your login and full permissions in a disposable worktree.
-Pressing Enter starts Vera directly after checking the checkout against the project's linked repositories.
+The **Confirm** step shows the project, checkout, harness and "harness default" model, and states that Vera runs in its own tmux session, listening for `@vibeflow review` on the linked repository until you delete the session.
+Pressing Enter checks the checkout against the project's linked repositories and then creates the session.
 Only when that check needs input, because several repository links match or the checkout does not match any link, a small Vera popup asks for that one choice.
 With the LLM gateway enabled, that popup also asks for the review model, because gateway reviews require an explicit model.
-Vera listens for repository review requests while idle and starts a fresh review for each assigned PR.
-Each review runs in its own disposable git worktree of the PR head, never in your checkout, and the worktree and all review files are deleted when the review ends.
-The `R` review-runner view shows listening, running, or failed status, and closing the TUI stops only its owned runners.
+
+Each Vera session serves exactly one project, repository link and checkout; start one Vera session per repository.
+It is an ordinary tmux session in the session list, like every other persona: attach with Enter, detach, delete with `d`, and it keeps running after the TUI exits.
+Its row shows **Vera · Code Reviewer**, the harness in the session name, the project and the listener's state: `listening`, `reviewing PR #N` or `stopped`.
+The session runs the foreground listener, `vibeflow --cra --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>`, with `--model` only when a model was chosen.
+No model runs while it listens.
+When a review is claimed, the pane shows the PR number and head commit, prepares a fresh worktree of the PR head, and then runs the harness's own interactive UI in the pane, launched like a persona (its launch template with full permissions) with the review task as the initial prompt.
+You can watch or type into the harness while it reviews.
+Once the harness writes a complete `result.json`, Vera closes it (SIGINT, then SIGTERM, then SIGKILL), restores the terminal, prints the result (clean, changes requested with the number of new findings, or failed with its reason), removes the worktree, and returns to listening.
+If the harness exits within a few seconds without a result, the pane shows its login hint.
+Deleting the session stops the listener gracefully: an in-flight review is reported as failed, its worktree is removed, and the runner deregisters.
+Restarting the session re-runs the same listener command.
+Choosing Vera again for a repository that already has a live Vera session attaches that session; choosing a different harness for it reports the running one instead, and a stopped session is replaced.
+All Vera sessions in one root share `review_concurrency`, so at most that many harness reviews run at once; a session at the limit keeps listening without claiming work.
+First-run prompts behave as they do for a persona in a new worktree: Gemini trusts the worktree through `GEMINI_CLI_TRUST_WORKSPACE`, Copilot's first-run dialogs are pre-seeded, Kiro uses `--trust-all-tools`, and Claude and Codex use their permission-bypass flags.
+Cursor's `--trust` works only in headless mode, so interactive Cursor can still ask to trust the worktree.
+
 Selecting Vera with coding personas keeps the full wizard for the coding personas.
 On the team **Provider** step, Vera's row uses its own override or the team default, and cycles only through harnesses Vera can run; the step does not continue while Vera's row shows a harness it cannot run.
-On confirm, Vera starts with that harness and then the coding agents launch with their own settings and overrides.
+On confirm, Vera's session starts with that harness and then the coding agents launch with their own settings and overrides.
 If Vera cannot start, the error is shown and the coding agents still launch.
-The selection grants consent only for this invocation and repository, without changing saved coding-agent configuration.
+The selection grants consent only for that session's repository, without changing saved coding-agent configuration.
 Headless `launch --persona code_reviewer` is intentionally rejected with an explicit `review-watch` command instead of starting a coding-agent loop.
 
 ## Multi-persona launch

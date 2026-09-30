@@ -357,7 +357,7 @@ func (m *Model) requestReviewDetail() tea.Cmd {
 	m.reviewDetail.Busy = true
 	d := m.reviewDetail
 	client := m.client
-	supervisor := m.reviewSupervisor
+	runners := m.veraRunners()
 	return func() tea.Msg {
 		result := reviewDetailMsg{project: d.Project, job: d.Job, generation: d.Generation}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -380,40 +380,23 @@ func (m *Model) requestReviewDetail() tea.Cmd {
 		} else {
 			result.history, result.err = client.listReviewJobSessions(ctx, d.Project, d.Job, d.HistoryAfter)
 		}
-		result.diagnostic = readOwnedReviewDiagnostic(supervisor, result.summary)
+		result.diagnostic = readVeraReviewDiagnostic(runners, result.summary)
 		return result
 	}
 }
 
 // Private receipt and attempt credentials stay on the command stack. Only the
 // validated diagnostic's allowlisted display values cross back into the model.
-func readOwnedReviewDiagnostic(s *reviewSupervisor, summary reviewSummary) string {
-	if s == nil || summary.Progress == nil {
+// runners maps each Vera session's runner ID to its binding.
+func readVeraReviewDiagnostic(runners map[string]reviewWatchOptions, summary reviewSummary) string {
+	if summary.Progress == nil {
 		return ""
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.capacity == nil {
-		return ""
-	}
-	for _, status := range s.statuses {
-		o := status.Binding.Options
+	for id, o := range runners {
 		if o.ProjectID != summary.Review.ProjectID || o.RepositoryLinkID != summary.Review.RepositoryLinkID || o.GitProvider != summary.Review.Provider {
 			continue
 		}
-		owned := s.owned[status.BindingID]
-		if owned == nil {
-			continue
-		}
-		select {
-		case <-owned.Done():
-			continue
-		default:
-		}
-		if status.BindingID != reviewBackgroundID(s.cfg.ServerURL, o) {
-			continue
-		}
-		dir := filepath.Join(filepath.Dir(s.capacity.Directory), "review-runners", status.BindingID)
+		dir := filepath.Join(RootDir(), "review-runners", id)
 		file, err := os.Open(filepath.Join(dir, "state.json"))
 		if err != nil {
 			continue
@@ -426,7 +409,7 @@ func readOwnedReviewDiagnostic(s *reviewSupervisor, summary reviewSummary) strin
 		}
 		r := state.Pending
 		e := r.Execution
-		if r.Capacity == nil || r.Capacity.Directory != s.capacity.Directory || r.JobID != summary.Review.ID || e.Review.ID != r.JobID || e.Attempt.RunnerID != state.ID || e.Attempt.Round.JobID != r.JobID || e.Attempt.Round.ID != summary.Progress.RoundID || e.Attempt.Round.HeadSHA != summary.Review.HeadSHA || e.Attempt.Round.BaseSHA != summary.Review.BaseSHA {
+		if r.JobID != summary.Review.ID || e.Review.ID != r.JobID || e.Attempt.RunnerID != state.ID || e.Attempt.Round.JobID != r.JobID || e.Attempt.Round.ID != summary.Progress.RoundID || e.Attempt.Round.HeadSHA != summary.Review.HeadSHA || e.Attempt.Round.BaseSHA != summary.Review.BaseSHA {
 			continue
 		}
 		correlated := false

@@ -881,6 +881,9 @@ func RestartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 // recoveryPane selects in-pane recovery: require a dead pane, and open the
 // harness's history picker when no exact conversation ID is available.
 func restartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Store, cache *SessionCache, registry *ProviderRegistry, recoveryPane string) (SessionMeta, error) {
+	if meta.Vera != nil {
+		return restartVeraSession(meta, tmux, store, cache, recoveryPane)
+	}
 	provider := meta.Provider
 	if provider == "" {
 		provider = cfg.DefaultProvider

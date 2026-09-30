@@ -365,7 +365,7 @@ func TestReviewSessionsBrowseWithoutRunnerConsent(t *testing.T) {
 	next, cmd = m.Update(cmd())
 	m = next.(Model)
 	m = reviewApply(m, cmd())
-	if len(m.sessions) != 2 || m.sessions[0].ManagedReview.ProjectID != 14 || m.reviewSupervisor != nil {
+	if len(m.sessions) != 2 || m.sessions[0].ManagedReview.ProjectID != 14 {
 		t.Fatalf("consent-free cross-project rows missing: %+v", m.sessions)
 	}
 	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -545,7 +545,7 @@ func TestReviewSessionsDetailSanitizedAndRoundReset(t *testing.T) {
 	if m.reviewDetail.Summary != nil {
 		t.Fatal("delayed detail resurrected denied scope")
 	}
-	if got := readOwnedReviewDiagnostic(nil, s); got != "" {
+	if got := readVeraReviewDiagnostic(nil, s); got != "" {
 		t.Fatal("unowned diagnostic exposed")
 	}
 }
@@ -583,13 +583,10 @@ func TestReviewSessionsFanoutBounded(t *testing.T) {
 }
 
 func TestReviewSessionsLocalDiagnosticCorrelation(t *testing.T) {
-	root := t.TempDir()
-	cfg := DefaultConfig()
-	cfg.ServerURL = "https://example.test"
+	root := withTempRoot(t)
 	o := reviewWatchOptions{ProjectID: 13, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "fixture"}
-	id := reviewBackgroundID(cfg.ServerURL, o)
-	capacity := &reviewCapacity{Directory: filepath.Join(root, "review-capacity-fixture")}
-	s := &reviewSupervisor{cfg: cfg, capacity: capacity, owned: map[string]*reviewOwnedRunner{id: {done: make(chan struct{})}}, statuses: []reviewRunnerStatus{{BindingID: id, Binding: reviewBinding{Options: o}, State: "online"}}}
+	id := reviewBackgroundID("https://example.test", o)
+	runners := map[string]reviewWatchOptions{id: o}
 	summary := reviewTestSummary(13, "job")
 	summary.Progress.RoundID = "round"
 	summary.ReviewSessions = []reviewSession{{ProjectID: 13, JobID: "job", RoundID: "round", SessionID: "session", RunnerID: "runner"}}
@@ -601,7 +598,7 @@ func TestReviewSessionsLocalDiagnosticCorrelation(t *testing.T) {
 	e.Attempt.Round.JobID = "job"
 	e.Attempt.Round.HeadSHA = summary.Review.HeadSHA
 	e.Attempt.Round.BaseSHA = summary.Review.BaseSHA
-	state := reviewRunnerState{ID: "runner", OwnerID: 42, Pending: &reviewReceipt{JobID: "job", Execution: e, Capacity: &reviewReservation{Directory: capacity.Directory, Slot: "slot-0"}}}
+	state := reviewRunnerState{ID: "runner", OwnerID: 42, Pending: &reviewReceipt{JobID: "job", Execution: e}}
 	dir := filepath.Join(root, "review-runners", id)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -617,35 +614,33 @@ func TestReviewSessionsLocalDiagnosticCorrelation(t *testing.T) {
 		}
 	}
 	write()
-	got := readOwnedReviewDiagnostic(s, summary)
+	got := readVeraReviewDiagnostic(runners, summary)
 	if !strings.Contains(got, "provider_exit") || strings.Contains(got, e.Attempt.ID) || strings.Contains(got, "runner") || strings.Contains(got, "session") {
 		t.Fatalf("unsafe/missing diagnostic %q", got)
 	}
-	for _, field := range []*string{&state.ID, &state.Pending.JobID, &e.Attempt.RunnerID, &e.Attempt.SessionID, &e.Attempt.Round.ID, &e.Attempt.Round.JobID, &e.Attempt.ID, &state.Pending.Capacity.Directory} {
+	for _, field := range []*string{&state.ID, &state.Pending.JobID, &e.Attempt.RunnerID, &e.Attempt.SessionID, &e.Attempt.Round.ID, &e.Attempt.Round.JobID, &e.Attempt.ID} {
 		old := *field
 		*field = "mismatch"
 		write()
-		if readOwnedReviewDiagnostic(s, summary) != "" {
+		if readVeraReviewDiagnostic(runners, summary) != "" {
 			t.Fatal("mismatched private correlation exposed")
 		}
 		*field = old
 	}
 	write()
-	delete(s.owned, id)
-	if readOwnedReviewDiagnostic(s, summary) != "" {
-		t.Fatal("unowned diagnostic exposed")
+	if readVeraReviewDiagnostic(map[string]reviewWatchOptions{}, summary) != "" {
+		t.Fatal("diagnostic exposed without a Vera session")
 	}
-	s.owned[id] = &reviewOwnedRunner{done: make(chan struct{})}
 	if err := os.WriteFile(filepath.Join(dir, "last-provider-diagnostic.json"), []byte(strings.Repeat(" ", 4097)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if readOwnedReviewDiagnostic(s, summary) != "" {
+	if readVeraReviewDiagnostic(runners, summary) != "" {
 		t.Fatal("oversized diagnostic exposed")
 	}
 	if err := os.Remove(filepath.Join(dir, "last-provider-diagnostic.json")); err != nil {
 		t.Fatal(err)
 	}
-	if readOwnedReviewDiagnostic(s, summary) != "" {
+	if readVeraReviewDiagnostic(runners, summary) != "" {
 		t.Fatal("missing diagnostic exposed")
 	}
 }
