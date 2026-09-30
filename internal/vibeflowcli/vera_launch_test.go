@@ -44,9 +44,127 @@ func TestVeraAgentPickerFeatureGate(t *testing.T) {
 		w.selectedPersonas = map[int]bool{found: true}
 		updated, _ := w.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		w = updated
-		if !w.done || w.result.Persona != "code_reviewer" || w.result.ProjectID != 66 || w.result.WorkDir != w.selectedWorkDir {
-			t.Fatalf("solo Vera entered ordinary coding setup: step=%v result=%+v", w.step, w.result)
+		if w.done || w.step != StepProvider {
+			t.Fatalf("solo Vera must continue to the Provider step: step=%v done=%v", w.step, w.done)
 		}
+	}
+}
+
+// veraWizardFixture is a CRA wizard at the Team step with Vera alone selected.
+// Providers: claude and qwen run Vera, aider is installed but Vera cannot run
+// it, cursor is not installed.
+func veraWizardFixture(t *testing.T) (WizardModel, int) {
+	t.Helper()
+	cfg := &Config{Providers: map[string]Provider{
+		"aider":  {Name: "Aider", Binary: "sh"},
+		"claude": {Name: "Claude", Binary: "sh"},
+		"cursor": {Name: "Cursor", Binary: "this-binary-does-not-exist-xyz-123"},
+		"qwen":   {Name: "Qwen", Binary: "sh"},
+	}}
+	w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
+	w.enableCRA()
+	vera := len(w.personas) - 1
+	w.step, w.selectedSessionType = StepTeam, 1
+	w.projects, w.selectedProject = []Project{{ID: 66, Name: "Selected"}}, 0
+	w.selectedWorkDir = t.TempDir()
+	w.selectedPersonas = map[int]bool{vera: true}
+	return w, vera
+}
+
+func wizardKey(t *testing.T, w WizardModel, keys ...tea.KeyPressMsg) WizardModel {
+	t.Helper()
+	for _, key := range keys {
+		w, _ = w.Update(key)
+	}
+	return w
+}
+
+var (
+	wizardEnter = tea.KeyPressMsg{Code: tea.KeyEnter}
+	wizardEsc   = tea.KeyPressMsg{Code: tea.KeyEscape}
+)
+
+// Vera alone goes Team -> Provider -> Confirm in the ordinary wizard.
+func TestVeraWizardReusesProviderAndConfirmSteps(t *testing.T) {
+	w, _ := veraWizardFixture(t)
+	w = wizardKey(t, w, wizardEnter)
+	if w.done || w.step != StepProvider {
+		t.Fatalf("Team did not lead to Provider: step=%v done=%v", w.step, w.done)
+	}
+	view := w.View()
+	for _, want := range []string{"Directory", "Type", "Project", "Team", "[Provider]", "Confirm", "Claude", "Qwen"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("provider step missing %q:\n%s", want, view)
+		}
+	}
+	for _, skipped := range []string{"Env", "Routing", "Branch", "Worktree", "Permissions"} {
+		if strings.Contains(view, skipped) {
+			t.Fatalf("Vera step line shows skipped step %q:\n%s", skipped, view)
+		}
+	}
+	// Vera cannot run aider, and cursor is not installed: neither is selectable.
+	for _, key := range []string{"aider", "cursor"} {
+		w.cursor = providerIdxByKey(t, w, key)
+		if next := wizardKey(t, w, wizardEnter); next.step != StepProvider || next.editingBinary {
+			t.Fatalf("%s was selectable for Vera: step=%v editingBinary=%v", key, next.step, next.editingBinary)
+		}
+	}
+	w.cursor = providerIdxByKey(t, w, "qwen")
+	w = wizardKey(t, w, wizardEnter)
+	if w.step != StepConfirm {
+		t.Fatalf("provider did not lead to Confirm: %v", w.step)
+	}
+	view = w.View()
+	for _, want := range []string{"Selected", w.selectedWorkDir, "Qwen", "harness default", "@vibeflow review", "until this CLI closes", "full permissions", "disposable worktree"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("confirm missing %q:\n%s", want, view)
+		}
+	}
+	if w = wizardKey(t, w, wizardEsc); w.step != StepProvider {
+		t.Fatalf("esc from Vera confirm went to %v", w.step)
+	}
+	w = wizardKey(t, w, wizardEnter, wizardEnter)
+	r := w.Result()
+	if !w.done || r.ProviderKey != "qwen" || r.Model != "" || r.ProjectID != 66 || r.ProjectName != "Selected" || r.WorkDir != w.selectedWorkDir || !reflect.DeepEqual(r.Personas, []string{"code_reviewer"}) {
+		t.Fatalf("wrong Vera result: done=%v %+v", w.done, r)
+	}
+}
+
+// In a mixed team Vera's provider row only offers harnesses Vera can run.
+func TestVeraWizardTeamRowOnlyOffersVeraHarnesses(t *testing.T) {
+	w, vera := veraWizardFixture(t)
+	w.selectedPersonas[0] = true // developer
+	w = wizardKey(t, w, wizardEnter)
+	if w.step != StepProvider || !w.teamModeProvider() {
+		t.Fatalf("mixed team not in team provider mode: %v", w.step)
+	}
+	w.selectedProvider = providerIdxByKey(t, w, "aider") // coding default Vera cannot run
+	if next := wizardKey(t, w, wizardEnter); next.step != StepProvider {
+		t.Fatal("Vera inherited a harness it cannot run")
+	}
+	if !strings.Contains(w.View(), "Vera cannot run") {
+		t.Fatalf("no reason shown for the blocked Vera row:\n%s", w.View())
+	}
+	w.cursor = 2 // developer row is 1, Vera row is 2
+	seen := map[string]bool{}
+	for range 6 {
+		w = wizardKey(t, w, tea.KeyPressMsg{Code: tea.KeyRight})
+		seen[w.providers[w.resolvedProviderForPersona(vera)].key] = true
+	}
+	if seen["aider"] || seen["cursor"] || !seen["claude"] || !seen["qwen"] {
+		t.Fatalf("Vera row cycled through %v", seen)
+	}
+	w.personaProviderIdx[vera] = providerIdxByKey(t, w, "claude")
+	if next := wizardKey(t, w, wizardEnter); next.step == StepProvider {
+		t.Fatal("valid Vera harness did not continue the coding setup")
+	}
+	w.step = StepConfirm
+	if !strings.Contains(w.View(), "@vibeflow review") {
+		t.Fatalf("team confirm does not explain Vera:\n%s", w.View())
+	}
+	w, _ = w.advance()
+	if r := w.Result(); r.ProviderKey != "aider" || r.PersonaProviders["code_reviewer"] != "claude" {
+		t.Fatalf("Vera provider lost: %+v", r)
 	}
 }
 
@@ -129,42 +247,22 @@ func TestVeraPickerLaunchBindingAndLifetime(t *testing.T) {
 	defer s.Close()
 	s.explicitOnly = true
 	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	msg := m.launchFromWizard(WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}, ProjectID: 66, ProjectName: "Selected", WorkDir: repo})
-	next, _ := m.Update(msg)
+	msg := m.launchFromWizard(WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}, ProjectID: 66, ProjectName: "Selected", WorkDir: repo, ProviderKey: "claude"})
+	next, cmd := m.Update(msg)
 	m = next.(Model)
-	if m.activeView != ViewVeraLaunch {
-		t.Fatalf("not review setup: %v", m.activeView)
-	}
-	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	m = next.(Model)
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if m.veraSetup.input == nil || m.veraSetup.input.Field != "model" {
-		t.Fatal("model choice missing")
-	}
-	m.veraSetup.cursor = len(m.veraSetup.input.Choices) - 1
-	next, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	m = next.(Model)
-	next, _ = m.Update(tea.KeyPressMsg{Text: "review-model"})
-	m = next.(Model)
-	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	m = next.(Model)
-	resolved := cmd()
-	next, cmd = m.Update(resolved)
-	m = next.(Model)
-	if cmd == nil {
-		t.Fatalf("launch missing, setup %+v", m.veraSetup)
+	if m.activeView == ViewVeraLaunch || m.veraSetup != nil || cmd == nil {
+		t.Fatalf("wizard choice must start Vera without a popup: view=%v", m.activeView)
 	}
 	next, _ = m.Update(cmd())
 	m = next.(Model)
-	if len(m.reviewStatuses) != 1 || m.reviewStatuses[0].State != "online" {
-		t.Fatalf("runner %+v setup %+v", m.reviewStatuses, m.veraSetup)
+	if len(m.reviewStatuses) != 1 || m.reviewStatuses[0].State != "online" || m.activeView != ViewReviewRunners {
+		t.Fatalf("runner %+v view %v", m.reviewStatuses, m.activeView)
 	}
 	row := m.reviewStatuses[0]
 	if row.Binding.ProjectName != "Selected" || row.Binding.Repository.Name != "acme/repo" || row.Binding.Repository.Host != "github.com" {
 		t.Fatalf("runner identity is not visible: %+v", row.Binding)
 	}
-	if row.Binding.Options.ProjectID != 66 || row.Binding.Options.RepositoryLinkID != 7 || row.Binding.Options.Repository != repo || row.Binding.Options.Provider != "claude" || row.Binding.Options.Model != "review-model" || !row.Binding.Options.RepositoryRequestsApproved {
+	if row.Binding.Options.ProjectID != 66 || row.Binding.Options.RepositoryLinkID != 7 || row.Binding.Options.Repository != repo || row.Binding.Options.Provider != "claude" || row.Binding.Options.Model != "" || !row.Binding.Options.RepositoryRequestsApproved {
 		t.Fatalf("wrong binding %+v", row.Binding)
 	}
 	if !strings.Contains(m.viewReviewRunners(), "Listening") {
@@ -179,7 +277,7 @@ func TestVeraPickerLaunchBindingAndLifetime(t *testing.T) {
 	b := row.Binding
 	b.Options.Model = "different-model"
 	statuses := s.StartBinding(b)
-	if registrations.Load() != 1 || statuses[0].Binding.Options.Model != "review-model" {
+	if registrations.Load() != 1 || statuses[0].Binding.Options.Model != "" {
 		t.Fatal("reuse duplicated runner or rewrote its options")
 	}
 	second, _ := reviewTestRepo(t)
@@ -226,19 +324,26 @@ func TestVeraTeamSelectionDoesNotChangeCodingConfig(t *testing.T) {
 		providers[key] = value
 	}
 	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	result := WizardResult{SessionType: "vibeflow", Personas: []string{"developer", "code_reviewer"}, Persona: "developer", ProviderKey: "qwen", ProjectID: 66, WorkDir: repo}
-	next, _ := m.Update(m.launchFromWizard(result))
+	result := WizardResult{SessionType: "vibeflow", Personas: []string{"developer", "code_reviewer"}, Persona: "developer", ProviderKey: "qwen", PersonaProviders: map[string]string{"code_reviewer": "claude"}, ProjectID: 66, WorkDir: repo}
+	next, cmd := m.Update(m.launchFromWizard(result))
 	m = next.(Model)
 	if m.veraPending == nil || len(m.veraPending.Personas) != 1 || m.veraPending.Persona != "developer" || m.veraPending.ProviderKey != "qwen" {
 		t.Fatalf("coding launch altered %+v", m.veraPending)
 	}
+	if m.activeView == ViewVeraLaunch || cmd == nil {
+		t.Fatal("team Vera opened a popup instead of starting")
+	}
+	launched := cmd().(veraLaunchedMsg)
+	if launched.err != nil || len(launched.statuses) != 1 || launched.statuses[0].Binding.Options.Provider != "claude" || launched.statuses[0].Binding.Options.Model != "" {
+		t.Fatalf("Vera ignored its team provider: %+v", launched)
+	}
 	if !reflect.DeepEqual(cfg.Providers, providers) {
 		t.Fatal("Vera rewrote coding providers")
 	}
-	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	next, cmd = m.Update(launched)
 	m = next.(Model)
 	if m.veraPending != nil || m.activeView != ViewSessions || cmd == nil {
-		t.Fatal("canceling Vera silently lost selected coding agents")
+		t.Fatal("starting Vera silently lost selected coding agents")
 	}
 }
 
@@ -264,13 +369,13 @@ func TestVeraTeamCodingLaunchKeepsProviderOverride(t *testing.T) {
 	tm := NewTmuxManager(fmt.Sprintf("vftest-vera-team-%d", os.Getpid()))
 	t.Cleanup(func() { _, _ = tm.run("kill-server") })
 	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s, tmux: tm, registry: NewProviderRegistry(cfg), logger: NewLogger(), store: NewStore(), cache: NewSessionCache()}
-	result := WizardResult{SessionType: "vibeflow", Personas: []string{"developer", "code_reviewer"}, Persona: "developer", ProviderKey: "qwen", Provider: cfg.Providers["qwen"], PersonaProviders: map[string]string{"developer": "codex"}, ProjectID: 66, ProjectName: "Selected", WorkDir: repo, WorktreeChoice: WorktreeCurrent}
-	next, _ := m.Update(m.launchFromWizard(result))
+	result := WizardResult{SessionType: "vibeflow", Personas: []string{"developer", "code_reviewer"}, Persona: "developer", ProviderKey: "qwen", Provider: cfg.Providers["qwen"], PersonaProviders: map[string]string{"developer": "codex", "code_reviewer": "claude"}, ProjectID: 66, ProjectName: "Selected", WorkDir: repo, WorktreeChoice: WorktreeCurrent}
+	next, cmd := m.Update(m.launchFromWizard(result))
 	m = next.(Model)
-	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	next, cmd = m.Update(cmd())
 	m = next.(Model)
 	if cmd == nil {
-		t.Fatal("canceling Vera dropped the coding launch")
+		t.Fatal("starting Vera dropped the coding launch")
 	}
 	if failure, ok := cmd().(sessionsMsg); ok && failure.err != nil {
 		t.Fatal(failure.err)
@@ -404,7 +509,7 @@ func TestVeraCheckoutRecoveryIgnoresCodingDefault(t *testing.T) {
 	}
 }
 
-func TestVeraCodexSetupPreservesHarnessAndModel(t *testing.T) {
+func TestVeraCodexWizardChoiceStartsCodex(t *testing.T) {
 	cfg, repo, registrations, _ := newVeraFixture(t)
 	cfg.Providers["codex"] = Provider{Binary: "/bin/sh"}
 	s, err := newReviewSupervisor(context.Background(), cfg, "")
@@ -413,31 +518,62 @@ func TestVeraCodexSetupPreservesHarnessAndModel(t *testing.T) {
 	}
 	defer s.Close()
 	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	next, _ := m.beginVeraLaunch(WizardResult{ProjectID: 66, WorkDir: repo, Persona: "code_reviewer"})
+	next, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, WorkDir: repo, Persona: "code_reviewer", ProviderKey: "codex"})
 	m = next.(Model)
-	if view := m.veraSetup.View().Content; strings.Contains(view, "API key") || !strings.Contains(view, "full permissions") {
-		t.Fatalf("Vera harness copy is stale:\n%s", view)
+	if m.veraSetup != nil || cmd == nil {
+		t.Fatal("Codex choice asked again instead of starting")
 	}
-	m.veraSetup.cursor = -1
-	for i, choice := range m.veraSetup.input.Choices {
-		if choice.Value == "codex" {
-			m.veraSetup.cursor = i
-		}
+	launched := cmd().(veraLaunchedMsg)
+	if launched.err != nil || len(launched.statuses) != 1 {
+		t.Fatalf("Codex Vera did not start: %+v", launched)
 	}
-	if m.veraSetup.cursor < 0 {
-		t.Fatal("configured Codex harness is not offered")
+	if o := launched.statuses[0].Binding.Options; o.Provider != "codex" || o.Model != "" || o.RepositoryLinkID != 7 {
+		t.Fatalf("Codex selection lost %+v", o)
 	}
-	next, cmd := m.veraSetup.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	setup := next.(reviewStartupModel)
-	resolved := cmd().(reviewStartupResolvedMsg)
-	setup.options, setup.modelSelected = resolved.options, true
-	setup.options.Model = "codex-review-model"
-	resolved = setup.resolve()().(reviewStartupResolvedMsg)
-	if resolved.err != nil || resolved.input != nil || resolved.options.Provider != "codex" || resolved.options.Model != "codex-review-model" || resolved.options.RepositoryLinkID != 7 {
-		t.Fatalf("Codex selection lost %+v", resolved)
+	if registrations.Load() != 1 {
+		t.Fatalf("want one registration, got %d", registrations.Load())
+	}
+}
+
+// A harness Vera cannot run is refused before any server call.
+func TestVeraUnsupportedHarnessIsRefused(t *testing.T) {
+	cfg, repo, registrations, _ := newVeraFixture(t)
+	s, err := newReviewSupervisor(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
+	next, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, WorkDir: repo, Persona: "code_reviewer", ProviderKey: "aider"})
+	if next.(Model).err == nil || cmd != nil || registrations.Load() != 0 {
+		t.Fatal("unsupported harness was not refused")
+	}
+}
+
+// Only a checkout that does not match the linked repository needs more input;
+// that rare case reuses the small setup popup and never asks for a model.
+func TestVeraCheckoutMismatchAsksForCheckoutOnly(t *testing.T) {
+	cfg, _, registrations, _ := newVeraFixture(t)
+	wrong, _ := reviewTestRepo(t)
+	reviewTestGit(t, wrong, "remote", "set-url", "origin", "https://github.com/acme/unlinked.git")
+	s, err := newReviewSupervisor(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
+	next, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, ProjectName: "Selected", WorkDir: wrong, Persona: "code_reviewer", ProviderKey: "claude"})
+	m = next.(Model)
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if m.activeView != ViewVeraLaunch || m.veraSetup == nil || m.veraSetup.input == nil || m.veraSetup.input.Field != "repository" {
+		t.Fatalf("checkout mismatch not actionable: view=%v setup=%+v", m.activeView, m.veraSetup)
+	}
+	if view := m.veraSetup.View().Content; !strings.Contains(view, "acme/repo") {
+		t.Fatalf("checkout prompt does not name the linked repository:\n%s", view)
 	}
 	if registrations.Load() != 0 {
-		t.Fatal("setup started an LLM or runner prematurely")
+		t.Fatal("mismatched checkout started a runner")
 	}
 }
 
@@ -530,17 +666,12 @@ func TestVeraRepickWithDifferentHarnessIsReported(t *testing.T) {
 		t.Fatalf("first Vera did not start %+v", rows)
 	}
 	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	next, _ := m.beginVeraLaunch(WizardResult{ProjectID: 66, ProjectName: "Selected", WorkDir: repo, Persona: "code_reviewer"})
-	m = next.(Model)
-	m.veraSetup.options = o
-	m.veraSetup.options.Model = "other-model"
-	m.veraSetup.done, m.veraSetup.enabled = true, true
-	next, cmd := m.updateVeraLaunch(tea.FocusMsg{})
+	_, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, ProjectName: "Selected", WorkDir: repo, Persona: "code_reviewer", ProviderKey: "codex"})
 	if cmd == nil {
 		t.Fatal("launch command missing")
 	}
 	launched, ok := cmd().(veraLaunchedMsg)
-	if !ok || launched.err == nil || !strings.Contains(launched.err.Error(), "already listening") || !strings.Contains(launched.err.Error(), "review-model") {
+	if !ok || launched.err == nil || !strings.Contains(launched.err.Error(), "already listening") || !strings.Contains(launched.err.Error(), "claude (review-model)") {
 		t.Fatalf("harness change was silently ignored: %+v", launched)
 	}
 	if registrations.Load() != 1 {

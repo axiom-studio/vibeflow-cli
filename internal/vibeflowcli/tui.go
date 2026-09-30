@@ -816,12 +816,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case veraLaunchRequestedMsg:
 		return m.beginVeraLaunch(msg.result)
+	case veraLaunchInputMsg:
+		return m.showVeraLaunchInput(msg)
 	case veraLaunchedMsg:
 		if msg.err != nil {
 			if m.veraSetup != nil {
 				m.veraSetup.err, m.veraSetup.busy, m.veraSetup.done, m.veraSetup.enabled = msg.err, false, false, false
+				return m, nil
 			}
-			return m, nil
+			// Started straight from the wizard: report the failure and still
+			// launch any coding personas chosen alongside Vera.
+			m.err = msg.err
+			clear := tea.Tick(10*time.Second, func(time.Time) tea.Msg { return errClearMsg{} })
+			if m.veraPending != nil {
+				result := *m.veraPending
+				m.veraPending = nil
+				return m, tea.Batch(clear, func() tea.Msg { return m.launchFromWizard(result) })
+			}
+			return m, clear
 		}
 		m.veraSetup = nil
 		m.reviewStatuses = msg.statuses

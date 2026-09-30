@@ -16,14 +16,27 @@ type veraLaunchedMsg struct {
 	err      error
 }
 
+// veraLaunchInputMsg means the binding needs a choice the wizard cannot make:
+// an ambiguous repository link or a checkout that does not match the link.
+type veraLaunchInputMsg struct {
+	options reviewWatchOptions
+	input   *reviewStartupInput
+}
+
+// beginVeraLaunch starts Vera with the harness chosen in the wizard's Provider
+// step and the harness default model. Coding personas selected alongside Vera
+// launch after it with their own settings.
 func (m Model) beginVeraLaunch(result WizardResult) (tea.Model, tea.Cmd) {
 	if !m.craEnabled || m.reviewSupervisor == nil {
 		m.err = fmt.Errorf("start this CLI with --cra to launch Vera")
 		return m, nil
 	}
-	choices := reviewHarnessChoices(m.reviewSupervisor.cfg)
-	if len(choices) == 0 {
-		m.err = fmt.Errorf("install a supported coding harness (%s) and configure its binary to launch Vera", strings.Join(reviewHarnessKeys, ", "))
+	provider := result.PersonaProviders["code_reviewer"]
+	if provider == "" {
+		provider = result.ProviderKey
+	}
+	if !reviewHarnessSupported(provider) {
+		m.err = fmt.Errorf("Vera cannot run harness %q; choose one of: %s", provider, strings.Join(reviewHarnessKeys, ", "))
 		return m, nil
 	}
 	personas := result.Personas
@@ -41,16 +54,34 @@ func (m Model) beginVeraLaunch(result WizardResult) (tea.Model, tea.Cmd) {
 		pending.Personas, pending.Persona = coding, coding[0]
 		m.veraPending = &pending
 	}
-	o := reviewWatchOptions{Project: strconv.FormatInt(result.ProjectID, 10), ProjectID: result.ProjectID, Repository: result.WorkDir, Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute, Name: m.reviewSupervisor.options.Name, RepositoryRequestsApproved: true}
+	s, projectName := m.reviewSupervisor, result.ProjectName
+	o := reviewWatchOptions{Project: strconv.FormatInt(result.ProjectID, 10), ProjectID: result.ProjectID, Repository: result.WorkDir, Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute, Name: s.options.Name, RepositoryRequestsApproved: true, Provider: provider}
 	if result.ProjectID <= 0 {
-		o.Project = result.ProjectName
+		o.Project = projectName
 	}
-	setup := newReviewStartupModel(m.reviewSupervisor.ctx, m.reviewSupervisor.cfg, m.reviewSupervisor.configPath, o)
+	m.veraProjectName = projectName
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(s.ctx, time.Minute)
+		defer cancel()
+		resolved, input, err := resolveReviewStartup(ctx, s.cfg, o, true)
+		if err != nil {
+			return veraLaunchedMsg{err: err}
+		}
+		if input != nil {
+			return veraLaunchInputMsg{options: resolved, input: input}
+		}
+		return startVera(ctx, s, resolved, projectName)
+	}
+}
+
+// showVeraLaunchInput opens the small setup popup for the one choice the
+// binding still needs; the harness and model are already settled.
+func (m Model) showVeraLaunchInput(msg veraLaunchInputMsg) (tea.Model, tea.Cmd) {
+	setup := newReviewStartupModel(m.reviewSupervisor.ctx, m.reviewSupervisor.cfg, m.reviewSupervisor.configPath, msg.options)
 	setup.selectedBinding, setup.repositorySelected = true, true
 	setup.title, setup.cancelHint = reviewSessionLabel, "Esc: cancel"
-	setup.input = &reviewStartupInput{Field: "provider", Message: "Vera reviews PRs for anyone who comments @vibeflow review on this linked repository until this CLI closes. Choose Vera's coding harness: it runs with your login and full permissions in a disposable worktree.", Choices: choices}
+	setup.input = msg.input
 	m.veraSetup = &setup
-	m.veraProjectName = result.ProjectName
 	m.activeView = ViewVeraLaunch
 	return m, nil
 }
@@ -92,22 +123,28 @@ func (m Model) updateVeraLaunch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(s.ctx, time.Minute)
 		defer cancel()
-		binding, err := resolveVeraBinding(ctx, s.cfg, o, projectName)
-		if err != nil {
-			return veraLaunchedMsg{err: err}
-		}
-		id := reviewBackgroundID(s.cfg.ServerURL, binding.Options)
-		for _, row := range s.Snapshot() {
-			if running := row.Binding.Options; row.BindingID == id && row.State == "online" && (running.Provider != o.Provider || running.Model != o.Model) {
-				model := running.Model
-				if model == "" {
-					model = "harness default"
-				}
-				return veraLaunchedMsg{err: fmt.Errorf("Vera is already listening for this repository with %s (%s); close this CLI and start Vera again to change its harness", running.Provider, model)}
-			}
-		}
-		return veraLaunchedMsg{statuses: s.StartBinding(binding)}
+		return startVera(ctx, s, o, projectName)
 	}
+}
+
+// startVera starts the runner for a resolved binding, refusing to silently
+// keep a runner already listening with another harness or model.
+func startVera(ctx context.Context, s *reviewSupervisor, o reviewWatchOptions, projectName string) veraLaunchedMsg {
+	binding, err := resolveVeraBinding(ctx, s.cfg, o, projectName)
+	if err != nil {
+		return veraLaunchedMsg{err: err}
+	}
+	id := reviewBackgroundID(s.cfg.ServerURL, binding.Options)
+	for _, row := range s.Snapshot() {
+		if running := row.Binding.Options; row.BindingID == id && row.State == "online" && (running.Provider != o.Provider || running.Model != o.Model) {
+			model := running.Model
+			if model == "" {
+				model = "harness default"
+			}
+			return veraLaunchedMsg{err: fmt.Errorf("Vera is already listening for this repository with %s (%s); close this CLI and start Vera again to change its harness", running.Provider, model)}
+		}
+	}
+	return veraLaunchedMsg{statuses: s.StartBinding(binding)}
 }
 
 func resolveVeraBinding(ctx context.Context, cfg *Config, o reviewWatchOptions, projectName string) (reviewBinding, error) {

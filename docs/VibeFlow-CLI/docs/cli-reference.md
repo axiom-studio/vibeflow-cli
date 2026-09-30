@@ -45,18 +45,22 @@ Native reviews use the provider's default model; gateway reviews require an expl
 There is no persona or model question when a PR arrives: each review starts a fresh Vera automatically.
 
 To launch only one repository's runner, press `n`, choose its checkout and VibeFlow project, then select **Vera · Code Reviewer** in the agent picker.
+The wizard continues with its ordinary **Provider** step and then **Confirm**; the coding-agent Env, Routing, Branch, Worktree and Permissions steps are skipped.
 Vera is available only with `--cra`, even if you chose **Not now** at startup.
-Choose any configured coding harness whose binary is installed (Claude, Codex, Gemini, Qwen, Copilot, Cursor or Kiro) and its review model.
+Choose any configured coding harness whose binary is installed (Claude, Codex, Gemini, Qwen, Copilot, Cursor or Kiro); other providers cannot be selected for Vera.
+Vera uses the harness default model, so there is no model question.
 Vera runs that harness like your other personas: your normal login and environment, with full permissions.
 Codex works with a ChatGPT subscription login as well as an API key.
-The chosen checkout must match a repository linked to that project; ambiguous links are explicitly selected.
+Confirm starts Vera directly.
+The chosen checkout must match a repository linked to that project; only when links are ambiguous or the checkout does not match does a small popup ask for that choice.
+With the LLM gateway enabled, that popup also asks for a model, because gateway reviews require one.
 This choice opts in to repository requests for this invocation only and does not enroll other repositories.
 The harness prompt states that anyone who comments `@vibeflow review` on that repository can then request a review using your harness credentials until the CLI closes.
 Because Vera runs with full permissions, PR content and comments from those commenters reach an unrestricted agent on your machine; only its working directory is disposable.
 Choosing Vera again for a repository whose runner is already listening with another harness or model reports the running choice instead of silently keeping it.
 Press `R` to see the runner **Listening**, running a review, or reporting a failure.
 Selecting the same binding reuses or reports its existing runner; selecting another repository can start another runner within the existing capacity limits.
-Vera can be selected beside coding agents, but its harness/model setup remains separate and does not change their configuration.
+Vera can be selected beside coding agents: its row on the team **Provider** step picks its harness, restricted to the ones Vera can run, and the coding agents keep their own settings and overrides.
 Vera never enters the coding-agent task loop, and `launch --persona code_reviewer` directs you to `review-watch` instead.
 
 With `--cra`, the TUI displays review jobs across accessible projects, including queued jobs without an attempt, even when runner consent is declined.

@@ -23,8 +23,9 @@ import (
 )
 
 // Drives Vera from the New Agent picker in a real PTY after declining the
-// all-project consent: exactly the chosen repository gets an idle, model-free
-// runner, and quitting the TUI deregisters and stops it.
+// all-project consent: the wizard's Provider and Confirm steps start it,
+// exactly the chosen repository gets an idle, model-free runner, and quitting
+// the TUI deregisters and stops it.
 func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	if _, err := exec.LookPath("script"); err != nil {
 		t.Skip("native script command unavailable; real PTY is required")
@@ -207,21 +208,6 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		}
 		return ""
 	}
-	// Every row of a popup must end on the same border column.
-	checkBorder := func(name, visible string) {
-		t.Helper()
-		column := -1
-		for _, line := range strings.Split(visible, "\n") {
-			if i := strings.LastIndex(line, "│"); i >= 0 {
-				if width := ansi.StringWidth(line[:i]); column < 0 {
-					column = width
-				} else if width != column {
-					t.Errorf("%s popup border misaligned at %q (column %d, want %d)", name, strings.TrimSpace(line), width, column)
-				}
-			}
-		}
-	}
-
 	// 1. Decline all-project automatic runners.
 	awaitScreen("Run PR reviews while this CLI is open?")
 	terminal.send(t, "\x1b")
@@ -266,19 +252,22 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	t.Logf("team step with only Vera selected:\n%s", visible)
 	terminal.send(t, "\r")
 
-	// 3. Harness, then model.
-	visible = awaitScreen("Vera · Code Reviewer", "Choose Vera", "Claude Code", "full permissions")
-	t.Logf("harness choice:\n%s", visible)
-	checkBorder("harness", visible)
-	if !strings.Contains(visible, "> Claude Code") {
+	// 3. The wizard's own Provider and Confirm steps; no popup, no model question.
+	visible = awaitScreen("Select a provider:", "[Provider]", "Confirm", "Claude Code")
+	t.Logf("provider step for Vera:\n%s", visible)
+	for _, skipped := range []string{"Routing", "Branch", "Worktree", "Permissions"} {
+		if strings.Contains(visible, skipped) {
+			t.Fatalf("Vera provider step shows skipped step %q:\n%s", skipped, visible)
+		}
+	}
+	if !strings.Contains(lineWith(visible, "Claude Code"), "> Claude Code") {
 		t.Fatalf("Claude is not the default harness:\n%s", visible)
 	}
 	terminal.send(t, "\r")
-	visible = awaitScreen("Choose the model for this Vera runner.", "Harness default")
-	t.Logf("model choice:\n%s", visible)
-	checkBorder("model", visible)
-	if !strings.Contains(lineWith(visible, "Harness default"), "> Harness default") {
-		t.Fatalf("model cursor not on the first choice:\n%s", visible)
+	visible = awaitScreen("Confirm Vera · Code Reviewer", "[Confirm]", "Project:   Axiom", "Checkout:", repo, "Harness:   Claude Code", "Model:     harness default", "@vibeflow review", "enter: start")
+	t.Logf("confirm step for Vera:\n%s", visible)
+	if strings.Contains(visible, "Choose the model") {
+		t.Fatalf("Vera asked for a model:\n%s", visible)
 	}
 	terminal.send(t, "\r")
 
