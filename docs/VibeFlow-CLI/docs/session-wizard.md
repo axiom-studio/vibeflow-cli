@@ -43,12 +43,15 @@ No model runs while it listens.
 When a review is claimed, the pane shows the PR number and head commit, prepares a fresh worktree of the PR head, and then runs the harness's own interactive UI in the pane, launched like a persona (its launch template with full permissions) with the review task as the initial prompt.
 You can watch or type into the harness while it reviews.
 Once the harness writes a complete `result.json`, Vera closes it (SIGINT, then SIGTERM, then SIGKILL), restores the terminal, prints the result (clean, changes requested with the number of new findings, or failed with its reason), removes the worktree, and returns to listening.
-If the harness exits within a few seconds without a result, the pane shows its login hint.
-Deleting the session stops the listener gracefully: an in-flight review is reported as failed, its worktree is removed, and the runner deregisters.
+Before claiming any review, Vera runs the harness's login status command where one exists (Claude, Codex, Cursor and Kiro) and stops with the login command if the harness is not logged in.
+If the harness exits within 15 seconds without a result, Vera fails that attempt once and stops with its exit code and a possible login or trust fix; the review stays queued for when Vera starts again.
+If no result exists after 60 seconds, the pane says once that Vera is still waiting, in case the harness shows a login or trust screen to answer there.
+Ctrl-C during a review goes to the harness; once it exits, Vera reports the attempt as cancelled and waits 5 seconds, so pressing Ctrl-C again stops Vera, and otherwise it resumes listening.
+Deleting the session stops the listener gracefully: an in-flight review is reported as cancelled, its worktree is removed, and the runner deregisters.
 Restarting the session re-runs the same listener command.
 Choosing Vera again for a repository that already has a live Vera session attaches that session; choosing a different harness for it reports the running one instead, and a stopped session is replaced.
 All Vera sessions in one root share `review_concurrency`, so at most that many harness reviews run at once; a session at the limit keeps listening without claiming work.
-First-run prompts behave as they do for a persona in a new worktree: Gemini trusts the worktree through `GEMINI_CLI_TRUST_WORKSPACE`, Copilot's first-run dialogs are pre-seeded, Kiro uses `--trust-all-tools`, and Claude and Codex use their permission-bypass flags.
+First-run prompts behave as they do for a persona in a new worktree: Claude's and Codex's folder-trust questions are pre-answered for the worktree in their own config and forgotten at cleanup, Gemini trusts the worktree through `GEMINI_CLI_TRUST_WORKSPACE`, Copilot's first-run dialogs are pre-seeded, Kiro uses `--trust-all-tools`, and Claude and Codex use their permission-bypass flags.
 Cursor's `--trust` works only in headless mode, so interactive Cursor can still ask to trust the worktree.
 
 Selecting Vera with coding personas keeps the full wizard for the coding personas.

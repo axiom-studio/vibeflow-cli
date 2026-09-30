@@ -141,38 +141,66 @@ func reviewForegroundAttr(tty *os.File) *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true, Foreground: true, Ctty: int(tty.Fd())}
 }
 
-// reviewTerminal is the runner's terminal while an interactive harness runs.
+// reviewTerminal is the runner's terminal while an interactive harness runs:
+// its own stdin, stdout and stderr, handed to the harness as they are. The
+// /dev/tty alias would also reach the pane, but macOS kqueue rejects it, which
+// crashes Bun (claude, kiro) and crossterm (codex) harnesses at start.
 type reviewTerminal struct {
-	file  *os.File
+	files [3]*os.File
 	state *term.State
 }
 
-// openReviewTerminal returns the controlling terminal when out is one, which
-// is what makes a foreground runner (a Vera tmux pane) interactive.
+// openReviewTerminal returns the runner's terminal when stdin and out are
+// one, which is what makes a foreground runner (a Vera tmux pane) interactive.
 func openReviewTerminal(out any) *reviewTerminal {
 	f, ok := out.(*os.File)
-	if !ok || !term.IsTerminal(f.Fd()) {
+	if !ok || !term.IsTerminal(f.Fd()) || !term.IsTerminal(os.Stdin.Fd()) {
 		return nil
 	}
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return nil
+	stderr := os.Stderr
+	if !term.IsTerminal(stderr.Fd()) {
+		stderr = f
 	}
-	return &reviewTerminal{file: tty}
+	return &reviewTerminal{files: [3]*os.File{os.Stdin, f, stderr}}
 }
 
-func (t *reviewTerminal) save() { t.state, _ = term.GetState(t.file.Fd()) }
+// reviewTerminalFiles adopts the runner's terminal descriptors fd, fd+1 and
+// fd+2 in the review child guard.
+func reviewTerminalFiles(fd int) ([3]*os.File, error) {
+	var files [3]*os.File
+	for i := range files {
+		if fd < 3 || !term.IsTerminal(uintptr(fd+i)) {
+			return files, fmt.Errorf("interactive review needs the runner's terminal")
+		}
+		syscall.CloseOnExec(fd + i)
+		files[i] = os.NewFile(uintptr(fd+i), "review-terminal")
+	}
+	return files, nil
+}
+
+func (t *reviewTerminal) save() { t.state, _ = term.GetState(t.files[0].Fd()) }
 
 // reclaim takes the terminal back from a stopped harness: this process group
-// is the foreground again, and the saved modes and a sane screen return.
-func (t *reviewTerminal) reclaim() {
+// is the foreground again, with the saved modes, no leftover input (such as
+// late replies to the harness's terminal queries) and a fresh line. forced
+// means the harness was killed and may still be in its alternate screen.
+func (t *reviewTerminal) reclaim(forced bool) {
+	fd := t.files[0].Fd()
 	signal.Ignore(syscall.SIGTTOU) // Changing the terminal from the background.
 	defer signal.Reset(syscall.SIGTTOU)
-	_ = unix.IoctlSetPointerInt(int(t.file.Fd()), unix.TIOCSPGRP, syscall.Getpgrp())
+	_ = unix.IoctlSetPointerInt(int(fd), unix.TIOCSPGRP, syscall.Getpgrp())
 	if t.state != nil {
-		_ = term.Restore(t.file.Fd(), t.state)
+		_ = term.Restore(fd, t.state)
 	}
-	// Leave the alternate screen; show the cursor; stop mouse, focus and
-	// bracketed-paste reporting; reset colors.
-	_, _ = t.file.WriteString("\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[0m\r\n")
+	time.Sleep(50 * time.Millisecond) // Let replies already in flight arrive.
+	flushTerminalInput(int(fd))
+	// Show the cursor; stop mouse, focus and bracketed-paste reporting; reset
+	// colors. Leaving the alternate screen also restores an old cursor
+	// position, which would overwrite a crashed harness's last words, so it
+	// is sent only when the harness could not leave it itself.
+	reset := "\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[0m\r\n"
+	if forced {
+		reset = "\x1b[?1049l" + reset
+	}
+	_, _ = t.files[1].WriteString(reset)
 }

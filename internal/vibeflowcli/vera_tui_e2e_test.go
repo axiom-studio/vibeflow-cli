@@ -53,7 +53,9 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	t.Cleanup(func() { tmux("kill-server") })
 	modelRun := filepath.Join(marks, "claude-model")
 	provider := filepath.Join(binDir, "claude")
-	claudeScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(modelRun) + "\nexit 1\n"
+	// Like the real CLI, `auth status` answers without a model; anything else
+	// would be a model run.
+	claudeScript := "#!/bin/sh\n[ \"$*\" = 'auth status' ] && { echo '{\"loggedIn\": true}'; exit 0; }\nprintf '%s\\n' \"$*\" >> " + shellQuote(modelRun) + "\nexit 1\n"
 	if err := os.WriteFile(provider, []byte(claudeScript), 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -75,7 +75,15 @@ type reviewWatch struct {
 	capacity           *reviewCapacity
 	slot               *os.File
 	tty                *reviewTerminal // Set when the harness runs interactively in this terminal.
+	interrupted        bool            // The user closed the interactive harness before its result.
 }
+
+// An interactive harness that exits sooner than this without a result could
+// not start its review (a crash, or a login or trust screen answered no).
+const reviewQuickExit = 15 * time.Second
+
+// reviewWaitNotice is when a waiting interactive review points at the pane.
+const reviewWaitNotice = 60 * time.Second
 
 func reviewUUID() string {
 	b := make([]byte, 16)
@@ -355,7 +363,11 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			w.client.reviewRequest(stopCtx, "DELETE", w.prefix(), nil, nil)
 		}
 	}()
-	fmt.Fprintf(w.output, "Review runner %s is online (%s, %s). Ctrl-C stops it.\n", w.options.Name, w.options.Kind, w.options.Provider)
+	stopHint := "Ctrl-C stops it."
+	if w.tty != nil {
+		stopHint = "Ctrl-C stops it while listening; during a review Ctrl-C goes to the harness, and Vera then offers to stop."
+	}
+	fmt.Fprintf(w.output, "Review runner %s is online (%s, %s). %s\n", w.options.Name, w.options.Kind, w.options.Provider, stopHint)
 	fmt.Fprintln(w.output, reviewListeningLine)
 	// An interrupted attempt always fails or replays its saved result. It never
 	// resumes the old model conversation or launches a second child for it.
@@ -446,6 +458,13 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 	if needsProvider && !w.providerReady {
 		if err := preflightReviewProvider(ctx, w.cfg, w.options.Provider, w.options.Model); err != nil {
 			return err
+		}
+		// Headless, a logged-out harness fails fast with a classified message;
+		// interactively it would wait on a login screen until the deadline.
+		if w.tty != nil {
+			if err := checkReviewHarnessLogin(ctx, w.cfg, w.options.Provider); err != nil {
+				return err
+			}
 		}
 		w.providerReady = true
 	}
@@ -582,12 +601,24 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 	if err := w.finishReceipt(p); err != nil {
 		return err
 	}
-	fmt.Fprintln(w.output, reviewListeningLine)
 	// Retrying would fail the same way and spend the review's attempts.
 	if fatal := w.harnessFatal; fatal != nil {
 		w.harnessFatal = nil
 		return fatal
 	}
+	if ctx.Err() != nil {
+		return nil // Stopping: no longer listening.
+	}
+	if w.interrupted {
+		w.interrupted = false
+		fmt.Fprintln(w.output, "Review interrupted. Press Ctrl-C again within 5 s to stop Vera, or wait to resume listening.")
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(5 * time.Second):
+		}
+	}
+	fmt.Fprintln(w.output, reviewListeningLine)
 	return nil
 }
 
@@ -617,6 +648,10 @@ func (w *reviewWatch) cleanup(p *reviewReceipt) error {
 	dir := w.workDir(p)
 	if err := w.providerCleanupPending(p); err != nil {
 		return err
+	}
+	if w.tty != nil {
+		// Before the directory goes, while its real path still resolves.
+		_ = forgetReviewTrust(w.options.Provider, reviewProviderEnv(w.cfg, w.options.Provider), dir)
 	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
@@ -837,9 +872,15 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			return nil, err
 		}
 	}
+	var extra []*os.File // The guard's descriptors from 3 on.
 	if w.slot != nil {
+		extra = append(extra, w.slot)
 		spec.CapacityFD = 3
 		spec.Cleanup = &reviewProviderCleanup{Reservation: *p.Capacity, RequestID: p.RequestID, JobID: p.JobID, AttemptID: p.Execution.Attempt.ID}
+	}
+	if interactive {
+		spec.TerminalFD = 3 + len(extra)
+		extra = append(extra, w.tty.files[:]...)
 	}
 	if err = saveReviewJSON(filepath.Join(root, "child.json"), spec); err != nil {
 		return nil, err
@@ -849,9 +890,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		return nil, err
 	}
 	guard := exec.Command(executable, "review-child", filepath.Join(root, "child.json"))
-	if w.slot != nil {
-		guard.ExtraFiles = []*os.File{w.slot}
-	}
+	guard.ExtraFiles = extra
 	setStage("child_guard")
 	guard.WaitDelay = 250 * time.Millisecond
 	guard.Env = []string{"PATH=" + os.Getenv("PATH")}
@@ -882,7 +921,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		pipe.Close()
 		guard.Wait()
 		if interactive {
-			w.tty.reclaim()
+			w.tty.reclaim(false)
 		}
 		return nil, fmt.Errorf("review child guard failed")
 	}
@@ -894,24 +933,14 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	harnessStarted := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- guard.Wait() }()
-	finished := false
-	select {
-	case err = <-done:
-		pipe.Close()
-	case <-ctx.Done():
-		pipe.Close()
-		err = <-done
-	case <-written:
-		pipe.Close() // The guard stops the harness: SIGINT, SIGTERM, then SIGKILL.
-		<-done
-		err, finished = nil, true
-	}
+	notice := time.Duration(0) // A headless harness has no screen to answer.
 	if interactive {
-		w.tty.reclaim()
-		if !finished && ctx.Err() == nil && time.Since(harnessStarted) < 15*time.Second {
-			fmt.Fprintf(w.output, "%s exited after %s without a review result; if it needs a login, %s.\n", w.options.Provider, time.Since(harnessStarted).Round(time.Second), reviewHarnessLoginHint(w.options.Provider))
-		}
+		notice = reviewWaitNotice
 	}
+	finished, err := waitReviewHarness(ctx, done, written, notice, func() { pipe.Close() }, func() {
+		fmt.Fprintf(w.output, "\r\nVera is still waiting for %s; if it is showing a login or trust screen, answer it here or press Ctrl-C twice to stop Vera.\r\n", w.options.Provider)
+	})
+	ran := time.Since(harnessStarted)
 	diagnostic.StdoutBytes, diagnostic.StderrBytes = stdout.n, stderr.n
 	if report, ok := readReviewProcessReport(filepath.Join(root, "child-diagnostic.json")); ok {
 		diagnostic.Stage = "provider"
@@ -926,6 +955,25 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.ExitCode = &code
 		diagnostic.Signal = reviewProcessSignal(guard.ProcessState)
 		diagnostic.Category = "child_guard_failed"
+	}
+	if interactive {
+		// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
+		w.tty.reclaim(diagnostic.Signal == int(syscall.SIGTERM) || diagnostic.Signal == int(syscall.SIGKILL))
+		if _, _, resultErr := readReviewResult(resultPath, p, brief.Digest); !finished && ctx.Err() == nil && resultErr != nil {
+			// Only the user closes an interactive harness early, unless it
+			// could not start its review at all.
+			if ran < reviewQuickExit && diagnostic.Signal != int(syscall.SIGINT) {
+				exit := ""
+				if diagnostic.ExitCode != nil && *diagnostic.ExitCode >= 0 {
+					exit = fmt.Sprintf(" (exit code %d)", *diagnostic.ExitCode)
+				}
+				w.harnessFatal = fmt.Errorf("Vera stopped: %s exited within %d s without a review%s; it may need a login or a trust answer (%s). The review stays queued; start Vera again when %s works", w.options.Provider, int(reviewQuickExit.Seconds()), exit, reviewHarnessLoginHint(w.options.Provider), w.options.Provider)
+			} else {
+				w.interrupted = true
+				diagnostic.Category = "cancelled"
+			}
+			return nil, diagnostic.failure()
+		}
 	}
 	if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(resultPath)) {
 		diagnostic.Category = category
@@ -1064,13 +1112,15 @@ func reviewChildCmd() *cobra.Command {
 		child.Env = spec.Env
 		if spec.Interactive {
 			// The harness's own UI, in the foreground of the runner's terminal.
-			tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+			tty, err := reviewTerminalFiles(spec.TerminalFD)
 			if err != nil {
-				return fmt.Errorf("interactive review needs the runner's terminal")
+				return err
 			}
-			defer tty.Close()
-			child.Stdin, child.Stdout, child.Stderr = tty, tty, tty
-			child.SysProcAttr = reviewForegroundAttr(tty)
+			for _, f := range tty {
+				defer f.Close()
+			}
+			child.Stdin, child.Stdout, child.Stderr = tty[0], tty[1], tty[2]
+			child.SysProcAttr = reviewForegroundAttr(tty[0])
 		} else {
 			input, err := os.Open(spec.InputFile)
 			if err != nil {
@@ -1239,4 +1289,33 @@ func reviewOutcomeLine(p *reviewReceipt) string {
 		return fmt.Sprintf("Result: changes requested with %d new findings.", len(result.Findings))
 	}
 	return "Result: clean."
+}
+
+// waitReviewHarness waits until the guard exits, the attempt ends, or an
+// interactive harness has written its result, which stop then closes. After
+// notice (when set) it calls say once. finished reports a written result.
+func waitReviewHarness(ctx context.Context, done <-chan error, written <-chan struct{}, notice time.Duration, stop, say func()) (finished bool, err error) {
+	var noticed <-chan time.Time
+	if notice > 0 {
+		timer := time.NewTimer(notice)
+		defer timer.Stop()
+		noticed = timer.C
+	}
+	for {
+		select {
+		case err = <-done:
+			stop()
+			return false, err
+		case <-ctx.Done():
+			stop()
+			return false, <-done
+		case <-written:
+			stop() // The guard stops the harness: SIGINT, SIGTERM, then SIGKILL.
+			<-done
+			return true, nil
+		case <-noticed:
+			noticed = nil
+			say()
+		}
+	}
 }

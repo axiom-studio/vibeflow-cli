@@ -212,10 +212,25 @@ func TestReviewWatchListenersShareCapacity(t *testing.T) {
 	}
 }
 
-// In a Vera tmux pane the harness runs its interactive UI attached to the
-// pane: it owns the terminal (and keyboard) until its result exists, then the
-// listener closes it, removes the worktree and returns to listening.
-func TestReviewWatchInteractiveHarnessInPane(t *testing.T) {
+// veraPane is a real Vera tmux session whose listener runs the built CLI
+// against reviewWatchServer, with a fake interactive harness.
+type veraPane struct {
+	t        *testing.T
+	tm       *TmuxManager
+	session  string
+	e        *reviewExecution
+	claims   map[int64]*atomic.Int64
+	results  *atomic.Int64
+	marks    string
+	claudeDB string // The listener's private Claude config file.
+	token    string
+}
+
+// startVeraPane starts Vera with a fake "claude" harness whose body is
+// script(e, mark). The fake answers `auth status` as logged in, like the real
+// CLI; loggedIn false makes it report the opposite.
+func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, mark func(string) string) string) *veraPane {
+	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
@@ -223,88 +238,291 @@ func TestReviewWatchInteractiveHarnessInPane(t *testing.T) {
 	repo, e := reviewTestRepo(t)
 	e.Review.Number = 9
 	server, claims, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
-	marks := t.TempDir()
-	mark := func(name string) string { return filepath.Join(marks, name) }
+	v := &veraPane{t: t, e: e, claims: claims, results: results, marks: t.TempDir(), token: "interactive-canary"}
+	// The listener pre-trusts worktrees in Claude's config: keep it private.
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	v.claudeDB = filepath.Join(claudeDir, ".claude.json")
+	if err := os.WriteFile(v.claudeDB, []byte(`{"numStartups": 3, "projects": {"/elsewhere": {"hasTrustDialogAccepted": true}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	status := `{"loggedIn": true}`
+	code := 0
+	if !loggedIn {
+		status, code = `{"loggedIn": false}`, 1
+	}
 	harness := filepath.Join(t.TempDir(), "claude")
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$@\" > " + shellQuote(mark("args")) + "\n" +
-		"[ -t 0 ] && [ -t 1 ] && echo tty > " + shellQuote(mark("tty")) + "\n" +
-		"echo $$ > " + shellQuote(mark("pid")) + "\n" +
-		"echo 'FAKE HARNESS UI ready for input'\n" +
-		"IFS= read -r line\n" +
-		"printf '%s\\n' \"$line\" > " + shellQuote(mark("input")) + "\n" +
-		"cat " + shellQuote(reviewWatchResult(t, e, 0)) + " > ../../result.json\n" +
-		"echo 'result written; waiting to be closed'\n" +
-		"exec sleep 300\n"
-	if err := os.WriteFile(harness, []byte(script), 0700); err != nil {
+	body := "#!/bin/sh\n" +
+		"if [ \"$1 $2\" = 'auth status' ]; then echo '" + status + "'; exit " + strconv.Itoa(code) + "; fi\n" +
+		script(e, v.mark)
+	if err := os.WriteFile(harness, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
 	cfg := DefaultConfig()
-	cfg.ServerURL, cfg.APIToken = server.URL, "interactive-canary"
+	cfg.ServerURL, cfg.APIToken = server.URL, v.token
 	cfg.Providers["claude"] = Provider{Name: "Claude", Binary: harness, LaunchTemplate: "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}"}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
 		t.Fatal(err)
 	}
 	setVeraExecutable(t, builtVibeflow(t))
-	tm := NewTmuxManager(fmt.Sprintf("vftest-vera-ui-%d", os.Getpid()))
-	t.Cleanup(func() { _, _ = tm.run("kill-server") })
-	meta := SessionMeta{Name: "vera-ui", Provider: "claude", Persona: "code_reviewer", WorkingDir: repo, Vera: &veraBinding{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", RunnerName: "interactive"}}
-	meta.TmuxSession = tm.FullSessionName(meta.Provider, meta.Name)
-	if err := startVeraTmuxSession(tm, meta, ""); err != nil {
-		t.Fatal(err)
-	}
-	pane := func() string {
-		out, _ := tm.run("capture-pane", "-p", "-S", "-200", "-t", meta.TmuxSession)
-		return out
-	}
-	waitFor := func(what string, ok func() bool) {
-		t.Helper()
-		deadline := time.Now().Add(20 * time.Second)
-		for !ok() {
-			if time.Now().After(deadline) {
-				t.Fatalf("missing %s; pane:\n%s", what, pane())
+	v.tm = NewTmuxManager(fmt.Sprintf("vftest-vera-ui-%d", os.Getpid()))
+	t.Cleanup(func() {
+		_, _ = v.tm.run("kill-server")
+		// The listener still writes its root while it shuts down.
+		locks, _ := filepath.Glob(filepath.Join(RootDir(), "review-runners", "*", "runner.lock"))
+		for _, path := range locks {
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+				if lock, err := lockReviewFile(path); err == nil {
+					lock.Close()
+					break
+				}
 			}
-			time.Sleep(50 * time.Millisecond)
 		}
-	}
-	exists := func(path string) func() bool {
-		return func() bool { _, err := os.Stat(path); return err == nil }
-	}
-	waitFor("harness on the pane's terminal", exists(mark("tty")))
-	waitFor("harness UI in the pane", func() bool { return strings.Contains(pane(), "FAKE HARNESS UI") })
-	// Keys typed into the pane reach the harness: it is the foreground group.
-	if _, err := tm.run("send-keys", "-t", meta.TmuxSession, "hello-from-pane", "Enter"); err != nil {
+	})
+	meta := SessionMeta{Name: "vera-ui", Provider: "claude", Persona: "code_reviewer", WorkingDir: repo, Vera: &veraBinding{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", RunnerName: "interactive"}}
+	meta.TmuxSession = v.tm.FullSessionName(meta.Provider, meta.Name)
+	v.session = meta.TmuxSession
+	if err := startVeraTmuxSession(v.tm, meta, ""); err != nil {
 		t.Fatal(err)
 	}
-	waitFor("typed input", func() bool {
-		data, _ := os.ReadFile(mark("input"))
+	// A dead pane stays visible, so a stopped listener's last words are checked.
+	if _, err := v.tm.run("set-option", "-t", v.session, "remain-on-exit", "on"); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func (v *veraPane) mark(name string) string { return filepath.Join(v.marks, name) }
+
+func (v *veraPane) capture() string {
+	out, _ := v.tm.run("capture-pane", "-p", "-J", "-S", "-200", "-t", v.session)
+	return out
+}
+
+func (v *veraPane) keys(keys ...string) {
+	v.t.Helper()
+	if _, err := v.tm.run(append([]string{"send-keys", "-t", v.session}, keys...)...); err != nil {
+		v.t.Fatal(err)
+	}
+}
+
+func (v *veraPane) waitFor(what string, ok func() bool) {
+	v.t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for !ok() {
+		if time.Now().After(deadline) {
+			v.t.Fatalf("missing %s; pane:\n%s", what, v.capture())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (v *veraPane) shows(text string) func() bool {
+	return func() bool { return strings.Contains(v.capture(), text) }
+}
+
+func (v *veraPane) dead() bool {
+	out, _ := v.tm.run("display-message", "-p", "-t", v.session, "#{pane_dead}")
+	return strings.TrimSpace(out) == "1"
+}
+
+func (v *veraPane) exists(name string) func() bool {
+	return func() bool { _, err := os.Stat(v.mark(name)); return err == nil }
+}
+
+// lastReceipt is the listener's retained record of its last attempt.
+func (v *veraPane) lastReceipt() reviewReceipt {
+	v.t.Helper()
+	var p reviewReceipt
+	matches, _ := filepath.Glob(filepath.Join(RootDir(), "review-runners", "*", "last-receipt.json"))
+	if len(matches) != 1 {
+		v.t.Fatalf("last receipts: %v", matches)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil || json.Unmarshal(data, &p) != nil {
+		v.t.Fatalf("read receipt: %v", err)
+	}
+	return p
+}
+
+// In a Vera tmux pane the harness runs its interactive UI attached to the
+// pane: it owns the terminal (and keyboard) until its result exists, then the
+// listener closes it, removes the worktree and returns to listening.
+func TestReviewWatchInteractiveHarnessInPane(t *testing.T) {
+	var result string
+	v := startVeraPane(t, true, func(e *reviewExecution, mark func(string) string) string {
+		result = reviewWatchResult(t, e, 0)
+		return "printf '%s\\n' \"$@\" > " + shellQuote(mark("args")) + "\n" +
+			"[ -t 0 ] && [ -t 1 ] && echo tty > " + shellQuote(mark("tty")) + "\n" +
+			"echo $$ > " + shellQuote(mark("pid")) + "\n" +
+			// Claude's trust dialog is pre-answered for exactly this worktree.
+			"grep -q \"\\\"$(pwd -P)\\\"\" \"$CLAUDE_CONFIG_DIR/.claude.json\" && echo yes > " + shellQuote(mark("trusted")) + "\n" +
+			"echo 'FAKE HARNESS UI ready for input'\n" +
+			"IFS= read -r line\n" +
+			"printf '%s\\n' \"$line\" > " + shellQuote(mark("input")) + "\n" +
+			"cat " + shellQuote(result) + " > ../../result.json\n" +
+			"echo 'result written; waiting to be closed'\n" +
+			"exec sleep 300\n"
+	})
+	v.waitFor("harness on the pane's terminal", v.exists("tty"))
+	v.waitFor("harness UI in the pane", v.shows("FAKE HARNESS UI"))
+	if _, err := os.Stat(v.mark("trusted")); err != nil {
+		data, _ := os.ReadFile(v.claudeDB)
+		t.Fatalf("worktree not pre-trusted for Claude: %s", data)
+	}
+	// Keys typed into the pane reach the harness: it is the foreground group.
+	v.keys("hello-from-pane", "Enter")
+	v.waitFor("typed input", func() bool {
+		data, _ := os.ReadFile(v.mark("input"))
 		return strings.TrimSpace(string(data)) == "hello-from-pane"
 	})
-	waitFor("result, worktree removal and listening again", func() bool {
-		text := pane()
+	v.waitFor("result, worktree removal and listening again", func() bool {
+		text := v.capture()
 		i := strings.Index(text, "Result: clean.")
-		return results.Load() == 1 && i >= 0 && strings.Contains(text[i:], "Review worktree removed.") && strings.Contains(text[i:], reviewListeningLine)
+		return v.results.Load() == 1 && i >= 0 && strings.Contains(text[i:], "Review worktree removed.") && strings.Contains(text[i:], reviewListeningLine)
 	})
-	t.Logf("Vera pane after the review:\n%s", pane())
-	args, _ := os.ReadFile(mark("args"))
+	t.Logf("Vera pane after the review:\n%s", v.capture())
+	args, _ := os.ReadFile(v.mark("args"))
 	if !strings.Contains(string(args), "--dangerously-skip-permissions") || !strings.Contains(string(args), "task.txt") {
 		t.Fatalf("harness launch did not use the persona template and task prompt: %q", args)
 	}
-	pid, _ := os.ReadFile(mark("pid"))
+	pid, _ := os.ReadFile(v.mark("pid"))
 	harnessPID, _ := strconv.Atoi(strings.TrimSpace(string(pid)))
-	waitFor("harness stopped", func() bool { return syscall.Kill(harnessPID, 0) != nil })
+	v.waitFor("harness stopped", func() bool { return syscall.Kill(harnessPID, 0) != nil })
 	if work, _ := filepath.Glob(filepath.Join(RootDir(), "review-runners", "*", "work", "*")); len(work) != 0 {
 		t.Fatalf("review worktree kept: %v", work)
 	}
-	if claims[7].Load() != 1 || strings.Contains(pane(), cfg.APIToken) {
-		t.Fatalf("claims=%d or token shown:\n%s", claims[7].Load(), pane())
+	// Cleanup forgets the worktree again and keeps everything else.
+	var config struct {
+		NumStartups int                        `json:"numStartups"`
+		Projects    map[string]json.RawMessage `json:"projects"`
+	}
+	data, _ := os.ReadFile(v.claudeDB)
+	if err := json.Unmarshal(data, &config); err != nil || config.NumStartups != 3 || len(config.Projects) != 1 || config.Projects["/elsewhere"] == nil {
+		t.Fatalf("Claude config after cleanup: %s", data)
+	}
+	if v.claims[7].Load() != 1 || strings.Contains(v.capture(), v.token) {
+		t.Fatalf("claims=%d or token shown:\n%s", v.claims[7].Load(), v.capture())
 	}
 	// The listener has the terminal back: Ctrl-C now stops it, as its banner says.
-	if _, err := tm.run("send-keys", "-t", meta.TmuxSession, "C-c"); err != nil {
+	v.keys("C-c")
+	v.waitFor("listener exit on Ctrl-C", v.dead)
+}
+
+// A harness that exits at once without a review (a crash, a login or trust
+// screen answered "no") stops Vera after one failed attempt instead of
+// re-claiming until the review's attempts are spent.
+func TestReviewWatchInteractiveQuickExitStopsVera(t *testing.T) {
+	v := startVeraPane(t, true, func(*reviewExecution, func(string) string) string {
+		return "echo 'FAKE HARNESS: please log in'\nexit 3\n"
+	})
+	v.waitFor("Vera stopped", v.dead)
+	text := v.capture()
+	t.Logf("pane:\n%s", text)
+	for _, want := range []string{"claude exited within 15 s without a review (exit code 3)", "it may need a login or a trust answer", "run claude and use /login", "The review stays queued"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pane missing %q", want)
+		}
+	}
+	if strings.Contains(text[strings.Index(text, "Claimed"):], reviewListeningLine) || v.claims[7].Load() != 1 {
+		t.Fatalf("Vera kept listening after a quick harness exit (claims=%d)", v.claims[7].Load())
+	}
+}
+
+// Ctrl-C during a review closes the harness; the listener then offers to stop
+// instead of re-claiming, and records the attempt as cancelled.
+func TestReviewWatchInteractiveInterruptOffersStop(t *testing.T) {
+	v := startVeraPane(t, true, func(*reviewExecution, func(string) string) string {
+		return "echo 'FAKE HARNESS UI'\nexec sleep 300\n"
+	})
+	v.waitFor("harness UI", v.shows("FAKE HARNESS UI"))
+	v.keys("C-c")
+	v.waitFor("interrupt prompt", v.shows("Review interrupted. Press Ctrl-C again within 5 s to stop Vera, or wait to resume listening."))
+	v.keys("C-c")
+	v.waitFor("Vera stopped", v.dead)
+	text := v.capture()
+	if strings.Contains(text[strings.Index(text, "Review interrupted"):], reviewListeningLine) || v.claims[7].Load() != 1 {
+		t.Fatalf("Vera resumed listening (claims=%d):\n%s", v.claims[7].Load(), text)
+	}
+	if p := v.lastReceipt(); !strings.Contains(p.Failure, "(cancelled") {
+		t.Fatalf("interrupted attempt recorded as %q", p.Failure)
+	}
+}
+
+// Without a login the harness would sit on its login screen until the
+// deadline; Vera refuses to claim instead.
+func TestReviewWatchInteractiveRefusesLoggedOutHarness(t *testing.T) {
+	v := startVeraPane(t, false, func(*reviewExecution, func(string) string) string {
+		return "echo 'FAKE HARNESS UI'\nexec sleep 300\n"
+	})
+	v.waitFor("Vera stopped", v.dead)
+	text := v.capture()
+	if !strings.Contains(text, "is not logged in") || !strings.Contains(text, "run claude and use /login") || v.claims[7].Load() != 0 {
+		t.Fatalf("logged-out harness claimed=%d:\n%s", v.claims[7].Load(), text)
+	}
+}
+
+// Stopping the listener mid-review records the attempt as cancelled, and
+// the listener does not announce listening again on its way out.
+func TestReviewWatchStopMidReviewIsCancelled(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	server, claims, _ := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	marks := t.TempDir()
+	provider := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\ntouch "+shellQuote(filepath.Join(marks, "started"))+"\nexec sleep 300\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	waitFor("listener exit on Ctrl-C", func() bool {
-		dead, _ := tm.run("display-message", "-p", "-t", meta.TmuxSession, "#{pane_dead}")
-		return strings.TrimSpace(dead) == "1"
-	})
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "stop-canary"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- runReviewWatch(ctx, &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "stop-test")
+	}()
+	deadline := time.Now().Add(15 * time.Second)
+	for _, err := os.Stat(filepath.Join(marks, "started")); err != nil; _, err = os.Stat(filepath.Join(marks, "started")) {
+		if time.Now().After(deadline) {
+			t.Fatal("review never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	text := out.String()
+	if i := strings.Index(text, "Claimed"); i < 0 || strings.Contains(text[i:], reviewListeningLine) || claims[7].Load() != 1 {
+		t.Fatalf("stopping listener announced listening again:\n%s", text)
+	}
+	matches, _ := filepath.Glob(filepath.Join(RootDir(), "review-runners", "*", "last-receipt.json"))
+	data, _ := os.ReadFile(matches[0])
+	var p reviewReceipt
+	if json.Unmarshal(data, &p) != nil || !strings.Contains(p.Failure, "(cancelled") {
+		t.Fatalf("stopped attempt recorded as %q", p.Failure)
+	}
+}
+
+// Vera tells the user, once, that a harness showing a login or trust screen
+// is waiting for them.
+func TestWaitReviewHarnessNotice(t *testing.T) {
+	done := make(chan error, 1)
+	notices := 0
+	go func() { time.Sleep(100 * time.Millisecond); done <- nil }()
+	finished, err := waitReviewHarness(context.Background(), done, nil, 10*time.Millisecond, func() {}, func() { notices++ })
+	if err != nil || finished || notices != 1 {
+		t.Fatalf("err=%v finished=%v notices=%d", err, finished, notices)
+	}
+	written := make(chan struct{})
+	close(written)
+	stop := func() { done <- nil } // Closing the guard's pipe stops the harness.
+	if finished, _ = waitReviewHarness(context.Background(), done, written, time.Hour, stop, func() { notices++ }); !finished || notices != 1 {
+		t.Fatalf("finished=%v notices=%d", finished, notices)
+	}
 }

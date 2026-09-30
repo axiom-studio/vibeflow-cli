@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 )
 
 type reviewChildSpec struct {
@@ -22,8 +23,11 @@ type reviewChildSpec struct {
 	DeadlineAt int64                  `json:"deadline_at"`
 	CapacityFD int                    `json:"capacity_fd,omitempty"`
 	Cleanup    *reviewProviderCleanup `json:"cleanup,omitempty"`
-	// Interactive runs the harness in the foreground of the guard's terminal.
+	// Interactive runs the harness in the foreground of the runner's terminal:
+	// descriptors TerminalFD, +1 and +2 are the runner's own stdin, stdout and
+	// stderr. Never the /dev/tty alias, which macOS kqueue rejects.
 	Interactive bool `json:"interactive,omitempty"`
+	TerminalFD  int  `json:"terminal_fd,omitempty"`
 }
 
 func reviewResultSchema() []byte {
@@ -114,19 +118,7 @@ func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, ro
 	if err != nil {
 		return nil, fmt.Errorf("selected review harness is not installed")
 	}
-	env := map[string]string{}
-	for _, kv := range os.Environ() {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			env[k] = v
-		}
-	}
-	resolved, _ := ResolveProviderEnvVars(cfg, provider) // A missing key means the harness uses its own login.
-	for k, v := range resolved {
-		env[k] = v
-	}
-	for k, v := range p.Env { // Explicit provider configuration wins.
-		env[k] = os.ExpandEnv(v)
-	}
+	env := reviewProviderEnv(cfg, provider)
 	if provider == "gemini" {
 		// Each review worktree is new, so Gemini would refuse it as untrusted.
 		env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
@@ -168,15 +160,36 @@ Schema:
 	if stdin {
 		spec.InputFile = taskPath
 	}
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		spec.Env = append(spec.Env, k+"="+env[k])
-	}
+	spec.Env = reviewEnvList(env)
 	return spec, nil
+}
+
+// reviewProviderEnv is the user's own environment plus the provider's
+// configured variables, which win.
+func reviewProviderEnv(cfg *Config, provider string) map[string]string {
+	env := map[string]string{}
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+	resolved, _ := ResolveProviderEnvVars(cfg, provider) // A missing key means the harness uses its own login.
+	for k, v := range resolved {
+		env[k] = v
+	}
+	for k, v := range cfg.Providers[provider].Env { // Explicit provider configuration wins.
+		env[k] = os.ExpandEnv(v)
+	}
+	return env
+}
+
+func reviewEnvList(env map[string]string) []string {
+	list := make([]string, 0, len(env))
+	for k, v := range env {
+		list = append(list, k+"="+v)
+	}
+	sort.Strings(list)
+	return list
 }
 
 // makeReviewSpecInteractive turns a prepared headless review into the
@@ -204,14 +217,12 @@ func makeReviewSpecInteractive(spec *reviewChildSpec, cfg *Config, provider, mod
 			env[k] = v
 		}
 	}
-	spec.Env = nil
-	for k, v := range withClaudeHardeningEnv(provider, env) {
-		spec.Env = append(spec.Env, k+"="+v)
-	}
-	sort.Strings(spec.Env)
+	spec.Env = reviewEnvList(withClaudeHardeningEnv(provider, env))
 	if provider == "copilot" {
 		_, _ = EnsureCopilotFirstRunConfig(spec.Dir) // Same first-run pre-seed as persona launches.
 	}
+	// Claude and Codex would ask to trust each new worktree first.
+	_ = trustReviewWorktree(provider, env, spec.Dir)
 	spec.Binary, spec.Args, spec.InputFile, spec.Interactive = "/bin/sh", []string{"-c", "exec " + command}, os.DevNull, true
 	return nil
 }
@@ -235,4 +246,32 @@ func preflightReviewProvider(ctx context.Context, cfg *Config, provider, model s
 		return fmt.Errorf("selected review harness %q is not installed", provider)
 	}
 	return nil
+}
+
+// reviewHarnessStatus is each harness's non-interactive login check, verified
+// 2026-09-30 against the installed CLIs. Copilot, Gemini and Qwen have none.
+var reviewHarnessStatus = map[string][]string{
+	"claude": {"auth", "status"}, // Exit 1 and "loggedIn": false when logged out.
+	"codex":  {"login", "status"},
+	"cursor": {"status"}, // Prints "Not logged in" with exit status 0.
+	"kiro":   {"whoami"},
+}
+
+// checkReviewHarnessLogin refuses a harness that reports it is not logged in,
+// before a review is claimed: interactively it would sit on a login screen
+// until the review's deadline. A status check that hangs proves nothing.
+func checkReviewHarnessLogin(ctx context.Context, cfg *Config, provider string) error {
+	args, ok := reviewHarnessStatus[provider]
+	if !ok || (cfg.LLMGatewayEnabled && provider == "claude") {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cfg.Providers[provider].Binary, args...)
+	cmd.Env = reviewEnvList(reviewProviderEnv(cfg, provider))
+	out, err := cmd.CombinedOutput() // Never shown: it can name the account.
+	if ctx.Err() != nil || (err == nil && !strings.Contains(strings.ToLower(string(out)), "not logged in")) {
+		return nil
+	}
+	return fmt.Errorf("Vera did not claim a review: %s reports that %s is not logged in on this machine; %s, then start Vera again", "`"+filepath.Base(cfg.Providers[provider].Binary)+" "+strings.Join(args, " ")+"`", provider, reviewHarnessLoginHint(provider))
 }

@@ -28,8 +28,12 @@ func runReviewProcess(context.Context, *exec.Cmd) error {
 
 func reviewForegroundAttr(*os.File) *syscall.SysProcAttr { return nil }
 
-type reviewTerminal struct{ file *os.File }
+type reviewTerminal struct{ files [3]*os.File }
 
 func openReviewTerminal(any) *reviewTerminal { return nil }
 func (*reviewTerminal) save()                {}
-func (*reviewTerminal) reclaim()             {}
+func (*reviewTerminal) reclaim(bool)         {}
+
+func reviewTerminalFiles(int) ([3]*os.File, error) {
+	return [3]*os.File{}, fmt.Errorf("review runners currently require macOS or Linux")
+}
