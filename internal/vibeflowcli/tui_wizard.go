@@ -1388,7 +1388,11 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 					if rowIdx >= 0 && rowIdx < len(order) {
 						personaIdx := order[rowIdx]
 						from := w.resolvedProviderForPersona(personaIdx)
-						w.personaProviderIdx[personaIdx] = w.nextAvailableProviderIdx(from, delta)
+						if w.personas[personaIdx].key == "code_reviewer" {
+							w.personaProviderIdx[personaIdx] = w.nextProviderIdx(from, delta, w.providerRunsVera)
+						} else {
+							w.personaProviderIdx[personaIdx] = w.nextAvailableProviderIdx(from, delta)
+						}
 					}
 				}
 			}
@@ -1505,12 +1509,12 @@ func (w WizardModel) View() string {
 	if w.quickSwitch {
 		steps = []stepLabel{{StepBranch, "Branch"}, {StepWorktree, "Worktree"}}
 	}
-	// Vera alone ends at Team; its harness/model setup follows outside the wizard.
-	selected := w.selectedPersonaIndices()
-	veraOnly := len(selected) == 1 && w.personas[selected[0]].key == "code_reviewer"
+	// Vera alone needs only a harness: it always runs in its own disposable
+	// worktree with the harness's full-permission mode.
+	veraOnly := w.veraOnly()
 	var stepLine strings.Builder
 	for _, s := range steps {
-		if veraOnly && s.step != StepWorkDir && s.step != StepSessionType && s.step != StepProject && s.step != StepTeam {
+		if veraOnly && s.step > StepProvider && s.step != StepConfirm {
 			continue
 		}
 		if s.step == StepQwenLaunchConfig && w.postProviderConfigStep() != StepQwenLaunchConfig {
@@ -1722,6 +1726,10 @@ func (w WizardModel) View() string {
 				inherits := w.personaProviderIdx[personaIdx] < 0
 				resolved := w.resolvedProviderForPersona(personaIdx)
 				b.WriteString(w.renderTeamProviderRow(i+1, label, resolved, inherits))
+				if w.personas[personaIdx].key == "code_reviewer" && !w.providerRunsVera(resolved) {
+					b.WriteString(lipgloss.NewStyle().Foreground(warningColor).Render(fmt.Sprintf("    Vera cannot run this harness; press ← / → to pick one of: %s", strings.Join(reviewHarnessKeys, ", "))))
+					b.WriteString("\n")
+				}
 			}
 		} else {
 			b.WriteString("Select a provider:\n\n")
@@ -1733,6 +1741,8 @@ func (w WizardModel) View() string {
 				name := pe.provider.Name
 				if !pe.available {
 					name = lipgloss.NewStyle().Foreground(dimColor).Render(name + " (not installed)")
+				} else if veraOnly && !w.providerRunsVera(i) {
+					name = lipgloss.NewStyle().Foreground(dimColor).Render(name + " (Vera cannot run this harness)")
 				}
 				b.WriteString(fmt.Sprintf("%s%s\n", cursor, name))
 			}
@@ -2029,6 +2039,9 @@ func (w WizardModel) View() string {
 		if w.groupEdit {
 			return w.groupEditConfirmView()
 		}
+		if veraOnly {
+			return b.String() + w.veraConfirmView()
+		}
 		b.WriteString("Confirm session:\n\n")
 		if w.selectedWorkDir != "" {
 			b.WriteString(fmt.Sprintf("  Directory:     %s\n", w.selectedWorkDir))
@@ -2139,6 +2152,9 @@ func (w WizardModel) View() string {
 				keyState = "saved for this vendor"
 			}
 			b.WriteString(fmt.Sprintf("  API key:       %s\n", keyState))
+		}
+		if w.veraSelected() {
+			b.WriteString("\n  " + veraConfirmNote + "\n")
 		}
 		b.WriteString("\n")
 		b.WriteString(helpStyle.Render("enter: create  esc: back"))
@@ -2253,18 +2269,33 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		if w.selectedPersona < 0 {
 			w.selectedPersona = 0 // fallback
 		}
-		if selected := w.selectedPersonaIndices(); len(selected) == 1 && w.personas[selected[0]].key == "code_reviewer" {
-			w.result = WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}, WorkDir: w.selectedWorkDir, WorktreeChoice: WorktreeCurrent}
-			if w.selectedProject < len(w.projects) {
-				w.result.ProjectID, w.result.ProjectName = w.projects[w.selectedProject].ID, w.projects[w.selectedProject].Name
-			}
-			w.done = true
-			return w, nil
-		}
 		w.step = StepProvider
 		w.cursor = 0
+		if w.veraOnly() {
+			// Start on the first harness Vera can run.
+			w.cursor = max(0, w.nextProviderIdx(w.selectedProvider-1, 1, w.providerRunsVera))
+		}
 	case StepProvider:
 		teamMode := w.teamModeProvider()
+		if w.veraOnly() {
+			// Vera needs only a harness it can run: no env, routing, branch,
+			// worktree or permission choices.
+			if w.cursor >= len(w.providers) || !w.providerRunsVera(w.cursor) {
+				return w, nil
+			}
+			w.selectedProvider = w.cursor
+			w.clearForeignBinaryPath()
+			w.step = StepConfirm
+			w.cursor = 0
+			return w, nil
+		}
+		if teamMode {
+			for _, i := range w.selectedPersonaIndices() {
+				if w.personas[i].key == "code_reviewer" && !w.providerRunsVera(w.resolvedProviderForPersona(i)) {
+					return w, nil
+				}
+			}
+		}
 		if !teamMode {
 			w.selectedProvider = w.cursor
 			if w.cursor < len(w.providers) && !w.providers[w.cursor].available {
@@ -2433,6 +2464,15 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 			return w.buildGroupEditResult()
 		}
 		pe := w.providers[w.selectedProvider]
+		if w.veraOnly() {
+			// Empty Model: Vera uses the harness default model.
+			w.result = WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}, Provider: pe.provider, ProviderKey: pe.key, WorkDir: w.selectedWorkDir, WorktreeChoice: WorktreeCurrent}
+			if w.selectedProject < len(w.projects) {
+				w.result.ProjectID, w.result.ProjectName = w.projects[w.selectedProject].ID, w.projects[w.selectedProject].Name
+			}
+			w.done = true
+			return w, nil
+		}
 		// Determine worktree choice from selected option text.
 		wtChoice := WorktreeCurrent
 		var existingPath string
@@ -2694,6 +2734,11 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		w.step = StepWorktree
 		w.cursor = w.selectedWorktree
 	case StepConfirm:
+		if w.veraOnly() {
+			w.step = StepProvider
+			w.cursor = w.selectedProvider
+			return w, nil
+		}
 		if w.groupEdit {
 			// Group edit skips the permissions step — go back to provider.
 			w.step = StepProvider
@@ -2775,17 +2820,67 @@ func (w WizardModel) renderTeamProviderRow(rowIdx int, label string, providerIdx
 // after `from` in the cycle direction (delta = +1 or -1). Returns `from`
 // unchanged if no other available provider exists.
 func (w WizardModel) nextAvailableProviderIdx(from, delta int) int {
+	return w.nextProviderIdx(from, delta, func(i int) bool { return w.providers[i].available })
+}
+
+// nextProviderIdx returns the next provider after `from` in the cycle
+// direction for which ok holds, or `from` when none does.
+func (w WizardModel) nextProviderIdx(from, delta int, ok func(int) bool) int {
 	n := len(w.providers)
 	if n == 0 {
 		return from
 	}
 	for step := 1; step <= n; step++ {
 		j := ((from+delta*step)%n + n) % n
-		if w.providers[j].available {
+		if ok(j) {
 			return j
 		}
 	}
 	return from
+}
+
+// providerRunsVera reports whether Vera can run the installed provider at i.
+func (w WizardModel) providerRunsVera(i int) bool {
+	return i >= 0 && i < len(w.providers) && w.providers[i].available && reviewHarnessSupported(w.providers[i].key)
+}
+
+// veraSelected reports whether Vera is part of the selected vibeflow team.
+func (w WizardModel) veraSelected() bool {
+	if w.selectedSessionType != 1 {
+		return false
+	}
+	for _, i := range w.selectedPersonaIndices() {
+		if w.personas[i].key == "code_reviewer" {
+			return true
+		}
+	}
+	return false
+}
+
+// veraOnly reports whether Vera is the only selected persona.
+func (w WizardModel) veraOnly() bool {
+	return w.veraSelected() && len(w.selectedPersonaIndices()) == 1
+}
+
+const veraConfirmNote = "Vera listens for @vibeflow review on the linked repository until this CLI closes and runs with your login and full permissions in a disposable worktree."
+
+// veraConfirmView renders the Confirm step when Vera is the only persona.
+func (w WizardModel) veraConfirmView() string {
+	var b strings.Builder
+	b.WriteString("Confirm " + reviewSessionLabel + ":\n\n")
+	if w.selectedProject < len(w.projects) {
+		b.WriteString(fmt.Sprintf("  Project:   %s\n", w.projects[w.selectedProject].Name))
+	}
+	b.WriteString(fmt.Sprintf("  Checkout:  %s\n", w.selectedWorkDir))
+	b.WriteString(fmt.Sprintf("  Harness:   %s\n", w.providers[w.selectedProvider].provider.Name))
+	b.WriteString("  Model:     harness default\n\n")
+	note := "  " + veraConfirmNote
+	if w.width > 0 {
+		note = lipgloss.NewStyle().PaddingLeft(2).Width(w.width).Render(veraConfirmNote)
+	}
+	b.WriteString(note + "\n\n")
+	b.WriteString(helpStyle.Render("enter: start  esc: back"))
+	return b.String()
 }
 
 // resolvedBranch returns the actual branch name — either the new branch name

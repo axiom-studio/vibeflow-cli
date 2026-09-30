@@ -290,7 +290,6 @@ type reviewStartupModel struct {
 	owlPaused          bool
 	repositorySelected bool
 	selectedBinding    bool
-	modelSelected      bool
 	title, cancelHint  string // Explicit Vera/checkout setup; empty means startup consent.
 }
 
@@ -321,17 +320,6 @@ func (m reviewStartupModel) resolve() tea.Cmd {
 	return func() tea.Msg {
 		o := m.options
 		if m.selectedBinding {
-			if !m.modelSelected {
-				choices := []reviewStartupChoice{}
-				if !m.cfg.LLMGatewayEnabled {
-					choices = append(choices, reviewStartupChoice{Label: "Harness default", Value: "default"})
-				}
-				for _, model := range ModelsForProvider(o.Provider) {
-					choices = append(choices, reviewStartupChoice{Label: model.ID, Value: model.ID})
-				}
-				choices = append(choices, reviewStartupChoice{Label: "Enter another model", Value: "manual"})
-				return reviewStartupResolvedMsg{options: o, input: &reviewStartupInput{Field: "model", Message: "Choose the model for this Vera runner.", Choices: choices}}
-			}
 			o, input, err := resolveReviewStartup(m.ctx, m.cfg, o, true)
 			return reviewStartupResolvedMsg{options: o, input: input, err: err}
 		}
@@ -469,7 +457,6 @@ func (m reviewStartupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.repositorySelected = false
 			case "provider":
 				m.options.Provider, m.options.Model = value, ""
-				m.modelSelected = false
 			case "repository_choice":
 				if value == "manual" {
 					m.input = &reviewStartupInput{Field: "repository", Message: m.input.ManualMessage}
@@ -482,16 +469,7 @@ func (m reviewStartupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.options.Repository, m.options.RepositoryLinkID = value, 0
 				m.repositorySelected = true
 			case "model":
-				if m.selectedBinding && value == "manual" {
-					m.input = &reviewStartupInput{Field: "model", Message: "Enter the model to use for PR reviews."}
-					m.cursor, m.text = 0, ""
-					return m, nil
-				}
-				if m.selectedBinding && value == "default" {
-					value = ""
-				}
 				m.options.Model = value
-				m.modelSelected = true
 			case "repository_link":
 				provider, id, _ := strings.Cut(value, ":")
 				m.options.GitProvider = provider

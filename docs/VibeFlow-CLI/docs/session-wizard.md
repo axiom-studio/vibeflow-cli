@@ -23,15 +23,23 @@ Exact labels and ordering match your installed version; the list above reflects 
 ## Vera PR review runner
 
 With `vibeflow --cra`, the persona picker also offers **Vera · Code Reviewer**.
-Selecting only Vera skips the coding-agent branch, worktree, routing, and permission steps.
-It validates the selected checkout against the chosen project's linked repositories, then asks for Claude or Codex and a review model.
-Vera can run on any configured coding harness whose binary is installed, in normal mode like the other personas: your own login and environment, with full permissions.
+Selecting only Vera uses the same wizard with fewer steps: **Directory > Type > Project > Team > Provider > Confirm**.
+Env, Routing, Qwen, Endpoint, Branch, Worktree and Permissions are skipped because Vera always runs in its own disposable worktree with the harness's full-permission mode.
+The **Provider** step is the ordinary provider list; harnesses Vera cannot run are shown dimmed and cannot be selected, and uninstalled ones show **(not installed)**.
+Vera can run Claude, Codex, Copilot, Cursor, Gemini, Kiro or Qwen, in normal mode like the other personas: your own login, environment, MCP servers and credentials, with full permissions.
 Codex works with a ChatGPT subscription login as well as an API key.
+There is no model question: Vera uses the harness default model.
+The **Confirm** step shows the project, checkout, harness and "harness default" model, and states that Vera listens for `@vibeflow review` on the linked repository until this CLI closes and runs with your login and full permissions in a disposable worktree.
+Pressing Enter starts Vera directly after checking the checkout against the project's linked repositories.
+Only when that check needs input, because several repository links match or the checkout does not match any link, a small Vera popup asks for that one choice.
+With the LLM gateway enabled, that popup also asks for the review model, because gateway reviews require an explicit model.
 Vera listens for repository review requests while idle and starts a fresh review for each assigned PR.
 Each review runs in its own disposable git worktree of the PR head, never in your checkout, and the worktree and all review files are deleted when the review ends.
 The `R` review-runner view shows listening, running, or failed status, and closing the TUI stops only its owned runners.
-Selecting Vera with coding personas launches the review runner separately and then launches the coding agents with their original settings.
-Canceling Vera setup still continues the selected coding-agent launch.
+Selecting Vera with coding personas keeps the full wizard for the coding personas.
+On the team **Provider** step, Vera's row uses its own override or the team default, and cycles only through harnesses Vera can run; the step does not continue while Vera's row shows a harness it cannot run.
+On confirm, Vera starts with that harness and then the coding agents launch with their own settings and overrides.
+If Vera cannot start, the error is shown and the coding agents still launch.
 The selection grants consent only for this invocation and repository, without changing saved coding-agent configuration.
 Headless `launch --persona code_reviewer` is intentionally rejected with an explicit `review-watch` command instead of starting a coding-agent loop.
 
