@@ -158,42 +158,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		cfg.MCPToolName = flagMCPToolName
 	}
 
-	// Unlike the first-run authentication wizard, consent is requested on
-	// every interactive launch. No detached runner is adopted or auto-started.
 	cwd, _ := os.Getwd()
-	var reviewSetup reviewStartupModel
-	if flagCRA {
-		startupOptions, _ := loadReviewGroupPreferences(cfg, cfgPath, cwd)
-		startup := newReviewStartupModel(ctx, cfg, cfgPath, startupOptions)
-		startProgram := tea.NewProgram(startup, tea.WithContext(ctx), tea.WithoutSignalHandler())
-		startResult, err := startProgram.Run()
-		if err != nil {
-			return fmt.Errorf("review runner setup: %w", err)
-		}
-		var ok bool
-		reviewSetup, ok = startResult.(reviewStartupModel)
-		if !ok || reviewSetup.quit || !reviewSetup.done {
-			return nil
-		}
-	}
-	var supervisor *reviewSupervisor
-	if flagCRA {
-		supervisor, err = newReviewSupervisor(ctx, cfg, cfgPath)
-		if err != nil {
-			return fmt.Errorf("review runners: %w", err)
-		}
-		supervisor.options = reviewSetup.options
-		supervisor.options.RepositoryRequestsApproved = reviewSetup.enabled
-		supervisor.explicitOnly = !reviewSetup.enabled
-		if reviewSetup.enabled {
-			_ = saveReviewGroupPreferences(cfg, cfgPath, supervisor.options, supervisor.preferences)
-		}
-		defer func() {
-			if err := supervisor.Close(); err != nil {
-				fmt.Fprintf(os.Stderr, "PR review runner: %v\n", err)
-			}
-		}()
-	}
 
 	// Initialize components
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
@@ -227,11 +192,6 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	model := NewModel(cfg, client, tmux, worktrees, store, cache, registry, projectID)
 	model.serverWarning = serverWarning
 	model.craEnabled = flagCRA
-	model.reviewSupervisor = supervisor
-	if supervisor != nil {
-		model.reviewPaths = append([]string(nil), supervisor.initialPaths...)
-		model.reviewPreferences = copyReviewPreferences(supervisor.preferences)
-	}
 
 	// Detect dead sessions from cache and show restart popup if any.
 	if sessions, err := tmux.ListSessions(); err == nil {

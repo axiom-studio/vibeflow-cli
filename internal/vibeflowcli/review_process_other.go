@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 )
 
 func reviewProcessSignal(*os.ProcessState) int { return 0 }
@@ -24,3 +25,11 @@ func lockReviewFile(string) (*os.File, error) {
 func runReviewProcess(context.Context, *exec.Cmd) error {
 	return fmt.Errorf("review runners currently require macOS or Linux")
 }
+
+func reviewForegroundAttr(*os.File) *syscall.SysProcAttr { return nil }
+
+type reviewTerminal struct{ file *os.File }
+
+func openReviewTerminal(any) *reviewTerminal { return nil }
+func (*reviewTerminal) save()                {}
+func (*reviewTerminal) reclaim()             {}

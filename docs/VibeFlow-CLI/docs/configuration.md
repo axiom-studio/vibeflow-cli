@@ -21,17 +21,11 @@ The `--root` flag enables fully isolated parallel instances with independent con
 
 The first-launch server/API-key setup is saved here and is not repeated on later TUI launches.
 The PR review preview is disabled unless the command includes `--cra`; this temporary rollout flag is not saved in configuration.
-The independent **Run PR reviews while this CLI is open?** prompt appears on every interactive `vibeflow --cra` launch.
-Accepting permits requests from PR commenters on the connected repositories, including commenters without a Cloud account.
-Repository routing is enabled only when the server advertises `repository_review_v1` during this launch.
-Saved preferences and detached-runner records do not grant this consent on a later launch.
-Its **Run reviews** / **Not now** answer is never persisted or coupled to authentication setup, and **Not now** is the default.
-Choosing **Run reviews** discovers all accessible projects, independently of `default_project`, and reuses `default_provider` with one shared provider/model setup when needed.
-Checkout selection reuses a valid remembered path for each stable repository binding, then checks `default_work_dir`, the launch directory, `directory_history`, and this root's saved session paths.
-One matching checkout is selected automatically; press `R` then Enter to resolve multiple clones or enter a missing checkout without blocking normal TUI use.
-Paths are validated against Git origin identity; aliases and worktrees sharing a common Git directory are deduplicated.
-Discovery refreshes on `r`, newly known paths, and every minute without changing ordinary queue polling.
-Only runners created by this TUI stop with it; use explicit `vibeflow --cra review-watch --background` for a detached runner.
+`vibeflow --cra` starts straight into the session list; Vera runs only in a Vera session you start from New Agent, one per repository.
+Starting that session permits requests from PR commenters on its one linked repository, including commenters without a Cloud account, until you delete the session.
+Repository routing is enabled only when the server advertises `repository_review_v1` when the session's listener starts.
+Detached-runner records do not grant this consent for another repository.
+Use explicit `vibeflow --cra review-watch --background` for a detached runner on a machine without tmux.
 Vera can use any entry under `providers` whose `binary` is installed: `claude`, `codex`, `copilot`, `cursor`, `gemini`, `kiro` or `qwen`.
 It runs that harness in normal mode with the provider's `env`, `saved_env_vars` and your own login, so a Codex ChatGPT login works.
 Each review runs in a disposable git worktree under the root's `review-runners/` directory, which is removed when the review ends.
@@ -46,7 +40,7 @@ default_project: my-project
 default_work_dir: /path/to/projects
 tmux_socket: vibeflow
 poll_interval_seconds: 5
-review_concurrency: 2  # positive integer; shared execution limit for TUI-managed review groups
+review_concurrency: 2  # positive integer; reviews running at once across this root's Vera sessions
 view_mode: flat   # flat or grouped
 
 llm_gateway_enabled: false  # optional: route LLM traffic via server gateway when supported
@@ -86,8 +80,9 @@ Built-in provider keys include **`claude`**, **`codex`**, **`gemini`**, **`curso
 
 `review_concurrency` defaults to `2` when omitted and accepts any positive integer.
 Zero, negative, null, and noninteger values are configuration errors.
-The limit covers each TUI-managed attempt through provider shutdown and result acknowledgement, including saved results awaiting restored authorization.
-Standalone and externally owned runners are independent of a TUI's capacity group.
+All foreground `review-watch` listeners in one root, including every Vera session, share this limit: at most that many reviews run at once, and a listener at the limit keeps listening without claiming work.
+The limit covers each attempt through provider shutdown and result acknowledgement, including saved results awaiting restored authorization.
+Detached `--background` runners are independent of it.
 An unresolved `Provider cleanup unverified` notice names a private attempt diagnostic whose reservation remains quarantined across restarts.
 A surviving child guard clears that notice only after confirming its provider process group has stopped; a free file lock alone is not cleanup evidence.
 Other available slots can continue serving healthy bindings.
@@ -122,7 +117,6 @@ All paths below are resolved relative to the root directory (default `~/.vibeflo
 | `<root>/sessions.json` | Session metadata (file-locked) |
 | `<root>/session_cache.json` | Cache for restart-after-exit; persists full launch parameters so `vibeflow restart` works after a session exits tmux |
 | `<root>/vibeflow.pid` | PID lock so only one TUI instance runs per root |
-| `<root>/review-runner-preferences.json` | Reusable provider/model and checkout choices keyed by stable binding identity, scoped to server/config/provider/directory context; migrates the old single-choice format and never stores consent or credentials |
 
 ### Internal fields
 

@@ -50,6 +50,7 @@ type SessionMeta struct {
 	LLMGatewayEnabled      bool             `json:"llm_gateway_enabled,omitempty"`
 	MCPToolName            string           `json:"mcp_tool_name,omitempty"`
 	OpenShell              *OpenShellConfig `json:"openshell,omitempty"`
+	Vera                   *veraBinding     `json:"vera,omitempty"` // Set only for Vera sessions: what their listener serves.
 	CreatedAt              time.Time        `json:"created_at"`
 }
 

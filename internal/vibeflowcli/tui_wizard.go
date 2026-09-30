@@ -2862,7 +2862,7 @@ func (w WizardModel) veraOnly() bool {
 	return w.veraSelected() && len(w.selectedPersonaIndices()) == 1
 }
 
-const veraConfirmNote = "Vera listens for @vibeflow review on the linked repository until this CLI closes and runs with your login and full permissions in a disposable worktree."
+const veraConfirmNote = "Vera runs in its own tmux session, listening for @vibeflow review on the linked repository until you delete the session. Each review runs with your login and full permissions in a disposable worktree."
 
 // veraConfirmView renders the Confirm step when Vera is the only persona.
 func (w WizardModel) veraConfirmView() string {

@@ -1,3 +1,5 @@
+//go:build darwin || linux
+
 package vibeflowcli
 
 import (
@@ -11,11 +13,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Removing the CRA-gated picker entry would make Vera unreachable from New Agent.
@@ -115,7 +121,7 @@ func TestVeraWizardReusesProviderAndConfirmSteps(t *testing.T) {
 		t.Fatalf("provider did not lead to Confirm: %v", w.step)
 	}
 	view = w.View()
-	for _, want := range []string{"Selected", w.selectedWorkDir, "Qwen", "harness default", "@vibeflow review", "until this CLI closes", "full permissions", "disposable worktree"} {
+	for _, want := range []string{"Selected", w.selectedWorkDir, "Qwen", "harness default", "@vibeflow review", "own tmux session", "until you delete the session", "full permissions", "disposable worktree"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("confirm missing %q:\n%s", want, view)
 		}
@@ -168,35 +174,18 @@ func TestVeraWizardTeamRowOnlyOffersVeraHarnesses(t *testing.T) {
 	}
 }
 
-// Declining all-project consent must not start runners during background discovery.
-func TestVeraUnselectedDiscoveryDoesNotLaunch(t *testing.T) {
-	withTempRoot(t)
-	repo, _ := reviewTestRepo(t)
-	cfg := DefaultConfig()
-	cfg.ServerURL, cfg.APIToken = "http://127.0.0.1:1", "fixture"
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	s.explicitOnly = true
-	o := reviewStartupOptions(cfg, "", repo)
-	o.ProjectID, o.RepositoryLinkID, o.GitProvider, o.Repository = 66, 7, "github", repo
-	statuses := s.Reconcile(reviewDiscovery{Complete: true, Projects: []Project{{ID: 66}}, Bindings: []reviewBinding{{Options: o}}})
-	if len(statuses) != 0 {
-		t.Fatalf("no selected Vera, got runners %+v", statuses)
-	}
-}
-
-func newVeraFixture(t *testing.T) (*Config, string, *atomic.Int64, *atomic.Int64) {
+// newVeraFixture serves the review API for project 66 with links 7 (acme/repo)
+// and 8 (acme/second), saves the config the listener reads, and counts runner
+// registrations, idle work polls and DELETEs.
+func newVeraFixture(t *testing.T) (cfg *Config, repo string, registrations, polls, stops *atomic.Int64) {
 	t.Helper()
 	withTempRoot(t)
-	repo, _ := reviewTestRepo(t)
+	repo, _ = reviewTestRepo(t)
 	provider := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	var registrations, stops atomic.Int64
+	registrations, polls, stops = new(atomic.Int64), new(atomic.Int64), new(atomic.Int64)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/projects"):
@@ -212,6 +201,7 @@ func newVeraFixture(t *testing.T) (*Config, string, *atomic.Int64, *atomic.Int64
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			w.WriteHeader(204)
 		case strings.HasSuffix(r.URL.Path, "/work"):
+			polls.Add(1)
 			fmt.Fprint(w, `{"reviews":[]}`)
 		case r.Method == "DELETE":
 			stops.Add(1)
@@ -222,83 +212,294 @@ func newVeraFixture(t *testing.T) (*Config, string, *atomic.Int64, *atomic.Int64
 		}
 	}))
 	t.Cleanup(server.Close)
-	cfg := DefaultConfig()
-	cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
-	cfg.Providers["claude"] = Provider{Binary: provider}
-	return cfg, repo, &registrations, &stops
+	cfg = DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "vera-api-canary"
+	cfg.Providers["claude"] = Provider{Name: "Claude", Binary: provider}
+	cfg.Providers["codex"] = Provider{Name: "Codex", Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	return cfg, repo, registrations, polls, stops
 }
 
-// The picker must route to review setup before ordinary session initialization.
+// veraTmuxModel is a TUI model on a private tmux socket.
+func veraTmuxModel(t *testing.T, cfg *Config) Model {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager(fmt.Sprintf("vftest-vera-%d-%d", os.Getpid(), time.Now().UnixNano()%1e9))
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	return Model{config: cfg, craEnabled: true, tmux: tm, registry: NewProviderRegistry(cfg), logger: NewLogger(), store: NewStore(), cache: NewSessionCache(), repoRootCache: map[string]string{}}
+}
+
+// paneCommand is the command tmux started a session's pane with.
+func paneCommand(t *testing.T, tm *TmuxManager, session string) string {
+	t.Helper()
+	out, err := tm.run("display-message", "-p", "-t", session, "#{pane_start_command}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Trim(strings.TrimSpace(out), `"`) // tmux quotes the stored command.
+}
+
+// setVeraExecutable points Vera sessions at binary instead of the test binary.
+func setVeraExecutable(t *testing.T, binary string) {
+	t.Helper()
+	orig := veraExecutable
+	veraExecutable = func() (string, error) { return binary, nil }
+	t.Cleanup(func() { veraExecutable = orig })
+}
+
+// launchVera drives the wizard result for Vera through the TUI and returns the
+// message the launch produced.
+func launchVera(t *testing.T, m Model, result WizardResult) (Model, tea.Msg) {
+	t.Helper()
+	next, cmd := m.Update(m.launchFromWizard(result))
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatalf("Vera launch produced no command; err=%v", m.err)
+	}
+	return m, cmd()
+}
+
+func veraResult(repo, provider string) WizardResult {
+	return WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}, ProjectID: 66, ProjectName: "Selected", WorkDir: repo, ProviderKey: provider}
+}
+
+func veraRunnerName() string {
+	name, _ := os.Hostname()
+	if !reviewStartupText(name, 100) {
+		name = "Review runner"
+	}
+	return name
+}
+
+func storedVera(t *testing.T) []SessionMeta {
+	t.Helper()
+	metas, err := NewStore().List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vera []SessionMeta
+	for _, meta := range metas {
+		if meta.Vera != nil {
+			vera = append(vera, meta)
+		}
+	}
+	return vera
+}
+
+// Confirming Vera creates an ordinary persona tmux session whose command is the
+// foreground listener for exactly the chosen binding and harness.
+func TestVeraWizardConfirmCreatesListenerSession(t *testing.T) {
+	cfg, repo, registrations, _, _ := newVeraFixture(t)
+	fake := filepath.Join(t.TempDir(), "vibeflow")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec sleep 300\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	setVeraExecutable(t, fake)
+	m := veraTmuxModel(t, cfg)
+	m, msg := launchVera(t, m, veraResult(repo, "claude"))
+	if launched, ok := msg.(veraLaunchedMsg); !ok || launched.err != nil || launched.existing != "" {
+		t.Fatalf("Vera did not launch: %#v", msg)
+	}
+	metas := storedVera(t)
+	if len(metas) != 1 {
+		t.Fatalf("want one stored Vera session, got %+v", metas)
+	}
+	meta := metas[0]
+	want := SessionMeta{Name: meta.Name, TmuxSession: sessionPrefix + "claude-" + meta.Name, Provider: "claude", Project: "Selected", ProjectID: 66, Persona: "code_reviewer", Branch: meta.Branch, WorkingDir: repo, SessionType: "vibeflow", Vera: &veraBinding{ProjectID: 66, RepositoryLinkID: 7, GitProvider: "github", RunnerName: veraRunnerName()}, CreatedAt: meta.CreatedAt}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("stored Vera session\n got %+v\nwant %+v", meta, want)
+	}
+	root, _ := filepath.Abs(RootDir())
+	command := "exec " + shellJoin([]string{fake, "--cra", "--root", root, "--config", filepath.Join(root, "config.yaml"), "review-watch", "--project", "66", "--repo", repo, "--repository-link", "7", "--git-provider", "github", "--provider", "claude", "--name", veraRunnerName()})
+	started := paneCommand(t, m.tmux, meta.TmuxSession)
+	if started != command {
+		t.Fatalf("pane command\n got %q\nwant %q", started, command)
+	}
+	if strings.Contains(started, cfg.APIToken) {
+		t.Fatal("listener command carries the API token")
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".vibeflow-session-code_reviewer")); !os.IsNotExist(err) {
+		t.Fatal("Vera wrote coding-agent session state")
+	}
+	if registrations.Load() != 0 {
+		t.Fatal("the TUI itself registered a runner; only the listener may")
+	}
+	// Restart re-runs the same command in the exited pane.
+	if _, err := m.tmux.run("respawn-pane", "-k", "-t", meta.TmuxSession, "true"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if dead, _ := m.tmux.run("display-message", "-p", "-t", meta.TmuxSession, "#{pane_dead}"); strings.TrimSpace(dead) == "1" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := RestartSession(meta, cfg, m.tmux, m.store, m.cache, m.registry); err != nil {
+		t.Fatal(err)
+	}
+	if again := paneCommand(t, m.tmux, meta.TmuxSession); again != command {
+		t.Fatalf("restart ran %q, want %q", again, command)
+	}
+}
+
+// The session list shows Vera like any persona, with the listener's state.
+func TestVeraSessionRowShowsListenerStatus(t *testing.T) {
+	cfg, repo, _, _, _ := newVeraFixture(t)
+	fake := filepath.Join(t.TempDir(), "vibeflow")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec sleep 300\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	setVeraExecutable(t, fake)
+	m := veraTmuxModel(t, cfg)
+	m, _ = launchVera(t, m, veraResult(repo, "claude"))
+	meta := storedVera(t)[0]
+	row := func() SessionRow {
+		t.Helper()
+		msg := m.refreshSessions().(sessionsMsg)
+		if msg.err != nil || len(msg.sessions) != 1 {
+			t.Fatalf("session list %+v %v", msg.sessions, msg.err)
+		}
+		next, _ := m.Update(msg)
+		m = next.(Model)
+		return msg.sessions[0]
+	}
+	rendered := func(s SessionRow) string {
+		var b strings.Builder
+		m.renderSessionRow(&b, s, 1, 0, 120, "")
+		return ansi.Strip(b.String())
+	}
+	if r := row(); r.Persona != "code_reviewer" || r.Provider != "claude" || r.WorkingDir != repo || r.Project != "Selected" || r.Status != "listening" {
+		t.Fatalf("idle Vera row %+v", r)
+	} else if text := rendered(r); !strings.Contains(text, "Vera · Code Reviewer") || !strings.Contains(text, "Selected") || !strings.Contains(text, "listening") || !strings.Contains(text, "claude-") {
+		t.Fatalf("idle Vera row renders as:\n%s", text)
+	}
+	dir := filepath.Join(RootDir(), "review-runners", reviewBackgroundID(cfg.ServerURL, veraOptions(meta)))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	e := &reviewExecution{Review: reviewJob{ID: "job", Number: 12}}
+	if err := saveReviewJSON(filepath.Join(dir, "state.json"), reviewRunnerState{ID: "runner", Pending: &reviewReceipt{JobID: "job", Execution: e}}); err != nil {
+		t.Fatal(err)
+	}
+	if r := row(); r.Status != "reviewing" || !strings.Contains(rendered(r), "reviewing PR #12") {
+		t.Fatalf("reviewing Vera row %+v:\n%s", r, rendered(r))
+	}
+	if _, err := m.tmux.run("respawn-pane", "-k", "-t", meta.TmuxSession, "true"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for r := row(); r.Status != "stopped"; r = row() {
+		if time.Now().After(deadline) {
+			t.Fatalf("exited Vera row %+v", r)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Choosing Vera again for the same repository attaches the live session; a
+// different harness is refused instead of silently keeping the old one.
+func TestVeraSecondSelectionReusesLiveSession(t *testing.T) {
+	cfg, repo, _, _, _ := newVeraFixture(t)
+	fake := filepath.Join(t.TempDir(), "vibeflow")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec sleep 300\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	setVeraExecutable(t, fake)
+	m := veraTmuxModel(t, cfg)
+	m, _ = launchVera(t, m, veraResult(repo, "claude"))
+	first := storedVera(t)[0]
+	m, msg := launchVera(t, m, veraResult(repo, "claude"))
+	if launched, ok := msg.(veraLaunchedMsg); !ok || launched.err != nil || launched.existing != first.TmuxSession {
+		t.Fatalf("second selection did not reuse %s: %#v", first.TmuxSession, msg)
+	}
+	next, cmd := m.Update(msg)
+	m = next.(Model)
+	attached := false
+	for _, c := range batchCmds(cmd) {
+		if a, ok := c().(autoAttachMsg); ok && a.name == first.TmuxSession {
+			attached = true
+		}
+	}
+	if !attached {
+		t.Fatal("existing Vera session was not attached")
+	}
+	_, msg = launchVera(t, m, veraResult(repo, "codex"))
+	if launched, ok := msg.(veraLaunchedMsg); !ok || launched.err == nil || !strings.Contains(launched.err.Error(), "already listening") || !strings.Contains(launched.err.Error(), "claude") {
+		t.Fatalf("harness change was not reported: %#v", msg)
+	}
+	sessions, _ := m.tmux.ListSessions()
+	if len(sessions) != 1 || len(storedVera(t)) != 1 {
+		t.Fatalf("duplicate Vera sessions: %+v", sessions)
+	}
+}
+
+// batchCmds flattens a tea.Batch into its commands.
+func batchCmds(cmd tea.Cmd) []tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	if batch, ok := cmd().(tea.BatchMsg); ok {
+		var cmds []tea.Cmd
+		for _, c := range batch {
+			cmds = append(cmds, batchCmds(c)...)
+		}
+		return cmds
+	}
+	return []tea.Cmd{cmd}
+}
+
+// Deleting the session with d stops the real listener, which deregisters.
+func TestVeraSessionDeleteStopsListener(t *testing.T) {
+	cfg, repo, registrations, polls, stops := newVeraFixture(t)
+	setVeraExecutable(t, builtVibeflow(t))
+	m := veraTmuxModel(t, cfg)
+	m, _ = launchVera(t, m, veraResult(repo, "claude"))
+	meta := storedVera(t)[0]
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for !ok() {
+			if time.Now().After(deadline) {
+				pane, _ := m.tmux.run("capture-pane", "-p", "-t", meta.TmuxSession)
+				t.Fatalf("missing %s; pane:\n%s", what, pane)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	waitFor("listener registration and idle poll", func() bool { return registrations.Load() == 1 && polls.Load() >= 1 })
+	pane, _ := m.tmux.run("capture-pane", "-p", "-t", meta.TmuxSession)
+	if !strings.Contains(pane, reviewListeningLine) || strings.Contains(pane, cfg.APIToken) {
+		t.Fatalf("listener pane:\n%s", pane)
+	}
+	pid, err := m.tmux.run("display-message", "-p", "-t", meta.TmuxSession, "#{pane_pid}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.Update(m.refreshSessions())
+	m = next.(Model)
+	next, _ = m.Update(tea.KeyPressMsg{Text: "d"})
+	next, _ = next.(Model).Update(tea.KeyPressMsg{Text: "y"})
+	m = next.(Model)
+	waitFor("runner DELETE", func() bool { return stops.Load() == 1 })
+	listener, _ := strconv.Atoi(strings.TrimSpace(pid))
+	waitFor("listener exit", func() bool { return syscall.Kill(listener, 0) != nil })
+	if m.tmux.HasSession(meta.TmuxSession) {
+		t.Fatal("tmux session survived delete")
+	}
+}
+
+// Vera is not a coding agent: without --cra it cannot launch at all.
 func TestVeraSoloLaunchNeverStartsCodingLoop(t *testing.T) {
 	cfg := DefaultConfig()
 	m := Model{config: cfg, craEnabled: false}
 	msg := m.launchFromWizard(WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}})
 	if failure, ok := msg.(sessionsMsg); !ok || failure.err == nil || !strings.Contains(failure.err.Error(), "--cra") {
 		t.Fatalf("CRA off must explicitly deny review launch, got %#v", msg)
-	}
-}
-
-func TestVeraPickerLaunchBindingAndLifetime(t *testing.T) {
-	cfg, repo, registrations, stops := newVeraFixture(t)
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	s.explicitOnly = true
-	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	msg := m.launchFromWizard(WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}, ProjectID: 66, ProjectName: "Selected", WorkDir: repo, ProviderKey: "claude"})
-	next, cmd := m.Update(msg)
-	m = next.(Model)
-	if m.activeView == ViewVeraLaunch || m.veraSetup != nil || cmd == nil {
-		t.Fatalf("wizard choice must start Vera without a popup: view=%v", m.activeView)
-	}
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if len(m.reviewStatuses) != 1 || m.reviewStatuses[0].State != "online" || m.activeView != ViewReviewRunners {
-		t.Fatalf("runner %+v view %v", m.reviewStatuses, m.activeView)
-	}
-	row := m.reviewStatuses[0]
-	if row.Binding.ProjectName != "Selected" || row.Binding.Repository.Name != "acme/repo" || row.Binding.Repository.Host != "github.com" {
-		t.Fatalf("runner identity is not visible: %+v", row.Binding)
-	}
-	if row.Binding.Options.ProjectID != 66 || row.Binding.Options.RepositoryLinkID != 7 || row.Binding.Options.Repository != repo || row.Binding.Options.Provider != "claude" || row.Binding.Options.Model != "" || !row.Binding.Options.RepositoryRequestsApproved {
-		t.Fatalf("wrong binding %+v", row.Binding)
-	}
-	if !strings.Contains(m.viewReviewRunners(), "Listening") {
-		t.Fatal("idle runner must visibly listen")
-	}
-	if _, err := os.Stat(filepath.Join(repo, ".vibeflow-session-code_reviewer")); !os.IsNotExist(err) {
-		t.Fatal("Vera wrote ordinary coding session state")
-	}
-	if registrations.Load() != 1 {
-		t.Fatal("first runner not registered exactly once")
-	}
-	b := row.Binding
-	b.Options.Model = "different-model"
-	statuses := s.StartBinding(b)
-	if registrations.Load() != 1 || statuses[0].Binding.Options.Model != "" {
-		t.Fatal("reuse duplicated runner or rewrote its options")
-	}
-	second, _ := reviewTestRepo(t)
-	reviewTestGit(t, second, "remote", "set-url", "origin", "https://github.com/acme/second.git")
-	b.Options.Repository, b.Options.RepositoryLinkID, b.Repository.ID, b.Repository.Name = second, 8, 8, "acme/second"
-	statuses = s.StartBinding(b)
-	if registrations.Load() != 2 || len(statuses) != 2 {
-		t.Fatalf("second binding failed %+v", statuses)
-	}
-	// Full discovery must retain selected models without enrolling a third link.
-	unselected := b
-	unselected.Options.RepositoryLinkID = 9
-	statuses = s.Reconcile(reviewDiscovery{Complete: true, Projects: []Project{{ID: 66, Name: "Selected"}}, Bindings: []reviewBinding{row.Binding, b, unselected}})
-	if registrations.Load() != 2 || len(statuses) != 2 {
-		t.Fatal("discovery enlarged selected consent scope")
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if stops.Load() != 2 {
-		t.Fatalf("owned runners not stopped: %d", stops.Load())
 	}
 }
 
@@ -309,130 +510,6 @@ func TestVeraHeadlessNeverStartsCodingLoop(t *testing.T) {
 	cmd.SetArgs([]string{"--persona", "code_reviewer"})
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "review-watch") {
 		t.Fatalf("expected explicit review-watch direction, got %v", err)
-	}
-}
-
-func TestVeraTeamSelectionDoesNotChangeCodingConfig(t *testing.T) {
-	cfg, repo, _, _ := newVeraFixture(t)
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	providers := make(map[string]Provider, len(cfg.Providers))
-	for key, value := range cfg.Providers {
-		providers[key] = value
-	}
-	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	result := WizardResult{SessionType: "vibeflow", Personas: []string{"developer", "code_reviewer"}, Persona: "developer", ProviderKey: "qwen", PersonaProviders: map[string]string{"code_reviewer": "claude"}, ProjectID: 66, WorkDir: repo}
-	next, cmd := m.Update(m.launchFromWizard(result))
-	m = next.(Model)
-	if m.veraPending == nil || len(m.veraPending.Personas) != 1 || m.veraPending.Persona != "developer" || m.veraPending.ProviderKey != "qwen" {
-		t.Fatalf("coding launch altered %+v", m.veraPending)
-	}
-	if m.activeView == ViewVeraLaunch || cmd == nil {
-		t.Fatal("team Vera opened a popup instead of starting")
-	}
-	launched := cmd().(veraLaunchedMsg)
-	if launched.err != nil || len(launched.statuses) != 1 || launched.statuses[0].Binding.Options.Provider != "claude" || launched.statuses[0].Binding.Options.Model != "" {
-		t.Fatalf("Vera ignored its team provider: %+v", launched)
-	}
-	if !reflect.DeepEqual(cfg.Providers, providers) {
-		t.Fatal("Vera rewrote coding providers")
-	}
-	next, cmd = m.Update(launched)
-	m = next.(Model)
-	if m.veraPending != nil || m.activeView != ViewSessions || cmd == nil {
-		t.Fatal("starting Vera silently lost selected coding agents")
-	}
-}
-
-// Removing Vera leaves one coding persona, which must still honor its team provider override.
-func TestVeraTeamCodingLaunchKeepsProviderOverride(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	cfg, repo, _, _ := newVeraFixture(t)
-	agents := t.TempDir()
-	for _, key := range []string{"qwen", "codex"} {
-		binary := filepath.Join(agents, key)
-		if err := os.WriteFile(binary, []byte("#!/bin/sh\nsleep 300\n"), 0700); err != nil {
-			t.Fatal(err)
-		}
-		cfg.Providers[key] = Provider{Name: key, Binary: binary, LaunchTemplate: "{{.Binary}}"}
-	}
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	tm := NewTmuxManager(fmt.Sprintf("vftest-vera-team-%d", os.Getpid()))
-	t.Cleanup(func() { _, _ = tm.run("kill-server") })
-	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s, tmux: tm, registry: NewProviderRegistry(cfg), logger: NewLogger(), store: NewStore(), cache: NewSessionCache()}
-	result := WizardResult{SessionType: "vibeflow", Personas: []string{"developer", "code_reviewer"}, Persona: "developer", ProviderKey: "qwen", Provider: cfg.Providers["qwen"], PersonaProviders: map[string]string{"developer": "codex", "code_reviewer": "claude"}, ProjectID: 66, ProjectName: "Selected", WorkDir: repo, WorktreeChoice: WorktreeCurrent}
-	next, cmd := m.Update(m.launchFromWizard(result))
-	m = next.(Model)
-	next, cmd = m.Update(cmd())
-	m = next.(Model)
-	if cmd == nil {
-		t.Fatal("starting Vera dropped the coding launch")
-	}
-	if failure, ok := cmd().(sessionsMsg); ok && failure.err != nil {
-		t.Fatal(failure.err)
-	}
-	sessions, err := tm.run("list-sessions", "-F", "#{session_name}")
-	if err != nil || !strings.Contains(sessions, sessionPrefix+"codex-") || strings.Contains(sessions, sessionPrefix+"qwen-") {
-		t.Fatalf("developer ignored its codex override: %v %q", err, sessions)
-	}
-}
-
-func TestVeraSelectedCheckoutRequiresExactBinding(t *testing.T) {
-	cfg, repo, registrations, _ := newVeraFixture(t)
-	cfg.DirectoryHistory = []string{repo}
-	wrong, _ := reviewTestRepo(t)
-	reviewTestGit(t, wrong, "remote", "set-url", "origin", "https://github.com/acme/unlinked.git")
-	o := reviewWatchOptions{Project: "66", ProjectID: 66, Provider: "claude", Repository: wrong, Kind: "local", Model: "test", Name: "fixture"}
-	_, input, err := resolveReviewStartup(context.Background(), cfg, o, true)
-	if err != nil || input == nil || input.Field != "repository" {
-		t.Fatalf("missing binding must be actionable, input=%+v err=%v", input, err)
-	}
-	if registrations.Load() != 0 {
-		t.Fatal("unlinked selection launched a runner")
-	}
-	o.Repository, o.RepositoryLinkID, o.GitProvider = repo, 99, "github"
-	if _, err := resolveVeraBinding(context.Background(), cfg, o, "Selected"); err == nil {
-		t.Fatal("wrong link accepted")
-	}
-}
-
-func TestVeraExternalRunnerIsNotAdopted(t *testing.T) {
-	cfg, repo, registrations, stops := newVeraFixture(t)
-	o := reviewStartupOptions(cfg, "", repo)
-	o.ProjectID, o.Project, o.RepositoryLinkID, o.GitProvider, o.RepositoryRequestsApproved = 66, "66", 7, "github", true
-	external, err := startReviewOwned(context.Background(), cfg, "", o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer external.Close()
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.explicitOnly = true
-	statuses := s.StartBinding(reviewBinding{Options: o})
-	if len(statuses) != 1 || statuses[0].State != "external" || registrations.Load() != 1 || len(s.owned) != 0 {
-		t.Fatalf("external ownership changed %+v", statuses)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-external.Done():
-		t.Fatal("TUI stopped an external runner")
-	default:
-	}
-	if stops.Load() != 0 {
-		t.Fatal("external runner disabled by TUI")
 	}
 }
 
@@ -447,103 +524,56 @@ func TestVeraHeadlessTeamSelectionIsExplicit(t *testing.T) {
 	}
 }
 
-func TestVeraMissingCheckoutCanRecover(t *testing.T) {
-	cfg, repo, _, _ := newVeraFixture(t)
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
+// A team with Vera starts Vera's session and the coding personas with their
+// own providers; removing Vera must keep the developer's override.
+func TestVeraTeamLaunchStartsVeraAndCodingSessions(t *testing.T) {
+	cfg, repo, _, _, _ := newVeraFixture(t)
+	fake := filepath.Join(t.TempDir(), "vibeflow")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec sleep 300\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	s.explicitOnly = true
-	o := reviewStartupOptions(cfg, "", repo)
-	o.ProjectID, o.Project, o.RepositoryLinkID, o.GitProvider, o.RepositoryRequestsApproved = 66, "66", 7, "github", true
-	o.Repository = ""
-	statuses := s.StartBinding(reviewBinding{Options: o})
-	if len(statuses) != 1 || statuses[0].State != "needs_checkout" {
-		t.Fatalf("missing checkout unexpectedly started %+v", statuses)
+	setVeraExecutable(t, fake)
+	agents := t.TempDir()
+	for _, key := range []string{"qwen", "codex"} {
+		binary := filepath.Join(agents, key)
+		if err := os.WriteFile(binary, []byte("#!/bin/sh\nsleep 300\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Providers[key] = Provider{Name: key, Binary: binary, LaunchTemplate: "{{.Binary}}"}
 	}
-	o.Repository = repo
-	statuses = s.Reconcile(reviewDiscovery{Complete: true, Projects: []Project{{ID: 66}}, Bindings: []reviewBinding{{Options: o}}})
-	if len(statuses) != 1 || statuses[0].State != "online" || statuses[0].Binding.Options.Repository != repo {
-		t.Fatalf("validated checkout could not recover selected runner %+v", statuses)
+	providers := make(map[string]Provider, len(cfg.Providers))
+	for key, value := range cfg.Providers {
+		providers[key] = value
 	}
-}
-
-// Declining startup consent leaves the coding default (here qwen) in the group options.
-// Correcting a selected Vera checkout must still save with Vera's valid review harness.
-func TestVeraCheckoutRecoveryIgnoresCodingDefault(t *testing.T) {
-	cfg, repo, _, _ := newVeraFixture(t)
-	cfg.DefaultProvider = "qwen"
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
+	m := veraTmuxModel(t, cfg)
+	result := WizardResult{SessionType: "vibeflow", Personas: []string{"developer", "code_reviewer"}, Persona: "developer", ProviderKey: "qwen", Provider: cfg.Providers["qwen"], PersonaProviders: map[string]string{"developer": "codex", "code_reviewer": "claude"}, ProjectID: 66, ProjectName: "Selected", WorkDir: repo, WorktreeChoice: WorktreeCurrent}
+	m, msg := launchVera(t, m, result)
+	if m.veraPending == nil || len(m.veraPending.Personas) != 1 || m.veraPending.Persona != "developer" {
+		t.Fatalf("coding launch altered %+v", m.veraPending)
 	}
-	defer s.Close()
-	s.options = reviewStartupOptions(cfg, "", repo)
-	s.explicitOnly = true
-	o := s.options
-	o.ProjectID, o.Project, o.RepositoryLinkID, o.GitProvider, o.Provider, o.RepositoryRequestsApproved = 66, "66", 7, "github", "claude", true
-	o.Repository = ""
-	statuses := s.StartBinding(reviewBinding{Options: o, Repository: reviewStartupRepository{Provider: "github", Host: "github.com", ID: 7, Name: "acme/repo"}})
-	if len(statuses) != 1 || statuses[0].State != "needs_checkout" {
-		t.Fatalf("missing checkout unexpectedly started %+v", statuses)
-	}
-	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s, activeView: ViewReviewRunners, reviewStatuses: statuses, reviewPreferences: map[string]string{}}
-	next, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	next, cmd := m.Update(msg)
 	m = next.(Model)
-	if m.reviewCheckout == nil {
-		t.Fatal("Enter did not open the checkout editor")
+	if m.veraPending != nil || m.activeView != ViewSessions {
+		t.Fatal("starting Vera lost the selected coding agents")
 	}
-	m.reviewCheckout.text = repo
-	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	m = next.(Model)
-	if cmd == nil {
-		t.Fatal("checkout was not submitted")
+	for _, c := range batchCmds(cmd) {
+		if failure, ok := c().(sessionsMsg); ok && failure.err != nil {
+			t.Fatal(failure.err)
+		}
 	}
-	saved, ok := cmd().(reviewCheckoutSavedMsg)
-	if !ok || saved.err != nil || saved.path != repo {
-		t.Fatalf("checkout recovery failed: %+v", saved)
+	sessions, err := m.tmux.run("list-sessions", "-F", "#{session_name}")
+	if err != nil || !strings.Contains(sessions, sessionPrefix+"codex-") || !strings.Contains(sessions, sessionPrefix+"claude-") || strings.Contains(sessions, sessionPrefix+"qwen-") {
+		t.Fatalf("want Vera on claude and developer on codex: %v %q", err, sessions)
 	}
-	if cfg.DefaultProvider != "qwen" {
-		t.Fatal("checkout recovery changed the coding-agent default")
-	}
-}
-
-func TestVeraCodexWizardChoiceStartsCodex(t *testing.T) {
-	cfg, repo, registrations, _ := newVeraFixture(t)
-	cfg.Providers["codex"] = Provider{Binary: "/bin/sh"}
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	next, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, WorkDir: repo, Persona: "code_reviewer", ProviderKey: "codex"})
-	m = next.(Model)
-	if m.veraSetup != nil || cmd == nil {
-		t.Fatal("Codex choice asked again instead of starting")
-	}
-	launched := cmd().(veraLaunchedMsg)
-	if launched.err != nil || len(launched.statuses) != 1 {
-		t.Fatalf("Codex Vera did not start: %+v", launched)
-	}
-	if o := launched.statuses[0].Binding.Options; o.Provider != "codex" || o.Model != "" || o.RepositoryLinkID != 7 {
-		t.Fatalf("Codex selection lost %+v", o)
-	}
-	if registrations.Load() != 1 {
-		t.Fatalf("want one registration, got %d", registrations.Load())
+	if !reflect.DeepEqual(cfg.Providers, providers) {
+		t.Fatal("Vera rewrote coding providers")
 	}
 }
 
 // A harness Vera cannot run is refused before any server call.
 func TestVeraUnsupportedHarnessIsRefused(t *testing.T) {
-	cfg, repo, registrations, _ := newVeraFixture(t)
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
+	cfg, repo, registrations, _, _ := newVeraFixture(t)
+	m := Model{config: cfg, craEnabled: true}
 	next, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, WorkDir: repo, Persona: "code_reviewer", ProviderKey: "aider"})
 	if next.(Model).err == nil || cmd != nil || registrations.Load() != 0 {
 		t.Fatal("unsupported harness was not refused")
@@ -551,29 +581,44 @@ func TestVeraUnsupportedHarnessIsRefused(t *testing.T) {
 }
 
 // Only a checkout that does not match the linked repository needs more input;
-// that rare case reuses the small setup popup and never asks for a model.
+// the small prompt asks for the checkout and never for a model.
 func TestVeraCheckoutMismatchAsksForCheckoutOnly(t *testing.T) {
-	cfg, _, registrations, _ := newVeraFixture(t)
+	cfg, repo, _, _, _ := newVeraFixture(t)
 	wrong, _ := reviewTestRepo(t)
 	reviewTestGit(t, wrong, "remote", "set-url", "origin", "https://github.com/acme/unlinked.git")
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
+	fake := filepath.Join(t.TempDir(), "vibeflow")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec sleep 300\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	next, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, ProjectName: "Selected", WorkDir: wrong, Persona: "code_reviewer", ProviderKey: "claude"})
+	setVeraExecutable(t, fake)
+	m := veraTmuxModel(t, cfg)
+	m, msg := launchVera(t, m, veraResult(wrong, "claude"))
+	next, _ := m.Update(msg)
 	m = next.(Model)
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if m.activeView != ViewVeraLaunch || m.veraSetup == nil || m.veraSetup.input == nil || m.veraSetup.input.Field != "repository" {
-		t.Fatalf("checkout mismatch not actionable: view=%v setup=%+v", m.activeView, m.veraSetup)
+	if m.activeView != ViewVeraLaunch || m.veraPrompt == nil || m.veraPrompt.input == nil || m.veraPrompt.input.Field != "repository" {
+		t.Fatalf("checkout mismatch not actionable: view=%v prompt=%+v", m.activeView, m.veraPrompt)
 	}
-	if view := m.veraSetup.View().Content; !strings.Contains(view, "acme/repo") {
+	if view := m.viewContent(); !strings.Contains(view, "acme/repo") {
 		t.Fatalf("checkout prompt does not name the linked repository:\n%s", view)
 	}
-	if registrations.Load() != 0 {
-		t.Fatal("mismatched checkout started a runner")
+	if len(storedVera(t)) != 0 {
+		t.Fatal("mismatched checkout started a session")
+	}
+	next, _ = m.Update(tea.PasteMsg{Content: repo})
+	next, cmd := next.(Model).Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(Model)
+	for cmd != nil {
+		msg := cmd()
+		if _, ok := msg.(veraLaunchedMsg); ok {
+			next, _ = m.Update(msg)
+			m = next.(Model)
+			break
+		}
+		next, cmd = m.Update(msg)
+		m = next.(Model)
+	}
+	if metas := storedVera(t); len(metas) != 1 || metas[0].WorkingDir != repo || m.activeView != ViewSessions || m.veraPrompt != nil {
+		t.Fatalf("corrected checkout did not start Vera: %+v view=%v", metas, m.activeView)
 	}
 }
 
@@ -594,137 +639,5 @@ func TestVeraAmbiguousLinksRequireSelection(t *testing.T) {
 	_, input, err := resolveReviewStartup(context.Background(), cfg, o, true)
 	if err != nil || input == nil || input.Field != "repository_link" || len(input.Choices) != 2 {
 		t.Fatalf("ambiguous binding silently picked: input=%+v err=%v", input, err)
-	}
-}
-
-func TestVeraRunnerActivityProjection(t *testing.T) {
-	cfg, repo, _, _ := newVeraFixture(t)
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { s.owned = map[string]*reviewOwnedRunner{}; _ = s.Close() }()
-	o := reviewStartupOptions(cfg, "", repo)
-	o.ProjectID, o.Project, o.RepositoryLinkID, o.GitProvider, o.RepositoryRequestsApproved = 66, "66", 7, "github", true
-	id := reviewBackgroundID(cfg.ServerURL, o)
-	// The process handle is inert here: this test reads durable activity only,
-	// while the launch/lifetime test above exercises the real owned subprocess.
-	s.owned[id] = &reviewOwnedRunner{done: make(chan struct{})}
-	s.statuses = []reviewRunnerStatus{{BindingID: id, Binding: reviewBinding{Options: o}}}
-	statuses := s.Snapshot()
-	if len(statuses) != 1 || !strings.Contains(statuses[0].Message, "Listening") {
-		t.Fatalf("missing idle state %+v", statuses)
-	}
-	statePath := filepath.Join(RootDir(), "review-runners", id, "state.json")
-	if err := os.MkdirAll(filepath.Dir(statePath), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveReviewJSON(statePath, reviewRunnerState{Pending: &reviewReceipt{}}); err != nil {
-		t.Fatal(err)
-	}
-	if rows := s.Snapshot(); !strings.Contains(rows[0].Message, "Running") {
-		t.Fatalf("pending attempt invisible %+v", rows)
-	}
-	s.owned[id].status = reviewLegacyRoutingNotice
-	if rows := s.Snapshot(); !strings.Contains(rows[0].Message, "Running") || !strings.Contains(rows[0].Message, "server upgrade") {
-		t.Fatalf("legacy notice hid the activity or itself %+v", rows)
-	}
-}
-
-// A coding launch queued behind Vera can raise a conflict modal, which only the
-// sessions view handles; staying on the runners view silently dropped it.
-func TestVeraTeamLaunchReturnsToSessionsForConflicts(t *testing.T) {
-	pending := WizardResult{SessionType: "vibeflow", Persona: "developer", Personas: []string{"developer"}}
-	m := Model{config: DefaultConfig(), craEnabled: true, veraPending: &pending, activeView: ViewVeraLaunch}
-	next, cmd := m.Update(veraLaunchedMsg{})
-	m = next.(Model)
-	if m.activeView != ViewSessions || cmd == nil {
-		t.Fatalf("pending coding launch left view %v", m.activeView)
-	}
-	next, _ = m.Update(conflictDetectedMsg{conflict: ConflictResult{Status: ActiveConflict}, wizardResult: pending})
-	if next.(Model).activeView != ViewConflict {
-		t.Fatal("coding-agent conflict prompt was dropped")
-	}
-}
-
-// Choosing Vera again for a running repository must not silently keep the old harness.
-func TestVeraRepickWithDifferentHarnessIsReported(t *testing.T) {
-	cfg, repo, registrations, _ := newVeraFixture(t)
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	s.explicitOnly = true
-	o := reviewStartupOptions(cfg, "", repo)
-	o.ProjectID, o.Project, o.RepositoryLinkID, o.GitProvider, o.Provider, o.Model, o.RepositoryRequestsApproved = 66, "66", 7, "github", "claude", "review-model", true
-	binding, err := resolveVeraBinding(context.Background(), cfg, o, "Selected")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rows := s.StartBinding(binding); len(rows) != 1 || rows[0].State != "online" {
-		t.Fatalf("first Vera did not start %+v", rows)
-	}
-	m := Model{config: cfg, craEnabled: true, reviewSupervisor: s}
-	_, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, ProjectName: "Selected", WorkDir: repo, Persona: "code_reviewer", ProviderKey: "codex"})
-	if cmd == nil {
-		t.Fatal("launch command missing")
-	}
-	launched, ok := cmd().(veraLaunchedMsg)
-	if !ok || launched.err == nil || !strings.Contains(launched.err.Error(), "already listening") || !strings.Contains(launched.err.Error(), "claude (review-model)") {
-		t.Fatalf("harness change was silently ignored: %+v", launched)
-	}
-	if registrations.Load() != 1 {
-		t.Fatal("re-picking Vera registered another runner")
-	}
-}
-
-// Declined consent must not scan every project; it refreshes only Vera picks,
-// using the runner name the TUI started with so runner IDs stay stable.
-func TestReviewDiscoveryDeclinedScope(t *testing.T) {
-	withTempRoot(t)
-	repo, _ := reviewTestRepo(t)
-	var projectLists, selectedReads, otherReads atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/projects"):
-			projectLists.Add(1)
-			fmt.Fprint(w, `[{"id":66,"name":"Selected"},{"id":67,"name":"Other"}]`)
-		case strings.HasSuffix(r.URL.Path, "/projects/66/pr-review-repositories"):
-			selectedReads.Add(1)
-			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"}],"supported_runner_capabilities":["repository_review_v1"]}`)
-		case strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
-			otherReads.Add(1)
-			fmt.Fprint(w, `{"repositories":[]}`)
-		default:
-			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	cfg := DefaultConfig()
-	cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
-	s, err := newReviewSupervisor(context.Background(), cfg, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	s.explicitOnly = true
-	s.options.Name = "runner-name-at-startup"
-	m := &Model{config: cfg, craEnabled: true, reviewSupervisor: s, reviewPreferences: map[string]string{}}
-	if msg := m.requestReviewDiscovery()(); len(msg.(reviewDiscoveryMsg).statuses) != 0 || projectLists.Load() != 0 {
-		t.Fatalf("declined consent scanned projects: %d lists", projectLists.Load())
-	}
-	o := s.options
-	o.ProjectID, o.RepositoryLinkID, o.GitProvider, o.Repository = 66, 7, "github", ""
-	s.selected[reviewBackgroundID(cfg.ServerURL, o)] = o
-	m.reviewDiscoveryBusy = false
-	m.requestReviewDiscovery()()
-	if selectedReads.Load() != 1 || otherReads.Load() != 0 {
-		t.Fatalf("declined discovery read selected=%d other=%d", selectedReads.Load(), otherReads.Load())
-	}
-	d, err := discoverReviewBindings(context.Background(), cfg, []string{repo}, nil, "runner-name-at-startup", map[int64]bool{66: true})
-	if err != nil || len(d.Bindings) != 1 || d.Bindings[0].Options.Name != "runner-name-at-startup" {
-		t.Fatalf("discovery did not keep the TUI runner name: %+v %v", d.Bindings, err)
 	}
 }

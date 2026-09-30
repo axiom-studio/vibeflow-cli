@@ -6,7 +6,7 @@ The binary name is **`vibeflow`**. Root command with no subcommand runs the **TU
 
 | Flag | Description |
 |------|-------------|
-| `--cra` | Enable the PR review preview; disabled by default until production backend rollout. TUI runner startup still requires consent. |
+| `--cra` | Enable the PR review preview (Vera); disabled by default until production backend rollout. |
 | `--config` | Path to config file (default `<root>/config.yaml`) |
 | `--root` | Root directory for config, sessions, and logs (default `~/.vibeflow-cli`). Also settable via `VIBEFLOW_ROOT` env var. Enables isolated parallel instances. |
 | `--mcp` | MCP server tool name used in the agent init prompt (default: `vibeflow`). Override if you run a renamed or forked MCP server. |
@@ -20,60 +20,39 @@ Subcommands read `server_url` from configuration; set it during setup with boots
 ### `vibeflow` (interactive TUI)
 
 Server and API-key setup runs only for a new, uninitialized root and remains saved in `config.yaml`.
-Only `vibeflow --cra` asks **Run PR reviews while this CLI is open?**
-Without `--cra`, no review prompt, API requests, rows, or shortcuts are enabled.
-The default is **Not now**; this choice is never saved.
-**Not now** performs no repository discovery; the `R` view explains how to add Vera for one repository instead.
-The prompt includes an original pixel-art owl built into the CLI, with no extra installation required.
-It blinks and moves gently while waiting; press Space to pause or resume the animation.
-Smaller terminals show a compact owl, and terminals without color retain a monochrome drawing.
+`vibeflow --cra` starts straight into the normal session list; there is no startup review prompt and no review runner starts implicitly.
+Without `--cra`, no review UI, API requests, rows, or shortcuts are enabled.
 
-Choose **Run reviews** to discover every accessible project's linked repositories and start all resolved local runners owned by this TUI.
-`default_project` continues to select ordinary sessions and headless review history; it appears first in TUI review browsing but does not filter accessible projects.
-Startup uses one shared provider/model selection for the entire runner group.
-A valid remembered checkout wins; otherwise discovery checks `default_work_dir`, the launch directory, `directory_history`, and this root's saved session paths against existing GitHub, GitHub Enterprise, or Bitbucket links.
-The checkout's origin determines eligibility, not the saved session's project label.
-One matching checkout is selected automatically; press `R`, select an unresolved binding, and press Enter to choose among multiple checkouts or use **Enter another path**.
-Aliases and worktrees sharing the same Git repository are grouped, while separate clones remain selectable.
-Missing checkouts never block entry to the main TUI.
-Explicit paths are validated against the selected repository, and an invalid path stays in the editor without silently selecting another checkout.
-Discovery does not recursively scan the filesystem, clone repositories, modify session metadata, or read another root's session history.
-Press `r` to refresh; newly known session paths and a separate one-minute timer also refresh discovery.
-Temporary project failures leave healthy runners online; definitive removal or access revocation stops owned runners for that scope.
-Older servers returning a capped 200-project list show an incomplete-coverage warning.
-Native reviews use the provider's default model; gateway reviews require an explicit model.
-There is no persona or model question when a PR arrives: each review starts a fresh Vera automatically.
-
-To launch only one repository's runner, press `n`, choose its checkout and VibeFlow project, then select **Vera · Code Reviewer** in the agent picker.
+The only way to run Vera in the TUI is a Vera session: press `n`, choose the repository's checkout and VibeFlow project, then select **Vera · Code Reviewer** in the agent picker.
 The wizard continues with its ordinary **Provider** step and then **Confirm**; the coding-agent Env, Routing, Branch, Worktree and Permissions steps are skipped.
-Vera is available only with `--cra`, even if you chose **Not now** at startup.
 Choose any configured coding harness whose binary is installed (Claude, Codex, Gemini, Qwen, Copilot, Cursor or Kiro); other providers cannot be selected for Vera.
 Vera uses the harness default model, so there is no model question.
-Vera runs that harness like your other personas: your normal login and environment, with full permissions.
+Vera runs that harness like your other personas: your normal login, environment, MCP servers and credentials, with full permissions.
 Codex works with a ChatGPT subscription login as well as an API key.
-Confirm starts Vera directly.
 The chosen checkout must match a repository linked to that project; only when links are ambiguous or the checkout does not match does a small popup ask for that choice.
 With the LLM gateway enabled, that popup also asks for a model, because gateway reviews require one.
-This choice opts in to repository requests for this invocation only and does not enroll other repositories.
-The harness prompt states that anyone who comments `@vibeflow review` on that repository can then request a review using your harness credentials until the CLI closes.
+Confirm creates an ordinary tmux session for Vera, listed with the other sessions as **Vera · Code Reviewer** with its harness, project and state (`listening`, `reviewing PR #N` or `stopped`).
+Each Vera session serves one project, repository link and checkout; start one per repository.
+The session runs `vibeflow --cra --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>` in the foreground, adding `--model` only when one was chosen.
+Passing `--cra` there is the explicit consent for repository requests on that one repository, registered only when the server advertises `repository_review_v1`.
+Anyone who comments `@vibeflow review` on that repository can then request a review using your harness credentials until you delete the session.
 Because Vera runs with full permissions, PR content and comments from those commenters reach an unrestricted agent on your machine; only its working directory is disposable.
-Choosing Vera again for a repository whose runner is already listening with another harness or model reports the running choice instead of silently keeping it.
-Press `R` to see the runner **Listening**, running a review, or reporting a failure.
-Selecting the same binding reuses or reports its existing runner; selecting another repository can start another runner within the existing capacity limits.
+Attach to the session to watch it: it prints a listening line, then for each review the claimed PR number and head commit, the worktree it prepared, and the harness's own interactive UI in the pane, followed by the result, the worktree removal and the listening line again.
+Vera closes the harness once it has written a complete result.
+The Vera session behaves like other persona sessions: it survives the TUI exiting, `d` deletes it, and restart re-runs the same command.
+Deleting it stops the listener gracefully; an in-flight review is reported as failed and its worktree removed, and the runner deregisters.
+Choosing Vera again for a repository with a live Vera session attaches that session, or reports its harness when you chose a different one.
 Vera can be selected beside coding agents: its row on the team **Provider** step picks its harness, restricted to the ones Vera can run, and the coding agents keep their own settings and overrides.
 Vera never enters the coding-agent task loop, and `launch --persona code_reviewer` directs you to `review-watch` instead.
 
-With `--cra`, the TUI displays review jobs across accessible projects, including queued jobs without an attempt, even when runner consent is declined.
+With `--cra`, the TUI also displays review jobs across accessible projects, including queued jobs without an attempt.
+These read-only rows are the server's PR review history, grouped per repository under **PR reviews**, while the Vera session row is the local listener; the two are different things, so each appears once.
 Select a review to preview it, then press Enter or click it again to open its read-only detail.
 Details show revision, runner, progress checklist, findings, publication status, and retained attempt history.
 Use `o` for the PR, `c` for AxiomCloud, `r` to refresh, arrows or PageUp/PageDown to scroll, and Esc to return.
 Use `]` and `[` for older and latest jobs in the selected project, or attempt history inside detail; `n` and `p` page findings inside detail.
-Local diagnostics appear only for a matching attempt owned by this TUI; provider transcripts are unavailable.
-Normal exit, Ctrl-C, termination, or loss of the TUI process closes its owned runners and active review processes, preserving pending receipts and history.
-An independently started runner is never adopted or stopped by this TUI.
+Local diagnostics appear only for a matching attempt of one of this root's Vera sessions; provider transcripts are unavailable.
 Separate `--root` instances remain independent, and `--root` is not the repository checkout.
-If startup fails, Enter opens the normal CLI without a runner; `r` retries startup.
-Headless subcommands do not show this prompt.
 
 ### `vibeflow version`
 
@@ -126,7 +105,7 @@ Model flags apply when the provider process starts and are stored in session met
 
 Passing `--cra` explicitly opts this runner into requests from commenters on its linked repository when supported by the server.
 Without the server capability, it uses legacy routing and reports that a server upgrade is needed.
-TUI-owned runners show that notice in the `R` view, and detached runners show it in `review-watch --status` and when started.
+A Vera session shows that notice in its pane, and detached runners show it in `review-watch --status` and when started.
 Runner selection is configured in the project's pull request settings, using Automatic or a preferred eligible runner.
 
 All public forms require `--cra`, including `--background`, `--status`, and `--stop`.
@@ -162,8 +141,8 @@ vibeflow --cra review-watch --project 42 --repository-link 123 --provider claude
 #### Background runner management
 
 Ordinary persona sessions do not start a review runner implicitly.
-For ordinary interactive use, choose **Run reviews** at TUI startup instead of running this command.
-Use explicit detached mode only when the runner must outlive the TUI, using the same root and config that contain your VibeFlow credentials.
+For ordinary interactive use, start a Vera session from the TUI (see above), which already survives the TUI exiting.
+Use explicit detached mode on headless machines without tmux, using the same root and config that contain your VibeFlow credentials.
 Stop an existing foreground watcher with Ctrl-C before enabling its background replacement.
 
 ```bash
@@ -177,7 +156,7 @@ vibeflow --cra --root /path/to/cli-root review-watch --stop <runner-ID-from-stat
 
 The start command waits up to 20 seconds for provider preflight and a successful server heartbeat before reporting that the runner is running.
 It stays alive after the terminal or TUI exits; idle polling makes no model calls.
-Each claimed review is still a fresh Principal Engineer process, not an interactive tmux persona.
+Each claimed review runs the harness headless, not in a tmux pane.
 Use the preview TUI's retained review sessions or `vibeflow --cra list --project 12` to see attempts, and `vibeflow --cra review-watch --status` to see the local background supervisor.
 Repeated starts of the same binding do not launch another supervisor; changing an active binding requires stopping it first.
 
@@ -200,10 +179,13 @@ No service manager, login item, deployment, or machine-boot autostart is install
 Vera runs on any supported coding harness on macOS or Linux, in normal mode like the other personas.
 Startup only checks that the harness is configured and its binary is installed; it makes no model call.
 If the harness reports that it is not logged in, was refused access, or does not trust the review worktree, that attempt fails once and Vera stops with the command to fix it, instead of spending the review's remaining attempts.
-The CLI trusts each disposable review worktree for Gemini and Cursor automatically.
+The CLI trusts each disposable review worktree for Gemini automatically, and for Cursor in headless runs; interactive Cursor can still ask to trust it.
 The harness gets your full environment, its configured `env`, saved env vars, and its own login and configuration, with your real `HOME` and `CODEX_HOME`.
 Codex therefore works with a ChatGPT subscription login or an API key.
-Each harness runs headless with its permission prompts disabled:
+In a terminal, such as a Vera session's tmux pane, each review runs the harness's normal interactive UI in the foreground of that terminal, launched with the provider's launch template in full-permission mode and the task file as its initial prompt, the same way a persona receives its init prompt (Gemini uses `-i` so its UI stays interactive).
+Keys typed into the pane reach the harness, and Vera closes it with SIGINT, then SIGTERM, then SIGKILL once a complete `result.json` exists or the deadline or lease ends, then restores the terminal.
+If an interactive harness exits within 15 seconds without a result, the pane shows its login hint; its output is not captured, so the login and trust classification below applies to headless runs.
+Without a terminal (detached runners, redirected output), each harness runs headless with its permission prompts disabled, and its output is never shown or relayed:
 
 | Harness | Command |
 |---------|---------|
@@ -219,7 +201,7 @@ The binary comes from the provider's `binary` in `config.yaml`.
 For argument-prompt harnesses, `<prompt>` points the agent at the full task file, which avoids per-argument size limits.
 The task tells the agent to write exactly one JSON object to the review's `result.json`, matching `schema.json`, then stop.
 A harness that exits without writing that file fails the attempt as `invalid_result`.
-Custom launch templates are not used for reviews.
+Headless runs do not use launch templates; interactive runs use the provider's launch template, like persona sessions.
 
 Gateway mode requires `--model`.
 With Claude, gateway mode uses an attempt-local model relay and exposes only Claude's inference endpoints to the harness.

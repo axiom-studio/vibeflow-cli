@@ -74,6 +74,7 @@ type reviewWatch struct {
 	harnessFatal       error // Set when the harness cannot run on this machine until the user acts.
 	capacity           *reviewCapacity
 	slot               *os.File
+	tty                *reviewTerminal // Set when the harness runs interactively in this terminal.
 }
 
 func reviewUUID() string {
@@ -122,14 +123,11 @@ func saveReviewJSON(path string, value any) error {
 
 func reviewWatchCmd() *cobra.Command {
 	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
-	var background, status, owned bool
+	var background, status bool
 	var stop, managed, serverURL string
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		// Flags parsed; runtime failures print their message, not the usage text.
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true // main prints the error once.
-		if owned {
-			return runReviewOwned(cmd.Context(), cmd.InOrStdin(), cmd.OutOrStdout())
-		}
 		if managed != "" {
 			return runReviewBackground(cmd.Context(), managed)
 		}
@@ -231,7 +229,14 @@ func reviewWatchCmd() *cobra.Command {
 		}
 		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer cancel()
-		watch := &reviewWatch{client: client, cfg: cfg, options: o, output: cmd.OutOrStdout()}
+		// Every foreground listener on this machine and root, such as each Vera
+		// tmux session, shares one review_concurrency limit.
+		capacity, err := sharedReviewCapacity(RootDir(), cfg.ReviewConcurrency)
+		if err != nil {
+			return err
+		}
+		// A terminal (a Vera tmux pane) shows each harness's interactive UI.
+		watch := &reviewWatch{client: client, cfg: cfg, options: o, output: cmd.OutOrStdout(), capacity: capacity, tty: openReviewTerminal(cmd.OutOrStdout())}
 		return watch.run(ctx)
 	}}
 	cmd.Flags().StringVar(&o.Project, "project", "", "VibeFlow project name or ID")
@@ -249,11 +254,9 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&status, "status", false, "Show managed review runners in this root")
 	cmd.Flags().StringVar(&stop, "stop", "", "Stop and disable a detached runner ID")
 	cmd.Flags().StringVar(&managed, "managed-runner", "", "Internal managed runner binding ID")
-	cmd.Flags().BoolVar(&owned, "owned-runner", false, "Internal runner owned by this CLI's liveness pipe")
 	cmd.Flags().StringVar(&serverURL, "server-url", "", "VibeFlow server URL (pinned for background runners)")
 	_ = cmd.Flags().MarkHidden("managed-runner")
-	_ = cmd.Flags().MarkHidden("owned-runner")
-	cmd.MarkFlagsMutuallyExclusive("background", "status", "stop", "managed-runner", "owned-runner")
+	cmd.MarkFlagsMutuallyExclusive("background", "status", "stop", "managed-runner")
 	return cmd
 }
 
@@ -353,6 +356,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 	}()
 	fmt.Fprintf(w.output, "Review runner %s is online (%s, %s). Ctrl-C stops it.\n", w.options.Name, w.options.Kind, w.options.Provider)
+	fmt.Fprintln(w.output, reviewListeningLine)
 	// An interrupted attempt always fails or replays its saved result. It never
 	// resumes the old model conversation or launches a second child for it.
 	if w.state.Pending != nil {
@@ -529,7 +533,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		fresh = true
 	}
 	if len(p.Result) == 0 && p.Failure == "" && fresh {
-		fmt.Fprintf(w.output, "Reviewing %s at %.12s with a fresh Vera.\n", p.JobID, p.Execution.Attempt.Round.HeadSHA)
+		fmt.Fprintf(w.output, "\nClaimed %s at %.12s; starting a fresh Vera with %s.\n", reviewPRLabel(p.Execution.Review), p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
 		result, err := w.execute(ctx, p)
 		if err != nil {
 			p.Failure = err.Error()
@@ -539,12 +543,14 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		if err = w.save(); err != nil {
 			return err
 		}
+		fmt.Fprintln(w.output, reviewOutcomeLine(p))
 	}
 	// Cleanup precedes network publication, and the exact submission remains
 	// durable even if a successful server response is lost.
 	if err := w.cleanup(p); err != nil {
 		return err
 	}
+	fmt.Fprintln(w.output, "Review worktree removed.")
 	submitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	var err error
@@ -568,14 +574,15 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 	if err != nil {
 		fmt.Fprintln(w.output, "Review attempt is no longer accepted; its receipt was retained.")
 	} else if p.Failure != "" {
-		fmt.Fprintln(w.output, "Review attempt failed:", p.Failure)
+		fmt.Fprintln(w.output, "Failure reported to VibeFlow.")
 	} else {
-		fmt.Fprintln(w.output, "Review result accepted. The server handles tickets and PR publication.")
+		fmt.Fprintln(w.output, "Result sent to VibeFlow; the server handles tickets and PR publication.")
 	}
 	p.Completed = true
 	if err := w.finishReceipt(p); err != nil {
 		return err
 	}
+	fmt.Fprintln(w.output, reviewListeningLine)
 	// Retrying would fail the same way and spend the review's attempts.
 	if fatal := w.harnessFatal; fatal != nil {
 		w.harnessFatal = nil
@@ -771,6 +778,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution); err != nil {
 		return nil, err
 	}
+	fmt.Fprintf(w.output, "Review worktree ready: %s\n", filepath.Join(root, "input", "head"))
 	markProgress(1)
 	if err := os.WriteFile(filepath.Join(root, "input", "brief.json"), brief.Content, 0600); err != nil {
 		return nil, err
@@ -823,6 +831,12 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		return nil, err
 	}
 	spec.DeadlineAt = deadline.UnixMilli()
+	interactive := w.tty != nil
+	if interactive {
+		if err = makeReviewSpecInteractive(spec, w.cfg, w.options.Provider, w.options.Model, root); err != nil {
+			return nil, err
+		}
+	}
 	if w.slot != nil {
 		spec.CapacityFD = 3
 		spec.Cleanup = &reviewProviderCleanup{Reservation: *p.Capacity, RequestID: p.RequestID, JobID: p.JobID, AttemptID: p.Execution.Attempt.ID}
@@ -842,11 +856,18 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	guard.WaitDelay = 250 * time.Millisecond
 	guard.Env = []string{"PATH=" + os.Getenv("PATH")}
 	guard.Dir = root
-	// Harness output is counted and only its tail is kept, in memory, to name
-	// failures the user must fix (login, trust); it is never sent to the server.
+	// Headless harness output is counted and only its tail is kept, in memory,
+	// to name failures the user must fix (login, trust); it is never relayed
+	// or sent to the server. An interactive harness owns the terminal instead.
 	stdout, stderr := reviewByteCounter{limit: 8 << 20}, reviewByteCounter{limit: 64 << 10}
 	guard.Stdout = &stdout
 	guard.Stderr = &stderr
+	if interactive {
+		fmt.Fprintf(w.output, "Starting %s in this pane; Vera closes it once the review result is written.\n", w.options.Provider)
+		w.tty.save()
+	} else {
+		fmt.Fprintf(w.output, "Running %s headless; its output is not shown.\n", w.options.Provider)
+	}
 	pipe, err := guard.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -860,16 +881,36 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if _, err = pipe.Write([]byte{'R'}); err != nil {
 		pipe.Close()
 		guard.Wait()
+		if interactive {
+			w.tty.reclaim()
+		}
 		return nil, fmt.Errorf("review child guard failed")
 	}
+	resultPath := filepath.Join(root, "result.json")
+	var written <-chan struct{} // An interactive harness stays open after writing its result.
+	if interactive {
+		written = watchReviewResult(ctx, resultPath, p, brief.Digest)
+	}
+	harnessStarted := time.Now()
 	done := make(chan error, 1)
 	go func() { done <- guard.Wait() }()
+	finished := false
 	select {
 	case err = <-done:
 		pipe.Close()
 	case <-ctx.Done():
 		pipe.Close()
 		err = <-done
+	case <-written:
+		pipe.Close() // The guard stops the harness: SIGINT, SIGTERM, then SIGKILL.
+		<-done
+		err, finished = nil, true
+	}
+	if interactive {
+		w.tty.reclaim()
+		if !finished && ctx.Err() == nil && time.Since(harnessStarted) < 15*time.Second {
+			fmt.Fprintf(w.output, "%s exited after %s without a review result; if it needs a login, %s.\n", w.options.Provider, time.Since(harnessStarted).Round(time.Second), reviewHarnessLoginHint(w.options.Provider))
+		}
 	}
 	diagnostic.StdoutBytes, diagnostic.StderrBytes = stdout.n, stderr.n
 	if report, ok := readReviewProcessReport(filepath.Join(root, "child-diagnostic.json")); ok {
@@ -877,16 +918,16 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		stageStarted = time.Now().Add(-time.Duration(report.DurationMS) * time.Millisecond)
 		diagnostic.ExitCode, diagnostic.Signal = report.ExitCode, report.Signal
 		diagnostic.ProviderDurationMS = report.DurationMS
-		if report.Category != "completed" {
+		if report.Category != "completed" && !finished {
 			diagnostic.Category = report.Category
 		}
-	} else if guard.ProcessState != nil {
+	} else if guard.ProcessState != nil && !finished {
 		code := guard.ProcessState.ExitCode()
 		diagnostic.ExitCode = &code
 		diagnostic.Signal = reviewProcessSignal(guard.ProcessState)
 		diagnostic.Category = "child_guard_failed"
 	}
-	if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(filepath.Join(root, "result.json"))) {
+	if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(resultPath)) {
 		diagnostic.Category = category
 		w.harnessFatal = fmt.Errorf("Vera stopped: the %s harness %s on this machine; %s, then start Vera again", w.options.Provider, reviewHarnessProblem(category), reviewHarnessLoginHint(w.options.Provider))
 		return nil, diagnostic.failure()
@@ -898,38 +939,72 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	diagnostic.Category = "invalid_result"
 	// Every harness writes its result to the same file; a missing file after
 	// exit is an invalid result.
-	output, err := reviewReadBounded(filepath.Join(root, "result.json"), 256<<10)
+	result, reported, err := readReviewResult(resultPath, p, brief.Digest)
 	if err != nil {
-		return nil, fmt.Errorf("review harness wrote no bounded result file")
+		return nil, err
+	}
+	if result == nil {
+		if reported {
+			diagnostic.Category = "provider_reported_failure"
+		}
+		return nil, diagnostic.failure()
+	}
+	markProgress(2)
+	return result, nil
+}
+
+// readReviewResult reads a harness's result.json. A complete envelope returns
+// no error: result is set for a result matching the claimed revision and
+// brief, and reported marks an explicit failure_reason instead.
+func readReviewResult(path string, p *reviewReceipt, digest string) (result json.RawMessage, reported bool, err error) {
+	output, err := reviewReadBounded(path, 256<<10)
+	if err != nil {
+		return nil, false, fmt.Errorf("review harness wrote no bounded result file")
 	}
 	var envelope struct {
 		Result  json.RawMessage `json:"result"`
 		Failure string          `json:"failure_reason"`
 	}
 	if json.Unmarshal(output, &envelope) != nil {
-		return nil, fmt.Errorf("review provider returned invalid JSON")
+		return nil, false, fmt.Errorf("review provider returned invalid JSON")
 	}
 	if envelope.Failure != "" || len(envelope.Result) == 0 || bytes.Equal(envelope.Result, []byte("null")) {
-		if envelope.Failure != "" {
-			diagnostic.Category = "provider_reported_failure"
-		}
-		return nil, diagnostic.failure()
+		return nil, envelope.Failure != "", nil
 	}
-	var result struct {
+	var identity struct {
 		Version int    `json:"schema_version"`
 		Head    string `json:"head_sha"`
 		Base    string `json:"base_sha"`
 		Digest  string `json:"brief_digest"`
 	}
-	if json.Unmarshal(envelope.Result, &result) != nil || result.Version != 1 || result.Head != p.Execution.Attempt.Round.HeadSHA || result.Base != p.Execution.Attempt.Round.BaseSHA || result.Digest != brief.Digest {
-		return nil, fmt.Errorf("review result does not match the claimed revision and brief")
+	if json.Unmarshal(envelope.Result, &identity) != nil || identity.Version != 1 || identity.Head != p.Execution.Attempt.Round.HeadSHA || identity.Base != p.Execution.Attempt.Round.BaseSHA || identity.Digest != digest {
+		return nil, false, fmt.Errorf("review result does not match the claimed revision and brief")
 	}
-	markProgress(2)
-	return envelope.Result, nil
+	return envelope.Result, false, nil
+}
+
+// watchReviewResult closes its channel once result.json holds a complete
+// envelope for this attempt; a partly written file is read again later.
+func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, digest string) <-chan struct{} {
+	written := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+			if _, _, err := readReviewResult(path, p, digest); err == nil {
+				close(written)
+				return
+			}
+		}
+	}()
+	return written
 }
 
 func reviewChildCmd() *cobra.Command {
-	return &cobra.Command{Use: "review-child <private-spec>", Hidden: true, Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "review-child <private-spec>", Hidden: true, Args: cobra.ExactArgs(1), SilenceUsage: true, RunE: func(cmd *cobra.Command, args []string) error {
 		path := args[0]
 		lock, err := lockReviewFile(filepath.Join(filepath.Dir(path), "child.lock"))
 		if err != nil {
@@ -984,17 +1059,28 @@ func reviewChildCmd() *cobra.Command {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		input, err := os.Open(spec.InputFile)
-		if err != nil {
-			return err
-		}
-		defer input.Close()
 		child := exec.Command(spec.Binary, spec.Args...)
 		child.Dir = spec.Dir
 		child.Env = spec.Env
-		child.Stdin = input
-		child.Stdout = cmd.OutOrStdout()
-		child.Stderr = cmd.ErrOrStderr()
+		if spec.Interactive {
+			// The harness's own UI, in the foreground of the runner's terminal.
+			tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+			if err != nil {
+				return fmt.Errorf("interactive review needs the runner's terminal")
+			}
+			defer tty.Close()
+			child.Stdin, child.Stdout, child.Stderr = tty, tty, tty
+			child.SysProcAttr = reviewForegroundAttr(tty)
+		} else {
+			input, err := os.Open(spec.InputFile)
+			if err != nil {
+				return err
+			}
+			defer input.Close()
+			child.Stdin = input
+			child.Stdout = cmd.OutOrStdout()
+			child.Stderr = cmd.ErrOrStderr()
+		}
 		marker := filepath.Join(filepath.Dir(path), "provider-cleanup-pending.json")
 		if spec.Cleanup != nil {
 			if filepath.Base(filepath.Dir(path)) != spec.Cleanup.RequestID {
@@ -1128,4 +1214,29 @@ func removeReviewDir(dir string) error {
 		return nil
 	})
 	return os.RemoveAll(dir)
+}
+
+const reviewListeningLine = "Listening for @vibeflow review requests; no model runs while idle."
+
+func reviewPRLabel(job reviewJob) string {
+	if job.Number > 0 {
+		return fmt.Sprintf("PR #%d", job.Number)
+	}
+	return "review " + job.ID
+}
+
+// reviewOutcomeLine summarizes a finished attempt for the runner's own output.
+func reviewOutcomeLine(p *reviewReceipt) string {
+	if p.Failure != "" {
+		return "Result: failed - " + p.Failure
+	}
+	var result struct {
+		Outcome  string            `json:"outcome"`
+		Findings []json.RawMessage `json:"new_findings"`
+	}
+	_ = json.Unmarshal(p.Result, &result)
+	if result.Outcome == "changes_requested" {
+		return fmt.Sprintf("Result: changes requested with %d new findings.", len(result.Findings))
+	}
+	return "Result: clean."
 }
