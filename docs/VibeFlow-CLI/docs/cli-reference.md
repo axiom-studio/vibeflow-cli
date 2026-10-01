@@ -31,27 +31,29 @@ Vera runs that harness like your other personas: your normal login, environment,
 Codex works with a ChatGPT subscription login as well as an API key.
 The chosen checkout must match a repository linked to that project; only when links are ambiguous or the checkout does not match does a small popup ask for that choice.
 With the LLM gateway enabled, that popup also asks for a model, because gateway reviews require one.
-Confirm creates an ordinary tmux session for Vera, listed with the other sessions as **Vera · Code Reviewer** with its harness, project and state (`listening`, `reviewing PR #N` or `stopped`).
+Confirm creates an ordinary tmux session for Vera, listed with the other sessions as **Vera · Code Reviewer · <repository>** with its project and state (`listening`, `reviewing PR #N` or `stopped`).
+The raw session name stays in the detail panel.
 Each Vera session serves one project, repository link and checkout; start one per repository.
-The session runs `vibeflow --cra --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>` in the foreground, adding `--model` only when one was chosen.
+The session's window has two panes.
+The left pane (about 70% of the width, focused on attach) runs `vibeflow --cra --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>` in the foreground, adding `--model` only when one was chosen.
+The right pane (about 30%) runs the same command with the hidden `--history` flag: a read-only, scrollable list of the PRs reviewed on this repository link, newest first.
+Each entry shows the PR number and title, then the outcome (Clean, Changes requested or Needs human review), round, findings, short head commit and time of the latest attempt; the PR under review now is marked with `▶`.
+The list refreshes every 10 seconds; use the arrow keys, PgUp/PgDn, Home/End or the mouse wheel to scroll, and Enter to show the selected PR's link on the bottom line.
+If the review API is unreachable, the list keeps the last good entries and its status line says so until the next successful refresh.
+The session list status always comes from the listener pane, whichever pane has focus.
 Passing `--cra` there is the explicit consent for repository requests on that one repository, registered only when the server advertises `repository_review_v1`.
 Anyone who comments `@vibeflow review` on that repository can then request a review using your harness credentials until you delete the session.
 Because Vera runs with full permissions, PR content and comments from those commenters reach an unrestricted agent on your machine; only its working directory is disposable.
 Attach to the session to watch it: it prints a listening line, then for each review the claimed PR number and head commit, the worktree it prepared, and the harness's own interactive UI in the pane, followed by the result, the worktree removal and the listening line again.
 Vera closes the harness once it has written a complete result.
-The Vera session behaves like other persona sessions: it survives the TUI exiting, `d` deletes it, and restart re-runs the same command.
+The Vera session behaves like other persona sessions: it survives the TUI exiting, `d` deletes it with both panes, and restart re-runs the same commands in both panes.
 Deleting it stops the listener gracefully; an in-flight review is reported as failed and its worktree removed, and the runner deregisters.
 Choosing Vera again for a repository with a live Vera session attaches that session, or reports its harness when you chose a different one.
 Vera can be selected beside coding agents: its row on the team **Provider** step picks its harness, restricted to the ones Vera can run, and the coding agents keep their own settings and overrides.
 Vera never enters the coding-agent task loop, and `launch --persona code_reviewer` directs you to `review-watch` instead.
 
-With `--cra`, the TUI also displays review jobs across accessible projects, including queued jobs without an attempt.
-These read-only rows are the server's PR review history, grouped per repository under **PR reviews**, while the Vera session row is the local listener; the two are different things, so each appears once.
-Select a review to preview it, then press Enter or click it again to open its read-only detail.
-Details show revision, runner, progress checklist, findings, publication status, and retained attempt history.
-Use `o` for the PR, `c` for AxiomCloud, `r` to refresh, arrows or PageUp/PageDown to scroll, and Esc to return.
-Use `]` and `[` for older and latest jobs in the selected project, or attempt history inside detail; `n` and `p` page findings inside detail.
-Local diagnostics appear only for a matching attempt of one of this root's Vera sessions; provider transcripts are unavailable.
+The session list shows only local sessions: past PR reviews appear in each Vera session's history pane, not as rows.
+A repository without a running Vera session has no review list in the CLI; AxiomCloud keeps the full history and findings.
 Separate `--root` instances remain independent, and `--root` is not the repository checkout.
 
 ### `vibeflow version`
@@ -157,7 +159,7 @@ vibeflow --cra --root /path/to/cli-root review-watch --stop <runner-ID-from-stat
 The start command waits up to 20 seconds for provider preflight and a successful server heartbeat before reporting that the runner is running.
 It stays alive after the terminal or TUI exits; idle polling makes no model calls.
 Each claimed review runs the harness headless, not in a tmux pane.
-Use the preview TUI's retained review sessions or `vibeflow --cra list --project 12` to see attempts, and `vibeflow --cra review-watch --status` to see the local background supervisor.
+Use a Vera session's history pane or `vibeflow --cra list --project 12` to see reviews, and `vibeflow --cra review-watch --status` to see the local background supervisor.
 Repeated starts of the same binding do not launch another supervisor; changing an active binding requires stopping it first.
 
 The private binding under `<root>/review-runners/<ID>/background.json` saves absolute root/config/repository paths, the exact server URL, provider/model, local login sources, and a one-way VibeFlow credential fingerprint, not credential values.
