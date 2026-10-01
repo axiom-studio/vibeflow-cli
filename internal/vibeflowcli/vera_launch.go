@@ -56,7 +56,12 @@ func veraOptions(meta SessionMeta) reviewWatchOptions {
 // veraListenerCommand is the foreground review-watch a Vera session runs.
 // --cra is the explicit invocation consent. Credentials come from the config
 // file, so no token appears on the command line or in the session env.
-func veraListenerCommand(meta SessionMeta) (string, error) {
+func veraListenerCommand(meta SessionMeta) (string, error) { return veraCommand(meta, false) }
+
+// veraHistoryCommand is the read-only review list beside the listener.
+func veraHistoryCommand(meta SessionMeta) (string, error) { return veraCommand(meta, true) }
+
+func veraCommand(meta SessionMeta, history bool) (string, error) {
 	bin, err := veraExecutable()
 	if err != nil {
 		return "", err
@@ -73,46 +78,42 @@ func veraListenerCommand(meta SessionMeta) (string, error) {
 		return "", err
 	}
 	o := veraOptions(meta)
-	args := []string{bin, "--cra", "--root", root, "--config", config, "review-watch", "--project", o.Project, "--repo", o.Repository, "--repository-link", strconv.FormatInt(o.RepositoryLinkID, 10), "--git-provider", o.GitProvider, "--provider", o.Provider}
+	args := []string{bin, "--cra", "--root", root, "--config", config, "review-watch"}
+	if history {
+		args = append(args, "--history")
+	}
+	args = append(args, "--project", o.Project, "--repo", o.Repository, "--repository-link", strconv.FormatInt(o.RepositoryLinkID, 10), "--git-provider", o.GitProvider, "--provider", o.Provider)
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)
 	}
 	args = append(args, "--name", o.Name)
-	// exec: the listener itself gets the hangup when its session is deleted.
+	// exec: the process itself gets the hangup when its session is deleted.
 	return "exec " + shellJoin(args), nil
 }
 
-// veraRowStatus reads what a Vera session's listener is doing from its durable
-// runner state, the same receipt it recovers from.
+// veraPendingReceipt is the review a Vera listener holds, from the durable
+// runner state it recovers from; nil while it listens.
+func veraPendingReceipt(serverURL string, o reviewWatchOptions) *reviewReceipt {
+	data, err := os.ReadFile(filepath.Join(RootDir(), "review-runners", reviewBackgroundID(serverURL, o), "state.json"))
+	var state reviewRunnerState
+	if err != nil || json.Unmarshal(data, &state) != nil {
+		return nil
+	}
+	return state.Pending
+}
+
+// veraRowStatus reads what a Vera session's listener is doing.
 func veraRowStatus(meta SessionMeta, serverURL string, paneDead bool) (status, work string) {
 	if paneDead {
 		return "stopped", "stopped"
 	}
-	data, err := os.ReadFile(filepath.Join(RootDir(), "review-runners", reviewBackgroundID(serverURL, veraOptions(meta)), "state.json"))
-	var state reviewRunnerState
-	if err == nil && json.Unmarshal(data, &state) == nil && state.Pending != nil {
-		if e := state.Pending.Execution; e != nil {
+	if p := veraPendingReceipt(serverURL, veraOptions(meta)); p != nil {
+		if e := p.Execution; e != nil {
 			return "reviewing", "reviewing " + reviewPRLabel(e.Review)
 		}
 		return "reviewing", "claiming a PR review"
 	}
 	return "listening", "listening"
-}
-
-// veraRunners maps each stored Vera session's runner ID to its binding.
-func (m Model) veraRunners() map[string]reviewWatchOptions {
-	runners := map[string]reviewWatchOptions{}
-	if m.store == nil || m.config == nil {
-		return runners
-	}
-	metas, _ := m.store.List()
-	for _, meta := range metas {
-		if meta.Vera != nil {
-			o := veraOptions(meta)
-			runners[reviewBackgroundID(m.config.ServerURL, o)] = o
-		}
-	}
-	return runners
 }
 
 // beginVeraLaunch resolves the repository binding for the harness chosen in
@@ -196,7 +197,7 @@ func (m Model) launchVeraSession(o reviewWatchOptions, projectName string) tea.M
 }
 
 // startVeraTmuxSession runs the listener in meta's tmux session, or respawns
-// it in an exited pane.
+// it in an exited pane, with the history list beside it.
 func startVeraTmuxSession(tmux *TmuxManager, meta SessionMeta, respawnPane string) error {
 	command, err := veraListenerCommand(meta)
 	if err != nil {
@@ -208,8 +209,52 @@ func startVeraTmuxSession(tmux *TmuxManager, meta SessionMeta, respawnPane strin
 	if !tmux.HasSession(meta.TmuxSession) {
 		return fmt.Errorf("session %q was not created — tmux has-session check failed", meta.TmuxSession)
 	}
+	if err := startVeraHistoryPane(tmux, meta, respawnPane); err != nil {
+		return err
+	}
 	_ = tmux.BindSessionKeys(meta.TmuxSession)
 	return nil
+}
+
+// veraHistorySplitArgs splits the listener pane, keeping focus on it, with
+// the history list in a new right-hand pane.
+func veraHistorySplitArgs(listenerPane, workDir, command string) []string {
+	return []string{"split-window", "-h", "-d", "-l", veraHistoryWidth, "-t", listenerPane, "-c", workDir, "-P", "-F", "#{pane_id}", command}
+}
+
+// startVeraHistoryPane makes sure the listener's window shows a running
+// history list: it respawns an exited one and splits a missing one. A
+// listener composed into a workbench keeps its list in its own session.
+func startVeraHistoryPane(tmux *TmuxManager, meta SessionMeta, listener string) error {
+	var err error
+	if listener == "" {
+		if listener, err = tmux.agentPaneID(meta.TmuxSession); err != nil {
+			return err
+		}
+	}
+	if session, _ := tmux.run("display-message", "-p", "-t", listener, "#{session_name}"); strings.TrimSpace(session) != meta.TmuxSession {
+		return nil
+	}
+	command, err := veraHistoryCommand(meta)
+	if err != nil {
+		return err
+	}
+	out, _ := tmux.run("list-panes", "-t", listener, "-F", "#{pane_id}\t#{pane_dead}\t#{@vibeflow_vera_history}")
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Split(line, "\t"); len(f) == 3 && f[2] == "1" {
+			if f[1] != "1" {
+				return nil
+			}
+			_, err := tmux.run("respawn-pane", "-t", f[0], "-c", meta.WorkingDir, command)
+			return err
+		}
+	}
+	out, err = tmux.run(veraHistorySplitArgs(listener, meta.WorkingDir, command)...)
+	if err != nil {
+		return fmt.Errorf("open Vera's review history pane: %w: %s", err, strings.TrimSpace(out))
+	}
+	_, err = tmux.run("set-option", "-p", "-t", strings.TrimSpace(out), "@vibeflow_vera_history", "1")
+	return err
 }
 
 // restartVeraSession re-runs the same listener command: in place when the
@@ -220,10 +265,8 @@ func restartVeraSession(meta SessionMeta, tmux *TmuxManager, store *Store, cache
 		target = recoveryPane
 	}
 	respawn := ""
-	if pane, _ := tmux.agentPaneID(target); pane != "" {
-		if dead, err := tmux.run("display-message", "-p", "-t", pane, "#{pane_dead}"); err == nil && strings.TrimSpace(dead) == "1" {
-			respawn = pane
-		}
+	if pane, _ := tmux.agentPaneID(target); pane != "" && tmux.paneDead(pane) {
+		respawn = pane
 	}
 	if recoveryPane != "" && respawn == "" {
 		return SessionMeta{}, fmt.Errorf("pane %q has not exited", recoveryPane)

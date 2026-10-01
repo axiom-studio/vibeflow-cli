@@ -637,6 +637,7 @@ type workbenchSource struct {
 	name   string            // original full tmux session name
 	paneID string            // pane id, stable across join/break (e.g. "%4")
 	status map[string]string // captured status-bar options to re-apply
+	kept   bool              // the session outlived the join (Vera's history pane stayed)
 }
 
 // WorkbenchComposition is a live pane-join workbench. Restore returns every
@@ -829,12 +830,12 @@ func (tm *TmuxManager) composeInto(target string, sessions []string, titles map[
 	tm.configureWorkbenchBorders(target)
 	for _, name := range sessions {
 		full := tm.ensurePrefix(name)
-		pid, err := tm.paneID(full)
+		pid, err := tm.agentPaneID(full)
 		if err != nil {
 			return err
 		}
 		status := tm.captureSessionStatus(full)
-		if out, err := tm.run(joinPaneArgs(full, target)...); err != nil {
+		if out, err := tm.run(joinPaneArgs(pid, target)...); err != nil {
 			return fmt.Errorf("join %q into workbench: %w: %s", full, err, strings.TrimSpace(out))
 		}
 		title := workbenchPaneTitle(full)
@@ -845,7 +846,7 @@ func (tm *TmuxManager) composeInto(target string, sessions []string, titles map[
 		// configureWorkbenchBorders) so the running agent's OSC pane-title
 		// writes cannot overwrite it.
 		_, _ = tm.run("set-option", "-p", "-t", pid, "@vfheader", title)
-		comp.sources = append(comp.sources, workbenchSource{name: full, paneID: pid, status: status})
+		comp.sources = append(comp.sources, workbenchSource{name: full, paneID: pid, status: status, kept: tm.HasSession(full)})
 		_, _ = tm.run(tiledLayoutArgs(target)...)
 	}
 	return nil
@@ -1037,6 +1038,14 @@ func (c *WorkbenchComposition) Restore() error {
 	tm := c.tm
 	var firstErr error
 	for _, s := range c.sources {
+		// A session with other panes (Vera's review history) survived the
+		// join; put the agent pane back on its left.
+		if s.kept && tm.HasSession(s.name) {
+			if _, err := tm.run("join-pane", "-h", "-b", "-l", "70%", "-s", s.paneID, "-t", s.name); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("restore pane for %q: %w", s.name, err)
+			}
+			continue
+		}
 		// Recreate the session by name with a throwaway shell pane, move the
 		// agent pane back in, then drop the throwaway.
 		if _, err := tm.run("new-session", "-d", "-s", s.name); err != nil {
@@ -1126,6 +1135,12 @@ func (tm *TmuxManager) agentPaneID(target string) (string, error) {
 		}
 	}
 	return tm.paneID(target)
+}
+
+// paneDead reports whether a pane's process has exited.
+func (tm *TmuxManager) paneDead(pane string) bool {
+	out, err := tm.run("display-message", "-p", "-t", pane, "#{pane_dead}")
+	return err == nil && strings.TrimSpace(out) == "1"
 }
 
 // configurePaneRecovery keeps the launch identity with the pane, including when

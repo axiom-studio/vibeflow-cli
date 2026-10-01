@@ -198,6 +198,8 @@ func newVeraFixture(t *testing.T) (cfg *Config, repo string, registrations, poll
 			body["user_id"] = 42
 			registrations.Add(1)
 			_ = json.NewEncoder(w).Encode(body)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-summaries"): // Vera's history pane.
+			fmt.Fprint(w, `{"summaries":[]}`)
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			w.WriteHeader(204)
 		case strings.HasSuffix(r.URL.Path, "/work"):
@@ -322,6 +324,8 @@ func TestVeraWizardConfirmCreatesListenerSession(t *testing.T) {
 	if strings.Contains(started, cfg.APIToken) {
 		t.Fatal("listener command carries the API token")
 	}
+	history := "exec " + shellJoin([]string{fake, "--cra", "--root", root, "--config", filepath.Join(root, "config.yaml"), "review-watch", "--history", "--project", "66", "--repo", repo, "--repository-link", "7", "--git-provider", "github", "--provider", "claude", "--name", veraRunnerName()})
+	assertVeraPanes(t, m.tmux, meta.TmuxSession, command, history)
 	if _, err := os.Stat(filepath.Join(repo, ".vibeflow-session-code_reviewer")); !os.IsNotExist(err) {
 		t.Fatal("Vera wrote coding-agent session state")
 	}
@@ -344,6 +348,35 @@ func TestVeraWizardConfirmCreatesListenerSession(t *testing.T) {
 	}
 	if again := paneCommand(t, m.tmux, meta.TmuxSession); again != command {
 		t.Fatalf("restart ran %q, want %q", again, command)
+	}
+	assertVeraPanes(t, m.tmux, meta.TmuxSession, command, history)
+	// Restarting a live session recreates both panes.
+	if _, err := RestartSession(meta, cfg, m.tmux, m.store, m.cache, m.registry); err != nil {
+		t.Fatal(err)
+	}
+	assertVeraPanes(t, m.tmux, meta.TmuxSession, command, history)
+}
+
+// assertVeraPanes checks Vera's layout: the listener on the left (~70%) with
+// keyboard focus and the launch identity, the history list on the right (~30%).
+func assertVeraPanes(t *testing.T, tm *TmuxManager, session, listener, history string) {
+	t.Helper()
+	out, err := tm.run("list-panes", "-t", session, "-F", "#{pane_left}\t#{pane_width}\t#{window_width}\t#{pane_active}\t#{@vibeflow_session}\t#{pane_start_command}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want two Vera panes, got:\n%s", out)
+	}
+	left, right := strings.SplitN(lines[0], "\t", 6), strings.SplitN(lines[1], "\t", 6)
+	if left[0] != "0" || left[3] != "1" || left[4] != session || strings.Trim(left[5], `"`) != listener {
+		t.Fatalf("left pane is not the focused listener: %q", lines[0])
+	}
+	width, _ := strconv.Atoi(right[1])
+	window, _ := strconv.Atoi(right[2])
+	if right[0] == "0" || right[3] != "0" || right[4] != "" || strings.Trim(right[5], `"`) != history || window == 0 || width*100/window < 27 || width*100/window > 33 {
+		t.Fatalf("right pane is not the 30%% history list: %q", lines[1])
 	}
 }
 
@@ -375,7 +408,7 @@ func TestVeraSessionRowShowsListenerStatus(t *testing.T) {
 	}
 	if r := row(); r.Persona != "code_reviewer" || r.Provider != "claude" || r.WorkingDir != repo || r.Project != "Selected" || r.Status != "listening" {
 		t.Fatalf("idle Vera row %+v", r)
-	} else if text := rendered(r); !strings.Contains(text, "Vera · Code Reviewer") || !strings.Contains(text, "Selected") || !strings.Contains(text, "listening") || !strings.Contains(text, "claude-") {
+	} else if text := rendered(r); !strings.Contains(text, "Vera · Code Reviewer · "+filepath.Base(repo)) || !strings.Contains(text, "Selected") || !strings.Contains(text, "listening") || strings.Contains(text, "claude-") {
 		t.Fatalf("idle Vera row renders as:\n%s", text)
 	}
 	dir := filepath.Join(RootDir(), "review-runners", reviewBackgroundID(cfg.ServerURL, veraOptions(meta)))
@@ -389,7 +422,15 @@ func TestVeraSessionRowShowsListenerStatus(t *testing.T) {
 	if r := row(); r.Status != "reviewing" || !strings.Contains(rendered(r), "reviewing PR #12") {
 		t.Fatalf("reviewing Vera row %+v:\n%s", r, rendered(r))
 	}
-	if _, err := m.tmux.run("respawn-pane", "-k", "-t", meta.TmuxSession, "true"); err != nil {
+	// Status follows the listener even while the history pane has focus.
+	listener, err := m.tmux.agentPaneID(meta.TmuxSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.tmux.run("select-pane", "-R", "-t", listener); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.tmux.run("respawn-pane", "-k", "-t", listener, "true"); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -472,7 +513,7 @@ func TestVeraSessionDeleteStopsListener(t *testing.T) {
 		}
 	}
 	waitFor("listener registration and idle poll", func() bool { return registrations.Load() == 1 && polls.Load() >= 1 })
-	pane, _ := m.tmux.run("capture-pane", "-p", "-t", meta.TmuxSession)
+	pane, _ := m.tmux.run("capture-pane", "-p", "-J", "-t", meta.TmuxSession) // -J: the 70% pane wraps.
 	if !strings.Contains(pane, reviewListeningLine) || strings.Contains(pane, cfg.APIToken) {
 		t.Fatalf("listener pane:\n%s", pane)
 	}

@@ -131,7 +131,7 @@ func saveReviewJSON(path string, value any) error {
 
 func reviewWatchCmd() *cobra.Command {
 	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
-	var background, status bool
+	var background, status, history bool
 	var stop, managed, serverURL string
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		// Flags parsed; runtime failures print their message, not the usage text.
@@ -190,6 +190,16 @@ func reviewWatchCmd() *cobra.Command {
 		}
 		if o.Name == "" {
 			o.Name, _ = os.Hostname()
+		}
+		if history {
+			// The read-only list beside a Vera listener; it never registers.
+			o.ProjectID, err = strconv.ParseInt(o.Project, 10, 64)
+			if err != nil || o.ProjectID <= 0 || o.RepositoryLinkID <= 0 || cfg.APIToken == "" {
+				return fmt.Errorf("review history needs a numeric --project, --repository-link, and a connected config")
+			}
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+			defer cancel()
+			return runReviewHistory(ctx, cfg, o)
 		}
 		if o.RepositoryLinkID <= 0 || o.Project == "" || (o.Kind != "local" && o.Kind != "shared") || o.Timeout < time.Minute || o.Timeout > time.Hour {
 			return fmt.Errorf("provide --project and --repository-link; timeout must be 1m to 1h")
@@ -257,6 +267,8 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Name, "name", "", "Runner name (default: hostname)")
 	cmd.Flags().DurationVar(&o.PollInterval, "interval", o.PollInterval, "Idle API polling interval, 1s to 60s; each poll also heartbeats the runner, no LLM runs while idle")
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Maximum time per attempt, also bounded by the server deadline")
+	cmd.Flags().BoolVar(&history, "history", false, "Show this repository's reviews as a scrollable read-only list (Vera's right-hand pane)")
+	_ = cmd.Flags().MarkHidden("history")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
 	cmd.Flags().BoolVar(&background, "background", false, "Run this explicit binding in the background independently of the TUI")
 	cmd.Flags().BoolVar(&status, "status", false, "Show managed review runners in this root")

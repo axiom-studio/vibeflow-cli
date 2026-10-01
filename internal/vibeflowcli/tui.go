@@ -17,7 +17,6 @@
 package vibeflowcli
 
 import (
-	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -79,7 +78,6 @@ const copyrightText = "by axiomstudio.ai | Copyright 2026"
 
 // SessionRow represents a session displayed in the TUI.
 type SessionRow struct {
-	ManagedReview *reviewSession
 	Name          string
 	Project       string
 	Persona       string
@@ -108,7 +106,6 @@ const (
 	ViewWorktrees
 	ViewHelp
 	ViewRestart
-	ViewReviewDetail
 	ViewVeraLaunch
 )
 
@@ -147,22 +144,10 @@ type Model struct {
 	cache            *SessionCache      // session cache for restart-without-intervention
 	restartSelect    RestartSelectModel // dead-session restart multiselect
 
-	reviewAfter             string
-	reviewProjects          map[int64]reviewProjectPage
-	reviewReadSlots         chan struct{}
-	reviewProjectGeneration uint64
-	reviewProjectsBusy      bool
-	reviewBrowseWarning     string
-	reviewBrowseError       string
-	reviewDetail            reviewDetailState
-	craEnabled              bool
-	reviewNext              string
-	reviewWarning           string
-	reviewUnconfigured      bool // no project resolved; managed reviews cannot load
-	reviewReadStarted       time.Time
-	veraPrompt              *veraPrompt
-	veraPending             *WizardResult
-	veraProjectName         string
+	craEnabled      bool
+	veraPrompt      *veraPrompt
+	veraPending     *WizardResult
+	veraProjectName string
 
 	// Grouped view state.
 	groupMode       bool              // true = grouped by repo root, false = flat
@@ -302,7 +287,7 @@ func captureTickCmd() tea.Cmd {
 
 func (m Model) refreshCapture() tea.Msg {
 	idx := m.selectedSessionIdx()
-	if idx < 0 || m.sessions[idx].ManagedReview != nil {
+	if idx < 0 {
 		return captureMsg{}
 	}
 	name := m.sessions[idx].Name
@@ -429,7 +414,12 @@ func (m Model) refreshSessions() tea.Msg {
 		// Enrich with store metadata (provider, branch, worktree, persona).
 		if meta, ok := storeMeta[ts.Name]; ok {
 			if meta.Vera != nil {
-				row.Status, row.CurrentWork = veraRowStatus(meta, m.config.ServerURL, ts.PaneDead)
+				// The listener pane, not whichever pane has focus, is Vera's status.
+				dead := ts.PaneDead
+				if pane, err := m.tmux.agentPaneID(ts.Name); err == nil {
+					dead = m.tmux.paneDead(pane)
+				}
+				row.Status, row.CurrentWork = veraRowStatus(meta, m.config.ServerURL, dead)
 			}
 			row.Provider = meta.Provider
 			row.Branch = meta.Branch
@@ -519,6 +509,47 @@ func (m *Model) getRepoRoot(dir string) string {
 	return root
 }
 
+// replaceSessionRows swaps in a refreshed list, keeping the selected row.
+func (m *Model) replaceSessionRows(rows []SessionRow) {
+	name := ""
+	if idx := m.selectedSessionIdx(); idx >= 0 && idx < len(m.sessions) {
+		name = m.sessions[idx].Name
+	}
+	m.sessions = rows
+	m.buildGroups()
+	for idx, s := range rows {
+		if s.Name == name {
+			if !m.groupMode {
+				m.cursor = idx
+				return
+			}
+			pos := 0
+			for _, root := range m.groupOrder {
+				pos++
+				if !m.collapsedGroups[root] {
+					for _, i := range m.groupedSessions[root] {
+						if i == idx {
+							m.cursor = pos
+							return
+						}
+						pos++
+					}
+				}
+			}
+		}
+	}
+	maxIdx := len(rows) - 1
+	if m.groupMode {
+		maxIdx = m.groupedListLen() - 1
+	}
+	if maxIdx < 0 {
+		maxIdx = 0
+	}
+	if m.cursor > maxIdx {
+		m.cursor = maxIdx
+	}
+}
+
 // buildGroups rebuilds the grouped session data from the current flat session list.
 func (m *Model) buildGroups() {
 	m.groupedSessions = make(map[string][]int)
@@ -527,10 +558,6 @@ func (m *Model) buildGroups() {
 
 	for i, s := range m.sessions {
 		root := m.getRepoRoot(s.WorkingDir)
-		if s.ManagedReview != nil {
-			r := s.ManagedReview
-			root = fmt.Sprintf("%s:%d:%s:%s:%d", reviewSessionsGroup, r.ProjectID, r.Provider, r.ProviderHost, r.RepositoryLinkID)
-		}
 		if root == "" {
 			root = "(unknown)"
 		}
@@ -623,7 +650,7 @@ func (m Model) rowForGroupEdit() (SessionRow, bool) {
 // so a Name-based store.Get misses freshly-launched sessions. Returns false when
 // the store is unset, unreadable, or has no session for the row.
 func (m Model) storeMetaForRow(row SessionRow) (SessionMeta, bool) {
-	if m.store == nil || row.ManagedReview != nil {
+	if m.store == nil {
 		return SessionMeta{}, false
 	}
 	tmuxName := sessionPrefix + row.Name
@@ -657,9 +684,6 @@ func projectLabel(root string) string {
 // work with a project root selected (#3293) — previously selectedSessionIdx
 // returned -1 on a header and the shortcuts no-op'd.
 func (m Model) selectedRepoRoot() (root string, ok bool) {
-	if m.selectedReview() != nil {
-		return "", false
-	}
 	if m.groupMode {
 		idx, groupRoot := m.groupedCursorToSession()
 		if idx < 0 && groupRoot == "" {
@@ -680,7 +704,7 @@ func (m Model) selectedProjectSessions() (label string, names []string) {
 		return "", nil
 	}
 	for _, s := range m.sessions {
-		if s.ManagedReview == nil && m.getRepoRoot(s.WorkingDir) == selRoot {
+		if m.getRepoRoot(s.WorkingDir) == selRoot {
 			names = append(names, s.Name)
 		}
 	}
@@ -693,9 +717,6 @@ func (m Model) projectGroups() []WorkbenchProject {
 	var order []string
 	byRoot := map[string][]string{}
 	for _, s := range m.sessions {
-		if s.ManagedReview != nil {
-			continue
-		}
 		root := m.getRepoRoot(s.WorkingDir)
 		if _, ok := byRoot[root]; !ok {
 			order = append(order, root)
@@ -741,9 +762,6 @@ func (m Model) workbenchMetas(fullNames []string) []SessionMeta {
 func (m Model) workbenchTitles() map[string]string {
 	titles := make(map[string]string, len(m.sessions))
 	for _, s := range m.sessions {
-		if s.ManagedReview != nil {
-			continue
-		}
 		if h := workbenchHeader(s.Persona, s.Project, s.Branch); h != "" {
 			// Key by the FULL tmux name (with the vibeflow_ prefix): composeInto
 			// looks the header up via titles[ensurePrefix(name)], and s.Name has
@@ -786,7 +804,6 @@ func cacheGCTickCmd() tea.Cmd {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshSessions,
-		m.craReviewSummaries(),
 		captureTickCmd(),
 		tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		cacheGCTickCmd(),
@@ -795,9 +812,6 @@ func (m Model) Init() tea.Cmd {
 
 // Update handles messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if next, cmd, handled := m.updateReviewReads(msg); handled {
-		return next, cmd
-	}
 	// Global handlers — process regardless of active view so ticks and
 	// session refreshes continue while sub-views (wizard, conflict modal,
 	// worktree list) are active.
@@ -813,14 +827,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so the diff-based renderer doesn't skip lines it assumes are unchanged.
 		return m, tea.ClearScreen
 	case tickMsg:
-		var detail tea.Cmd
-		if m.activeView == ViewReviewDetail {
-			detail = m.requestReviewDetail()
-		}
 		return m, tea.Batch(
 			m.refreshSessions,
-			m.craReviewSummaries(),
-			detail,
 			tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		)
 	case sessionsMsg:
@@ -832,55 +840,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Auto-clear error after 10 seconds.
 			return m, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return errClearMsg{} })
 		}
-		rows := msg.sessions
-		for _, row := range m.sessions {
-			if row.ManagedReview != nil {
-				rows = append(rows, row)
-			}
-		}
-		m.replaceSessionRows(rows)
+		m.replaceSessionRows(msg.sessions)
 		m.orphanWorktrees = msg.orphans
-		return m, nil
-	case reviewSessionsMsg:
-		if msg.after != m.reviewAfter || msg.started.Before(m.reviewReadStarted) {
-			return m, nil
-		}
-		m.reviewReadStarted = msg.started
-		if errors.Is(msg.err, errReviewProjectUnconfigured) {
-			m.reviewUnconfigured = true
-			m.reviewWarning = ""
-			return m, nil
-		}
-		if msg.err != nil {
-			var response *reviewHTTPError
-			if errors.As(msg.err, &response) && (response.Status == 401 || response.Status == 403 || response.Status == 404) {
-				var rows []SessionRow
-				for _, row := range m.sessions {
-					if row.ManagedReview == nil {
-						rows = append(rows, row)
-					}
-				}
-				m.replaceSessionRows(rows)
-				m.reviewAfter = ""
-				m.reviewNext = ""
-				m.reviewWarning = "Managed reviews unavailable: " + msg.err.Error()
-				return m, nil
-			}
-			m.reviewWarning = "Managed reviews unavailable; displayed history may be stale: " + msg.err.Error()
-			return m, nil
-		}
-		m.reviewWarning = ""
-		m.reviewNext = msg.page.NextAfterID
-		var rows []SessionRow
-		for _, row := range m.sessions {
-			if row.ManagedReview == nil {
-				rows = append(rows, row)
-			}
-		}
-		for _, r := range msg.page.Sessions {
-			rows = append(rows, r.row())
-		}
-		m.replaceSessionRows(rows)
 		return m, nil
 	case errClearMsg:
 		m.err = nil
@@ -1009,11 +970,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateConflict(msg)
 	case ViewWorktrees:
 		return m.updateWorktreeList(msg)
-	case ViewReviewDetail:
-		if key, ok := msg.(tea.KeyPressMsg); !ok || (key.String() != "q" && key.String() != "ctrl+c") {
-			return m.updateReviewDetail(msg)
-		}
-		m.activeView = ViewSessions
 	case ViewHelp:
 		// Any keypress closes the help popup.
 		if _, ok := msg.(tea.KeyPressMsg); ok {
@@ -1030,12 +986,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 	case tea.KeyPressMsg:
-		if m.selectedReview() != nil {
-			switch msg.String() {
-			case "d", "b", "e", "m":
-				return m, nil
-			}
-		}
 		// Handle confirmation dialogs first.
 		if m.confirmDelete {
 			switch msg.String() {
@@ -1082,7 +1032,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "q":
-			if m.localSessionCount() > 0 {
+			if len(m.sessions) > 0 {
 				m.confirmQuit = true
 				return m, nil
 			}
@@ -1109,10 +1059,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				if sessionIdx >= 0 && sessionIdx < len(m.sessions) {
-					return m.activateSession(m.sessions[sessionIdx].Name)
+					return m, m.attachSessionCmd(m.sessions[sessionIdx].Name)
 				}
 			} else if m.cursor < len(m.sessions) {
-				return m.activateSession(m.sessions[m.cursor].Name)
+				return m, m.attachSessionCmd(m.sessions[m.cursor].Name)
 			}
 		case "g":
 			m.groupMode = !m.groupMode
@@ -1193,33 +1143,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wizard = NewGroupEditWizard(group, anchor, m.registry, repoRoot, m.worktrees, m.config)
 			m.activeView = ViewWizard
 			return m, nil
-		case "]":
-			if len(m.reviewProjects) > 0 {
-				return m.pageReviewProject(true)
-			}
-			if !m.craEnabled {
-				return m, nil
-			}
-			if m.reviewNext != "" {
-				m.reviewAfter = m.reviewNext
-				m.reviewNext = ""
-				return m, m.refreshReviewSessions
-			}
-			return m, nil
-		case "[":
-			if len(m.reviewProjects) > 0 {
-				return m.pageReviewProject(false)
-			}
-			if !m.craEnabled {
-				return m, nil
-			}
-			m.reviewAfter = ""
-			m.reviewNext = ""
-			return m, m.refreshReviewSessions
 		case "r":
-			if m.selectedReview() != nil {
-				return m, m.craReviewSummaries()
-			}
 			// Manual recovery retry for failed sessions, otherwise refresh.
 			idx := m.selectedSessionIdx()
 			if idx >= 0 && idx < len(m.sessions) && m.healthMonitor != nil {
@@ -1229,7 +1153,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			}
-			return m, tea.Batch(m.refreshSessions, m.craReviewSummaries())
+			return m, m.refreshSessions
 		case "m":
 			// Project workbench: compose the selected session's project (its
 			// repo-root group) into one natively interactive tmux view. One
@@ -1270,7 +1194,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "D":
 			// Detach: quit TUI while sessions continue running.
-			if m.localSessionCount() > 0 {
+			if len(m.sessions) > 0 {
 				m.confirmDetach = true
 			} else {
 				m.quitting = true
@@ -1475,9 +1399,6 @@ func (m Model) updateWorktreeList(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handles cleanup and ID preservation). Shared by the `d` delete confirmation and
 // the group-edit remove path.
 func (m Model) killSessionByName(name string) {
-	if m.managedReview(name) != nil {
-		return
-	}
 	if err := m.tmux.KillSession(name); err != nil {
 		m.logger.Error("kill session %s: %v", name, err)
 	} else {
@@ -2058,9 +1979,6 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 // switches to) the named session. Shared by the Enter key and mouse clicks so
 // both activate a session identically.
 func (m Model) attachSessionCmd(name string) tea.Cmd {
-	if m.managedReview(name) != nil {
-		return nil
-	}
 	cmd := m.tmux.AttachSessionCmd(name)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return attachExitMsg{err: err}
@@ -2122,12 +2040,12 @@ func (m Model) handleListClick(x, y int) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if alreadySelected && sessionIdx >= 0 && sessionIdx < len(m.sessions) {
-				return m.activateSession(m.sessions[sessionIdx].Name)
+				return m, m.attachSessionCmd(m.sessions[sessionIdx].Name)
 			}
 			return m, nil
 		}
 		if alreadySelected && span.pos < len(m.sessions) {
-			return m.activateSession(m.sessions[span.pos].Name)
+			return m, m.attachSessionCmd(m.sessions[span.pos].Name)
 		}
 		return m, nil
 	}
@@ -2167,8 +2085,6 @@ func (m Model) viewContent() string {
 		return m.conflictModal.View()
 	case ViewWorktrees:
 		return m.worktreeList.View()
-	case ViewReviewDetail:
-		return m.viewReviewDetail()
 	case ViewHelp:
 		return m.renderHelpPopup()
 	case ViewRestart:
@@ -2203,8 +2119,6 @@ func (m Model) viewContent() string {
 		hintStyle := lipgloss.NewStyle().Foreground(dimColor)
 		errLine = errStyle.Render("Error: "+errMsg) + "\n" +
 			hintStyle.Render("  See "+RootDir()+"/vibeflow-cli.log for details")
-	} else if m.reviewWarning != "" {
-		errLine = lipgloss.NewStyle().Foreground(warningColor).Render(truncate(m.reviewWarning, width))
 	} else if m.serverWarning != "" {
 		warnBannerStyle := lipgloss.NewStyle().Foreground(warningColor)
 		errLine = warnBannerStyle.Render("⚠ " + m.serverWarning + " — local sessions still available")
@@ -2227,11 +2141,9 @@ func (m Model) viewContent() string {
 			helpBar = warnStyle.Render(fmt.Sprintf("Delete '%s'? (y/n)", delName))
 		}
 	case m.confirmQuit:
-		helpBar = warnStyle.Render(fmt.Sprintf("%d local session(s) remain open. Quit? (y/n)", m.localSessionCount()))
+		helpBar = warnStyle.Render(fmt.Sprintf("%d local session(s) remain open. Quit? (y/n)", len(m.sessions)))
 	case m.confirmDetach:
-		helpBar = warnStyle.Render(fmt.Sprintf("Detach? %d local session(s) remain open. (y/n)", m.localSessionCount()))
-	case m.reviewSelection():
-		helpBar = helpStyle.Render("Read-only review  enter: details  r: refresh  ]: older  [: latest  g: group  q: quit")
+		helpBar = warnStyle.Render(fmt.Sprintf("Detach? %d local session(s) remain open. (y/n)", len(m.sessions)))
 	default:
 		enterHint := "attach"
 		if m.groupMode {
@@ -2366,12 +2278,6 @@ func (m Model) renderSessionList(width, height int) string {
 	b.WriteString(headerStyle.Render(fmt.Sprintf("Sessions (%s)", modeLabel)))
 	b.WriteString("\n")
 
-	// One dim line in place of the managed section when no project resolved.
-	hint := ""
-	if m.reviewUnconfigured {
-		hint = "\n" + lipgloss.NewStyle().Foreground(dimColor).Render(truncate(reviewUnconfiguredHint, width))
-	}
-
 	if len(m.sessions) == 0 {
 		if m.hitmap != nil {
 			m.hitmap.top = 0
@@ -2379,7 +2285,6 @@ func (m Model) renderSessionList(width, height int) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("No active sessions."))
 		b.WriteString("\n")
 		b.WriteString(lipgloss.NewStyle().Foreground(dimColor).Render("Press 'n' to create one."))
-		b.WriteString(hint)
 		return b.String()
 	}
 
@@ -2390,17 +2295,14 @@ func (m Model) renderSessionList(width, height int) string {
 		rows = m.buildFlatRows(width)
 	}
 
-	// avail = body lines below the fixed "Sessions" header (and the hint).
+	// avail = body lines below the fixed "Sessions" header.
 	avail := height - 1
-	if hint != "" {
-		avail--
-	}
 	if avail < 1 {
 		avail = 1
 	}
 	b.WriteString(m.windowRows(rows, avail))
 
-	return strings.TrimRight(b.String(), "\n") + hint
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // buildFlatRows pre-renders every session as a listRow in flat (ungrouped) mode.
@@ -2521,10 +2423,6 @@ func (m Model) buildGroupedRows(width int) []listRow {
 		}
 		// Shorten long paths.
 		displayRoot := root
-		if len(indices) > 0 && m.sessions[indices[0]].ManagedReview != nil {
-			r := m.sessions[indices[0]].ManagedReview
-			displayRoot = fmt.Sprintf("%s (%d) / %s", reviewDisplay(m.reviewProjects[r.ProjectID].Name), r.ProjectID, reviewDisplay(r.RepositoryName))
-		}
 		if len(displayRoot) > width-12 {
 			displayRoot = "..." + displayRoot[len(displayRoot)-(width-15):]
 		}
@@ -2605,16 +2503,11 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 		nameMax = 8
 	}
 	displayName := s.Name
-	if s.ManagedReview != nil {
-		displayName = fmt.Sprintf("PR #%d", s.ManagedReview.PRNumber)
-		if s.ManagedReview.Title != "" {
-			displayName += " " + reviewDisplay(s.ManagedReview.Title)
-		}
+	vera := s.Persona == "code_reviewer"
+	if vera { // The raw session ID stays in the detail panel.
+		displayName = reviewSessionLabel + " · " + filepath.Base(s.WorkingDir)
 	}
 	name := truncate(displayName, nameMax)
-	if s.ManagedReview != nil {
-		name = ansi.Truncate(displayName, nameMax, "…")
-	}
 	line := fmt.Sprintf("%s %s%s%s", indStyle.Render(indicator), name, recoveredBadge, healthBadge)
 
 	if pos == cursor {
@@ -2629,11 +2522,8 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	if s.Branch != "" {
 		parts = append(parts, s.Branch)
 	}
-	if s.Persona != "" {
+	if s.Persona != "" && !vera {
 		label := s.Persona
-		if label == "code_reviewer" {
-			label = reviewSessionLabel
-		}
 		icon := PersonaCompactIcon(s.Persona)
 		if icon != "" {
 			parts = append(parts, lipgloss.NewStyle().Foreground(PersonaColor(s.Persona)).Render(icon)+" "+label)
@@ -2644,25 +2534,11 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	if s.Project != "" {
 		parts = append(parts, s.Project)
 	}
-	if s.Persona == "code_reviewer" && s.CurrentWork != "" {
+	if vera && s.CurrentWork != "" {
 		parts = append(parts, s.CurrentWork) // Vera: listening, reviewing PR #N or stopped.
 	}
 	if len(parts) > 0 {
 		subtitle := strings.Join(parts, " · ")
-		if s.ManagedReview != nil {
-			subtitle = s.ManagedReview.pullRequest() + " · " + s.ManagedReview.progress()
-			if s.ManagedReview.CountsKnown {
-				findings, blockers := "findings", "blockers"
-				if s.ManagedReview.FindingCount == 1 {
-					findings = "finding"
-				}
-				if s.ManagedReview.BlockerCount == 1 {
-					blockers = "blocker"
-				}
-				subtitle += fmt.Sprintf(" · %d %s · %d %s", s.ManagedReview.FindingCount, findings, s.ManagedReview.BlockerCount, blockers)
-			}
-			subtitle = ansi.Truncate(subtitle, width-8-len(indent), "…")
-		}
 		subtitleStyle := lipgloss.NewStyle().Foreground(dimColor)
 		// Align with the name text (after indicator + provider dot).
 		pad := "    " + indent
@@ -2689,9 +2565,6 @@ func (m Model) renderDetailPanel(width, height int) string {
 	}
 
 	s := m.sessions[idx]
-	if s.ManagedReview != nil {
-		return renderReviewSession(s.ManagedReview, width, height)
-	}
 
 	labelStyle := lipgloss.NewStyle().Foreground(dimColor).Width(14)
 	valueStyle := lipgloss.NewStyle().Foreground(oceanForeground)
@@ -2840,9 +2713,6 @@ func (m Model) renderDetailPanel(width, height int) string {
 
 // renderHelpPopup renders a centered help overlay with categorized keyboard shortcuts.
 func (m Model) renderHelpPopup() string {
-	if m.reviewSelection() {
-		return reviewSessionLabel + "\n\nRead-only status and retained review history.\nEnter: details   r: refresh   ]: older   [: latest\nDetails: o: PR   c: AxiomCloud   [/]: attempts\nUse AxiomCloud for review controls.\n\nEsc: back"
-	}
 	width := m.width
 	if width < 40 {
 		width = 80
@@ -2958,11 +2828,9 @@ func renderStatus(status string) string {
 	}
 }
 
+// truncate cuts s to max display columns, never inside a multi-byte rune.
 func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-1] + "…"
+	return ansi.Truncate(s, max, "…")
 }
 
 func stripANSI(s string) string {
