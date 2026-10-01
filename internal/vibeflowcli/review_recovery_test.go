@@ -355,3 +355,46 @@ func TestReviewCrashRecoveryRemovesWorktree(t *testing.T) {
 		t.Fatalf("developer repository gained a worktree: %s", list)
 	}
 }
+
+// A long outage prints one unavailable line and one recovery line, not a
+// retry line per poll.
+func TestReviewWatchOutageMessageOncePerOutage(t *testing.T) {
+	previousRoot := rootDir
+	SetRootDir(t.TempDir())
+	t.Cleanup(func() { rootDir = previousRoot })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var heartbeats atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			body["user_id"] = 1
+			json.NewEncoder(w).Encode(body)
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			n := heartbeats.Add(1)
+			if n >= 12 {
+				cancel()
+			}
+			if n <= 4 || (n >= 7 && n <= 9) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/work"):
+			fmt.Fprint(w, `{"reviews":[]}`)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+	var out strings.Builder
+	w := &reviewWatch{client: NewClient(server.URL, "token"), providerReady: true, output: &out, options: reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "outage", PollInterval: time.Millisecond}}
+	if err := w.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out.String(), "Review API unavailable") != 2 || strings.Count(out.String(), "Review API reachable again") != 2 {
+		t.Fatalf("outage messages:\n%s", out.String())
+	}
+}
