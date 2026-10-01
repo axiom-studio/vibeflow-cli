@@ -239,8 +239,10 @@ func defaultPersonas() []personaEntry {
 	}
 }
 
+var veraPersona = personaEntry{"code_reviewer", reviewSessionLabel, "Reviews PRs when anyone comments @vibeflow review; fresh Vera worktree each time"}
+
 func (w *WizardModel) enableCRA() {
-	w.personas = append(w.personas, personaEntry{"code_reviewer", reviewSessionLabel, "Reviews PRs when anyone comments @vibeflow review; fresh Vera worktree each time"})
+	w.personas = append(w.personas, veraPersona)
 	w.personaProviderIdx = append(w.personaProviderIdx, -1)
 }
 
@@ -527,7 +529,8 @@ func (w WizardModel) buildQuickSwitchResult() (WizardModel, tea.Cmd) {
 // running sessions that share the anchor's repo root and branch; `anchor` is the
 // selected session those settings are inherited from. The flow is
 // StepTeam → StepProvider → StepConfirm — every other step is inherited.
-func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, cfg *Config) WizardModel {
+// cra lists Vera as in New Agent, preselected when the group has a Vera session.
+func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, cfg *Config, cra bool) WizardModel {
 	// Provider list from the registry (same shape as the other constructors).
 	entries := make([]providerEntry, 0)
 	for _, key := range providerKeys(registry) {
@@ -548,6 +551,9 @@ func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *Provi
 	}
 
 	personas := defaultPersonas()
+	if cra {
+		personas = append(personas, veraPersona)
+	}
 	personaIdxByKey := make(map[string]int, len(personas))
 	for i, p := range personas {
 		personaIdxByKey[p.key] = i
@@ -1481,6 +1487,8 @@ func (w WizardModel) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	if w.quickSwitch {
 		b.WriteString(title.Render("Switch Branch"))
+	} else if w.groupEdit {
+		b.WriteString(title.Render("Edit Group"))
 	} else {
 		b.WriteString(title.Render("New Session"))
 	}
@@ -1508,6 +1516,9 @@ func (w WizardModel) View() string {
 	}
 	if w.quickSwitch {
 		steps = []stepLabel{{StepBranch, "Branch"}, {StepWorktree, "Worktree"}}
+	}
+	if w.groupEdit {
+		steps = []stepLabel{{StepTeam, "Team"}, {StepProvider, "Provider"}, {StepConfirm, "Confirm"}}
 	}
 	// Vera alone needs only a harness: it always runs in its own disposable
 	// worktree with the harness's full-permission mode.
