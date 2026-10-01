@@ -76,6 +76,34 @@ type reviewWatch struct {
 	slot               *os.File
 	tty                *reviewTerminal // Set when the harness runs interactively in this terminal.
 	interrupted        bool            // The user closed the interactive harness before its result.
+	stopBrowse         func()          // Ends the idle key handling of tty.
+}
+
+// veraBrowseHint tells the user how to reach the history pane from the listener.
+const veraBrowseHint = "↑/↓ browse reviews · Enter opens a review · Ctrl-C stops Vera"
+
+// browse turns the idle mode of a listener's terminal on or off: no echo, and
+// browse keys go to the history pane beside it.
+func (w *reviewWatch) browse(on bool) {
+	if w.tty == nil {
+		return
+	}
+	if w.stopBrowse != nil {
+		w.stopBrowse()
+		w.stopBrowse = nil
+	}
+	if on {
+		pane := os.Getenv("TMUX_PANE")
+		w.stopBrowse = w.tty.browse(func(input []byte) { forwardVeraKeys(execVeraTmux, pane, input) })
+	}
+}
+
+// listening says the runner is idle again.
+func (w *reviewWatch) listening() {
+	fmt.Fprintln(w.output, reviewListeningLine)
+	if w.tty != nil {
+		fmt.Fprintln(w.output, veraBrowseHint)
+	}
 }
 
 // An interactive harness that exits sooner than this without a result could
@@ -132,7 +160,7 @@ func saveReviewJSON(path string, value any) error {
 func reviewWatchCmd() *cobra.Command {
 	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
 	var background, status, history bool
-	var stop, managed, serverURL string
+	var stop, managed, serverURL, detail string
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		// Flags parsed; runtime failures print their message, not the usage text.
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true // main prints the error once.
@@ -191,14 +219,18 @@ func reviewWatchCmd() *cobra.Command {
 		if o.Name == "" {
 			o.Name, _ = os.Hostname()
 		}
-		if history {
-			// The read-only list beside a Vera listener; it never registers.
+		if history || detail != "" {
+			// The read-only list beside a Vera listener, or one review from
+			// it; neither registers.
 			o.ProjectID, err = strconv.ParseInt(o.Project, 10, 64)
 			if err != nil || o.ProjectID <= 0 || o.RepositoryLinkID <= 0 || cfg.APIToken == "" {
 				return fmt.Errorf("review history needs a numeric --project, --repository-link, and a connected config")
 			}
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer cancel()
+			if detail != "" {
+				return runReviewDetail(ctx, cfg, o.ProjectID, detail)
+			}
 			return runReviewHistory(ctx, cfg, o)
 		}
 		if o.RepositoryLinkID <= 0 || o.Project == "" || (o.Kind != "local" && o.Kind != "shared") || o.Timeout < time.Minute || o.Timeout > time.Hour {
@@ -269,6 +301,8 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Maximum time per attempt, also bounded by the server deadline")
 	cmd.Flags().BoolVar(&history, "history", false, "Show this repository's reviews as a scrollable read-only list (Vera's right-hand pane)")
 	_ = cmd.Flags().MarkHidden("history")
+	cmd.Flags().StringVar(&detail, "review-detail", "", "Show one review's recorded result and findings (opened from Vera's history pane)")
+	_ = cmd.Flags().MarkHidden("review-detail")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
 	cmd.Flags().BoolVar(&background, "background", false, "Run this explicit binding in the background independently of the TUI")
 	cmd.Flags().BoolVar(&status, "status", false, "Show managed review runners in this root")
@@ -380,7 +414,9 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		stopHint = "Ctrl-C stops it while listening; during a review Ctrl-C goes to the harness, and Vera then offers to stop."
 	}
 	fmt.Fprintf(w.output, "Review runner %s is online (%s, %s). %s\n", w.options.Name, w.options.Kind, w.options.Provider, stopHint)
-	fmt.Fprintln(w.output, reviewListeningLine)
+	w.listening()
+	w.browse(true)
+	defer w.browse(false)
 	// An interrupted attempt always fails or replays its saved result. It never
 	// resumes the old model conversation or launches a second child for it.
 	if w.state.Pending != nil {
@@ -638,7 +674,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		case <-time.After(5 * time.Second):
 		}
 	}
-	fmt.Fprintln(w.output, reviewListeningLine)
+	w.listening()
 	return nil
 }
 
@@ -923,6 +959,10 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	guard.Stderr = &stderr
 	if interactive {
 		fmt.Fprintf(w.output, "Starting %s in this pane; Vera closes it once the review result is written.\n", w.options.Provider)
+		// The harness gets the terminal as it was, and Vera's idle mode back
+		// once the harness is gone.
+		w.browse(false)
+		defer w.browse(true)
 		w.tty.save()
 	} else {
 		fmt.Fprintf(w.output, "Running %s headless; its output is not shown.\n", w.options.Provider)

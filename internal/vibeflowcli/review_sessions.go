@@ -54,9 +54,11 @@ type reviewSessionsPage struct {
 
 type reviewSummaryJob struct {
 	reviewJob
-	ProjectID int64 `json:"project_id"`
-	Number    int64 `json:"number"`
-	Details   struct {
+	ProjectID     int64 `json:"project_id"`
+	Number        int64 `json:"number"`
+	RoundsStarted int   `json:"rounds_started"`
+	RoundLimit    int   `json:"round_limit"`
+	Details       struct {
 		URL                string `json:"url"`
 		BaseRepositoryName string `json:"base_repository_name"`
 		Title              string `json:"title"`
@@ -82,8 +84,12 @@ type reviewSummary struct {
 	FindingCount       int              `json:"finding_count"`
 	UnresolvedBlockers int              `json:"unresolved_blockers"`
 	Progress           *reviewProgress  `json:"progress"`
-	ReviewSessions     []reviewSession  `json:"review_sessions"`
-	ReviewSessionsNext string           `json:"review_sessions_next_after_id"`
+	LastCompletedRound *struct {
+		Number  int    `json:"number"`
+		HeadSHA string `json:"head_sha"`
+	} `json:"last_completed_round"`
+	ReviewSessions     []reviewSession `json:"review_sessions"`
+	ReviewSessionsNext string          `json:"review_sessions_next_after_id"`
 	Runner             struct {
 		State  string `json:"state"`
 		Name   string `json:"name"`

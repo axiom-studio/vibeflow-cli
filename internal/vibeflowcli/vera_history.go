@@ -3,6 +3,8 @@ package vibeflowcli
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,15 +31,24 @@ type reviewHistoryMsg struct {
 }
 type reviewHistoryTickMsg struct{}
 
+// reviewPopupMsg reports a closed review popup, or why none could open.
+type reviewPopupMsg struct {
+	job string
+	err error
+}
+
 type reviewHistory struct {
 	load           func() tea.Msg
 	title          string
 	rows           []reviewSummary
 	current        string
-	status, detail string
+	status         string
 	failed, loaded bool
 	cursor, offset int
 	width, height  int
+	popup          func(job string) error   // Shows one review over the session.
+	loadDetail     func(job string) tea.Msg // Reads one review for the in-pane fallback.
+	detail         *reviewDetail            // The in-pane review, when popups are unavailable.
 }
 
 func newReviewHistory(title string, load func() tea.Msg) reviewHistory {
@@ -95,10 +106,51 @@ func loadReviewHistory(client *Client, serverURL string, o reviewWatchOptions) t
 
 func (h reviewHistory) Init() tea.Cmd { return h.load }
 
+// open shows the selected review in a popup.
+func (h reviewHistory) open() tea.Cmd {
+	if h.cursor >= len(h.rows) || h.popup == nil {
+		return nil
+	}
+	job, popup := h.rows[h.cursor].Review.ID, h.popup
+	return func() tea.Msg { return reviewPopupMsg{job: job, err: popup(job)} }
+}
+
 func (h reviewHistory) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		h.width, h.height = size.Width, size.Height
+	}
+	if popup, ok := msg.(reviewPopupMsg); ok && popup.err != nil && h.loadDetail != nil {
+		// No popup (tmux before 3.2, or no attached client): show it here.
+		d := newReviewDetail(func() tea.Msg { return h.loadDetail(popup.job) })
+		d, _ = d.update(tea.WindowSizeMsg{Width: h.width, Height: h.height})
+		h.detail = &d
+		return h, d.load
+	}
+	if h.detail != nil {
+		switch msg.(type) {
+		case tea.KeyPressMsg, tea.MouseWheelMsg, tea.WindowSizeMsg, reviewDetailMsg:
+			if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "ctrl+c" {
+				return h, tea.Quit
+			}
+			d, closed := h.detail.update(msg)
+			h.detail = &d
+			if closed {
+				h.detail = nil
+			}
+			return h, nil
+		}
+	}
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		h.width, h.height = msg.Width, msg.Height
+	case tea.MouseClickMsg:
+		// Two lines per entry below the header and status lines.
+		if msg.Button == tea.MouseLeft && msg.Y >= 2 {
+			if i := h.offset + (msg.Y-2)/2; i < min(len(h.rows), h.offset+h.page()) {
+				if i == h.cursor {
+					return h, h.open()
+				}
+				h.scroll(i - h.cursor)
+			}
+		}
 	case reviewHistoryTickMsg:
 		return h, h.load
 	case reviewHistoryMsg:
@@ -145,9 +197,7 @@ func (h reviewHistory) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "end", "G":
 			h.scroll(len(h.rows))
 		case "enter":
-			if h.cursor < len(h.rows) {
-				h.detail = reviewDisplay(h.rows[h.cursor].Review.Details.URL)
-			}
+			return h, h.open()
 		}
 	}
 	return h, nil
@@ -176,6 +226,9 @@ func (h reviewHistory) View() tea.View {
 }
 
 func (h reviewHistory) render() string {
+	if h.detail != nil {
+		return h.detail.render()
+	}
 	width, height := max(1, h.width), max(3, h.height)
 	if h.width == 0 {
 		width, height = 40, 24
@@ -192,12 +245,18 @@ func (h reviewHistory) render() string {
 	}
 	for i := h.offset; i < min(len(h.rows), h.offset+h.page()); i++ {
 		s := h.rows[i]
-		marker := "  "
+		// ">" marks the cursor even without colors (NO_COLOR drops reverse).
+		marker := " "
+		if i == h.cursor {
+			marker = ">"
+		}
 		if s.Review.ID == h.current {
-			marker = "▶ "
+			marker += "▶ "
+		} else {
+			marker += "  "
 		}
 		title := fit(fmt.Sprintf("%s#%d %s", marker, s.Review.Number, reviewDisplay(s.Review.Details.Title)))
-		meta := fit("  " + reviewHistoryMeta(s))
+		meta := fit("   " + reviewHistoryMeta(s))
 		switch {
 		case i == h.cursor:
 			style := lipgloss.NewStyle().Reverse(true)
@@ -212,11 +271,7 @@ func (h reviewHistory) render() string {
 	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
-	footer := h.detail
-	if footer == "" {
-		footer = "↑↓ scroll · Enter: PR link"
-	}
-	return strings.Join(append(lines[:height-1], dim.Render(fit(footer))), "\n")
+	return strings.Join(append(lines[:height-1], dim.Render(fit("↑↓ browse · Enter: open review · click works"))), "\n")
 }
 
 // reviewHistoryMeta is a review's outcome line: state, round, findings,
@@ -244,6 +299,16 @@ func reviewHistoryMeta(s reviewSummary) string {
 func runReviewHistory(ctx context.Context, cfg *Config, o reviewWatchOptions) error {
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
 	model := newReviewHistory(filepath.Base(o.Repository), func() tea.Msg { return loadReviewHistory(client, cfg.ServerURL, o) })
+	model.popup = func(job string) error {
+		args := veraDetailArgs(os.Args, job)
+		bin, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		args[0] = bin
+		return exec.Command("tmux", veraPopupArgs("exec "+shellJoin(args))...).Run()
+	}
+	model.loadDetail = func(job string) tea.Msg { return loadReviewDetail(ctx, client, o.ProjectID, job) }
 	_, err := tea.NewProgram(model, tea.WithContext(ctx)).Run()
 	if ctx.Err() != nil {
 		return nil

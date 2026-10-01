@@ -212,6 +212,10 @@ func startVeraTmuxSession(tmux *TmuxManager, meta SessionMeta, respawnPane strin
 	if err := startVeraHistoryPane(tmux, meta, respawnPane); err != nil {
 		return err
 	}
+	// Clicks and the wheel reach the history pane; only this session's option.
+	if _, err := tmux.run("set-option", "-t", meta.TmuxSession, "mouse", "on"); err != nil {
+		return err
+	}
 	_ = tmux.BindSessionKeys(meta.TmuxSession)
 	return nil
 }

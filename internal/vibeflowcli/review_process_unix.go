@@ -204,3 +204,56 @@ func (t *reviewTerminal) reclaim(forced bool) {
 	}
 	_, _ = t.files[1].WriteString(reset)
 }
+
+// veraQuietTermios is the listener's idle mode: keys are neither echoed nor
+// line-edited, one at a time, while Ctrl-C still raises SIGINT and output
+// keeps its newline handling.
+func veraQuietTermios(t unix.Termios) unix.Termios {
+	t.Lflag &^= unix.ECHO | unix.ICANON
+	t.Cc[unix.VMIN], t.Cc[unix.VTIME] = 1, 0
+	return t
+}
+
+// browse puts the terminal in the idle mode and hands every key read to
+// forward until the returned stop, which restores the previous mode.
+func (t *reviewTerminal) browse(forward func([]byte)) (stop func()) {
+	fd := int(t.files[0].Fd())
+	saved, err := unix.IoctlGetTermios(fd, reviewGetTermios)
+	if err != nil {
+		return func() {}
+	}
+	quiet := veraQuietTermios(*saved)
+	if unix.IoctlSetTermios(fd, reviewSetTermios, &quiet) != nil {
+		return func() {}
+	}
+	done, exited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		buf := make([]byte, 256)
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		for {
+			// Poll briefly so stop never waits on a blocked read.
+			n, err := unix.Poll(fds, 100)
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if err != nil && err != unix.EINTR {
+				return
+			}
+			if n <= 0 {
+				continue
+			}
+			if n, err = unix.Read(fd, buf); err != nil || n == 0 {
+				return
+			}
+			forward(buf[:n])
+		}
+	}()
+	return func() {
+		close(done)
+		<-exited
+		_ = unix.IoctlSetTermios(fd, reviewSetTermios, saved)
+	}
+}
