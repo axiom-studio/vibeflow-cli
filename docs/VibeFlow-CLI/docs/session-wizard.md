@@ -41,7 +41,15 @@ Its row shows **Vera · Code Reviewer · <repository>**, the project and the lis
 The session window is split in two.
 The left pane, about 70% wide and focused on attach, runs the foreground listener, `vibeflow --cra --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>`, with `--model` only when a model was chosen.
 The right pane, about 30% wide, runs the same command with `--history`: a read-only list of the PRs Vera reviewed on this repository, newest first, with outcome, round, findings, short head commit and time.
-The PR under review now is marked with `▶`, the list refreshes every 10 seconds, and arrows, PgUp/PgDn or the mouse wheel scroll it; Enter shows the selected PR's link.
+The PR under review now is marked with `▶` and the selected PR with `>`; the list refreshes every 10 seconds.
+While Vera listens, its left pane does not echo keys: ↑/↓, j/k, PgUp/PgDn, Home/End, Enter and Esc typed there move and open the history list, and Ctrl-C still stops Vera.
+The listener prints that hint, `↑/↓ browse reviews · Enter opens a review · Ctrl-C stops Vera`, each time it starts listening.
+The history pane takes the same keys and the mouse directly; the Vera session turns tmux mouse support on for itself only, so a click selects a row and a click on the selected row opens it.
+Enter opens the selected review in a tmux popup (90% wide, 85% high; tmux 3.2 or later, with an attached client) showing the PR title and link, outcome, rounds used of the limit, last reviewed head, summary and every finding with its state, severity, location, title, trigger, impact, evidence and verification.
+The popup scrolls with the same keys and closes with q or Esc.
+Without popups, the same view replaces the list inside the history pane until Esc.
+The view states that the live harness transcript of past reviews is not stored: only the recorded result and findings are.
+A review that is running now is visible in the left pane itself.
 Past PR reviews are no longer rows in the session list; without a running Vera session for a repository, use AxiomCloud for its history.
 No model runs while it listens.
 When a review is claimed, the pane shows the PR number and head commit, prepares a fresh worktree of the PR head, and then runs the harness's own interactive UI in the pane, launched like a persona (its launch template with full permissions) with the review task as the initial prompt.

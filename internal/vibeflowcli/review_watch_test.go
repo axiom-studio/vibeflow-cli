@@ -378,6 +378,10 @@ func TestReviewWatchInteractiveHarnessInPane(t *testing.T) {
 		data, _ := os.ReadFile(v.mark("input"))
 		return strings.TrimSpace(string(data)) == "hello-from-pane"
 	})
+	// Vera's idle mode was undone for the harness: the terminal echoes again.
+	if !strings.Contains(v.capture(), "hello-from-pane") {
+		t.Fatalf("typed input not echoed for the harness:\n%s", v.capture())
+	}
 	v.waitFor("result, worktree removal and listening again", func() bool {
 		text := v.capture()
 		i := strings.Index(text, "Result: clean.")
@@ -405,6 +409,15 @@ func TestReviewWatchInteractiveHarnessInPane(t *testing.T) {
 	}
 	if v.claims[7].Load() != 1 || strings.Contains(v.capture(), v.token) {
 		t.Fatalf("claims=%d or token shown:\n%s", v.claims[7].Load(), v.capture())
+	}
+	// Idle again: arrow keys browse instead of echoing.
+	if !strings.Contains(v.capture(), veraBrowseHint) {
+		t.Fatalf("listener lacks the browse hint:\n%s", v.capture())
+	}
+	v.keys("Down", "Up", "x")
+	time.Sleep(300 * time.Millisecond)
+	if text := v.capture(); strings.Contains(text, "^[[B") || strings.Contains(text, "^[[A") || strings.HasSuffix(strings.TrimSpace(text), "x") {
+		t.Fatalf("idle listener echoed keys:\n%s", text)
 	}
 	// The listener has the terminal back: Ctrl-C now stops it, as its banner says.
 	v.keys("C-c")

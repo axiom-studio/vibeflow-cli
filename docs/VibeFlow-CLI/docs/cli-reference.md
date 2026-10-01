@@ -39,7 +39,11 @@ The session's window has two panes.
 The left pane (about 70% of the width, focused on attach) runs `vibeflow --cra --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>` in the foreground, adding `--model` only when one was chosen.
 The right pane (about 30%) runs the same command with the hidden `--history` flag: a read-only, scrollable list of the PRs reviewed on this repository link, newest first.
 Each entry shows the PR number and title, then the outcome (Clean, Changes requested or Needs human review), round, findings, short head commit and time of the latest attempt; the PR under review now is marked with `▶`.
-The list refreshes every 10 seconds; use the arrow keys, PgUp/PgDn, Home/End or the mouse wheel to scroll, and Enter to show the selected PR's link on the bottom line.
+The list refreshes every 10 seconds; use the arrow keys, PgUp/PgDn, Home/End, the mouse wheel or a click to move, and Enter (or a click on the selected row) to open the review.
+The same browse keys work from the idle listener pane, which no longer echoes typed keys; Ctrl-C there still stops Vera.
+A review opens in a tmux popup running the hidden `review-watch --review-detail <review>` view: title, link, outcome, rounds used of the limit, last reviewed head, summary and all findings, scrollable, closed with q or Esc.
+Where popups are unavailable (tmux before 3.2, or no attached client) the view opens inside the history pane until Esc.
+Past reviews keep only their recorded result and findings; the live harness transcript is not stored.
 If the review API is unreachable, the list keeps the last good entries and its status line says so until the next successful refresh.
 The session list status always comes from the listener pane, whichever pane has focus.
 Passing `--cra` there is the explicit consent for repository requests on that one repository, registered only when the server advertises `repository_review_v1`.

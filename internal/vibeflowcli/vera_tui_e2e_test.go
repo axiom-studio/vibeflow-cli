@@ -95,12 +95,12 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		case r.Method == "GET" && path == "/projects/66/pr-review-sessions":
 			fmt.Fprint(w, `{"sessions":[]}`)
 		case r.Method == "GET" && path == "/projects/66/pr-review-summaries":
-			// One review for Vera's repository (link 7), one for another.
-			summary := func(job string, link, number int64, title string) string {
-				head, base := strings.Repeat("c", 40), strings.Repeat("b", 40)
-				return fmt.Sprintf(`{"review":{"id":%q,"project_id":66,"provider":"github","provider_host":"github.com","repository_link_id":%d,"number":%d,"head_sha":%q,"base_sha":%q,"state":"clean","details":{"url":"https://github.com/acme/repo/pull/%d","base_repository_name":"acme/repo","title":%q}},"finding_count":1,"progress":{"reporting_version":1,"round_number":2,"attempt_number":1,"head_sha":%q,"base_sha":%q},"review_sessions":[{"session_id":"s-%s","project_id":66,"job_id":%q,"started_at":1790000000000,"completed_at":1790000060000}]}`, job, link, number, head, base, number, title, head, base, job, job)
-			}
-			fmt.Fprintf(w, `{"summaries":[%s,%s]}`, summary("job-4", 7, 4, "Add late payment fee calculation"), summary("job-34", 8, 34, "Other repository change"))
+			// Two reviews for Vera's repository (link 7), one for another.
+			fmt.Fprintf(w, `{"summaries":[%s,%s,%s]}`, veraE2ESummary("job-4", 7, 4, "Add late payment fee calculation"), veraE2ESummary("job-5", 7, 5, "Fix rounding"), veraE2ESummary("job-34", 8, 34, "Other repository change"))
+		case r.Method == "GET" && path == "/projects/66/pr-review-summaries/job-4":
+			fmt.Fprint(w, veraE2ESummary("job-4", 7, 4, "Add late payment fee calculation"))
+		case r.Method == "GET" && path == "/projects/66/pr-review-summaries/job-4/findings":
+			fmt.Fprint(w, `{"findings":[{"id":"f1","job_id":"job-4","title":"Rounding drops cents","severity":"high","path":"billing/fee.go","line":42,"state":"present","trigger":"fee of 10.005","impact":"undercharged","evidence":"math.Floor","verification":"go test ./billing"}]}`)
 		case r.Method == "POST" && path == "/projects/66/pr-review-runners":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -373,6 +373,38 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	if strings.Contains(history, "#34") || strings.Contains(history, "vera-api-canary") {
 		t.Fatalf("history pane shows another repository or the token:\n%s", history)
 	}
+	// Keys typed in the listener pane browse the history pane instead of
+	// echoing; Enter opens the review, here inside the pane because no tmux
+	// client is attached for a popup.
+	if mouse := tmux("show-options", "-v", "-t", session, "mouse"); mouse != "on" {
+		t.Fatalf("Vera session mouse = %q; want on", mouse)
+	}
+	selected := func(text string) func() bool {
+		return func() bool {
+			for _, line := range strings.Split(tmux("capture-pane", "-p", "-t", right[0]), "\n") {
+				if strings.Contains(line, text) {
+					return strings.HasPrefix(line, ">")
+				}
+			}
+			return false
+		}
+	}
+	waitFor("newest review selected", selected("#5 Fix rounding"))
+	tmux("send-keys", "-t", left[0], "Down")
+	waitFor("Down in the listener pane selects the next review", selected("#4 Add late"))
+	tmux("send-keys", "-t", left[0], "Enter")
+	waitFor("review detail", func() bool {
+		history = tmux("capture-pane", "-p", "-t", right[0])
+		return strings.Contains(history, "PR #4 · Add late") && strings.Contains(history, "Rounding drops") && strings.Contains(history, "billing/fee.go:42") && strings.Contains(history, "q/Esc close")
+	})
+	t.Logf("review detail in the history pane:\n%s", history)
+	if pane := tmux("capture-pane", "-p", "-J", "-t", left[0]); strings.Contains(pane, "^[") || !strings.Contains(pane, veraBrowseHint) {
+		t.Fatalf("listener pane echoed keys or lacks the hint:\n%s", pane)
+	}
+	tmux("send-keys", "-t", left[0], "Escape")
+	waitFor("back to the review list", func() bool {
+		return strings.Contains(tmux("capture-pane", "-p", "-t", right[0]), "Reviews · ")
+	})
 	if pids := listenerPIDs(); len(pids) != 1 {
 		t.Fatalf("want one listener process, got %v", pids)
 	}
@@ -643,4 +675,12 @@ func veraScreen(raw string, width, height int) string {
 		lines[row] = strings.TrimRight(strings.Join(grid[row], ""), " ")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// veraE2ESummary is a clean review of PR number on link; a higher number is a
+// newer review.
+func veraE2ESummary(job string, link, number int64, title string) string {
+	head, base := strings.Repeat("c", 40), strings.Repeat("b", 40)
+	at := 1790000000000 + number*1000
+	return fmt.Sprintf(`{"review":{"id":%q,"project_id":66,"provider":"github","provider_host":"github.com","repository_link_id":%d,"number":%d,"head_sha":%q,"base_sha":%q,"state":"clean","rounds_started":2,"round_limit":3,"details":{"url":"https://github.com/acme/repo/pull/%d","base_repository_name":"acme/repo","title":%q}},"finding_count":1,"progress":{"reporting_version":1,"round_number":2,"attempt_number":1,"head_sha":%q,"base_sha":%q},"review_sessions":[{"session_id":"s-%s","project_id":66,"job_id":%q,"started_at":%d,"completed_at":%d}]}`, job, link, number, head, base, number, title, head, base, job, job, at, at+60000)
 }

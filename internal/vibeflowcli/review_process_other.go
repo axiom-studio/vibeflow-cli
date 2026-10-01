@@ -30,9 +30,10 @@ func reviewForegroundAttr(*os.File) *syscall.SysProcAttr { return nil }
 
 type reviewTerminal struct{ files [3]*os.File }
 
-func openReviewTerminal(any) *reviewTerminal { return nil }
-func (*reviewTerminal) save()                {}
-func (*reviewTerminal) reclaim(bool)         {}
+func openReviewTerminal(any) *reviewTerminal       { return nil }
+func (*reviewTerminal) save()                      {}
+func (*reviewTerminal) reclaim(bool)               {}
+func (*reviewTerminal) browse(func([]byte)) func() { return func() {} }
 
 func reviewTerminalFiles(int) ([3]*os.File, error) {
 	return [3]*os.File{}, fmt.Errorf("review runners currently require macOS or Linux")

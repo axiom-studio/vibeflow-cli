@@ -95,6 +95,10 @@ func TestReviewHistoryViewHighlightsCurrentAndScrolls(t *testing.T) {
 	if h.cursor != 6 || !strings.Contains(view, "#46 Title g") || strings.Contains(view, "#40 ") {
 		t.Fatalf("cursor %d did not scroll into view:\n%s", h.cursor, view)
 	}
+	// The cursor row is marked without colors too.
+	if !strings.Contains(view, "\n>  #46 Title g") {
+		t.Fatalf("cursor row not marked:\n%s", view)
+	}
 	h = historyKey(t, h, "end")
 	if h.cursor != 9 || !strings.Contains(ansi.Strip(h.render()), "#49 Title j") {
 		t.Fatalf("end did not reach the oldest review: %d", h.cursor)
@@ -113,10 +117,6 @@ func TestReviewHistoryViewHighlightsCurrentAndScrolls(t *testing.T) {
 	h = next.(reviewHistory)
 	if h.cursor != 5 {
 		t.Fatalf("mouse wheel moved to %d; want 5", h.cursor)
-	}
-	h = historyKey(t, h, "enter")
-	if view := ansi.Strip(h.render()); !strings.Contains(view, "https://github.com/acme/repo/pull/45") {
-		t.Fatalf("enter did not show the PR link:\n%s", view)
 	}
 	// A refresh keeps the selected PR selected even when a newer one arrives.
 	newer := append([]reviewSummary{historySummary("z", 50, 7, "github", "reviewing", 1, 0, 20000)}, rows...)
