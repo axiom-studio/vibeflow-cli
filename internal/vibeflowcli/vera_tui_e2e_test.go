@@ -272,12 +272,40 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	terminal.send(t, "j\r")
 	awaitScreen("Select a project:", "Axiom")
 	terminal.send(t, "\r")
-	awaitScreen("Select team", "Vera · Code Reviewer")
-	// Developer is preselected; deselect it, then select Vera (the last row) alone.
-	terminal.send(t, " "+strings.Repeat("j", 20)+" ")
-	visible = awaitScreen("[x]")
-	if vera := lineWith(visible, "Vera · Code Reviewer"); !strings.Contains(vera, "> [x]") {
-		t.Fatalf("Vera not selected under the cursor:\n%s", visible)
+	visible = awaitScreen("Select team", "Vera · Code Reviewer")
+	// awaitRow waits until the rendered row containing text satisfies ok, so
+	// each key lands on the frame the previous key produced.
+	awaitRow := func(what, text string, ok func(row string) bool) string {
+		t.Helper()
+		var visible string
+		waitFor(what, func() bool { visible = screen(); return ok(lineWith(visible, text)) })
+		return visible
+	}
+	cursorOn := func(row string) bool { return strings.HasPrefix(strings.TrimSpace(row), ">") }
+	cursorRow := func(visible string) string {
+		for _, line := range strings.Split(visible, "\n") {
+			if cursorOn(line) {
+				return line
+			}
+		}
+		return ""
+	}
+	// Developer is preselected under the cursor; deselect it, then walk the
+	// cursor down to Vera row by row and select Vera alone.
+	if dev := lineWith(visible, "Developer"); !strings.Contains(dev, "> (●)") {
+		t.Fatalf("Developer not preselected under the cursor:\n%s", visible)
+	}
+	terminal.send(t, " ")
+	visible = awaitRow("Developer deselected", "Developer", func(row string) bool { return strings.Contains(row, "> ( )") })
+	for !cursorOn(lineWith(visible, "Vera · Code Reviewer")) {
+		before := cursorRow(visible)
+		terminal.send(t, "j")
+		waitFor("team cursor to move off "+before, func() bool { visible = screen(); return cursorRow(visible) != before })
+	}
+	terminal.send(t, " ")
+	visible = awaitRow("Vera selected under the cursor", "Vera · Code Reviewer", func(row string) bool { return strings.Contains(row, "> [x]") })
+	if strings.Count(visible, "[x]") != 1 || strings.Contains(visible, "(●)") {
+		t.Fatalf("want Vera as the only team member:\n%s", visible)
 	}
 	terminal.send(t, "\r")
 
@@ -402,10 +430,31 @@ func veraScreen(raw string, width, height int) string {
 		grid[i] = blank()
 	}
 	x, y, savedX, savedY, last := 0, 0, 0, 0, " "
+	top, bottom := 0, height-1 // DECSTBM scroll region, inclusive.
 	clamp := func() { x, y = min(max(x, 0), width-1), min(max(y, 0), height-1) }
+	// scroll shifts rows from..bottom up (n > 0) or down (n < 0), blanking
+	// the rows it exposes.
+	scroll := func(from, n int) {
+		rows := grid[from : bottom+1]
+		if n > 0 {
+			n = min(n, len(rows))
+			copy(rows, rows[n:])
+			for k := len(rows) - n; k < len(rows); k++ {
+				rows[k] = blank()
+			}
+		} else {
+			n = min(-n, len(rows))
+			copy(rows[n:], rows[:len(rows)-n])
+			for k := 0; k < n; k++ {
+				rows[k] = blank()
+			}
+		}
+	}
 	lineFeed := func() {
-		if y++; y >= height {
-			grid, y = append(grid[1:], blank()), height-1
+		if y == bottom {
+			scroll(top, 1)
+		} else if y < height-1 {
+			y++
 		}
 	}
 	eraseRow := func(row, from, to int) {
@@ -464,6 +513,10 @@ func veraScreen(raw string, width, height int) string {
 			case 'd':
 				y = arg(0, 1) - 1
 			case 'r':
+				top, bottom = arg(0, 1)-1, min(arg(1, height), height)-1
+				if top >= bottom {
+					top, bottom = 0, height-1
+				}
 				x, y = 0, 0
 			case 'J':
 				clamp()
@@ -509,23 +562,16 @@ func veraScreen(raw string, width, height int) string {
 				}
 			case 'L', 'M', 'S', 'T':
 				clamp()
-				top, n := y, arg(0, 1)
+				from, n := y, arg(0, 1)
 				if final == 'S' || final == 'T' {
-					top = 0
+					from = top
+				} else if y < top || y > bottom {
+					break // Insert/delete line is a no-op outside the region.
 				}
-				n = min(n, height-top)
-				rows := grid[top:]
-				if final == 'M' || final == 'S' {
-					copy(rows, rows[n:])
-					for k := len(rows) - n; k < len(rows); k++ {
-						rows[k] = blank()
-					}
-				} else {
-					copy(rows[n:], rows[:len(rows)-n])
-					for k := 0; k < n; k++ {
-						rows[k] = blank()
-					}
+				if final == 'L' || final == 'T' {
+					n = -n
 				}
+				scroll(from, n)
 			case 'b':
 				for k := 0; k < arg(0, 1); k++ {
 					if x >= width {
@@ -554,9 +600,9 @@ func veraScreen(raw string, width, height int) string {
 			case '8':
 				x, y, i = savedX, savedY, i+2
 			case 'M':
-				if y == 0 {
-					grid = append([][]string{blank()}, grid[:height-1]...)
-				} else {
+				if y == top {
+					scroll(top, -1)
+				} else if y > 0 {
 					y--
 				}
 				i += 2
