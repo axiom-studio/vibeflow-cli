@@ -63,6 +63,13 @@ On the team **Provider** step, Vera's row uses its own override or the team defa
 On confirm, Vera's session starts with that harness and then the coding agents launch with their own settings and overrides.
 If Vera cannot start, the error is shown and the coding agents still launch.
 The selection grants consent only for that session's repository, without changing saved coding-agent configuration.
+
+With `--cra`, the **Edit Group** wizard (`e`) lists Vera too, with only its **Team > Provider > Confirm** steps.
+A group includes the Vera session of its checkout whatever branch that session recorded, so Vera starts preselected when the checkout has one.
+Ticking Vera starts it for the group's checkout and project through the same launch path as New Agent, including attaching a live Vera session or reporting its different harness.
+Unticking Vera stops and removes its session like any removed persona.
+Vera's Provider row in the edit is restricted to the harnesses Vera can run.
+Pressing `e` on Vera's row edits the coding group of its checkout, inheriting settings from a coding session when there is one.
 Headless `launch --persona code_reviewer` is intentionally rejected with an explicit `review-watch` command instead of starting a coding-agent loop.
 
 ## Multi-persona launch

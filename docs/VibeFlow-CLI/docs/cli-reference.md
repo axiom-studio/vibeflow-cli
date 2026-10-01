@@ -24,6 +24,7 @@ Server and API-key setup runs only for a new, uninitialized root and remains sav
 Without `--cra`, no review UI, API requests, rows, or shortcuts are enabled.
 
 The only way to run Vera in the TUI is a Vera session: press `n`, choose the repository's checkout and VibeFlow project, then select **Vera · Code Reviewer** in the agent picker.
+Group edit (`e`) offers Vera as well: it is preselected when the group's checkout has a Vera session, ticking it starts Vera for that checkout and project, and unticking it stops Vera's session.
 The wizard continues with its ordinary **Provider** step and then **Confirm**; the coding-agent Env, Routing, Branch, Worktree and Permissions steps are skipped.
 Choose any configured coding harness whose binary is installed (Claude, Codex, Gemini, Qwen, Copilot, Cursor or Kiro); other providers cannot be selected for Vera.
 Vera uses the harness default model, so there is no model question.

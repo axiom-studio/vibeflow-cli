@@ -1135,12 +1135,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			group := groupSessionsFor(anchor, all, m.getRepoRoot)
+			// Coding personas inherit settings from a coding session, not Vera.
+			if anchor.Persona == "code_reviewer" {
+				for _, meta := range group {
+					if meta.Persona != "code_reviewer" {
+						anchor = meta
+						group = groupSessionsFor(anchor, all, m.getRepoRoot)
+						break
+					}
+				}
+			}
 			repoRoot := anchor.WorkingDir
 			if anchor.WorktreePath != "" && m.worktrees != nil {
 				repoRoot = m.worktrees.RepoRoot()
 			}
 			m.groupEditRunning = group
-			m.wizard = NewGroupEditWizard(group, anchor, m.registry, repoRoot, m.worktrees, m.config)
+			m.wizard = NewGroupEditWizard(group, anchor, m.registry, repoRoot, m.worktrees, m.config, m.craEnabled)
 			m.activeView = ViewWizard
 			return m, nil
 		case "r":
@@ -1445,14 +1455,17 @@ func (m Model) killSessionMeta(meta SessionMeta) {
 }
 
 // groupSessionsFor returns the sessions that belong to the same group as anchor:
-// those sharing the anchor's repo root AND branch (the anchor itself included).
+// those sharing the anchor's repo root AND branch (the anchor itself included);
+// a Vera session matches on repo root alone.
 // repoRoot normalizes a working directory to its git repo root. Pure (repoRoot is
 // injected) so group membership is unit-testable without a live TUI.
 func groupSessionsFor(anchor SessionMeta, all []SessionMeta, repoRoot func(string) string) []SessionMeta {
 	anchorRoot := repoRoot(anchor.WorkingDir)
 	var out []SessionMeta
 	for _, meta := range all {
-		if repoRoot(meta.WorkingDir) == anchorRoot && meta.Branch == anchor.Branch {
+		// Vera listens for the whole checkout, so it ignores the branch.
+		sameBranch := meta.Branch == anchor.Branch || meta.Persona == "code_reviewer" || anchor.Persona == "code_reviewer"
+		if repoRoot(meta.WorkingDir) == anchorRoot && sameBranch {
 			out = append(out, meta)
 		}
 	}

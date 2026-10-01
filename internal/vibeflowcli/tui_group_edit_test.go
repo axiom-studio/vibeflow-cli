@@ -171,7 +171,7 @@ func TestNewGroupEditWizard_SeedsFromAnchorAndRunningGroup(t *testing.T) {
 		{Name: "arch", Provider: "gemini", Persona: "architect", Branch: "main", WorkingDir: "/repo/a"},
 	}
 
-	w := NewGroupEditWizard(group, anchor, reg, "/repo/a", nil, cfg)
+	w := NewGroupEditWizard(group, anchor, reg, "/repo/a", nil, cfg, false)
 
 	if !w.groupEdit {
 		t.Error("groupEdit should be true")
@@ -232,7 +232,7 @@ func TestNewGroupEditWizard_EmptyGroupFallsBackToAnchorPersona(t *testing.T) {
 	reg := NewProviderRegistry(cfg)
 	anchor := SessionMeta{Provider: "claude", Persona: "developer", Branch: "main", WorkingDir: "/repo/a"}
 
-	w := NewGroupEditWizard(nil, anchor, reg, "/repo/a", nil, cfg)
+	w := NewGroupEditWizard(nil, anchor, reg, "/repo/a", nil, cfg, false)
 
 	if !w.selectedPersonas[personaIndex("developer")] {
 		t.Error("with an empty group, the anchor persona (developer) must be pre-checked")
@@ -261,7 +261,7 @@ func TestBuildGroupEditResult_InheritsSharedSettingsAndDesiredPersonas(t *testin
 		{Name: "arch", Provider: "gemini", Persona: "architect", Branch: "main", WorkingDir: "/repo/a"},
 	}
 
-	w := NewGroupEditWizard(group, anchor, reg, "/repo/a", nil, cfg)
+	w := NewGroupEditWizard(group, anchor, reg, "/repo/a", nil, cfg, false)
 	// User adds qa_lead to the lineup.
 	w.selectedPersonas[personaIndex("qa_lead")] = true
 
