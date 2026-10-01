@@ -2,21 +2,17 @@ package vibeflowcli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
 const reviewSessionLabel = "Vera · Code Reviewer"
-const reviewSessionsGroup = "PR reviews"
 
 // Safe server projection. Attempt IDs, tokens and ordinary persona metadata
 // deliberately have no place here. History remains owned by the backend.
@@ -102,25 +98,6 @@ type reviewSummariesPage struct {
 	Summaries   []reviewSummary `json:"summaries"`
 	NextAfterID string          `json:"next_after_id"`
 }
-type reviewFinding struct {
-	ID           string `json:"id"`
-	JobID        string `json:"job_id"`
-	Title        string `json:"title"`
-	Severity     string `json:"severity"`
-	Path         string `json:"path"`
-	Line         int    `json:"line"`
-	State        string `json:"state"`
-	HeadSHA      string `json:"head_sha"`
-	BaseSHA      string `json:"base_sha"`
-	Trigger      string `json:"trigger"`
-	Impact       string `json:"impact"`
-	Evidence     string `json:"evidence"`
-	Verification string `json:"verification"`
-}
-type reviewFindingsPage struct {
-	Findings    []reviewFinding `json:"findings"`
-	NextAfterID string          `json:"next_after_id"`
-}
 
 func reviewPublicID(s string) bool {
 	if s == "" || len(s) > 160 {
@@ -170,92 +147,6 @@ func (c *Client) listReviewSummaries(ctx context.Context, projectID int64, after
 	}
 	return page, nil
 }
-func (c *Client) getReviewSummary(ctx context.Context, projectID int64, jobID string) (reviewSummary, error) {
-	var s reviewSummary
-	if projectID <= 0 || !reviewPublicID(jobID) {
-		return s, fmt.Errorf("invalid review identity")
-	}
-	if err := c.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-summaries/%s", projectID, jobID), nil, &s); err != nil {
-		return s, err
-	}
-	if !validReviewSummary(s, projectID, jobID) {
-		return reviewSummary{}, fmt.Errorf("invalid review summary scope")
-	}
-	return s, nil
-}
-func (c *Client) listReviewSummaryFindings(ctx context.Context, projectID int64, jobID, after string) (reviewFindingsPage, error) {
-	var page reviewFindingsPage
-	if projectID <= 0 || !reviewPublicID(jobID) || (after != "" && !reviewPublicID(after)) {
-		return page, fmt.Errorf("invalid finding identity")
-	}
-	q := url.Values{"limit": {"25"}, "after_id": {after}}
-	if err := c.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-summaries/%s/findings?%s", projectID, jobID, q.Encode()), nil, &page); err != nil {
-		return page, err
-	}
-	if len(page.Findings) > 25 || (page.NextAfterID != "" && (!reviewPublicID(page.NextAfterID) || page.NextAfterID == after)) {
-		return reviewFindingsPage{}, fmt.Errorf("invalid finding page")
-	}
-	seen := map[string]bool{}
-	for _, f := range page.Findings {
-		if f.JobID != jobID || !reviewPublicID(f.ID) || seen[f.ID] {
-			return reviewFindingsPage{}, fmt.Errorf("invalid finding scope")
-		}
-		seen[f.ID] = true
-	}
-	return page, nil
-}
-func (c *Client) listReviewJobSessions(ctx context.Context, projectID int64, jobID, after string) (reviewSessionsPage, error) {
-	var page reviewSessionsPage
-	if projectID <= 0 || !reviewPublicID(jobID) || (after != "" && !reviewPublicID(after)) {
-		return page, fmt.Errorf("invalid history identity")
-	}
-	q := url.Values{"limit": {"25"}, "job_id": {jobID}, "after_id": {after}}
-	if err := c.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-sessions?%s", projectID, q.Encode()), nil, &page); err != nil {
-		return page, err
-	}
-	if len(page.Sessions) > 25 || (page.NextAfterID != "" && (!reviewPublicID(page.NextAfterID) || page.NextAfterID == after)) {
-		return reviewSessionsPage{}, fmt.Errorf("invalid history page")
-	}
-	seen := map[string]bool{}
-	for _, s := range page.Sessions {
-		if s.ProjectID != projectID || s.JobID != jobID || !reviewPublicID(s.SessionID) || seen[s.SessionID] {
-			return reviewSessionsPage{}, fmt.Errorf("invalid history scope")
-		}
-		seen[s.SessionID] = true
-	}
-	return page, nil
-}
-func (s reviewSummary) row() SessionRow {
-	r := s.Review
-	v := reviewSession{ProjectID: r.ProjectID, JobID: r.ID, Provider: r.Provider, ProviderHost: r.ProviderHost, RepositoryLinkID: r.RepositoryLinkID, RepositoryName: r.Details.BaseRepositoryName, PRNumber: r.Number, PRURL: r.Details.URL, HeadSHA: r.HeadSHA, BaseSHA: r.BaseSHA, State: r.State, RunnerName: s.Runner.Name, Title: r.Details.Title, FindingCount: s.FindingCount, BlockerCount: s.UnresolvedBlockers, CountsKnown: true}
-	if p := s.Progress; p != nil {
-		v.RoundID, v.RoundNumber, v.AttemptNumber = p.RoundID, p.RoundNumber, p.AttemptNumber
-		v.Stage = reviewProgressStage(p)
-	}
-	row := v.row()
-	row.Name = fmt.Sprintf("review:%d:job:%s", r.ProjectID, r.ID)
-	return row
-}
-
-func reviewProgressStage(p *reviewProgress) string {
-	switch {
-	case p.State == "contact_lost":
-		return "contact lost"
-	case p.ResultRecorded:
-		return "result recorded"
-	case p.ReviewCompletedAt > 0:
-		return "review complete"
-	case p.CheckoutPreparedAt > 0:
-		return "checkout prepared"
-	case p.RunnerAssigned:
-		return "runner assigned"
-	case p.RequestAccepted:
-		return "waiting for runner"
-	default:
-		return ""
-	}
-}
-
 func (c *Client) listReviewSessions(ctx context.Context, projectID int64, after string) (reviewSessionsPage, error) {
 	var page reviewSessionsPage
 	if projectID <= 0 || len(after) > 256 {
@@ -338,45 +229,6 @@ func reviewStateLabel(state string) string {
 		return reviewDisplay(strings.ReplaceAll(state, "_", " "))
 	}
 }
-func (s reviewSession) row() SessionRow {
-	return SessionRow{Name: fmt.Sprintf("review:%d:session:%s", s.ProjectID, s.SessionID), Persona: reviewSessionLabel, Project: s.pullRequest(), Status: reviewDisplay(s.State), ManagedReview: &s}
-}
-func (m Model) localSessionCount() int {
-	n := 0
-	for _, s := range m.sessions {
-		if s.ManagedReview == nil {
-			n++
-		}
-	}
-	return n
-}
-
-func (m Model) managedReview(name string) *reviewSession {
-	for _, s := range m.sessions {
-		if s.Name == name {
-			return s.ManagedReview
-		}
-	}
-	return nil
-}
-func (m Model) reviewSelection() bool {
-	if m.selectedReview() != nil {
-		return true
-	}
-	if m.groupMode {
-		idx, root := m.groupedCursorToSession()
-		return idx < 0 && strings.HasPrefix(root, reviewSessionsGroup)
-	}
-	return false
-}
-
-func (m Model) selectedReview() *reviewSession {
-	if idx := m.selectedSessionIdx(); idx >= 0 && idx < len(m.sessions) {
-		return m.sessions[idx].ManagedReview
-	}
-	return nil
-}
-
 func printReviewSessions(ctx context.Context, out io.Writer, cfg *Config, project, after string) error {
 	if project == "" {
 		project = cfg.DefaultProject
@@ -422,93 +274,10 @@ func printReviewSessions(ctx context.Context, out io.Writer, cfg *Config, projec
 	return nil
 }
 
-type reviewSessionsMsg struct {
-	page    reviewSessionsPage
-	after   string
-	started time.Time
-	err     error
-}
-
-// errReviewProjectUnconfigured means no project resolved for the TUI; it is a
-// configuration state, not an outage, so it never produces a stale warning.
-var errReviewProjectUnconfigured = errors.New("no project selected")
-
-const reviewUnconfiguredHint = "PR reviews: no project selected (use --project or set default_project)"
-
-func (m Model) refreshReviewSessions() tea.Msg {
-	started := time.Now()
-	if m.projectID <= 0 {
-		return reviewSessionsMsg{after: m.reviewAfter, started: started, err: errReviewProjectUnconfigured}
-	}
-	if m.client == nil {
-		return reviewSessionsMsg{after: m.reviewAfter, started: started, err: fmt.Errorf("configure authentication to view managed reviews")}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	page, err := m.client.listReviewSessions(ctx, m.projectID, m.reviewAfter)
-	return reviewSessionsMsg{page: page, after: m.reviewAfter, started: started, err: err}
-}
-func (m *Model) replaceSessionRows(rows []SessionRow) {
-	name := ""
-	if idx := m.selectedSessionIdx(); idx >= 0 && idx < len(m.sessions) {
-		name = m.sessions[idx].Name
-	}
-	m.sessions = rows
-	m.buildGroups()
-	for idx, s := range rows {
-		if s.Name == name {
-			if !m.groupMode {
-				m.cursor = idx
-				return
-			}
-			pos := 0
-			for _, root := range m.groupOrder {
-				pos++
-				if !m.collapsedGroups[root] {
-					for _, i := range m.groupedSessions[root] {
-						if i == idx {
-							m.cursor = pos
-							return
-						}
-						pos++
-					}
-				}
-			}
-		}
-	}
-	maxIdx := len(rows) - 1
-	if m.groupMode {
-		maxIdx = m.groupedListLen() - 1
-	}
-	if maxIdx < 0 {
-		maxIdx = 0
-	}
-	if m.cursor > maxIdx {
-		m.cursor = maxIdx
-	}
-}
 func reviewShortSHA(s string) string {
 	s = reviewDisplay(s)
 	if len(s) > 12 {
 		return s[:12]
 	}
 	return s
-}
-
-func renderReviewSession(s *reviewSession, width, height int) string {
-	var lines = []string{reviewSessionLabel, s.pullRequest(), s.progress(), "Head " + reviewShortSHA(s.HeadSHA) + " · base " + reviewShortSHA(s.BaseSHA), "Runner: " + reviewDisplay(s.RunnerName) + " (" + reviewDisplay(s.RunnerKind) + ")", "Branch: " + reviewDisplay(s.GitBranch)}
-	if s.LastContactAt > 0 {
-		lines = append(lines, "Last contact: "+time.UnixMilli(s.LastContactAt).Local().Format("Jan 2 15:04:05"))
-	}
-	if s.CompletedAt > 0 {
-		lines = append(lines, "Completed: "+time.UnixMilli(s.CompletedAt).Local().Format("Jan 2 15:04:05"))
-	}
-	lines = append(lines, reviewDisplay(s.PRURL), "Read-only. Enter: review details.")
-	if height > 0 && len(lines) > height {
-		lines = lines[:height]
-	}
-	for i, line := range lines {
-		lines[i] = ansi.Truncate(line, width, "…")
-	}
-	return strings.Join(lines, "\n")
 }

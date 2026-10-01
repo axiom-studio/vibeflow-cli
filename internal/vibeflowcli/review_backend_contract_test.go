@@ -22,16 +22,18 @@ func TestReviewBackendWireContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/rest/v1/vibeflow/projects/1/pr-review-summaries/9a53de3c-f213-491c-bb7f-d5f952966d2f" {
+		if r.Method != http.MethodGet || r.URL.Path != "/rest/v1/vibeflow/projects/1/pr-review-summaries" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		_, _ = w.Write(summaryWire)
+		_, _ = w.Write([]byte(`{"summaries":[` + string(summaryWire) + `]}`))
 	}))
 	defer server.Close()
-	s, err := NewClient(server.URL, "fixture").getReviewSummary(context.Background(), 1, "9a53de3c-f213-491c-bb7f-d5f952966d2f")
-	if err != nil {
-		t.Fatal(err)
+	// Vera's history pane reads summaries through this listing.
+	page, err := NewClient(server.URL, "fixture").listReviewSummaries(context.Background(), 1, "")
+	if err != nil || len(page.Summaries) != 1 {
+		t.Fatalf("summary listing: %v %+v", err, page)
 	}
+	s := page.Summaries[0]
 	p := s.Progress
 	if s.Review.State != "changes_requested" || s.FindingCount != 1 || s.UnresolvedBlockers != 1 || s.Publication == nil || s.Publication.State != "published" || p == nil || p.ReportingVersion != 1 || !p.RequestAccepted || !p.RunnerAssigned || p.CheckoutPreparedAt == 0 || p.ReviewCompletedAt < p.CheckoutPreparedAt || !p.ResultRecorded || p.RoundNumber != 1 || p.AttemptNumber != 1 || p.State != "completed" {
 		t.Fatalf("backend summary contract drift: %+v progress=%+v", s, p)

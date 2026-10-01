@@ -95,7 +95,12 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		case r.Method == "GET" && path == "/projects/66/pr-review-sessions":
 			fmt.Fprint(w, `{"sessions":[]}`)
 		case r.Method == "GET" && path == "/projects/66/pr-review-summaries":
-			fmt.Fprint(w, `{"summaries":[]}`)
+			// One review for Vera's repository (link 7), one for another.
+			summary := func(job string, link, number int64, title string) string {
+				head, base := strings.Repeat("c", 40), strings.Repeat("b", 40)
+				return fmt.Sprintf(`{"review":{"id":%q,"project_id":66,"provider":"github","provider_host":"github.com","repository_link_id":%d,"number":%d,"head_sha":%q,"base_sha":%q,"state":"clean","details":{"url":"https://github.com/acme/repo/pull/%d","base_repository_name":"acme/repo","title":%q}},"finding_count":1,"progress":{"reporting_version":1,"round_number":2,"attempt_number":1,"head_sha":%q,"base_sha":%q},"review_sessions":[{"session_id":"s-%s","project_id":66,"job_id":%q,"started_at":1790000000000,"completed_at":1790000060000}]}`, job, link, number, head, base, number, title, head, base, job, job)
+			}
+			fmt.Fprintf(w, `{"summaries":[%s,%s]}`, summary("job-4", 7, 4, "Add late payment fee calculation"), summary("job-34", 8, 34, "Other repository change"))
 		case r.Method == "POST" && path == "/projects/66/pr-review-runners":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -138,7 +143,7 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	if resolved, err := filepath.EvalSymlinks(root); err == nil && resolved != root {
 		roots = append(roots, resolved)
 	}
-	listenerPIDs := func() []int {
+	processes := func(history bool) []int {
 		out, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "args=").Output()
 		if err != nil {
 			t.Fatalf("ps: %v", err)
@@ -147,7 +152,7 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		for _, line := range strings.Split(string(out), "\n") {
 			for _, r := range roots {
 				// The tmux server keeps its first client's argv, so match the binary.
-				if fields := strings.Fields(line); len(fields) > 1 && fields[1] == binary && strings.Contains(line, "--root "+r+" --config") && strings.Contains(line, " review-watch ") {
+				if fields := strings.Fields(line); len(fields) > 1 && fields[1] == binary && strings.Contains(line, "--root "+r+" --config") && strings.Contains(line, " review-watch ") && strings.Contains(line, " --history ") == history {
 					if pid, err := strconv.Atoi(fields[0]); err == nil {
 						pids = append(pids, pid)
 					}
@@ -156,9 +161,11 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		}
 		return pids
 	}
+	listenerPIDs := func() []int { return processes(false) }
+	historyPIDs := func() []int { return processes(true) }
 	t.Cleanup(func() {
-		for _, pid := range listenerPIDs() {
-			t.Errorf("Vera listener %d outlived the test; killing it", pid)
+		for _, pid := range append(listenerPIDs(), historyPIDs()...) {
+			t.Errorf("Vera process %d outlived the test; killing it", pid)
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
@@ -286,9 +293,14 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	t.Logf("confirm step for Vera:\n%s", visible)
 	terminal.send(t, "\r")
 
-	// 4. Vera is an ordinary session in the list, listening.
-	visible = awaitScreen("claude-", "listening")
+	// 4. Vera is an ordinary session in the list, listening, named for its
+	// repository; past PR reviews live in its history pane, not the list.
+	visible = awaitScreen("◆ ● Vera · Code Reviewer", "listening")
 	t.Logf("session list with Vera:\n%s", visible)
+	time.Sleep(300 * time.Millisecond) // A review read would have landed by now.
+	if visible := screen(); strings.Contains(visible, "PR #") || strings.Contains(visible, "late payment") || strings.Contains(visible, "Other repository") {
+		t.Fatalf("PR reviews listed in the session list:\n%s", visible)
+	}
 	sessions := strings.Fields(tmux("list-sessions", "-F", "#{session_name}"))
 	if len(sessions) != 1 || !strings.HasPrefix(sessions[0], sessionPrefix+"claude-") {
 		t.Fatalf("want one Vera tmux session, got %v", sessions)
@@ -310,13 +322,34 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(repo, ".vibeflow-session-code_reviewer")); !os.IsNotExist(err) {
 		t.Fatal("Vera wrote ordinary coding session state")
 	}
-	pane := tmux("capture-pane", "-p", "-t", session)
-	t.Logf("attached Vera pane:\n%s", pane)
+	// Two panes: the listener on the left, the history list on the right.
+	panes := strings.Split(tmux("list-panes", "-t", session, "-F", "#{pane_id}\t#{pane_left}\t#{@vibeflow_vera_history}\t#{pane_start_command}"), "\n")
+	if len(panes) != 2 {
+		t.Fatalf("want two Vera panes, got %q", panes)
+	}
+	left, right := strings.SplitN(panes[0], "\t", 4), strings.SplitN(panes[1], "\t", 4)
+	if left[1] != "0" || left[2] != "" || !strings.Contains(left[3], " review-watch --project 66 ") || right[2] != "1" || !strings.Contains(right[3], " review-watch --history --project 66 ") || !strings.Contains(right[3], " --repository-link 7 ") {
+		t.Fatalf("Vera panes:\n%s", strings.Join(panes, "\n"))
+	}
+	pane := tmux("capture-pane", "-p", "-J", "-t", left[0]) // -J: the 70% pane wraps long lines.
+	t.Logf("Vera listener pane:\n%s", pane)
 	if !strings.Contains(pane, reviewListeningLine) || strings.Contains(pane, "vera-api-canary") {
 		t.Fatalf("Vera pane:\n%s", pane)
 	}
+	var history string
+	waitFor("history pane rows", func() bool {
+		history = tmux("capture-pane", "-p", "-t", right[0])
+		return strings.Contains(history, "#4 Add late") && strings.Contains(history, "Clean · round 2")
+	})
+	t.Logf("Vera history pane:\n%s", history)
+	if strings.Contains(history, "#34") || strings.Contains(history, "vera-api-canary") {
+		t.Fatalf("history pane shows another repository or the token:\n%s", history)
+	}
 	if pids := listenerPIDs(); len(pids) != 1 {
 		t.Fatalf("want one listener process, got %v", pids)
+	}
+	if pids := historyPIDs(); len(pids) != 1 {
+		t.Fatalf("want one history process, got %v", pids)
 	}
 
 	// 5. Quitting the TUI leaves Vera listening, like any other persona.
@@ -330,12 +363,12 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	// 6. A new TUI lists the session; d deletes it, which deregisters and stops
 	// the listener.
 	terminal = startReviewTUITerminal(t, binary, launchRepo, root, binDir)
-	awaitScreen("claude-", "listening")
+	awaitScreen("◆ ● Vera · Code Reviewer", "listening")
 	terminal.send(t, "d")
 	awaitScreen("y/n")
 	terminal.send(t, "y")
 	waitFor("runner DELETE", func() bool { _, _, del, _ := counts(); return del >= 1 })
-	waitFor("listener exit", func() bool { return len(listenerPIDs()) == 0 })
+	waitFor("listener and history exit", func() bool { return len(listenerPIDs()) == 0 && len(historyPIDs()) == 0 })
 	mu.Lock()
 	stopped := append([]string(nil), deleted...)
 	stoppedLink := runnerLinks[stopped[0]]
