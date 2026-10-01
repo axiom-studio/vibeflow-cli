@@ -380,6 +380,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 	}
 	backoff := w.options.PollInterval
+	unavailable := false // One line when an outage starts and one when it ends.
 	status := idleStatus
 	if status != "" {
 		if w.onStatus != nil {
@@ -428,8 +429,15 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			if w.options.Once || !retry {
 				return err
 			}
-			fmt.Fprintf(w.output, "Review API unavailable; retrying in %s. The pending receipt is safe.\n", backoff)
+			if !unavailable {
+				unavailable = true
+				fmt.Fprintln(w.output, "Review API unavailable; retrying with backoff up to 1m. The pending receipt is safe.")
+			}
 		} else {
+			if unavailable {
+				unavailable = false
+				fmt.Fprintln(w.output, "Review API reachable again.")
+			}
 			backoff = w.options.PollInterval
 			if w.options.Once {
 				return nil
