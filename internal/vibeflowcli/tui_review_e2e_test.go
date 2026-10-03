@@ -7,12 +7,10 @@ import (
 	"io"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -20,140 +18,6 @@ import (
 type reviewTUIOutput struct {
 	sync.Mutex
 	text strings.Builder
-}
-
-// Replays the PTY's cursor writes so assertions inspect the current display,
-// not text retained in earlier terminal frames.
-func reviewVisibleScreen(raw string, width, height int) string {
-	cells := make([][]rune, height)
-	for i := range cells {
-		cells[i] = make([]rune, width)
-		for j := range cells[i] {
-			cells[i][j] = ' '
-		}
-	}
-	x, y := 0, 0
-	for i := 0; i < len(raw); {
-		if raw[i] == '\x1b' && i+1 < len(raw) {
-			if raw[i+1] == '[' {
-				start := i + 2
-				i = start
-				for i < len(raw) && (raw[i] < '@' || raw[i] > '~') {
-					i++
-				}
-				if i == len(raw) {
-					break
-				}
-				command, params := raw[i], strings.Split(raw[start:i], ";")
-				i++
-				number := func(index, fallback int) int {
-					if index >= len(params) {
-						return fallback
-					}
-					v, err := strconv.Atoi(params[index])
-					if err != nil || v == 0 {
-						return fallback
-					}
-					return v
-				}
-				switch command {
-				case 'H', 'f':
-					y, x = number(0, 1)-1, number(1, 1)-1
-				case 'A':
-					y -= number(0, 1)
-				case 'B':
-					y += number(0, 1)
-				case 'C':
-					x += number(0, 1)
-				case 'D':
-					x -= number(0, 1)
-				case 'G':
-					x = number(0, 1) - 1
-				case 'd':
-					y = number(0, 1) - 1
-				case 'J':
-					from := max(0, y)
-					if number(0, 0) == 2 {
-						from = 0
-					}
-					for row := from; row < height; row++ {
-						startCol := 0
-						if row == y && number(0, 0) != 2 {
-							startCol = max(0, x)
-						}
-						for col := startCol; col < width; col++ {
-							cells[row][col] = ' '
-						}
-					}
-				case 'K':
-					if y >= 0 && y < height {
-						for col := max(0, x); col < width; col++ {
-							cells[y][col] = ' '
-						}
-					}
-				case 'X':
-					if y >= 0 && y < height {
-						for col := max(0, x); col < min(width, x+number(0, 1)); col++ {
-							cells[y][col] = ' '
-						}
-					}
-				case 'P':
-					if y >= 0 && y < height && x >= 0 && x < width {
-						count := min(number(0, 1), width-x)
-						copy(cells[y][x:], cells[y][x+count:])
-						for col := width - count; col < width; col++ {
-							cells[y][col] = ' '
-						}
-					}
-				}
-				continue
-			}
-			if raw[i+1] == ']' {
-				i += 2
-				for i < len(raw) && raw[i] != '\a' && !(raw[i] == '\x1b' && i+1 < len(raw) && raw[i+1] == '\\') {
-					i++
-				}
-				if i < len(raw) && raw[i] == '\x1b' {
-					i += 2
-				} else if i < len(raw) {
-					i++
-				}
-				continue
-			}
-			i += 2
-			continue
-		}
-		switch raw[i] {
-		case '\r':
-			x, i = 0, i+1
-			continue
-		case '\n':
-			y, i = y+1, i+1
-			if y == height {
-				copy(cells, cells[1:])
-				cells[height-1] = make([]rune, width)
-				for col := range cells[height-1] {
-					cells[height-1][col] = ' '
-				}
-				y--
-			}
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(raw[i:])
-		i += size
-		if r < 32 {
-			continue
-		}
-		if y >= 0 && y < height && x >= 0 && x < width {
-			cells[y][x] = r
-		}
-		x += ansi.StringWidth(string(r))
-	}
-	lines := make([]string, height)
-	for i := range cells {
-		lines[i] = strings.TrimRight(string(cells[i]), " ")
-	}
-	return strings.Join(lines, "\n")
 }
 
 func (b *reviewTUIOutput) Write(p []byte) (int, error) {
@@ -233,5 +97,17 @@ func (terminal *reviewTUITerminal) send(t *testing.T, input string) {
 	t.Helper()
 	if _, err := io.WriteString(terminal.input, input); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Bubble Tea's renderer scrolls part of the screen with a DECSTBM region;
+// a replay that ignores it leaves rows where the terminal no longer has them.
+func TestTerminalScreenReplaysScrollRegion(t *testing.T) {
+	raw := "\x1b[1;1Hhead\x1b[2;1Hone\x1b[3;1Htwo\x1b[4;1Hfoot" +
+		"\x1b[2;3r\x1b[3;1H\n" + // Scroll rows 2-3 up one line.
+		"\x1b[r\x1b[3;1Hthree"
+	got := terminalScreen(raw, 10, 4)
+	if want := "head\ntwo\nthree\nfoot"; got != want {
+		t.Fatalf("screen\n%q\nwant\n%q", got, want)
 	}
 }
