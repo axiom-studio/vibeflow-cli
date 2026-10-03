@@ -109,8 +109,11 @@ func TestReviewProgressLostRenewalKeepsDurableResult(t *testing.T) {
 			receipt := &reviewReceipt{JobID: execution.Review.ID, RequestID: reviewUUID(), Execution: execution}
 			watch := &reviewWatch{
 				client: NewClient(server.URL, "token"), cfg: cfg, root: root, output: io.Discard,
-				state:   reviewRunnerState{ID: execution.Attempt.RunnerID, Pending: receipt},
-				options: reviewWatchOptions{ProjectID: 1, Repository: source, Provider: "claude", Timeout: 2 * time.Second},
+				state: reviewRunnerState{ID: execution.Attempt.RunnerID, Pending: receipt},
+				// The review's local deadline is not under test. Starting the child
+				// guard and provider takes about 1.8s under -race, so a 2s cap
+				// expired before the provider finished on a loaded machine.
+				options: reviewWatchOptions{ProjectID: 1, Repository: source, Provider: "claude", Timeout: 30 * time.Second},
 			}
 			if err := watch.advance(context.Background(), true); err != nil {
 				t.Fatal(err)
