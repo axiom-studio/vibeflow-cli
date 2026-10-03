@@ -831,8 +831,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tickCmd(time.Duration(m.config.PollInterval)*time.Second),
 		)
 	case sessionsMsg:
-		m.err = msg.err
+		// A successful refresh leaves an earlier error up until errClearMsg;
+		// clearing it here hid launch errors before they were drawn.
 		if msg.err != nil {
+			m.err = msg.err
 			if m.logger != nil {
 				m.logger.Error("sessions: %v", msg.err)
 			}
