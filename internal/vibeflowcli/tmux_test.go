@@ -1227,3 +1227,66 @@ func TestRedactSpawnArg_OpenAICompatKey(t *testing.T) {
 		}
 	}
 }
+
+// HasSession must match the exact session name: tmux resolves a bare -t target
+// by prefix, so vibeflow_claude-feat would match vibeflow_claude-feat-2 once the
+// former is gone, and workbench Restore would move the pane into the sibling.
+func TestComposeWorkbench_RestoreIgnoresPrefixSibling(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-workbench-prefix-" + itoa(os.Getpid()))
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	dir := t.TempDir()
+	for _, n := range []string{"feat", "feat-2", "other"} {
+		if err := tm.CreateSessionWithOpts(SessionOpts{Name: n, Provider: "claude", WorkDir: dir, Command: "sleep 300"}); err != nil {
+			t.Fatalf("create session %s: %v", n, err)
+		}
+	}
+	feat, sib, other := tm.FullSessionName("claude", "feat"), tm.FullSessionName("claude", "feat-2"), tm.FullSessionName("claude", "other")
+	featPane, err := tm.paneID(feat)
+	if err != nil {
+		t.Fatalf("paneID(%s): %v", feat, err)
+	}
+
+	comp, err := tm.ComposeWorkbench([]string{feat, other}, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+	if err := comp.Restore(); err != nil {
+		t.Errorf("Restore: %v", err)
+	}
+
+	out, _ := tm.run("list-panes", "-a", "-F", "#{session_name} #{pane_id}")
+	if !strings.Contains(out, feat+" "+featPane+"\n") && !strings.HasSuffix(out, feat+" "+featPane) {
+		t.Errorf("session %s not restored with its pane %s:\n%s", feat, featPane, out)
+	}
+	if n := strings.Count(out, sib+" "); n != 1 {
+		t.Errorf("sibling %s has %d panes, want 1:\n%s", sib, n, out)
+	}
+}
+
+func TestHasSession_ExactName(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-hassession-exact-" + itoa(os.Getpid()))
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	if err := tm.CreateSessionWithOpts(SessionOpts{Name: "feat-2", Provider: "claude", WorkDir: t.TempDir(), Command: "sleep 300"}); err != nil {
+		t.Fatal(err)
+	}
+	if tm.HasSession(tm.FullSessionName("claude", "feat")) {
+		t.Error("HasSession matched a prefix of an existing session name")
+	}
+	if !tm.HasSession(tm.FullSessionName("claude", "feat-2")) {
+		t.Error("HasSession missed the exact session")
+	}
+}
