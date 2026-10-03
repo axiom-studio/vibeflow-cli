@@ -191,7 +191,7 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	}
 
 	terminal := startReviewTUITerminal(t, binary, launchRepo, root, binDir)
-	screen := func() string { return veraScreen(terminal.output.RawString(), 100, 30) }
+	screen := func() string { return terminalScreen(terminal.output.RawString(), 100, 30) }
 	awaitScreen := func(want ...string) string {
 		t.Helper()
 		deadline := time.Now().Add(12 * time.Second)
@@ -457,11 +457,12 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	quit()
 }
 
-// veraScreen replays a PTY transcript onto a width x height grid. Unlike
-// reviewVisibleScreen it honors the hard tabs, erase modes, and line/char
+// terminalScreen replays a PTY transcript onto a width x height grid, so
+// assertions inspect the current display, not text retained in earlier
+// frames. It honors the scroll regions, hard tabs, erase modes, and line/char
 // insert-delete that Bubble Tea v2's diff renderer emits, so leftover cells
-// from earlier frames are not mistaken for product rendering bugs.
-func veraScreen(raw string, width, height int) string {
+// are not mistaken for product rendering bugs.
+func terminalScreen(raw string, width, height int) string {
 	blank := func() []string {
 		row := make([]string, width)
 		for i := range row {

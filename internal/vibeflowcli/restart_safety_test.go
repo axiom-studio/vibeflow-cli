@@ -46,7 +46,7 @@ func TestPaneRecoveryHelperProcess(t *testing.T) {
 		if widthErr != nil || heightErr != nil || width < 1 || height < 1 {
 			t.Fatal("invalid fixture screen dimensions")
 		}
-		fmt.Print(reviewVisibleScreen(string(raw), width, height))
+		fmt.Print(terminalScreen(string(raw), width, height))
 	}
 }
 
