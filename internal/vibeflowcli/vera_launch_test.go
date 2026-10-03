@@ -707,3 +707,39 @@ func TestVeraRowShowsRepositoryWhenNarrow(t *testing.T) {
 		}
 	}
 }
+
+// A failed Vera launch must stay on screen: the session refresh that follows
+// a launch used to clear the error before it was ever drawn.
+func TestVeraLaunchErrorStaysVisible(t *testing.T) {
+	withTempRoot(t)
+	m := veraTmuxModel(t, DefaultConfig())
+	_ = m.tmux.EnsureServer()
+	next, cmd := m.finishVeraLaunch(veraLaunchedMsg{err: fmt.Errorf("the vibeflow binary this TUI started from (/x) was removed or replaced; restart vibeflow")})
+	m = next.(Model)
+	var pending []tea.Cmd
+	if cmd != nil {
+		pending = append(pending, cmd)
+	}
+	for len(pending) > 0 {
+		c := pending[0]
+		pending = pending[1:]
+		done := make(chan tea.Msg, 1)
+		go func() { done <- c() }()
+		var got tea.Msg
+		select {
+		case got = <-done:
+		case <-time.After(2 * time.Second): // The 10s auto-clear timer.
+			continue
+		}
+		switch msg := got.(type) {
+		case tea.BatchMsg:
+			pending = append(pending, msg...)
+		case sessionsMsg:
+			next, _ = m.Update(msg)
+			m = next.(Model)
+		}
+	}
+	if m.err == nil || !strings.Contains(ansi.Strip(m.View().Content), "restart vibeflow") {
+		t.Fatalf("launch error cleared before it was shown: %v", m.err)
+	}
+}
