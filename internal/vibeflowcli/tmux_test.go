@@ -1322,3 +1322,20 @@ func TestCapturePaneOutputShowsAgentPaneNotFocusedPane(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// tmux explains its failures on stderr; `vibeflow kill` must show why, not
+// only "exit status 1".
+func TestKillSessionErrorCarriesTmuxMessage(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager(fmt.Sprintf("vftest-kill-%d", os.Getpid()))
+	if _, err := tm.run("new-session", "-d", "-s", "keep"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	err := tm.KillSession("missing")
+	if err == nil || !strings.Contains(err.Error(), "can't find session") {
+		t.Fatalf("kill error lacks tmux's reason: %v", err)
+	}
+}

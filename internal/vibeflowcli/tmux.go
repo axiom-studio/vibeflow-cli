@@ -1580,6 +1580,10 @@ func (tm *TmuxManager) run(args ...string) (string, error) {
 	fullArgs := append([]string{"-L", tm.socketName}, args...)
 	cmd := exec.Command("tmux", fullArgs...)
 	out, err := cmd.CombinedOutput()
+	// tmux explains failures in its output; "exit status 1" alone does not.
+	if msg := strings.TrimSpace(string(out)); err != nil && msg != "" {
+		err = fmt.Errorf("%w: %s", err, msg)
+	}
 	return string(out), err
 }
 
