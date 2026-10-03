@@ -93,12 +93,23 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		case r.Method == "GET" && path == "/projects/66/sessions":
 			fmt.Fprint(w, `[]`)
 		case r.Method == "GET" && path == "/projects/66/pr-review-sessions":
-			fmt.Fprint(w, `{"sessions":[]}`)
-		case r.Method == "GET" && path == "/projects/66/pr-review-summaries":
-			// Two reviews for Vera's repository (link 7), one for another.
-			fmt.Fprintf(w, `{"summaries":[%s,%s,%s]}`, veraE2ESummary("job-4", 7, 4, "Add late payment fee calculation"), veraE2ESummary("job-5", 7, 5, "Fix rounding"), veraE2ESummary("job-34", 8, 34, "Other repository change"))
+			// Two reviews for Vera's repository (link 7), one for another;
+			// the server filters by repository when asked.
+			link := r.URL.Query().Get("repository_link_id")
+			var sessions []string
+			for _, s := range []struct {
+				job  string
+				link int64
+			}{{"job-5", 7}, {"job-4", 7}, {"job-34", 8}} {
+				if link == "" || link == strconv.FormatInt(s.link, 10) {
+					sessions = append(sessions, fmt.Sprintf(`{"session_id":"s-%s","project_id":66,"job_id":%q,"provider":"github","repository_link_id":%d,"state":"completed"}`, s.job, s.job, s.link))
+				}
+			}
+			fmt.Fprintf(w, `{"sessions":[%s]}`, strings.Join(sessions, ","))
 		case r.Method == "GET" && path == "/projects/66/pr-review-summaries/job-4":
 			fmt.Fprint(w, veraE2ESummary("job-4", 7, 4, "Add late payment fee calculation"))
+		case r.Method == "GET" && path == "/projects/66/pr-review-summaries/job-5":
+			fmt.Fprint(w, veraE2ESummary("job-5", 7, 5, "Fix rounding"))
 		case r.Method == "GET" && path == "/projects/66/pr-review-summaries/job-4/findings":
 			fmt.Fprint(w, `{"findings":[{"id":"f1","job_id":"job-4","title":"Rounding drops cents","severity":"high","path":"billing/fee.go","line":42,"state":"present","trigger":"fee of 10.005","impact":"undercharged","evidence":"math.Floor","verification":"go test ./billing"}]}`)
 		case r.Method == "POST" && path == "/projects/66/pr-review-runners":

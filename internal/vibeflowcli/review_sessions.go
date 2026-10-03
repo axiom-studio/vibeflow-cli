@@ -100,10 +100,6 @@ type reviewSummary struct {
 		LastError string `json:"last_error"`
 	} `json:"publication"`
 }
-type reviewSummariesPage struct {
-	Summaries   []reviewSummary `json:"summaries"`
-	NextAfterID string          `json:"next_after_id"`
-}
 
 func reviewPublicID(s string) bool {
 	if s == "" || len(s) > 160 {
@@ -132,33 +128,22 @@ func validReviewSummary(s reviewSummary, project int64, job string) bool {
 	}
 	return true
 }
-func (c *Client) listReviewSummaries(ctx context.Context, projectID int64, after string) (reviewSummariesPage, error) {
-	var page reviewSummariesPage
-	if projectID <= 0 || (after != "" && !reviewPublicID(after)) {
-		return page, fmt.Errorf("invalid review project or cursor")
-	}
-	q := url.Values{"limit": {"25"}, "after_id": {after}}
-	if err := c.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-summaries?%s", projectID, q.Encode()), nil, &page); err != nil {
-		return page, err
-	}
-	if len(page.Summaries) > 25 || (page.NextAfterID != "" && (!reviewPublicID(page.NextAfterID) || page.NextAfterID == after)) {
-		return reviewSummariesPage{}, fmt.Errorf("invalid review summary page")
-	}
-	seen := map[string]bool{}
-	for _, s := range page.Summaries {
-		if !validReviewSummary(s, projectID, "") || seen[s.Review.ID] {
-			return reviewSummariesPage{}, fmt.Errorf("invalid review summary scope")
-		}
-		seen[s.Review.ID] = true
-	}
-	return page, nil
-}
 func (c *Client) listReviewSessions(ctx context.Context, projectID int64, after string) (reviewSessionsPage, error) {
+	return c.reviewSessionsPage(ctx, projectID, url.Values{"limit": {"25"}}, after, 25)
+}
+
+// listRepositoryReviewSessions pages one repository binding's review
+// attempts, newest first, using the server's repository filter.
+func (c *Client) listRepositoryReviewSessions(ctx context.Context, projectID int64, provider string, link int64, after string) (reviewSessionsPage, error) {
+	query := url.Values{"limit": {"100"}, "provider": {provider}, "repository_link_id": {strconv.FormatInt(link, 10)}}
+	return c.reviewSessionsPage(ctx, projectID, query, after, 100)
+}
+
+func (c *Client) reviewSessionsPage(ctx context.Context, projectID int64, query url.Values, after string, limit int) (reviewSessionsPage, error) {
 	var page reviewSessionsPage
 	if projectID <= 0 || len(after) > 256 {
 		return page, fmt.Errorf("select a valid project and review history cursor")
 	}
-	query := url.Values{"limit": {"25"}}
 	if after != "" {
 		query.Set("after_id", after)
 	}
@@ -166,7 +151,7 @@ func (c *Client) listReviewSessions(ctx context.Context, projectID int64, after 
 	if err != nil {
 		return page, err
 	}
-	if len(page.Sessions) > 25 || len(page.NextAfterID) > 256 || (page.NextAfterID != "" && page.NextAfterID == after) {
+	if len(page.Sessions) > limit || len(page.NextAfterID) > 256 || (page.NextAfterID != "" && page.NextAfterID == after) {
 		return reviewSessionsPage{}, fmt.Errorf("invalid review history page")
 	}
 	seen := map[string]bool{}

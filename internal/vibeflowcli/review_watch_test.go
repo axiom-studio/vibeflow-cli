@@ -44,8 +44,8 @@ func reviewWatchServer(t *testing.T, executions map[int64]*reviewExecution) (ser
 			}
 		}
 		switch {
-		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-summaries"): // Vera's history pane.
-			fmt.Fprint(w, `{"summaries":[]}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-sessions"): // Vera's history pane.
+			fmt.Fprint(w, `{"sessions":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
 			json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}, "supported_runner_capabilities": []string{"repository_review_v1"}})
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
