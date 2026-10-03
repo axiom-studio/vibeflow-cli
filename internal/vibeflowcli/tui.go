@@ -2713,7 +2713,15 @@ func (m Model) renderDetailPanel(width, height int) string {
 		if maxLines < 3 {
 			maxLines = 3
 		}
-		lines := strings.Split(m.captureOutput, "\n")
+		// Collapse runs of blank rows: a pane that exited early has its last
+		// words at the top and tmux's dead banner on the bottom row.
+		var lines []string
+		for _, line := range strings.Split(m.captureOutput, "\n") {
+			if strings.TrimSpace(line) == "" && len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+				continue
+			}
+			lines = append(lines, line)
+		}
 		if len(lines) > maxLines {
 			lines = lines[len(lines)-maxLines:]
 		}
