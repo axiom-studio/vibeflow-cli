@@ -939,7 +939,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if err = saveReviewJSON(filepath.Join(root, "child.json"), spec); err != nil {
 		return nil, err
 	}
-	executable, err := os.Executable()
+	executable, err := cliExecutable()
 	if err != nil {
 		return nil, err
 	}

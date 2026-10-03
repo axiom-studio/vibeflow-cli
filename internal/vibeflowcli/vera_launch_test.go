@@ -237,9 +237,9 @@ func paneCommand(t *testing.T, tm *TmuxManager, session string) string {
 // setVeraExecutable points Vera sessions at binary instead of the test binary.
 func setVeraExecutable(t *testing.T, binary string) {
 	t.Helper()
-	orig := veraExecutable
-	veraExecutable = func() (string, error) { return binary, nil }
-	t.Cleanup(func() { veraExecutable = orig })
+	orig := selfExecutable
+	selfExecutable = func() (string, error) { return binary, nil }
+	t.Cleanup(func() { selfExecutable = orig })
 }
 
 // launchVera drives the wizard result for Vera through the TUI and returns the
@@ -674,5 +674,18 @@ func TestVeraAmbiguousLinksRequireSelection(t *testing.T) {
 	_, input, err := resolveReviewStartup(context.Background(), cfg, o, true)
 	if err != nil || input == nil || input.Field != "repository_link" || len(input.Choices) != 2 {
 		t.Fatalf("ambiguous binding silently picked: input=%+v err=%v", input, err)
+	}
+}
+
+// A TUI whose binary was deleted after it started must refuse to start Vera
+// instead of leaving a dead pane ("no such file or directory", status 127).
+func TestVeraLaunchRefusesRemovedBinary(t *testing.T) {
+	withTempRoot(t)
+	setVeraExecutable(t, filepath.Join(t.TempDir(), "vibeflow-removed"))
+	meta := SessionMeta{Name: "v", Provider: "claude", WorkingDir: t.TempDir(), Vera: &veraBinding{ProjectID: 66, RepositoryLinkID: 7, GitProvider: "github", RunnerName: "r"}}
+	for _, command := range []func(SessionMeta) (string, error){veraListenerCommand, veraHistoryCommand} {
+		if _, err := command(meta); err == nil || !strings.Contains(err.Error(), "was removed or replaced; restart vibeflow") {
+			t.Fatalf("removed binary not refused: %v", err)
+		}
 	}
 }

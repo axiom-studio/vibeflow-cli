@@ -39,6 +39,24 @@ var (
 	buildDate    = "unknown"
 )
 
+// selfExecutable is this process's binary; tests substitute a freshly built
+// one for the test executable.
+var selfExecutable = os.Executable
+
+// cliExecutable is the vibeflow binary to start again in a pane or child
+// process. The path outlives the file: after a delete, or a rebuild that
+// unlinks it, the command would fail with "no such file or directory".
+func cliExecutable() (string, error) {
+	bin, err := selfExecutable()
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(bin); err != nil {
+		return "", fmt.Errorf("the vibeflow binary this TUI started from was removed or replaced; restart vibeflow (%s)", bin)
+	}
+	return bin, nil
+}
+
 // SetVersionInfo sets build metadata from ldflags.
 func SetVersionInfo(version, commit, date string) {
 	buildVersion = version

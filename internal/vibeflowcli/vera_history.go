@@ -301,7 +301,7 @@ func runReviewHistory(ctx context.Context, cfg *Config, o reviewWatchOptions) er
 	model := newReviewHistory(filepath.Base(o.Repository), func() tea.Msg { return loadReviewHistory(client, cfg.ServerURL, o) })
 	model.popup = func(job string) error {
 		args := veraDetailArgs(os.Args, job)
-		bin, err := os.Executable()
+		bin, err := cliExecutable()
 		if err != nil {
 			return err
 		}
