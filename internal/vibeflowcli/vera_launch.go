@@ -167,7 +167,7 @@ func (m Model) launchVeraSession(o reviewWatchOptions, projectName string) tea.M
 	if existing, live, ok := m.veraSessionFor(meta); ok {
 		if live {
 			if existing.Provider != meta.Provider || existing.Model != meta.Model {
-				return veraLaunchedMsg{err: fmt.Errorf("Vera is already listening for this repository with %s in %s; delete that session with d to change its harness", existing.Provider, strings.TrimPrefix(existing.TmuxSession, sessionPrefix))}
+				return veraLaunchedMsg{err: fmt.Errorf("Vera is already listening for this repository with %s; delete that Vera session with d to change it", existing.Provider)}
 			}
 			return veraLaunchedMsg{existing: existing.TmuxSession}
 		}
