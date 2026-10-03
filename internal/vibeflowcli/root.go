@@ -78,7 +78,7 @@ var versionCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolVar(&flagCRA, "cra", false, "Enable the PR review preview (still asks for session consent)")
+	rootCmd.PersistentFlags().BoolVar(&flagCRA, "cra", false, "Enable the PR review preview (Vera)")
 	rootCmd.PersistentFlags().StringVar(&flagRootDir, "root", "", "Root directory for config, sessions, and logs (default: ~/.vibeflow-cli)")
 	rootCmd.PersistentFlags().StringVar(&flagConfigPath, "config", "", "Path to config file (default: <root>/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&flagMCPToolName, "mcp", "", "MCP server tool name used in the agent init prompt (default: vibeflow)")

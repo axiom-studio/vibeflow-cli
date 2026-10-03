@@ -530,6 +530,16 @@ func (w WizardModel) buildQuickSwitchResult() (WizardModel, tea.Cmd) {
 // selected session those settings are inherited from. The flow is
 // StepTeam → StepProvider → StepConfirm — every other step is inherited.
 // cra lists Vera as in New Agent, preselected when the group has a Vera session.
+// groupEditPersonas is the persona list the Edit Group wizard offers. A running
+// persona outside it is invisible in the wizard, so applyGroupEdit never stops it.
+func groupEditPersonas(cra bool) []personaEntry {
+	personas := defaultPersonas()
+	if cra {
+		personas = append(personas, veraPersona)
+	}
+	return personas
+}
+
 func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, cfg *Config, cra bool) WizardModel {
 	// Provider list from the registry (same shape as the other constructors).
 	entries := make([]providerEntry, 0)
@@ -550,10 +560,7 @@ func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *Provi
 		}
 	}
 
-	personas := defaultPersonas()
-	if cra {
-		personas = append(personas, veraPersona)
-	}
+	personas := groupEditPersonas(cra)
 	personaIdxByKey := make(map[string]int, len(personas))
 	for i, p := range personas {
 		personaIdxByKey[p.key] = i

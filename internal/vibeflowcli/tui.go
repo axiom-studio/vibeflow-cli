@@ -1489,7 +1489,16 @@ func (m Model) applyGroupEdit(running []SessionMeta, result WizardResult) tea.Ms
 
 	toAdd, toRemove := diffGroupPersonas(runningKeys, result.Personas)
 
+	// Only personas the wizard offered can have been unticked; a hidden one
+	// (Vera without --cra) is absent from result.Personas but must keep running.
+	offered := make(map[string]bool)
+	for _, p := range groupEditPersonas(m.craEnabled) {
+		offered[p.key] = true
+	}
 	for _, persona := range toRemove {
+		if !offered[persona] {
+			continue
+		}
 		if meta, ok := runningByPersona[persona]; ok {
 			m.killSessionMeta(meta)
 		}

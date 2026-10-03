@@ -530,11 +530,16 @@ func (tm *TmuxManager) FindSessionBySessionID(sessionID string) string {
 	return ""
 }
 
-// HasSession checks if a session exists.
+// HasSession checks if a session with exactly this name exists.
 // name can be either a short name (prefix is added) or a full tmux name.
 func (tm *TmuxManager) HasSession(name string) bool {
-	fullName := tm.ensurePrefix(name)
-	_, err := tm.run("has-session", "-t", fullName)
+	target := tm.ensurePrefix(name)
+	if !strings.HasPrefix(target, "%") {
+		// "=" makes tmux match the exact name; a bare target also matches by
+		// prefix (vibeflow_claude-feat would resolve to vibeflow_claude-feat-2).
+		target = "=" + target
+	}
+	_, err := tm.run("has-session", "-t", target)
 	return err == nil
 }
 

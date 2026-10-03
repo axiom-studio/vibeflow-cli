@@ -1,6 +1,7 @@
 package vibeflowcli
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -168,5 +169,44 @@ func TestApplyGroupEdit_UntickingVeraStopsVera(t *testing.T) {
 	}
 	if !tm.HasSession(running[0].TmuxSession) {
 		t.Error("kept developer session was stopped")
+	}
+}
+
+// Without --cra the wizard hides Vera, but groupSessionsFor still counts a Vera
+// session on another branch of the checkout as part of the group. Confirming
+// Edit Group unchanged must not stop that hidden Vera session.
+func TestUpdate_EKeyUnchangedConfirmWithoutCRAKeepsVera(t *testing.T) {
+	m, tm, running := launchedGroupEditModel(t, "vftest-groupedit-nocra-"+itoa(os.Getpid()), []string{"developer", "code_reviewer"})
+	running[1].Branch = "old"
+	running[1].Vera = &veraBinding{ProjectID: 1, RepositoryLinkID: 2}
+	if err := m.store.Add(running[1]); err != nil {
+		t.Fatal(err)
+	}
+	dir := running[0].WorkingDir
+	cfg := DefaultConfig()
+	m.registry, m.config = NewProviderRegistry(cfg), cfg
+	m.repoRootCache = map[string]string{dir: dir}
+	m.sessions = []SessionRow{{Name: "claude-a", WorkingDir: dir, Branch: "main"}, {Name: "claude-b", WorkingDir: dir, Branch: "old"}}
+
+	nm, _ := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	m = nm.(Model)
+	if m.activeView != ViewWizard {
+		t.Fatalf("e did not open group edit (view %d)", m.activeView)
+	}
+	var cmd tea.Cmd
+	for i := 0; i < 5 && m.activeView == ViewWizard; i++ {
+		nm, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		m = nm.(Model)
+	}
+	if cmd == nil {
+		t.Fatal("confirming group edit returned no apply command")
+	}
+	_ = cmd()
+
+	if !tm.HasSession(running[1].TmuxSession) {
+		t.Error("unchanged Edit Group confirm without --cra stopped the hidden Vera session")
+	}
+	if !tm.HasSession(running[0].TmuxSession) {
+		t.Error("developer session was stopped")
 	}
 }
