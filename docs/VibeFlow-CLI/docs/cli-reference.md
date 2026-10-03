@@ -6,7 +6,6 @@ The binary name is **`vibeflow`**. Root command with no subcommand runs the **TU
 
 | Flag | Description |
 |------|-------------|
-| `--cra` | Enable the PR review preview (Vera); disabled by default until production backend rollout. |
 | `--config` | Path to config file (default `<root>/config.yaml`) |
 | `--root` | Root directory for config, sessions, and logs (default `~/.vibeflow-cli`). Also settable via `VIBEFLOW_ROOT` env var. Enables isolated parallel instances. |
 | `--mcp` | MCP server tool name used in the agent init prompt (default: `vibeflow`). Override if you run a renamed or forked MCP server. |
@@ -20,8 +19,8 @@ Subcommands read `server_url` from configuration; set it during setup with boots
 ### `vibeflow` (interactive TUI)
 
 Server and API-key setup runs only for a new, uninitialized root and remains saved in `config.yaml`.
-`vibeflow --cra` starts straight into the normal session list; there is no startup review prompt and no review runner starts implicitly.
-Without `--cra`, no review UI, API requests, rows, or shortcuts are enabled.
+`vibeflow` starts straight into the normal session list; there is no startup review prompt and no review runner starts implicitly.
+Vera is part of the normal binary; the former `--cra` preview flag is no longer needed and is ignored when passed.
 
 The only way to run Vera in the TUI is a Vera session: press `n`, choose the repository's checkout and VibeFlow project, then select **Vera · Code Reviewer** in the agent picker.
 Group edit (`e`) offers Vera as well: it is preselected when the group's checkout has a Vera session, ticking it starts Vera for that checkout and project, and unticking it stops Vera's session.
@@ -36,7 +35,7 @@ Confirm creates an ordinary tmux session for Vera, listed with the other session
 The raw session name stays in the detail panel.
 Each Vera session serves one project, repository link and checkout; start one per repository.
 The session's window has two panes.
-The left pane (about 70% of the width, focused on attach) runs `vibeflow --cra --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>` in the foreground, adding `--model` only when one was chosen.
+The left pane (about 70% of the width, focused on attach) runs `vibeflow --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>` in the foreground, adding `--model` only when one was chosen.
 The right pane (about 30%) runs the same command with the hidden `--history` flag: a read-only, scrollable list of the PRs reviewed on this repository link, newest first.
 Each entry shows the PR number and title, then the outcome (Clean, Changes requested or Needs human review), round, findings, short head commit and time of the latest attempt; the PR under review now is marked with `▶`.
 The list refreshes every 10 seconds; use the arrow keys, PgUp/PgDn, Home/End, the mouse wheel or a click to move, and Enter (or a click on the selected row) to open the review.
@@ -46,7 +45,7 @@ Where popups are unavailable (tmux before 3.2, or no attached client) the view o
 Past reviews keep only their recorded result and findings; the live harness transcript is not stored.
 If the review API is unreachable, the list keeps the last good entries and its status line says so until the next successful refresh.
 The session list status always comes from the listener pane, whichever pane has focus.
-Passing `--cra` there is the explicit consent for repository requests on that one repository, registered only when the server advertises `repository_review_v1`.
+Starting that session is the explicit consent for repository requests on that one repository, registered only when the server advertises `repository_review_v1`.
 Anyone who comments `@vibeflow review` on that repository can then request a review using your harness credentials until you delete the session.
 Because Vera runs with full permissions, PR content and comments from those commenters reach an unrestricted agent on your machine; only its working directory is disposable.
 Attach to the session to watch it: it prints a listening line, then for each review the claimed PR number and head commit, the worktree it prepared, and the harness's own interactive UI in the pane, followed by the result, the worktree removal and the listening line again.
@@ -110,21 +109,19 @@ Model flags apply when the provider process starts and are stored in session met
 
 ### `vibeflow review-watch`
 
-Passing `--cra` explicitly opts this runner into requests from commenters on its linked repository when supported by the server.
+Starting a runner opts it into requests from commenters on its linked GitHub repository when supported by the server.
 Without the server capability, it uses legacy routing and reports that a server upgrade is needed.
 A Vera session shows that notice in its pane, and detached runners show it in `review-watch --status` and when started.
 Runner selection is configured in the project's pull request settings, using Automatic or a preferred eligible runner.
-
-All public forms require `--cra`, including `--background`, `--status`, and `--stop`.
 
 Keep one local or shared PR review runner online without using a model while idle.
 Each claimed attempt starts a fresh Vera process with the server's finite review prompt, a disposable git worktree of the exact head commit, the exact base snapshot, project brief, and prior finding IDs.
 The server controls automatic and comment-triggered reviews, local priority, shared grants, cycle limits, repair tickets, and PR publication.
 
 ```bash
-vibeflow --cra review-watch --project my-project --repo /path/to/repo --repository-link 123 --provider claude
-vibeflow --cra review-watch --project 42 --repo /srv/repo --repository-link 123 --provider codex --runner-kind shared --name team-runner
-vibeflow --cra review-watch --project 42 --repository-link 123 --provider claude --model anthropic/claude-sonnet --once
+vibeflow review-watch --project my-project --repo /path/to/repo --repository-link 123 --provider claude
+vibeflow review-watch --project 42 --repo /srv/repo --repository-link 123 --provider codex --runner-kind shared --name team-runner
+vibeflow review-watch --project 42 --repository-link 123 --provider claude --model anthropic/claude-sonnet --once
 ```
 
 | Flag | Description |
@@ -153,18 +150,18 @@ Use explicit detached mode on headless machines without tmux, using the same roo
 Stop an existing foreground watcher with Ctrl-C before enabling its background replacement.
 
 ```bash
-vibeflow --cra --root /path/to/cli-root review-watch --background \
+vibeflow --root /path/to/cli-root review-watch --background \
   --server-url https://cloud-uat.axiomstudio.ai \
   --project 12 --repository-link 7 --git-provider github \
   --provider claude --repo /path/to/axiomcloud
-vibeflow --cra --root /path/to/cli-root review-watch --status
-vibeflow --cra --root /path/to/cli-root review-watch --stop <runner-ID-from-status>
+vibeflow --root /path/to/cli-root review-watch --status
+vibeflow --root /path/to/cli-root review-watch --stop <runner-ID-from-status>
 ```
 
 The start command waits up to 20 seconds for provider preflight and a successful server heartbeat before reporting that the runner is running.
 It stays alive after the terminal or TUI exits; idle polling makes no model calls.
 Each claimed review runs the harness headless, not in a tmux pane.
-Use a Vera session's history pane or `vibeflow --cra list --project 12` to see reviews, and `vibeflow --cra review-watch --status` to see the local background supervisor.
+Use a Vera session's history pane or `vibeflow list --project 12` to see reviews, and `vibeflow review-watch --status` to see the local background supervisor.
 Repeated starts of the same binding do not launch another supervisor; changing an active binding requires stopping it first.
 
 The private binding under `<root>/review-runners/<ID>/background.json` saves absolute root/config/repository paths, the exact server URL, provider/model, local login sources, and a one-way VibeFlow credential fingerprint, not credential values.
@@ -285,13 +282,13 @@ vibeflow models codex
 
 ### `vibeflow list` (alias: `ls`)
 
-List local agents; `--cra` also includes managed Principal Engineer review sessions for the selected project.
+List local agents and the managed Vera review sessions for the selected project.
 Use `--project <id-or-name>` or the configured default project.
 Managed reviews are read-only and include retained completed, failed, cancelled and expired attempts.
 
 ```bash
 vibeflow list --project my-project
-vibeflow --cra list --project 42 --reviews-after <returned-cursor>
+vibeflow list --project 42 --reviews-after <returned-cursor>
 ```
 
 Each page contains at most 25 managed reviews, newest first.

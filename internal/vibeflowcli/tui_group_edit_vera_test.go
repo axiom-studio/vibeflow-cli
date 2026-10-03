@@ -25,15 +25,15 @@ func veraGroup() (SessionMeta, []SessionMeta) {
 	return dev, []SessionMeta{dev, vera}
 }
 
-func TestNewGroupEditWizard_CRAListsAndPreselectsVera(t *testing.T) {
+func TestNewGroupEditWizard_ListsAndPreselectsVera(t *testing.T) {
 	cfg := DefaultConfig()
 	dev, group := veraGroup()
 
-	w := NewGroupEditWizard(group, dev, NewProviderRegistry(cfg), "/repo/a", nil, cfg, true)
+	w := NewGroupEditWizard(group, dev, NewProviderRegistry(cfg), "/repo/a", nil, cfg)
 
 	vi := wizardPersonaIndex(w, "code_reviewer")
 	if vi < 0 {
-		t.Fatal("group edit with --cra must list Vera like New Agent")
+		t.Fatal("group edit must list Vera like New Agent")
 	}
 	if !w.selectedPersonas[vi] {
 		t.Error("the group's running Vera must be preselected")
@@ -46,14 +46,19 @@ func TestNewGroupEditWizard_CRAListsAndPreselectsVera(t *testing.T) {
 	}
 }
 
-func TestNewGroupEditWizard_WithoutCRAOmitsVera(t *testing.T) {
+// A group without Vera still offers her, unticked, so Edit Group can add her.
+func TestNewGroupEditWizard_OffersVeraToGroupWithoutVera(t *testing.T) {
 	cfg := DefaultConfig()
-	dev, group := veraGroup()
+	dev, _ := veraGroup()
 
-	w := NewGroupEditWizard(group, dev, NewProviderRegistry(cfg), "/repo/a", nil, cfg, false)
+	w := NewGroupEditWizard([]SessionMeta{dev}, dev, NewProviderRegistry(cfg), "/repo/a", nil, cfg)
 
-	if wizardPersonaIndex(w, "code_reviewer") >= 0 {
-		t.Error("group edit without --cra must not list Vera")
+	vi := wizardPersonaIndex(w, "code_reviewer")
+	if vi < 0 {
+		t.Fatal("group edit must always list Vera")
+	}
+	if w.selectedPersonas[vi] {
+		t.Error("Vera preselected for a group that has no Vera session")
 	}
 	if !slices.Equal(w.groupRunning, []string{"developer"}) {
 		t.Errorf("groupRunning = %v, want [developer]", w.groupRunning)
@@ -63,7 +68,7 @@ func TestNewGroupEditWizard_WithoutCRAOmitsVera(t *testing.T) {
 func TestGroupEditWizard_TitleAndSteps(t *testing.T) {
 	cfg := DefaultConfig()
 	dev, group := veraGroup()
-	w := NewGroupEditWizard(group, dev, NewProviderRegistry(cfg), "/repo/a", nil, cfg, true)
+	w := NewGroupEditWizard(group, dev, NewProviderRegistry(cfg), "/repo/a", nil, cfg)
 
 	view := w.View()
 	if !strings.Contains(view, "Edit Group") || strings.Contains(view, "New Session") {
@@ -81,7 +86,7 @@ func TestGroupEditWizard_VeraHarnessRestricted(t *testing.T) {
 	cfg.Providers["shell"] = Provider{Name: "Shell", Binary: "sh"} // installed, not a review harness
 	dev, group := veraGroup()
 	reg := NewProviderRegistry(cfg)
-	w := NewGroupEditWizard(group, dev, reg, "/repo/a", nil, cfg, true)
+	w := NewGroupEditWizard(group, dev, reg, "/repo/a", nil, cfg)
 	vi := wizardPersonaIndex(w, "code_reviewer")
 	for i, pe := range w.providers {
 		if pe.key == "shell" {
@@ -119,7 +124,6 @@ func TestUpdate_EKeyOnVeraGroupPreselectsVera(t *testing.T) {
 		store:         st,
 		registry:      NewProviderRegistry(cfg),
 		config:        cfg,
-		craEnabled:    true,
 		repoRootCache: map[string]string{"/work/a": "/work/a"},
 		sessions: []SessionRow{
 			{Name: "codex-v", WorkingDir: "/work/a", Branch: "old"},
@@ -145,7 +149,7 @@ func TestUpdate_EKeyOnVeraGroupPreselectsVera(t *testing.T) {
 
 func TestApplyGroupEdit_TickingVeraStartsVera(t *testing.T) {
 	dev, _ := veraGroup()
-	m := Model{craEnabled: true}
+	m := Model{}
 
 	msg := m.applyGroupEdit([]SessionMeta{dev}, WizardResult{Personas: []string{"developer", "code_reviewer"}, ProjectName: "p", WorkDir: "/repo/a"})
 
@@ -160,7 +164,6 @@ func TestApplyGroupEdit_TickingVeraStartsVera(t *testing.T) {
 
 func TestApplyGroupEdit_UntickingVeraStopsVera(t *testing.T) {
 	m, tm, running := launchedGroupEditModel(t, "vftest-groupedit-vera", []string{"developer", "code_reviewer"})
-	m.craEnabled = true
 
 	_ = m.applyGroupEdit(running, WizardResult{Personas: []string{"developer"}})
 
@@ -172,11 +175,10 @@ func TestApplyGroupEdit_UntickingVeraStopsVera(t *testing.T) {
 	}
 }
 
-// Without --cra the wizard hides Vera, but groupSessionsFor still counts a Vera
-// session on another branch of the checkout as part of the group. Confirming
-// Edit Group unchanged must not stop that hidden Vera session.
-func TestUpdate_EKeyUnchangedConfirmWithoutCRAKeepsVera(t *testing.T) {
-	m, tm, running := launchedGroupEditModel(t, "vftest-groupedit-nocra-"+itoa(os.Getpid()), []string{"developer", "code_reviewer"})
+// groupSessionsFor counts a Vera session on another branch of the checkout as
+// part of the group. Confirming Edit Group unchanged must not stop it.
+func TestUpdate_EKeyUnchangedConfirmKeepsVera(t *testing.T) {
+	m, tm, running := launchedGroupEditModel(t, "vftest-groupedit-keepvera-"+itoa(os.Getpid()), []string{"developer", "code_reviewer"})
 	running[1].Branch = "old"
 	running[1].Vera = &veraBinding{ProjectID: 1, RepositoryLinkID: 2}
 	if err := m.store.Add(running[1]); err != nil {
@@ -204,7 +206,7 @@ func TestUpdate_EKeyUnchangedConfirmWithoutCRAKeepsVera(t *testing.T) {
 	_ = cmd()
 
 	if !tm.HasSession(running[1].TmuxSession) {
-		t.Error("unchanged Edit Group confirm without --cra stopped the hidden Vera session")
+		t.Error("unchanged Edit Group confirm stopped the Vera session")
 	}
 	if !tm.HasSession(running[0].TmuxSession) {
 		t.Error("developer session was stopped")

@@ -20,12 +20,12 @@ The `--root` flag enables fully isolated parallel instances with independent con
 ## Common settings
 
 The first-launch server/API-key setup is saved here and is not repeated on later TUI launches.
-The PR review preview is disabled unless the command includes `--cra`; this temporary rollout flag is not saved in configuration.
-`vibeflow --cra` starts straight into the session list; Vera runs only in a Vera session you start from New Agent, one per repository.
+Vera, the PR reviewer, is part of the normal binary and needs no flag or configuration switch.
+`vibeflow` starts straight into the session list; Vera runs only in a Vera session you start from New Agent, one per repository.
 Starting that session permits requests from PR commenters on its one linked repository, including commenters without a Cloud account, until you delete the session.
 Repository routing is enabled only when the server advertises `repository_review_v1` when the session's listener starts.
 Detached-runner records do not grant this consent for another repository.
-Use explicit `vibeflow --cra review-watch --background` for a detached runner on a machine without tmux.
+Use explicit `vibeflow review-watch --background` for a detached runner on a machine without tmux.
 Vera can use any entry under `providers` whose `binary` is installed: `claude`, `codex`, `copilot`, `cursor`, `gemini`, `kiro` or `qwen`.
 It runs that harness in normal mode with the provider's `env`, `saved_env_vars` and your own login, so a Codex ChatGPT login works.
 Each review runs in a disposable git worktree under the root's `review-runners/` directory, which is removed when the review ends.

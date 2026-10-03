@@ -25,19 +25,18 @@ import (
 )
 
 type reviewWatchOptions struct {
-	Project                    string
-	ProjectID                  int64
-	Repository                 string
-	RepositoryLinkID           int64
-	GitProvider                string
-	Provider                   string
-	Model                      string
-	Kind                       string
-	Name                       string
-	Once                       bool
-	PollInterval               time.Duration
-	Timeout                    time.Duration
-	RepositoryRequestsApproved bool
+	Project          string
+	ProjectID        int64
+	Repository       string
+	RepositoryLinkID int64
+	GitProvider      string
+	Provider         string
+	Model            string
+	Kind             string
+	Name             string
+	Once             bool
+	PollInterval     time.Duration
+	Timeout          time.Duration
 }
 
 type reviewReceipt struct {
@@ -173,7 +172,6 @@ func reviewWatchCmd() *cobra.Command {
 		if stop != "" {
 			return stopReviewBackground(cmd.Context(), stop, cmd.OutOrStdout())
 		}
-		o.RepositoryRequestsApproved = flagCRA
 		if background && (!cmd.Flags().Changed("repo") || !cmd.Flags().Changed("project") || !cmd.Flags().Changed("repository-link")) {
 			return fmt.Errorf("background runners require explicit --repo, --project, and --repository-link")
 		}
@@ -368,7 +366,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	}
 	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID}
 	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
-	if w.options.RepositoryRequestsApproved && w.options.GitProvider == "github" {
+	if w.options.GitProvider == "github" {
 		var discovery reviewStartupRepositoriesResponse
 		if err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery); err != nil {
 			return err

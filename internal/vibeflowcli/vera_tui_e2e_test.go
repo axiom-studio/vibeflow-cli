@@ -23,7 +23,7 @@ import (
 )
 
 // Drives Vera end to end through the real binary in a real PTY with real tmux:
-// --cra starts straight into the session list, New Agent > Vera > Provider >
+// the default binary starts straight into the session list, New Agent > Vera > Provider >
 // Confirm creates an ordinary tmux session whose listener registers only the
 // chosen repository and idles without a model, the session survives quitting
 // the TUI, and deleting it with d deregisters and stops the listener.
@@ -246,7 +246,7 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		}
 	}
 
-	// 1. --cra starts straight into the session list: no startup prompt, no
+	// 1. The TUI starts straight into the session list: no startup prompt, no
 	// repository scan, no runner, and no R runners view.
 	visible := awaitScreen("q: quit")
 	if strings.Contains(visible, "Run PR reviews") {

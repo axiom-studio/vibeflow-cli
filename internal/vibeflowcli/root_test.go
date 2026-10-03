@@ -19,6 +19,7 @@ package vibeflowcli
 import (
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,5 +108,25 @@ func TestHasExistingSessionState_LiveTmux(t *testing.T) {
 	}
 	if !hasExistingSessionState(store, tm) {
 		t.Fatal("expected true when a live tmux session exists on the socket")
+	}
+}
+
+// Vera is part of the normal binary: review-watch needs no flag, and --cra,
+// which Vera panes and managed runners from older builds still pass, is
+// accepted as a hidden no-op instead of failing their restart.
+func TestReviewWatchNeedsNoCRAFlagAndAcceptsLegacyCRA(t *testing.T) {
+	binary := builtVibeflow(t)
+	for _, args := range [][]string{
+		{"--root", t.TempDir(), "review-watch", "--status"},
+		{"--cra", "--root", t.TempDir(), "review-watch", "--status"},
+		{"--root", t.TempDir(), "--cra", "version"},
+	} {
+		if out, err := exec.Command(binary, args...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	out, err := exec.Command(binary, "--help").CombinedOutput()
+	if err != nil || strings.Contains(string(out), "cra") {
+		t.Fatalf("help must not list --cra: %v\n%s", err, out)
 	}
 }

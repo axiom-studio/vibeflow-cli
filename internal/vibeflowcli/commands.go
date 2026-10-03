@@ -95,7 +95,7 @@ func launchCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			for _, requested := range append([]string{persona}, strings.Split(personasRaw, ",")...) {
 				if strings.TrimSpace(requested) == "code_reviewer" {
-					return fmt.Errorf("Vera runs PR reviews in disposable worktrees, not the coding-agent task loop; use review-watch --cra --project <project> --repo <checkout> --repository-link <link-id> --provider <harness> [--model <model>]")
+					return fmt.Errorf("Vera runs PR reviews in disposable worktrees, not the coding-agent task loop; use review-watch --project <project> --repo <checkout> --repository-link <link-id> --provider <harness> [--model <model>]")
 				}
 			}
 			cfgPath, _ := cmd.Flags().GetString("config")
@@ -747,9 +747,6 @@ func listCmd() *cobra.Command {
 			}
 			// Best-effort: the local listing above stands even when the review
 			// API is offline or refuses this user, so warn and keep exit 0.
-			if !flagCRA {
-				return nil
-			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 			defer cancel()
 			if err := printReviewSessions(ctx, cmd.OutOrStdout(), cfg, project, after); err != nil {

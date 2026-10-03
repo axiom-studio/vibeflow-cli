@@ -16,14 +16,13 @@ import (
 
 func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 	for _, tc := range []struct {
-		name, advertisement, provider   string
-		approved, capability, discovery bool
+		name, advertisement, provider string
+		capability, discovery         bool
 	}{
-		{"approved_supported", `"repository_review_v1"`, "github", true, true, true},
-		{"declined_supported", `"repository_review_v1"`, "github", false, false, false},
-		{"old_server", "", "github", true, false, true},
-		{"unknown_capability", `"future_review_v2"`, "github", true, false, true},
-		{"bitbucket_unchanged", `"repository_review_v1"`, "bitbucket", true, false, false},
+		{"supported", `"repository_review_v1"`, "github", true, true},
+		{"old_server", "", "github", false, true},
+		{"unknown_capability", `"future_review_v2"`, "github", false, true},
+		{"bitbucket_unchanged", `"repository_review_v1"`, "bitbucket", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withTempRoot(t)
@@ -62,7 +61,7 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 			var statuses []string
 			watch := reviewWatch{onStatus: func(status string) { statuses = append(statuses, status) }, client: NewClient(server.URL, "fixture"), cfg: cfg, output: &output, options: reviewWatchOptions{
 				ProjectID: 23, RepositoryLinkID: 7, GitProvider: tc.provider, Kind: "local", Name: "negotiation",
-				Provider: "claude", Once: true, PollInterval: time.Second, RepositoryRequestsApproved: tc.approved,
+				Provider: "claude", Once: true, PollInterval: time.Second,
 			}}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

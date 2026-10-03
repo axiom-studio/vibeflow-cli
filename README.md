@@ -44,9 +44,8 @@ All seven agents support both **Vanilla** (standalone) and **VibeFlow** (server-
 
 ## Features
 
-PR review automation is a preview behind `vibeflow --cra` until the production backend is deployed.
-Without `--cra`, the CLI shows no review UI and makes no review API calls.
-`vibeflow --cra` starts straight into the session list with no startup review prompt.
+PR review automation (Vera, the code reviewer) is part of the normal binary; no flag is needed.
+`vibeflow` starts straight into the session list with no startup review prompt.
 Vera reviews run only in a Vera session you start from New Agent, one per repository.
 Review runners share `review_concurrency` slots (default `2`).
 
