@@ -54,7 +54,7 @@ var personaColors = map[string]lipgloss.Color{
 	"product_manager":    lipgloss.Color("#ffd98e"), // soft sand — innovation
 	"project_manager":    oceanSecondary,            // deep blue — organization
 	"customer":           lipgloss.Color("#7bed9f"), // ocean mint — communication
-	"code_reviewer":      lipgloss.Color("#e0b3ff"), // ocean-dusk lilac — review (CRA only)
+	"code_reviewer":      lipgloss.Color("#e0b3ff"), // ocean-dusk lilac - review (Vera)
 }
 
 // personaCompactIcons maps persona keys to small Unicode glyphs for inline display.

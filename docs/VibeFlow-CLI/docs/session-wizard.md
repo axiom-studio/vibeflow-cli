@@ -22,8 +22,8 @@ Exact labels and ordering match your installed version; the list above reflects 
 
 ## Vera PR review session
 
-With `vibeflow --cra`, the persona picker also offers **Vera · Code Reviewer**.
-This is the only way to run Vera in the TUI; `--cra` starts straight into the session list with no startup prompt.
+The persona picker always offers **Vera · Code Reviewer**.
+This is the only way to run Vera in the TUI; `vibeflow` starts straight into the session list with no startup prompt.
 Selecting only Vera uses the same wizard with fewer steps: **Directory > Type > Project > Team > Provider > Confirm**.
 Env, Routing, Qwen, Endpoint, Branch, Worktree and Permissions are skipped because each review runs in its own disposable worktree with the harness's full-permission mode.
 The **Provider** step is the ordinary provider list; harnesses Vera cannot run are shown dimmed and cannot be selected, and uninstalled ones show **(not installed)**.
@@ -39,7 +39,7 @@ Each Vera session serves exactly one project, repository link and checkout; star
 It is an ordinary tmux session in the session list, like every other persona: attach with Enter, detach, delete with `d`, and it keeps running after the TUI exits.
 Its row shows **Vera · Code Reviewer · <repository>**, the project and the listener's state: `listening`, `reviewing PR #N` or `stopped`; the detail panel keeps the session name.
 The session window is split in two.
-The left pane, about 70% wide and focused on attach, runs the foreground listener, `vibeflow --cra --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>`, with `--model` only when a model was chosen.
+The left pane, about 70% wide and focused on attach, runs the foreground listener, `vibeflow --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>`, with `--model` only when a model was chosen.
 The right pane, about 30% wide, runs the same command with `--history`: a read-only list of the PRs Vera reviewed on this repository, newest first, with outcome, round, findings, short head commit and time.
 The PR under review now is marked with `▶` and the selected PR with `>`; the list refreshes every 10 seconds.
 While Vera listens, its left pane does not echo keys: ↑/↓, j/k, PgUp/PgDn, Home/End, Enter and Esc typed there move and open the history list, and Ctrl-C still stops Vera.
@@ -72,11 +72,11 @@ On confirm, Vera's session starts with that harness and then the coding agents l
 If Vera cannot start, the error is shown and the coding agents still launch.
 The selection grants consent only for that session's repository, without changing saved coding-agent configuration.
 
-With `--cra`, the **Edit Group** wizard (`e`) lists Vera too, with only its **Team > Provider > Confirm** steps.
+The **Edit Group** wizard (`e`) lists Vera too, with only its **Team > Provider > Confirm** steps.
 A group includes the Vera session of its checkout whatever branch that session recorded, so Vera starts preselected when the checkout has one.
 Ticking Vera starts it for the group's checkout and project through the same launch path as New Agent, including attaching a live Vera session or reporting its different harness.
 Unticking Vera stops and removes its session like any removed persona.
-Without `--cra`, Edit Group hides Vera and never stops a running Vera session.
+Edit Group only stops personas it lists, so a running persona this build does not offer keeps running.
 Vera's Provider row in the edit is restricted to the harnesses Vera can run.
 Pressing `e` on Vera's row edits the coding group of its checkout, inheriting settings from a coding session when there is one.
 Headless `launch --persona code_reviewer` is intentionally rejected with an explicit `review-watch` command instead of starting a coding-agent loop.

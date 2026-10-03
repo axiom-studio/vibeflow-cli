@@ -54,7 +54,7 @@ func veraOptions(meta SessionMeta) reviewWatchOptions {
 }
 
 // veraListenerCommand is the foreground review-watch a Vera session runs.
-// --cra is the explicit invocation consent. Credentials come from the config
+// Credentials come from the config
 // file, so no token appears on the command line or in the session env.
 func veraListenerCommand(meta SessionMeta) (string, error) { return veraCommand(meta, false) }
 
@@ -78,7 +78,7 @@ func veraCommand(meta SessionMeta, history bool) (string, error) {
 		return "", err
 	}
 	o := veraOptions(meta)
-	args := []string{bin, "--cra", "--root", root, "--config", config, "review-watch"}
+	args := []string{bin, "--root", root, "--config", config, "review-watch"}
 	if history {
 		args = append(args, "--history")
 	}
@@ -120,10 +120,6 @@ func veraRowStatus(meta SessionMeta, serverURL string, paneDead bool) (status, w
 // the wizard's Provider step, then starts Vera's tmux session. Coding personas
 // selected alongside Vera launch after it with their own settings.
 func (m Model) beginVeraLaunch(result WizardResult) (tea.Model, tea.Cmd) {
-	if !m.craEnabled {
-		m.err = fmt.Errorf("start this CLI with --cra to launch Vera")
-		return m, nil
-	}
 	provider := result.PersonaProviders["code_reviewer"]
 	if provider == "" {
 		provider = result.ProviderKey
@@ -148,7 +144,7 @@ func (m Model) beginVeraLaunch(result WizardResult) (tea.Model, tea.Cmd) {
 		m.veraPending = &pending
 	}
 	projectName := result.ProjectName
-	o := reviewWatchOptions{Project: strconv.FormatInt(result.ProjectID, 10), ProjectID: result.ProjectID, Repository: result.WorkDir, Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute, RepositoryRequestsApproved: true, Provider: provider}
+	o := reviewWatchOptions{Project: strconv.FormatInt(result.ProjectID, 10), ProjectID: result.ProjectID, Repository: result.WorkDir, Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute, Provider: provider}
 	if result.ProjectID <= 0 {
 		o.Project = projectName
 	}

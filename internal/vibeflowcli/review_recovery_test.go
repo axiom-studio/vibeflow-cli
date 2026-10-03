@@ -122,6 +122,9 @@ func TestReviewCommandRecoversWithoutProviderInstallation(t *testing.T) {
 			}
 			registration["user_id"] = 1
 			json.NewEncoder(w).Encode(registration)
+		case strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+			// Registration's capability probe, not repository discovery.
+			w.Write([]byte(`{"repositories":[]}`))
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			w.WriteHeader(204)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/result"):
@@ -251,6 +254,9 @@ func TestReviewSubmissionDeadlineRetriesSavedReceipt(t *testing.T) {
 			}
 			out.WriteHeader(204)
 			cancel()
+		case strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+			// Registration's capability probe, not repository discovery.
+			out.Write([]byte(`{"repositories":[]}`))
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"), r.Method == "DELETE":
 			out.WriteHeader(204)
 		default:
@@ -302,6 +308,9 @@ func TestReviewCrashRecoveryRemovesWorktree(t *testing.T) {
 			json.NewDecoder(r.Body).Decode(&registration)
 			registration["user_id"] = 1
 			json.NewEncoder(w).Encode(registration)
+		case strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+			// Registration's capability probe, not repository discovery.
+			w.Write([]byte(`{"repositories":[]}`))
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/heartbeat"), r.Method == "DELETE":
 			w.WriteHeader(204)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/fail"):

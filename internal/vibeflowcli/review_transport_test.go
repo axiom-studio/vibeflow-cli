@@ -102,7 +102,7 @@ func TestReviewCommandRetainsSanitizedProviderFailure(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, binary, "--cra", "--root", root, "--config", config, "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "diagnostic", "--once")
+			cmd := exec.CommandContext(ctx, binary, "--root", root, "--config", config, "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "diagnostic", "--once")
 			output, err := cmd.CombinedOutput()
 			stops := tc.category == "authentication_required" || tc.category == "untrusted_workspace"
 			if (err != nil) != stops || !strings.Contains(reason, tc.category) || !strings.Contains(reason, tc.httpStatus) {

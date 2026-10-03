@@ -73,8 +73,8 @@ func TestVeraPopupAndDetailCommand(t *testing.T) {
 	if got := veraPopupArgs("exec vf"); !slices.Equal(got, []string{"display-popup", "-E", "-w", "90%", "-h", "85%", "exec vf"}) {
 		t.Fatalf("popup args %q", got)
 	}
-	args := []string{"/bin/vf", "--cra", "--root", "/r", "review-watch", "--history", "--project", "66", "--repository-link", "7"}
-	want := []string{"/bin/vf", "--cra", "--root", "/r", "review-watch", "--review-detail", "job-4", "--project", "66", "--repository-link", "7"}
+	args := []string{"/bin/vf", "--root", "/r", "review-watch", "--history", "--project", "66", "--repository-link", "7"}
+	want := []string{"/bin/vf", "--root", "/r", "review-watch", "--review-detail", "job-4", "--project", "66", "--repository-link", "7"}
 	if got := veraDetailArgs(args, "job-4"); !slices.Equal(got, want) {
 		t.Fatalf("detail args %q; want %q", got, want)
 	}

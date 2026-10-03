@@ -239,12 +239,12 @@ func defaultPersonas() []personaEntry {
 	}
 }
 
-var veraPersona = personaEntry{"code_reviewer", reviewSessionLabel, "Reviews PRs when anyone comments @vibeflow review; fresh Vera worktree each time"}
+var veraPersona = personaEntry{"code_reviewer", reviewSessionLabel, "Reviews PRs on @vibeflow review comments"}
 
-func (w *WizardModel) enableCRA() {
-	w.personas = append(w.personas, veraPersona)
-	w.personaProviderIdx = append(w.personaProviderIdx, -1)
-}
+// agentPickerPersonas is what New Agent and Edit Group offer: the coding
+// personas plus Vera. Quick Switch keeps defaultPersonas, since Vera is not a
+// persona a coding session can switch to.
+func agentPickerPersonas() []personaEntry { return append(defaultPersonas(), veraPersona) }
 
 // codeAgentKeys lists personas that modify git (only one allowed per branch).
 // Must stay in sync with GitModifyingPersonas in axiomcloud/database/vibeflow_models.go.
@@ -330,7 +330,7 @@ func NewWizardModel(registry *ProviderRegistry, repoRoot string, wm *WorktreeMan
 		savedRouting = RoutingGateway
 	}
 
-	personasList := defaultPersonas()
+	personasList := agentPickerPersonas()
 	personaProviderIdx := make([]int, len(personasList))
 	for i := range personaProviderIdx {
 		personaProviderIdx[i] = -1 // -1 = inherit team default
@@ -529,18 +529,10 @@ func (w WizardModel) buildQuickSwitchResult() (WizardModel, tea.Cmd) {
 // running sessions that share the anchor's repo root and branch; `anchor` is the
 // selected session those settings are inherited from. The flow is
 // StepTeam → StepProvider → StepConfirm — every other step is inherited.
-// cra lists Vera as in New Agent, preselected when the group has a Vera session.
-// groupEditPersonas is the persona list the Edit Group wizard offers. A running
-// persona outside it is invisible in the wizard, so applyGroupEdit never stops it.
-func groupEditPersonas(cra bool) []personaEntry {
-	personas := defaultPersonas()
-	if cra {
-		personas = append(personas, veraPersona)
-	}
-	return personas
-}
-
-func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, cfg *Config, cra bool) WizardModel {
+// It lists Vera as New Agent does, preselected when the group has a Vera
+// session. A running persona outside agentPickerPersonas is invisible in the
+// wizard, so applyGroupEdit never stops it.
+func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *ProviderRegistry, repoRoot string, wm *WorktreeManager, cfg *Config) WizardModel {
 	// Provider list from the registry (same shape as the other constructors).
 	entries := make([]providerEntry, 0)
 	for _, key := range providerKeys(registry) {
@@ -560,7 +552,7 @@ func NewGroupEditWizard(group []SessionMeta, anchor SessionMeta, registry *Provi
 		}
 	}
 
-	personas := groupEditPersonas(cra)
+	personas := agentPickerPersonas()
 	personaIdxByKey := make(map[string]int, len(personas))
 	for i, p := range personas {
 		personaIdxByKey[p.key] = i

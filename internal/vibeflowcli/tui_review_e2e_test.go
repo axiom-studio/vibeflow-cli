@@ -7,7 +7,6 @@ import (
 	"io"
 	"os/exec"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -183,9 +182,6 @@ type reviewTUITerminal struct {
 func startReviewTUITerminal(t *testing.T, binary, repo, root, binDir string, env ...string) *reviewTUITerminal {
 	t.Helper()
 	command := "stty rows 30 cols 100; exec " + shellQuote(binary) + " --root " + shellQuote(root)
-	if !slices.Contains(env, "TEST_CRA_DISABLED=1") {
-		command += " --cra"
-	}
 	args := []string{"-q", "/dev/null", "/bin/sh", "-c", command}
 	if runtime.GOOS == "linux" {
 		args = []string{"-q", "-e", "-c", command, "/dev/null"}

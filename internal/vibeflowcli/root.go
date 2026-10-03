@@ -33,7 +33,6 @@ var (
 	flagProject     string
 	flagMCPToolName string
 	flagTmuxSocket  string
-	flagCRA         bool
 
 	buildVersion = "dev"
 	buildCommit  = "none"
@@ -54,13 +53,6 @@ var rootCmd = &cobra.Command{
 It provides a Bubble Tea TUI to launch, monitor, and manage multiple
 Claude Code agent sessions via tmux.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if cmd.Name() == "review-watch" && !flagCRA {
-			owned, _ := cmd.Flags().GetBool("owned-runner")
-			managed, _ := cmd.Flags().GetString("managed-runner")
-			if !owned && managed == "" {
-				return fmt.Errorf("PR reviews are preview-only; pass --cra to enable them")
-			}
-		}
 		if flagRootDir != "" {
 			SetRootDir(flagRootDir)
 		}
@@ -78,7 +70,11 @@ var versionCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolVar(&flagCRA, "cra", false, "Enable the PR review preview (Vera)")
+	// --cra gated Vera while PR reviews were a preview; Vera is now always on.
+	// Vera panes and managed runners started by older builds still pass it,
+	// so it stays accepted, hidden and ignored.
+	rootCmd.PersistentFlags().Bool("cra", false, "")
+	_ = rootCmd.PersistentFlags().MarkHidden("cra")
 	rootCmd.PersistentFlags().StringVar(&flagRootDir, "root", "", "Root directory for config, sessions, and logs (default: ~/.vibeflow-cli)")
 	rootCmd.PersistentFlags().StringVar(&flagConfigPath, "config", "", "Path to config file (default: <root>/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&flagMCPToolName, "mcp", "", "MCP server tool name used in the agent init prompt (default: vibeflow)")
@@ -191,7 +187,6 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Run TUI
 	model := NewModel(cfg, client, tmux, worktrees, store, cache, registry, projectID)
 	model.serverWarning = serverWarning
-	model.craEnabled = flagCRA
 
 	// Detect dead sessions from cache and show restart popup if any.
 	if sessions, err := tmux.ListSessions(); err == nil {

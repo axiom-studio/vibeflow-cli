@@ -24,39 +24,29 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// Removing the CRA-gated picker entry would make Vera unreachable from New Agent.
-func TestVeraAgentPickerFeatureGate(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		cfg := DefaultConfig()
-		m := Model{config: cfg, registry: NewProviderRegistry(cfg), craEnabled: enabled}
-		next, _ := m.Update(tea.KeyPressMsg{Text: "n"})
-		w := next.(Model).wizard
-		found := -1
-		for i, persona := range w.personas {
-			if persona.key == "code_reviewer" {
-				found = i
-			}
-		}
-		if (found >= 0) != enabled {
-			t.Fatalf("CRA=%v: Vera picker index=%d", enabled, found)
-		}
-		if !enabled {
-			continue
-		}
-		w.step = StepTeam
-		w.projects = []Project{{ID: 66, Name: "Selected"}}
-		w.selectedWorkDir = t.TempDir()
-		w.selectedSessionType = 1
-		w.selectedPersonas = map[int]bool{found: true}
-		updated, _ := w.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-		w = updated
-		if w.done || w.step != StepProvider {
-			t.Fatalf("solo Vera must continue to the Provider step: step=%v done=%v", w.step, w.done)
-		}
+// Vera is part of the normal binary: New Agent always offers her.
+func TestVeraAgentPickerAlwaysOffersVera(t *testing.T) {
+	cfg := DefaultConfig()
+	m := Model{config: cfg, registry: NewProviderRegistry(cfg)}
+	next, _ := m.Update(tea.KeyPressMsg{Text: "n"})
+	w := next.(Model).wizard
+	found := wizardPersonaIndex(w, "code_reviewer")
+	if found < 0 {
+		t.Fatal("New Agent does not offer Vera")
+	}
+	w.step = StepTeam
+	w.projects = []Project{{ID: 66, Name: "Selected"}}
+	w.selectedWorkDir = t.TempDir()
+	w.selectedSessionType = 1
+	w.selectedPersonas = map[int]bool{found: true}
+	updated, _ := w.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	w = updated
+	if w.done || w.step != StepProvider {
+		t.Fatalf("solo Vera must continue to the Provider step: step=%v done=%v", w.step, w.done)
 	}
 }
 
-// veraWizardFixture is a CRA wizard at the Team step with Vera alone selected.
+// veraWizardFixture is a New Agent wizard at the Team step with Vera alone selected.
 // Providers: claude and qwen run Vera, aider is installed but Vera cannot run
 // it, cursor is not installed.
 func veraWizardFixture(t *testing.T) (WizardModel, int) {
@@ -68,8 +58,7 @@ func veraWizardFixture(t *testing.T) (WizardModel, int) {
 		"qwen":   {Name: "Qwen", Binary: "sh"},
 	}}
 	w := NewWizardModel(NewProviderRegistry(cfg), ".", nil, nil, "", nil, cfg)
-	w.enableCRA()
-	vera := len(w.personas) - 1
+	vera := wizardPersonaIndex(w, "code_reviewer")
 	w.step, w.selectedSessionType = StepTeam, 1
 	w.projects, w.selectedProject = []Project{{ID: 66, Name: "Selected"}}, 0
 	w.selectedWorkDir = t.TempDir()
@@ -232,7 +221,7 @@ func veraTmuxModel(t *testing.T, cfg *Config) Model {
 	}
 	tm := NewTmuxManager(fmt.Sprintf("vftest-vera-%d-%d", os.Getpid(), time.Now().UnixNano()%1e9))
 	t.Cleanup(func() { _, _ = tm.run("kill-server") })
-	return Model{config: cfg, craEnabled: true, tmux: tm, registry: NewProviderRegistry(cfg), logger: NewLogger(), store: NewStore(), cache: NewSessionCache(), repoRootCache: map[string]string{}}
+	return Model{config: cfg, tmux: tm, registry: NewProviderRegistry(cfg), logger: NewLogger(), store: NewStore(), cache: NewSessionCache(), repoRootCache: map[string]string{}}
 }
 
 // paneCommand is the command tmux started a session's pane with.
@@ -316,7 +305,7 @@ func TestVeraWizardConfirmCreatesListenerSession(t *testing.T) {
 		t.Fatalf("stored Vera session\n got %+v\nwant %+v", meta, want)
 	}
 	root, _ := filepath.Abs(RootDir())
-	command := "exec " + shellJoin([]string{fake, "--cra", "--root", root, "--config", filepath.Join(root, "config.yaml"), "review-watch", "--project", "66", "--repo", repo, "--repository-link", "7", "--git-provider", "github", "--provider", "claude", "--name", veraRunnerName()})
+	command := "exec " + shellJoin([]string{fake, "--root", root, "--config", filepath.Join(root, "config.yaml"), "review-watch", "--project", "66", "--repo", repo, "--repository-link", "7", "--git-provider", "github", "--provider", "claude", "--name", veraRunnerName()})
 	started := paneCommand(t, m.tmux, meta.TmuxSession)
 	if started != command {
 		t.Fatalf("pane command\n got %q\nwant %q", started, command)
@@ -324,7 +313,7 @@ func TestVeraWizardConfirmCreatesListenerSession(t *testing.T) {
 	if strings.Contains(started, cfg.APIToken) {
 		t.Fatal("listener command carries the API token")
 	}
-	history := "exec " + shellJoin([]string{fake, "--cra", "--root", root, "--config", filepath.Join(root, "config.yaml"), "review-watch", "--history", "--project", "66", "--repo", repo, "--repository-link", "7", "--git-provider", "github", "--provider", "claude", "--name", veraRunnerName()})
+	history := "exec " + shellJoin([]string{fake, "--root", root, "--config", filepath.Join(root, "config.yaml"), "review-watch", "--history", "--project", "66", "--repo", repo, "--repository-link", "7", "--git-provider", "github", "--provider", "claude", "--name", veraRunnerName()})
 	assertVeraPanes(t, m.tmux, meta.TmuxSession, command, history)
 	if _, err := os.Stat(filepath.Join(repo, ".vibeflow-session-code_reviewer")); !os.IsNotExist(err) {
 		t.Fatal("Vera wrote coding-agent session state")
@@ -534,13 +523,18 @@ func TestVeraSessionDeleteStopsListener(t *testing.T) {
 	}
 }
 
-// Vera is not a coding agent: without --cra it cannot launch at all.
+// Vera is not a coding agent: the wizard routes her to the Vera launch, and
+// the coding-session path refuses her outright.
 func TestVeraSoloLaunchNeverStartsCodingLoop(t *testing.T) {
 	cfg := DefaultConfig()
-	m := Model{config: cfg, craEnabled: false}
+	m := Model{config: cfg}
 	msg := m.launchFromWizard(WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}})
-	if failure, ok := msg.(sessionsMsg); !ok || failure.err == nil || !strings.Contains(failure.err.Error(), "--cra") {
-		t.Fatalf("CRA off must explicitly deny review launch, got %#v", msg)
+	if _, ok := msg.(veraLaunchRequestedMsg); !ok {
+		t.Fatalf("Vera must take the Vera launch path, got %#v", msg)
+	}
+	msg = m.executeLaunch(WizardResult{SessionType: "vibeflow", Persona: "code_reviewer"})
+	if failure, ok := msg.(sessionsMsg); !ok || failure.err == nil || !strings.Contains(failure.err.Error(), "not a coding agent") {
+		t.Fatalf("coding launch must refuse Vera, got %#v", msg)
 	}
 }
 
@@ -614,7 +608,7 @@ func TestVeraTeamLaunchStartsVeraAndCodingSessions(t *testing.T) {
 // A harness Vera cannot run is refused before any server call.
 func TestVeraUnsupportedHarnessIsRefused(t *testing.T) {
 	cfg, repo, registrations, _, _ := newVeraFixture(t)
-	m := Model{config: cfg, craEnabled: true}
+	m := Model{config: cfg}
 	next, cmd := m.beginVeraLaunch(WizardResult{ProjectID: 66, WorkDir: repo, Persona: "code_reviewer", ProviderKey: "aider"})
 	if next.(Model).err == nil || cmd != nil || registrations.Load() != 0 {
 		t.Fatal("unsupported harness was not refused")

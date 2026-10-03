@@ -144,7 +144,6 @@ type Model struct {
 	cache            *SessionCache      // session cache for restart-without-intervention
 	restartSelect    RestartSelectModel // dead-session restart multiselect
 
-	craEnabled      bool
 	veraPrompt      *veraPrompt
 	veraPending     *WizardResult
 	veraProjectName string
@@ -1081,9 +1080,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				repoRoot = m.worktrees.RepoRoot()
 			}
 			m.wizard = NewWizardModel(m.registry, repoRoot, m.worktrees, m.client, m.config.DefaultProject, m.config.DirectoryHistory, m.config)
-			if m.craEnabled {
-				m.wizard.enableCRA()
-			}
 			m.activeView = ViewWizard
 			return m, nil
 		case "d":
@@ -1150,7 +1146,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				repoRoot = m.worktrees.RepoRoot()
 			}
 			m.groupEditRunning = group
-			m.wizard = NewGroupEditWizard(group, anchor, m.registry, repoRoot, m.worktrees, m.config, m.craEnabled)
+			m.wizard = NewGroupEditWizard(group, anchor, m.registry, repoRoot, m.worktrees, m.config)
 			m.activeView = ViewWizard
 			return m, nil
 		case "r":
@@ -1490,9 +1486,10 @@ func (m Model) applyGroupEdit(running []SessionMeta, result WizardResult) tea.Ms
 	toAdd, toRemove := diffGroupPersonas(runningKeys, result.Personas)
 
 	// Only personas the wizard offered can have been unticked; a hidden one
-	// (Vera without --cra) is absent from result.Personas but must keep running.
+	// (a persona this build does not list) is absent from result.Personas but
+	// must keep running.
 	offered := make(map[string]bool)
-	for _, p := range groupEditPersonas(m.craEnabled) {
+	for _, p := range agentPickerPersonas() {
 		offered[p.key] = true
 	}
 	for _, persona := range toRemove {
@@ -1521,9 +1518,6 @@ func (m Model) launchFromWizard(result WizardResult) tea.Msg {
 	}
 	for _, persona := range personas {
 		if persona == "code_reviewer" {
-			if !m.craEnabled {
-				return sessionsMsg{err: fmt.Errorf("Vera requires --cra; use review-watch for PR reviews")}
-			}
 			return veraLaunchRequestedMsg{result: result}
 		}
 	}
@@ -1729,7 +1723,7 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 // executeLaunch performs the actual session creation after conflict resolution.
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	if result.Persona == "code_reviewer" {
-		return sessionsMsg{err: fmt.Errorf("Vera is a PR review runner, not a coding agent; start it through New Agent with --cra")}
+		return sessionsMsg{err: fmt.Errorf("Vera is a PR review runner, not a coding agent; start it through New Agent")}
 	}
 	// How the harness reaches its model. The gateway only applies to
 	// VibeFlow sessions, as before.

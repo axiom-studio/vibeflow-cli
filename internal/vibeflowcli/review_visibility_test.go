@@ -46,7 +46,7 @@ func TestReviewListCommandWithoutOrdinarySessions(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "--cra", "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list", "--project", "13")
+	cmd := exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list", "--project", "13")
 	out, err := cmd.CombinedOutput()
 	if err != nil || reads.Load() != 1 || !strings.Contains(string(out), reviewSessionLabel) || !strings.Contains(string(out), "acme/repo#57") || !strings.Contains(string(out), "--reviews-after review-visible") {
 		t.Fatalf("managed review invisible: %v reads=%d\n%s", err, reads.Load(), out)
@@ -55,15 +55,15 @@ func TestReviewListCommandWithoutOrdinarySessions(t *testing.T) {
 	if err := SaveConfig(cfg, path); err != nil {
 		t.Fatal(err)
 	}
-	cmd = exec.CommandContext(ctx, binary, "--cra", "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
+	cmd = exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
 	out, err = cmd.CombinedOutput()
 	if err != nil || reads.Load() != 2 || !strings.Contains(string(out), reviewSessionLabel) {
 		t.Fatalf("configured project ignored: %v reads=%d\n%s", err, reads.Load(), out)
 	}
-	cmd = exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list", "--project", "13", "--reviews-after", "review-visible")
+	cmd = exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list", "--project", "13")
 	out, err = cmd.CombinedOutput()
-	if err != nil || reads.Load() != 2 || strings.Contains(string(out), reviewSessionLabel) {
-		t.Fatalf("default list accessed CRA: %v reads=%d %s", err, reads.Load(), out)
+	if err != nil || reads.Load() != 3 || !strings.Contains(string(out), reviewSessionLabel) {
+		t.Fatalf("review history page not listed: %v reads=%d %s", err, reads.Load(), out)
 	}
 
 }
@@ -79,6 +79,10 @@ func TestReviewRegistrationRequiresExactScopeEcho(t *testing.T) {
 			SetRootDir(t.TempDir())
 			var requests atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/pr-review-repositories") {
+					w.Write([]byte(`{"repositories":[]}`)) // Capability probe.
+					return
+				}
 				requests.Add(1)
 				var in map[string]any
 				json.NewDecoder(r.Body).Decode(&in)
@@ -168,7 +172,7 @@ func TestReviewListCommandSurvivesReviewAPIFailure(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, binary, "--cra", "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
+			cmd := exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "--tmux-socket", fmt.Sprintf("review-list-%d", time.Now().UnixNano()), "list")
 			var stdout, stderr strings.Builder
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			err := cmd.Run()
