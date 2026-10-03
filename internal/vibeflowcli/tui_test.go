@@ -351,3 +351,16 @@ func TestRenderDetailPanel_GatewayDisabled_NoEnvSection(t *testing.T) {
 		t.Errorf("detail panel must not show gateway env vars when gateway is disabled:\n%s", out)
 	}
 }
+
+// A pane that exits early leaves its last words at the top and tmux's dead
+// banner at the bottom row, with blank rows between. The preview must show
+// the words, such as why Vera stopped, not only blank rows and the banner.
+func TestRenderDetailPanel_PreviewSkipsBlankRowsBeforeDeadBanner(t *testing.T) {
+	m := detailPanelModel(SessionRow{Name: "s1", Provider: "codex", Persona: "code_reviewer"}, DefaultConfig())
+	m.captureName = "s1"
+	m.captureOutput = "Listening for @vibeflow review requests\nError: codex is not logged in; run codex login" + strings.Repeat("\n", 15) + "Pane is dead (status 1) | Press Enter to resume"
+	out := ansiRe.ReplaceAllString(m.renderDetailPanel(63, 20), "") // A 100x30 terminal.
+	if !strings.Contains(out, "codex is not logged in") || !strings.Contains(out, "Pane is dead") {
+		t.Fatalf("preview hides why the pane exited:\n%s", out)
+	}
+}
