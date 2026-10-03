@@ -187,8 +187,8 @@ func newVeraFixture(t *testing.T) (cfg *Config, repo string, registrations, poll
 			body["user_id"] = 42
 			registrations.Add(1)
 			_ = json.NewEncoder(w).Encode(body)
-		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-summaries"): // Vera's history pane.
-			fmt.Fprint(w, `{"summaries":[]}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-sessions"): // Vera's history pane.
+			fmt.Fprint(w, `{"sessions":[]}`)
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			w.WriteHeader(204)
 		case strings.HasSuffix(r.URL.Path, "/work"):

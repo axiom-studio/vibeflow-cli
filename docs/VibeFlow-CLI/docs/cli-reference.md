@@ -37,6 +37,7 @@ Each Vera session serves one project, repository link and checkout; start one pe
 The session's window has two panes.
 The left pane (about 70% of the width, focused on attach) runs `vibeflow --root <root> --config <config> review-watch --project <id> --repo <checkout> --repository-link <id> --git-provider <provider> --provider <harness> --name <runner name>` in the foreground, adding `--model` only when one was chosen.
 The right pane (about 30%) runs the same command with the hidden `--history` flag: a read-only, scrollable list of the PRs reviewed on this repository link, newest first.
+It asks the server for that repository link's reviews directly, so other repositories in the project never crowd it out, and lists up to the 50 most recent.
 Each entry shows the PR number and title, then the outcome (Clean, Changes requested or Needs human review), round, findings, short head commit and time of the latest attempt; the PR under review now is marked with `▶`.
 The list refreshes every 10 seconds; use the arrow keys, PgUp/PgDn, Home/End, the mouse wheel or a click to move, and Enter (or a click on the selected row) to open the review.
 The same browse keys work from the idle listener pane, which no longer echoes typed keys; Ctrl-C there still stops Vera.

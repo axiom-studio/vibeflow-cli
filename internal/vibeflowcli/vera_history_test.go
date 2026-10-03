@@ -1,8 +1,13 @@
 package vibeflowcli
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,5 +157,57 @@ func TestReviewHistoryErrorIsOneStatusLine(t *testing.T) {
 	empty := historyModel(t, 60, 12, nil, "")
 	if view := ansi.Strip(empty.render()); !strings.Contains(view, "No reviews yet") {
 		t.Fatalf("empty history:\n%s", view)
+	}
+}
+
+// Review summaries list in job-ID order, which is random, so a project with
+// more than a few pages of reviews used to hide this repository's reviews.
+// The list comes from the server's repository filter on review attempts, and
+// an unchanged review is not re-read on refresh.
+func TestReviewHistoryUsesServerRepositoryFilter(t *testing.T) {
+	withTempRoot(t)
+	ours := historySummary("zz-ours", 9, 7, "github", "clean", 1, 2, 5000)
+	ours.Review.ProjectID, ours.Progress = 13, nil
+	ours.ReviewSessions[0].ProjectID, ours.ReviewSessions[0].JobID, ours.ReviewSessions[0].SessionID = 13, "zz-ours", "s-ours"
+	var listCalls, summaryReads atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/v1/vibeflow/projects/13/pr-review-summaries":
+			// 200 other reviews, ours never among the first pages.
+			listCalls.Add(1)
+			after, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Query().Get("after_id"), "j"))
+			var page []reviewSummary
+			for i := after + 1; i <= after+25; i++ {
+				s := historySummary(fmt.Sprintf("j%03d", i), int64(i), 8, "github", "clean", 1, 0, 1000)
+				s.Review.ProjectID, s.ReviewSessions, s.Progress = 13, nil, nil
+				page = append(page, s)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"summaries": page, "next_after_id": fmt.Sprintf("j%03d", after+25)})
+		case "/rest/v1/vibeflow/projects/13/pr-review-sessions":
+			q := r.URL.Query()
+			if q.Get("provider") != "github" || q.Get("repository_link_id") != "7" {
+				t.Errorf("history did not ask the server to filter by repository: %v", q)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"sessions": []map[string]any{
+				{"session_id": "s-ours", "project_id": 13, "job_id": "zz-ours", "provider": "github", "repository_link_id": 7, "pr_number": 9, "state": "completed", "completed_at": 5000},
+			}})
+		case "/rest/v1/vibeflow/projects/13/pr-review-summaries/zz-ours":
+			summaryReads.Add(1)
+			json.NewEncoder(w).Encode(ours)
+		default:
+			t.Errorf("unexpected %s", r.URL)
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+	loader := newReviewHistoryLoader(NewClient(server.URL, "token"), server.URL, reviewWatchOptions{ProjectID: 13, RepositoryLinkID: 7, GitProvider: "github"})
+	for i := 0; i < 2; i++ {
+		msg := loader.load().(reviewHistoryMsg)
+		if msg.err != nil || len(msg.rows) != 1 || msg.rows[0].Review.ID != "zz-ours" {
+			t.Fatalf("load %d: this repository's review missing: %+v", i, msg)
+		}
+	}
+	if summaryReads.Load() != 1 {
+		t.Fatalf("unchanged review re-read: %d summary reads", summaryReads.Load())
 	}
 }

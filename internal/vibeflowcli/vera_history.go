@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -20,7 +21,8 @@ import (
 const (
 	veraHistoryWidth   = "30%"
 	veraHistoryRefresh = 10 * time.Second
-	veraHistoryPages   = 4 // ponytail: newest 100 project reviews; page further if one repository's history needs it.
+	veraHistoryPages   = 4  // Up to 400 of the repository's newest review attempts...
+	veraHistoryReviews = 50 // ...naming at most this many reviews.
 )
 
 type reviewHistoryMsg struct {
@@ -80,28 +82,84 @@ func reviewHistoryTime(s reviewSummary) int64 {
 	return t
 }
 
-// loadReviewHistory reads this binding's reviews and the job its listener is
-// reviewing now.
-func loadReviewHistory(client *Client, serverURL string, o reviewWatchOptions) tea.Msg {
+// reviewHistoryLoader reads this binding's reviews and the job its listener
+// is reviewing now. The project's summary list is in job-ID order, not by
+// time, so the reviews are found through the server's repository filter on
+// review attempts, newest first, and each summary is read on its own. A
+// summary is re-read only when its review has a new or active attempt.
+type reviewHistoryLoader struct {
+	client    *Client
+	serverURL string
+	o         reviewWatchOptions
+	mu        sync.Mutex
+	cache     map[string]reviewHistoryEntry
+}
+
+type reviewHistoryEntry struct {
+	attempt string // The review's newest attempt as last read.
+	summary reviewSummary
+}
+
+func newReviewHistoryLoader(client *Client, serverURL string, o reviewWatchOptions) *reviewHistoryLoader {
+	return &reviewHistoryLoader{client: client, serverURL: serverURL, o: o, cache: map[string]reviewHistoryEntry{}}
+}
+
+func (l *reviewHistoryLoader) load() tea.Msg {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	var all []reviewSummary
+	o := l.o
+	var jobs []string
+	attempts := map[string]string{} // Job -> its newest attempt.
+	active := map[string]bool{}
 	after := ""
-	for page := 0; page < veraHistoryPages; page++ {
-		p, err := client.listReviewSummaries(ctx, o.ProjectID, after)
+	for page := 0; page < veraHistoryPages && len(jobs) < veraHistoryReviews; page++ {
+		p, err := l.client.listRepositoryReviewSessions(ctx, o.ProjectID, o.GitProvider, o.RepositoryLinkID, after)
 		if err != nil {
 			return reviewHistoryMsg{err: err, at: time.Now()}
 		}
-		all = append(all, p.Summaries...)
+		for _, s := range p.Sessions {
+			// A server without the filter lists every repository.
+			if s.Provider != o.GitProvider || s.RepositoryLinkID != o.RepositoryLinkID || !reviewPublicID(s.JobID) {
+				continue
+			}
+			if _, seen := attempts[s.JobID]; !seen {
+				attempts[s.JobID] = fmt.Sprint(s.SessionID, s.State, s.CompletedAt)
+				active[s.JobID] = s.Active
+				jobs = append(jobs, s.JobID)
+			}
+		}
 		if after = p.NextAfterID; after == "" {
 			break
 		}
 	}
+	jobs = jobs[:min(len(jobs), veraHistoryReviews)]
+	var rows []reviewSummary
+	keep := map[string]bool{}
+	for _, job := range jobs {
+		keep[job] = true
+		e, ok := l.cache[job]
+		if !ok || e.attempt != attempts[job] || active[job] { // A running review's progress moves.
+			s, err := l.client.getReviewSummary(ctx, o.ProjectID, job)
+			if err != nil {
+				return reviewHistoryMsg{err: err, at: time.Now()}
+			}
+			e = reviewHistoryEntry{attempt: attempts[job], summary: s}
+			l.cache[job] = e // Kept even if a later read fails, so retries progress.
+		}
+		rows = append(rows, e.summary)
+	}
+	for job := range l.cache {
+		if !keep[job] {
+			delete(l.cache, job)
+		}
+	}
 	current := ""
-	if p := veraPendingReceipt(serverURL, o); p != nil {
+	if p := veraPendingReceipt(l.serverURL, o); p != nil {
 		current = p.JobID
 	}
-	return reviewHistoryMsg{rows: reviewHistoryRows(all, o.RepositoryLinkID, o.GitProvider), current: current, at: time.Now()}
+	return reviewHistoryMsg{rows: reviewHistoryRows(rows, o.RepositoryLinkID, o.GitProvider), current: current, at: time.Now()}
 }
 
 func (h reviewHistory) Init() tea.Cmd { return h.load }
@@ -298,7 +356,7 @@ func reviewHistoryMeta(s reviewSummary) string {
 // runReviewHistory runs the history list in the terminal until interrupted.
 func runReviewHistory(ctx context.Context, cfg *Config, o reviewWatchOptions) error {
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
-	model := newReviewHistory(filepath.Base(o.Repository), func() tea.Msg { return loadReviewHistory(client, cfg.ServerURL, o) })
+	model := newReviewHistory(filepath.Base(o.Repository), newReviewHistoryLoader(client, cfg.ServerURL, o).load)
 	model.popup = func(job string) error {
 		args := veraDetailArgs(os.Args, job)
 		bin, err := cliExecutable()
