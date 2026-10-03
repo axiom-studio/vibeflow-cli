@@ -329,7 +329,18 @@ func (h reviewHistory) render() string {
 	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
-	return strings.Join(append(lines[:height-1], dim.Render(fit("↑↓ browse · Enter: open review · click works"))), "\n")
+	return strings.Join(append(lines[:height-1], dim.Render(fit(veraHistoryHint(width)))), "\n")
+}
+
+// veraHistoryHint is the longest key hint that fits the pane: about 30% of
+// the window is often under 40 columns.
+func veraHistoryHint(width int) string {
+	for _, hint := range []string{"↑↓ browse · Enter: open review · click works", "↑↓ browse · Enter: open review", "↑↓ · Enter: open"} {
+		if ansi.StringWidth(hint) <= width {
+			return hint
+		}
+	}
+	return "Enter: open"
 }
 
 // reviewHistoryMeta is a review's outcome line: state, round, findings,
