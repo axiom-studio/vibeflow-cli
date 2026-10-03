@@ -130,3 +130,20 @@ func TestReviewWatchNeedsNoCRAFlagAndAcceptsLegacyCRA(t *testing.T) {
 		t.Fatalf("help must not list --cra: %v\n%s", err, out)
 	}
 }
+
+// A failing command prints its error once, without the usage text; a usage
+// mistake still shows the usage.
+func TestCommandFailurePrintsErrorOnceWithoutUsage(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	binary := builtVibeflow(t)
+	out, _ := exec.Command(binary, "--root", t.TempDir(), "--tmux-socket", "vftest-noserver-"+filepath.Base(t.TempDir()), "kill", "missing").CombinedOutput()
+	if strings.Count(string(out), "Error:") != 1 || strings.Contains(string(out), "Usage:") {
+		t.Fatalf("runtime failure output:\n%s", out)
+	}
+	out, _ = exec.Command(binary, "--root", t.TempDir(), "kill").CombinedOutput()
+	if strings.Count(string(out), "Error:") != 1 || !strings.Contains(string(out), "Usage:") {
+		t.Fatalf("usage mistake output:\n%s", out)
+	}
+}

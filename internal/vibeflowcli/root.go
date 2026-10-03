@@ -70,7 +70,12 @@ var rootCmd = &cobra.Command{
 	Long: `vibeflow-cli is a terminal-based session manager for VibeFlow.
 It provides a Bubble Tea TUI to launch, monitor, and manage multiple
 Claude Code agent sessions via tmux.`,
+	// main prints the returned error once.
+	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Flags and arguments parsed; a failure from here on is not a usage
+		// mistake, so it shows no usage text.
+		cmd.SilenceUsage = true
 		if flagRootDir != "" {
 			SetRootDir(flagRootDir)
 		}
