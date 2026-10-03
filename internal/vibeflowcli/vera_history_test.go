@@ -211,3 +211,16 @@ func TestReviewHistoryUsesServerRepositoryFilter(t *testing.T) {
 		t.Fatalf("unchanged review re-read: %d summary reads", summaryReads.Load())
 	}
 }
+
+// The history pane is about 30% of the window: 29 to 36 columns in a 100 to
+// 120 column terminal. Its key hint must be readable there, not cut off.
+func TestReviewHistoryFooterFitsPane(t *testing.T) {
+	for _, width := range []int{18, 29, 36, 60} {
+		h := historyModel(t, width, 10, nil, "")
+		lines := strings.Split(ansi.Strip(h.render()), "\n")
+		footer := strings.TrimSpace(lines[len(lines)-1])
+		if strings.Contains(footer, "…") || !strings.Contains(footer, "Enter") {
+			t.Errorf("width %d: footer %q is cut off", width, footer)
+		}
+	}
+}
