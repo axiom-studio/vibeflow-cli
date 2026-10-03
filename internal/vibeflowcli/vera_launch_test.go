@@ -689,3 +689,21 @@ func TestVeraLaunchRefusesRemovedBinary(t *testing.T) {
 		}
 	}
 }
+
+// A 100-column terminal leaves the session list about 31 columns, too few
+// for "Vera · Code Reviewer · <repository>"; the repository must still show.
+func TestVeraRowShowsRepositoryWhenNarrow(t *testing.T) {
+	s := SessionRow{Name: "session-1", Persona: "code_reviewer", WorkingDir: "/src/billing-api", Provider: "claude", Status: "listening"}
+	m := Model{}
+	for _, tc := range []struct {
+		width  int
+		indent string
+		want   string
+	}{{31, "", "Vera · billing-api"}, {31, "  ", "Vera · billing-api"}, {80, "", "Vera · Code Reviewer · billing-api"}} {
+		var b strings.Builder
+		m.renderSessionRow(&b, s, 1, 0, tc.width, tc.indent)
+		if line := ansi.Strip(strings.Split(b.String(), "\n")[0]); !strings.Contains(line, tc.want) {
+			t.Errorf("width %d indent %q: row %q lacks %q", tc.width, tc.indent, line, tc.want)
+		}
+	}
+}

@@ -2522,6 +2522,9 @@ func (m Model) renderSessionRow(b *strings.Builder, s SessionRow, pos, cursor, w
 	vera := s.Persona == "code_reviewer"
 	if vera { // The raw session ID stays in the detail panel.
 		displayName = reviewSessionLabel + " · " + filepath.Base(s.WorkingDir)
+		if ansi.StringWidth(displayName) > nameMax { // The repository matters more than the role.
+			displayName = "Vera · " + filepath.Base(s.WorkingDir)
+		}
 	}
 	name := truncate(displayName, nameMax)
 	line := fmt.Sprintf("%s %s%s%s", indStyle.Render(indicator), name, recoveredBadge, healthBadge)

@@ -32,6 +32,7 @@ Codex works with a ChatGPT subscription login as well as an API key.
 The chosen checkout must match a repository linked to that project; only when links are ambiguous or the checkout does not match does a small popup ask for that choice.
 With the LLM gateway enabled, that popup also asks for a model, because gateway reviews require one.
 Confirm creates an ordinary tmux session for Vera, listed with the other sessions as **Vera · Code Reviewer · <repository>** with its project and state (`listening`, `reviewing PR #N` or `stopped`).
+When the list is too narrow for that, as in a 100-column terminal, the row reads **Vera · <repository>**.
 The raw session name stays in the detail panel.
 Each Vera session serves one project, repository link and checkout; start one per repository.
 The session's window has two panes.

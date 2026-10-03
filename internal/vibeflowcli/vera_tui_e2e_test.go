@@ -333,8 +333,9 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	terminal.send(t, "\r")
 
 	// 4. Vera is an ordinary session in the list, listening, named for its
-	// repository; past PR reviews live in its history pane, not the list.
-	visible = awaitScreen("◆ ● Vera · Code Reviewer", "listening")
+	// repository (the role text gives way to it in a 100-column terminal);
+	// past PR reviews live in its history pane, not the list.
+	visible = awaitScreen("◆ ● Vera · "+filepath.Base(repo), "listening")
 	t.Logf("session list with Vera:\n%s", visible)
 	time.Sleep(300 * time.Millisecond) // A review read would have landed by now.
 	if visible := screen(); strings.Contains(visible, "PR #") || strings.Contains(visible, "late payment") || strings.Contains(visible, "Other repository") {
@@ -434,7 +435,7 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	// 6. A new TUI lists the session; d deletes it, which deregisters and stops
 	// the listener.
 	terminal = startReviewTUITerminal(t, binary, launchRepo, root, binDir)
-	awaitScreen("◆ ● Vera · Code Reviewer", "listening")
+	awaitScreen("◆ ● Vera · "+filepath.Base(repo), "listening")
 	terminal.send(t, "d")
 	awaitScreen("y/n")
 	terminal.send(t, "y")
