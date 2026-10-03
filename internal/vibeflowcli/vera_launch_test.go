@@ -461,6 +461,9 @@ func TestVeraSecondSelectionReusesLiveSession(t *testing.T) {
 	_, msg = launchVera(t, m, veraResult(repo, "codex"))
 	if launched, ok := msg.(veraLaunchedMsg); !ok || launched.err == nil || !strings.Contains(launched.err.Error(), "already listening") || !strings.Contains(launched.err.Error(), "claude") {
 		t.Fatalf("harness change was not reported: %#v", msg)
+	} else if text := launched.err.Error(); len("Error: "+text) > 120 || !strings.Contains(text, "delete") {
+		// The TUI cuts its error line at 120 characters; the fix must fit.
+		t.Fatalf("harness change message too long for the error line (%d): %s", len(text), text)
 	}
 	sessions, _ := m.tmux.ListSessions()
 	if len(sessions) != 1 || len(storedVera(t)) != 1 {
