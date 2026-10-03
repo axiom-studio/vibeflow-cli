@@ -28,10 +28,6 @@ type veraBinding struct {
 	RunnerName       string `json:"runner_name"`
 }
 
-// veraExecutable is the CLI a Vera session's listener runs; tests substitute a
-// freshly built binary for the test executable.
-var veraExecutable = os.Executable
-
 type veraLaunchRequestedMsg struct{ result WizardResult }
 
 // veraLaunchedMsg reports a Vera session launch. existing names the live Vera
@@ -62,7 +58,7 @@ func veraListenerCommand(meta SessionMeta) (string, error) { return veraCommand(
 func veraHistoryCommand(meta SessionMeta) (string, error) { return veraCommand(meta, true) }
 
 func veraCommand(meta SessionMeta, history bool) (string, error) {
-	bin, err := veraExecutable()
+	bin, err := cliExecutable()
 	if err != nil {
 		return "", err
 	}

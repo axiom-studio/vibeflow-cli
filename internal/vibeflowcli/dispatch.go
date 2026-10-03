@@ -35,7 +35,7 @@ func dispatchCmd() *cobra.Command {
 }
 
 func StartCloudDispatchProcess(cfgPath, sessionName string) error {
-	exe, err := os.Executable()
+	exe, err := cliExecutable()
 	if err != nil {
 		return err
 	}

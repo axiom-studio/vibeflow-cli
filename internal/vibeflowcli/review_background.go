@@ -265,9 +265,9 @@ func launchReviewBackground(ctx context.Context, dir string, binding *reviewBack
 	if err := saveReviewJSON(filepath.Join(dir, "background-status.json"), &reviewBackgroundStatus{Phase: "starting"}); err != nil {
 		return fmt.Errorf("could not save managed runner status")
 	}
-	exe, err := os.Executable()
+	exe, err := cliExecutable()
 	if err != nil {
-		return fmt.Errorf("could not locate review runner executable")
+		return err
 	}
 	cmd := exec.Command(exe, "--root", binding.Root, "--config", binding.ConfigPath, "review-watch", "--managed-runner", filepath.Base(dir))
 	cmd.Dir = binding.Root
