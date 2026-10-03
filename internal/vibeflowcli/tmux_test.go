@@ -17,11 +17,13 @@
 package vibeflowcli
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 )
 
@@ -1288,5 +1290,35 @@ func TestHasSession_ExactName(t *testing.T) {
 	}
 	if !tm.HasSession(tm.FullSessionName("claude", "feat-2")) {
 		t.Error("HasSession missed the exact session")
+	}
+}
+
+// The session list preview shows the agent's pane even when another pane of
+// its window has focus, such as Vera's history list or a user's split shell.
+func TestCapturePaneOutputShowsAgentPaneNotFocusedPane(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	withTempRoot(t)
+	tm := NewTmuxManager(fmt.Sprintf("vftest-capture-%d", os.Getpid()))
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	dir := t.TempDir()
+	if err := tm.CreateSessionWithOpts(SessionOpts{Name: "cap", Provider: "claude", WorkDir: dir, Command: "echo AGENT-PANE; exec sleep 60"}); err != nil {
+		t.Fatal(err)
+	}
+	full := tm.FullSessionName("claude", "cap")
+	if _, err := tm.run("split-window", "-h", "-t", full, "-c", dir, "echo OTHER-PANE; exec sleep 60"); err != nil {
+		t.Fatal(err) // Without -d the new pane takes focus.
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := tm.CapturePaneOutput(full, 20)
+		if err == nil && strings.Contains(out, "AGENT-PANE") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("preview shows the focused pane instead of the agent's: %q %v", out, err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

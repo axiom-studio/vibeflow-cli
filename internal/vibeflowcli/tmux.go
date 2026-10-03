@@ -577,12 +577,17 @@ func (tm *TmuxManager) ResumeConversationID(meta SessionMeta) string {
 	return conversationIDFromExitHint(meta.Provider, output)
 }
 
-// CapturePaneOutput returns the last N lines of output from a tmux session's pane.
-// name can be a short name or a full tmux session name (prefix is added if needed).
+// CapturePaneOutput returns the last N lines of output from a tmux session's
+// agent pane, whichever pane of its window has focus. name can be a short
+// name, a full tmux session name (prefix is added if needed) or a pane ID.
 func (tm *TmuxManager) CapturePaneOutput(name string, lines int) (string, error) {
 	fullName := tm.ensurePrefix(name)
+	target := fullName
+	if pane, err := tm.agentPaneID(fullName); err == nil {
+		target = pane
+	}
 	startLine := fmt.Sprintf("-%d", lines)
-	out, err := tm.run("capture-pane", "-p", "-t", fullName, "-S", startLine)
+	out, err := tm.run("capture-pane", "-p", "-t", target, "-S", startLine)
 	if err != nil {
 		return "", fmt.Errorf("capture-pane %q: %w", fullName, err)
 	}
