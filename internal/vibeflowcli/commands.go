@@ -113,6 +113,32 @@ func launchCmd() *cobra.Command {
 			if provider == "" {
 				provider = "claude"
 			}
+			// HelloSeal has no backend other than its own API: without
+			// --routing the launch is an endpoint launch at the HelloSeal URL
+			// (--base-url, else HELLOSEAL_BASE_URL, else the URL the wizard
+			// remembered) under the HelloSeal key slot. Any other mode goes
+			// through validateRoutingFlags and is rejected like every other
+			// unsupported matrix cell; --llm-gateway is made explicit so it
+			// is rejected too instead of silently running direct.
+			if providerIsEndpointOnly(provider) {
+				if routingFlag == "" {
+					routingFlag = RoutingEndpoint
+					if llmGateway {
+						routingFlag = RoutingGateway
+					}
+				}
+				if routingFlag == RoutingEndpoint {
+					if baseURL == "" {
+						baseURL = ResolveHelloSealBaseURL(cfg)
+					}
+					if baseURL == "" {
+						return fmt.Errorf("provider %q needs its API base URL: pass --base-url or set %s", provider, helloSealBaseURLEnv)
+					}
+					if vendor == "" {
+						vendor = helloSealVendor
+					}
+				}
+			}
 			if err := validateRoutingFlags(provider, routingFlag, llmGateway, baseURL, vendor, model); err != nil {
 				return err
 			}
@@ -354,7 +380,7 @@ func launchCmd() *cobra.Command {
 				sessionEnv := cloneStringMap(baseEnv)
 				// qwen-binary providers read the model from OPENAI_MODEL; seed it
 				// from --model / --models so AppendQwenAPIFlags emits --model.
-				if provider == "qwen" && sessionModel != "" {
+				if usesQwenHarness(provider) && sessionModel != "" {
 					if sessionEnv == nil {
 						sessionEnv = make(map[string]string)
 					}
@@ -541,6 +567,11 @@ func validateRoutingFlags(provider, routing string, llmGateway bool, baseURL, ve
 		if baseURL != "" || vendor != "" {
 			return fmt.Errorf("--base-url and --vendor are only valid with --routing endpoint")
 		}
+		// A provider that is itself the endpoint has nothing to connect to
+		// directly; without --routing its launch already defaults to endpoint.
+		if routing == RoutingDirect && providerIsEndpointOnly(provider) {
+			return fmt.Errorf("provider %q is itself the model endpoint and cannot connect directly; use --routing endpoint", provider)
+		}
 		if routing == RoutingGateway && !providerSupportsGateway(provider) {
 			return fmt.Errorf("provider %q cannot route through the Axiom Studio AI Gateway", provider)
 		}
@@ -660,6 +691,11 @@ func modelsCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
 			if len(args) == 1 {
+				// An endpoint-only provider has no curated catalog; its
+				// endpoint is the only source of truth, so list it live.
+				if providerIsEndpointOnly(args[0]) {
+					return printLiveProviderModels(out, args[0])
+				}
 				// An explicit request for a provider without a catalog should
 				// say so rather than print nothing.
 				return printProviderModels(out, args[0])
@@ -688,6 +724,34 @@ func printProviderModels(out io.Writer, provider string) error {
 		return fmt.Errorf("no curated model list for provider %q", provider)
 	}
 	fmt.Fprintf(out, "%s:\n", provider)
+	printModelOptions(out, options)
+	return nil
+}
+
+// printLiveProviderModels prints the models an endpoint-only provider
+// (HelloSeal) serves right now, in the same shape as a curated catalog. The
+// base URL and key resolve the way a launch resolves them; a missing URL,
+// an unreachable endpoint or a rejected key is reported, never papered over.
+func printLiveProviderModels(out io.Writer, provider string) error {
+	cfg, err := LoadConfig(ConfigPath())
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	baseURL := ResolveHelloSealBaseURL(cfg)
+	if baseURL == "" {
+		return fmt.Errorf("%s base URL is not set: export %s or pick %s once in the session wizard", helloSealVendor, helloSealBaseURLEnv, helloSealVendor)
+	}
+	options, err := FetchOpenAICompatModels(context.Background(), helloSealVendor, baseURL, ResolveOpenAICompatKey(cfg, helloSealVendor))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "%s (live from %s):\n", provider, displayEndpointURL(baseURL))
+	printModelOptions(out, options)
+	return nil
+}
+
+// printModelOptions prints one catalog entry per line, id then description.
+func printModelOptions(out io.Writer, options []ModelOption) {
 	for _, option := range options {
 		if option.Description != "" {
 			fmt.Fprintf(out, "  %-20s %s\n", option.ID, option.Description)
@@ -695,7 +759,6 @@ func printProviderModels(out io.Writer, provider string) error {
 			fmt.Fprintf(out, "  %s\n", option.ID)
 		}
 	}
-	return nil
 }
 
 func listCmd() *cobra.Command {
@@ -1017,7 +1080,7 @@ func restartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	command = AppendCodexGatewayProviderFlags(command, provider, sessionEnv)
 	// Restore the stored model for qwen-binary providers so the restarted
 	// session runs the same model it was launched with.
-	if provider == "qwen" && meta.Model != "" {
+	if usesQwenHarness(provider) && meta.Model != "" {
 		if sessionEnv == nil {
 			sessionEnv = make(map[string]string)
 		}

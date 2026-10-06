@@ -631,7 +631,7 @@ func TestRecoveryPickerCommands(t *testing.T) {
 		{"claude", " --resume"}, {"codex", " resume"},
 		{"cursor", " --resume"}, {"qwen", " --resume"},
 		{"copilot", " --resume"}, {"kiro", " chat --resume-picker"},
-		{"gemini", " -i /resume"},
+		{"gemini", " -i /resume"}, {"helloseal", " --resume"},
 	} {
 		prov := DefaultConfig().Providers[tc.provider]
 		got, err := renderResumeCommand(prov.LaunchTemplate, LaunchTemplateVars{Binary: "agent"}, tc.provider, "", true)

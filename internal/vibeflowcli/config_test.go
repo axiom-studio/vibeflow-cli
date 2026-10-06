@@ -79,11 +79,11 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("MCPToolName = %q, want %q", cfg.MCPToolName, DefaultMCPToolName)
 	}
 
-	// Seven built-in providers.
-	if len(cfg.Providers) != 7 {
-		t.Fatalf("expected 7 providers, got %d", len(cfg.Providers))
+	// Eight built-in providers.
+	if len(cfg.Providers) != 8 {
+		t.Fatalf("expected 8 providers, got %d", len(cfg.Providers))
 	}
-	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen", "kiro", "copilot"} {
+	for _, key := range []string{"claude", "codex", "cursor", "gemini", "qwen", "kiro", "copilot", "helloseal"} {
 		if _, ok := cfg.Providers[key]; !ok {
 			t.Errorf("missing provider %q", key)
 		}
@@ -121,8 +121,8 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 	if cfg.ServerURL != "https://cloud.axiomstudio.ai" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
-	if len(cfg.Providers) != 7 {
-		t.Errorf("expected 7 default providers, got %d", len(cfg.Providers))
+	if len(cfg.Providers) != 8 {
+		t.Errorf("expected 8 default providers, got %d", len(cfg.Providers))
 	}
 }
 

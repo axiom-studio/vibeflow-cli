@@ -13,7 +13,7 @@
 
 # vibeflow-cli
 
-A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, Qwen Code, Kiro CLI, and GitHub Copilot CLI sessions from a single TUI - with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
+A terminal session manager for AI coding agents. Launch, manage, and switch between Claude Code, OpenAI Codex CLI, Google Gemini CLI, Cursor Agent, Qwen Code, Kiro CLI, GitHub Copilot CLI, and HelloSeal sessions from a single TUI - with git worktree isolation, session conflict detection, persona-based multi-agent workflows, and autonomous task execution via VibeFlow.
 
 ## Supported Agents
 
@@ -26,8 +26,9 @@ A terminal session manager for AI coding agents. Launch, manage, and switch betw
 | **Qwen Code** | `qwen` | `--yolo` | `-i` flag (interactive after prompt) |
 | **Kiro CLI** | `kiro-cli` | `--trust-all-tools` | Positional argument (verified — see [Providers — Kiro CLI caveats](docs/VibeFlow-CLI/docs/providers.md#kiro-cli-caveats)) |
 | **GitHub Copilot CLI** | `copilot` | `--yolo` | `-i` flag (interactive after prompt) |
+| **HelloSeal** | `qwen` (Qwen Code pointed at the HelloSeal API) | `--yolo` | `-i` flag (interactive after prompt) |
 
-All seven agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
+All eight agents support both **Vanilla** (standalone) and **VibeFlow** (server-connected autonomous) session modes. Custom providers can be added via configuration.
 
 ### VibeFlow Terminal UI
 

@@ -108,7 +108,7 @@ const reverifyAfterMonths = 6
 
 // RoutingModes lists every routing mode, in the order the document renders
 // them. Kept next to the matrix so a new mode is one edit away from being
-// required on all 7 harnesses by TestRoutingMatrixIsExhaustive.
+// required on every harness by TestRoutingMatrixIsExhaustive.
 var RoutingModes = []string{RoutingDirect, RoutingGateway, RoutingEndpoint, RoutingShell}
 
 // Reasons shared by the harnesses that connect only to their own backend, so
@@ -116,6 +116,10 @@ var RoutingModes = []string{RoutingDirect, RoutingGateway, RoutingEndpoint, Rout
 const (
 	reasonCursorOwnBackend = "Cursor Agent connects only to its own backend"
 	reasonKiroOwnBackend   = "Kiro authenticates with its own KIRO_API_KEY against its own backend"
+	// HelloSeal is the opposite case: not a harness with its own backend but
+	// a model API run through the qwen binary, so endpoint routing is the
+	// connection and every other mode would send the harness elsewhere.
+	reasonHelloSealEndpointOnly = "HelloSeal is itself the model endpoint: a HelloSeal session is the qwen binary routed to the HelloSeal API, so only endpoint routing applies"
 )
 
 // codexEndpointFlagFragments are the parts of Codex's -c model-provider flags
@@ -131,12 +135,15 @@ var codexEndpointFlagFragments = []string{
 	"model_providers." + codexEndpointProviderID + `.wire_api="responses"`,
 }
 
-// RoutingMatrix declares all 7 harnesses × 4 routing modes.
+// RoutingMatrix declares all 8 harnesses × 4 routing modes.
 //
-// Direct is supported everywhere: it is the absence of redirection, so it
-// needs no wiring. Its BlanksEnv entries are the vars ClearLLMGatewayEnv and
-// ClearShellEndpointEnv blank when the user explicitly chooses direct, so a
-// gateway or endpoint left in the shell cannot quietly stay in effect.
+// Direct is supported on every harness that has a backend of its own: it is
+// the absence of redirection, so it needs no wiring. Its BlanksEnv entries are
+// the vars ClearLLMGatewayEnv and ClearShellEndpointEnv blank when the user
+// explicitly chooses direct, so a gateway or endpoint left in the shell cannot
+// quietly stay in effect. The one provider that IS an endpoint (helloseal)
+// declares direct Unsupported, and derivedSupport agrees via
+// providerIsEndpointOnly.
 var RoutingMatrix = []RoutingCell{
 	// ---- claude ------------------------------------------------------
 	{
@@ -341,6 +348,23 @@ var RoutingMatrix = []RoutingCell{
 	{Provider: "kiro", Routing: RoutingGateway, Status: Unsupported, Reason: reasonKiroOwnBackend},
 	{Provider: "kiro", Routing: RoutingEndpoint, Status: Unsupported, Reason: reasonKiroOwnBackend},
 	{Provider: "kiro", Routing: RoutingShell, Status: Unsupported, Reason: reasonKiroOwnBackend},
+
+	// ---- helloseal ---------------------------------------------------
+	// Endpoint routing IS the HelloSeal connection, wired exactly like
+	// qwen × endpoint because the same binary runs. Direct would leave the
+	// qwen binary talking to Qwen's own backend, the gateway would route a
+	// HelloSeal session somewhere other than HelloSeal, and a shell endpoint
+	// is any URL the user has exported — none of them is HelloSeal.
+	{Provider: "helloseal", Routing: RoutingDirect, Status: Unsupported, Reason: reasonHelloSealEndpointOnly},
+	{Provider: "helloseal", Routing: RoutingGateway, Status: Unsupported, Reason: reasonHelloSealEndpointOnly},
+	{
+		Provider: "helloseal", Routing: RoutingEndpoint, Status: Supported,
+		WireFormat:  "OpenAI-compatible",
+		RequiresEnv: []string{"OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY"},
+		// A fresh install otherwise stops on its interactive sign-in picker.
+		Flags: []string{"--auth-type openai"},
+	},
+	{Provider: "helloseal", Routing: RoutingShell, Status: Unsupported, Reason: reasonHelloSealEndpointOnly},
 }
 
 // FindCell returns the declared cell for a harness/routing pair, or nil when
@@ -361,8 +385,9 @@ func FindCell(providerKey, routing string) *RoutingCell {
 func derivedSupport(providerKey, routing string) bool {
 	switch routing {
 	case RoutingDirect:
-		// Direct is the absence of redirection; every harness can do it.
-		return true
+		// Direct is the absence of redirection; every harness with its own
+		// backend can do it. A provider that is itself an endpoint cannot.
+		return !providerIsEndpointOnly(providerKey)
 	case RoutingGateway:
 		return providerSupportsGateway(providerKey)
 	case RoutingEndpoint:

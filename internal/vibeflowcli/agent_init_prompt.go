@@ -123,6 +123,8 @@ func BuildVibeflowCloudDispatchInitPrompt(mcpName, projectName, persona, session
 //     LaunchTemplate or to this switch, since a one-shot process can't back
 //     vibeflow's persistent tmux session that stays alive polling
 //     wait_for_work.
+//   - helloseal → `-i 'prompt'`, the qwen shape, because it runs the qwen
+//     binary (usesQwenHarness).
 //   - copilot → `-i 'prompt'` (start interactive mode and auto-execute the
 //     prompt). VERIFIED against the real `copilot` binary (v1.0.79): the
 //     seeded turn executes and the composer stays alive for follow-up
@@ -136,7 +138,7 @@ func AppendVibeflowInitPrompt(baseCommand, providerKey, prompt string) string {
 	switch providerKey {
 	case "gemini":
 		return baseCommand + fmt.Sprintf(" -p '%s'", escaped)
-	case "qwen", "copilot":
+	case "qwen", "copilot", helloSealProvider:
 		return baseCommand + fmt.Sprintf(" -i '%s'", escaped)
 	default:
 		return baseCommand + fmt.Sprintf(" '%s'", escaped)
@@ -251,7 +253,7 @@ func renderResumeCommand(tmpl string, vars LaunchTemplateVars, provider, id stri
 	if picker {
 		switch provider {
 		case "codex": // The resume subcommand opens its picker without an ID.
-		case "claude", "cursor", "qwen", "copilot":
+		case "claude", "cursor", "qwen", "copilot", helloSealProvider:
 			command += " --resume"
 		case "kiro":
 			command += " --resume-picker"
@@ -337,7 +339,7 @@ func codexConfigRawArg(value string) string {
 // the assembled command is handed to `sh -c` via tmux send-keys.
 func AppendQwenAPIFlags(baseCommand, providerKey string, env map[string]string) string {
 	// Only qwen-binary providers understand --openai-base-url / --model.
-	if providerKey != "qwen" {
+	if !usesQwenHarness(providerKey) {
 		return baseCommand
 	}
 	out := baseCommand
@@ -410,7 +412,7 @@ func qwenSavedAuthType() string {
 func applyQwenModelPassthrough(providerKey string, sessionEnv map[string]string) {
 	// Skip non-qwen-binary providers, and never override a model the
 	// session already carries (wizard, --model flag, or stored metadata).
-	if providerKey != "qwen" || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
+	if !usesQwenHarness(providerKey) || sessionEnv == nil || sessionEnv["OPENAI_MODEL"] != "" {
 		return
 	}
 	if v := os.Getenv("OPENAI_MODEL"); v != "" {

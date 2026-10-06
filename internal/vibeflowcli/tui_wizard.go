@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,6 +49,9 @@ const (
 	// Compatible-endpoint inputs, shown when the Routing step's endpoint
 	// option is chosen; runs before branch selection.
 	StepOpenAICompatConfig
+	// HelloSeal connection rows and live model list, shown in place of the
+	// Routing and Endpoint steps when the HelloSeal provider is chosen.
+	StepHelloSealConfig
 )
 
 // WorktreeChoice represents the user's worktree selection.
@@ -189,6 +193,15 @@ type WizardModel struct {
 	// by the oacRow* constants; the API key input is never rendered in clear.
 	oacInputs [oacRowCount]string
 	oacErr    string // inline validation error shown under the inputs
+
+	// HelloSeal (StepHelloSealConfig). hsInputs are the connection rows
+	// (hsRow* constants); hsModels is the live list once fetched and nil
+	// while the connection rows are shown. The key row is never rendered
+	// in clear.
+	hsInputs  [hsRowCount]string
+	hsModels  []ModelOption
+	hsLoading bool   // a fetch is in flight; only esc is handled
+	hsErr     string // last validation/fetch error, shown under the rows
 
 	// Branch auto-detection.
 	currentBranch     string // Current HEAD branch for auto-positioning cursor.
@@ -810,6 +823,8 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 		msg = tea.KeyPressMsg{Text: p.Content}
 	}
 	switch msg := msg.(type) {
+	case helloSealModelsMsg:
+		return w.receiveHelloSealModels(msg), nil
 	case tea.KeyPressMsg:
 		// Text input mode for working directory path.
 		if w.editingWorkDir {
@@ -1318,6 +1333,12 @@ func (w WizardModel) Update(msg tea.Msg) (WizardModel, tea.Cmd) {
 			}
 		}
 
+		// StepHelloSealConfig: connection rows take typing like the endpoint
+		// step; the model list is a plain list.
+		if w.step == StepHelloSealConfig {
+			return w.updateHelloSealKeys(msg)
+		}
+
 		// StepOpenAICompatConfig: four text inputs (base URL, vendor, model,
 		// API key). Every row accepts typing, so letters never navigate —
 		// only arrows/tab move between rows.
@@ -1508,6 +1529,7 @@ func (w WizardModel) View() string {
 		{StepLLMGateway, "Routing"},
 		{StepQwenLaunchConfig, "Qwen"},
 		{StepOpenAICompatConfig, "Endpoint"},
+		{StepHelloSealConfig, "HelloSeal"},
 		{StepBranch, "Branch"},
 		{StepWorktree, "Worktree"},
 		{StepPermissions, "Permissions"},
@@ -1522,6 +1544,8 @@ func (w WizardModel) View() string {
 	// Vera alone needs only a harness: it always runs in its own disposable
 	// worktree with the harness's full-permission mode.
 	veraOnly := w.veraOnly()
+	// HelloSeal replaces Routing and Endpoint with its own step.
+	endpointOnly := w.step > StepProvider && providerIsEndpointOnly(w.selectedProviderKey())
 	var stepLine strings.Builder
 	for _, s := range steps {
 		if veraOnly && s.step > StepProvider && s.step != StepConfirm {
@@ -1532,6 +1556,12 @@ func (w WizardModel) View() string {
 		}
 		// Only show the endpoint step when endpoint routing is chosen.
 		if s.step == StepOpenAICompatConfig && w.routing != RoutingEndpoint {
+			continue
+		}
+		if s.step == StepHelloSealConfig && !endpointOnly {
+			continue
+		}
+		if (s.step == StepLLMGateway || s.step == StepOpenAICompatConfig) && endpointOnly {
 			continue
 		}
 		if stepLine.Len() > 0 {
@@ -1844,6 +1874,10 @@ func (w WizardModel) View() string {
 		b.WriteString(helpStyle.Render(hint))
 		return b.String()
 
+	case StepHelloSealConfig:
+		b.WriteString(w.viewHelloSeal())
+		return b.String()
+
 	case StepOpenAICompatConfig:
 		dim := lipgloss.NewStyle().Foreground(dimColor)
 		cursorMark := lipgloss.NewStyle().Foreground(accentColor).Render("█")
@@ -2125,6 +2159,9 @@ func (w WizardModel) View() string {
 			RoutingEndpoint: "Compatible endpoint",
 			RoutingShell:    "Detected endpoint",
 		}[w.routing]
+		if providerIsEndpointOnly(pe.key) {
+			routingLabel = pe.provider.Name + " (compatible endpoint)"
+		}
 		b.WriteString(fmt.Sprintf("  Routing:       %s\n", routingLabel))
 		if w.routing == RoutingShell {
 			if urlVar, baseURL := DetectShellEndpoint(pe.key); baseURL != "" {
@@ -2205,6 +2242,8 @@ func (w WizardModel) listLen() int {
 		return len(qwenLaunchPresets()) + 2 // vendor rows + model input + base URL input
 	case StepOpenAICompatConfig:
 		return oacRowCount // base URL, vendor, model, API key inputs
+	case StepHelloSealConfig:
+		return w.helloSealListLen()
 	case StepBranch:
 		return len(w.filteredBranches)
 	case StepWorktree:
@@ -2385,6 +2424,8 @@ func (w WizardModel) advance() (WizardModel, tea.Cmd) {
 		w.step = StepBranch
 		w.cursor = 0
 		w.cursorToCurrentBranch()
+	case StepHelloSealConfig:
+		return w.advanceHelloSeal()
 	case StepOpenAICompatConfig:
 		// Validate; on failure stay on the step and show the error inline.
 		vendor, baseURL, model := w.oacValue(oacRowVendor), w.oacValue(oacRowBaseURL), w.oacValue(oacRowModel)
@@ -2716,8 +2757,13 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 			w.cancelled = true
 			return w, nil
 		}
-		// Reverse of advance(): the endpoint inputs or the harness's config
-		// step (qwen presets) when they ran, else the Routing step.
+		// Reverse of advance(): the HelloSeal step, the endpoint inputs or
+		// the harness's config step (qwen presets) when they ran, else the
+		// Routing step.
+		if providerIsEndpointOnly(w.selectedProviderKey()) {
+			w.enterHelloSealConfig()
+			return w, nil
+		}
 		if w.routing == RoutingEndpoint {
 			w.enterOpenAICompatConfig()
 			return w, nil
@@ -2730,6 +2776,21 @@ func (w WizardModel) goBack() (WizardModel, tea.Cmd) {
 		// Reverse of advance(): both follow the Routing step.
 		w.oacErr = ""
 		w.enterRoutingStep()
+	case StepHelloSealConfig:
+		if w.hsLoading {
+			// Backing out abandons the fetch; its result is then ignored.
+			w.hsLoading = false
+		}
+		if w.hsModels != nil {
+			// From the model list back to the connection rows.
+			w.hsModels = nil
+			w.hsErr = ""
+			w.cursor = hsRowBaseURL
+			return w, nil
+		}
+		// HelloSeal replaces the Routing step, so back is the provider list.
+		w.step = StepProvider
+		w.cursor = w.selectedProvider
 	case StepWorktree:
 		w.step = StepBranch
 		// Restore cursor to the position in the filtered list.
@@ -3061,6 +3122,8 @@ func gatewayUnsupportedReason(providerKey, name string) string {
 		return "not supported by " + name + " (connects only to its own backend)"
 	case "kiro":
 		return "not supported by " + name + " (authenticates with its own KIRO_API_KEY)"
+	case helloSealProvider:
+		return "not supported by " + name + " (HelloSeal is itself the model endpoint)"
 	default:
 		return "not supported by " + name
 	}
@@ -3099,6 +3162,15 @@ func (w WizardModel) afterProviderSelected() (WizardModel, tea.Cmd) {
 	if w.groupEdit {
 		w.step = StepConfirm
 		w.cursor = 0
+		return w, nil
+	}
+	// HelloSeal is its own endpoint, so there is no routing to choose: pin
+	// endpoint routing and go straight to its connection + model step.
+	if providerIsEndpointOnly(pe.key) {
+		w.routing = RoutingEndpoint
+		w.routingChosen = true
+		w.llmGatewayEnabled = false
+		w.enterHelloSealConfig()
 		return w, nil
 	}
 	w.enterRoutingStep()
@@ -3325,4 +3397,282 @@ func (w *WizardModel) enterQwenLaunchConfig() {
 		w.qwenInitialized = true
 		w.applyQwenPreset()
 	}
+}
+
+// Row indices of the StepHelloSealConfig connection inputs, in display order.
+const (
+	hsRowBaseURL = iota
+	hsRowAPIKey
+	hsRowCount // number of rows
+)
+
+// hsModelRows is how many models the HelloSeal list shows at once; the window
+// follows the cursor so a long list stays usable in a small pane.
+const hsModelRows = 12
+
+// helloSealModelsMsg carries the result of the asynchronous HelloSeal model
+// fetch back into the wizard.
+type helloSealModelsMsg struct {
+	models []ModelOption
+	err    error
+}
+
+// enterHelloSealConfig shows the HelloSeal step. The base URL is prefilled on
+// first entry from HELLOSEAL_BASE_URL or the last HelloSeal session; the API
+// key row always starts empty (a saved key is reused when left blank).
+// Re-entering with a fetched list (back from Branch) keeps the list and puts
+// the cursor on the model that was chosen.
+func (w *WizardModel) enterHelloSealConfig() {
+	w.step = StepHelloSealConfig
+	w.hsErr = ""
+	if w.hsInputs[hsRowBaseURL] == "" {
+		w.hsInputs[hsRowBaseURL] = ResolveHelloSealBaseURL(w.config)
+	}
+	if w.hsModels != nil {
+		w.cursor = w.helloSealModelIndex(w.oacValue(oacRowModel))
+		return
+	}
+	w.cursor = hsRowBaseURL
+}
+
+// helloSealListLen is the navigable row count of the HelloSeal step.
+func (w WizardModel) helloSealListLen() int {
+	if w.hsModels != nil {
+		return len(w.hsModels)
+	}
+	return hsRowCount
+}
+
+// helloSealModelIndex returns the list index of a model id, or 0 when the id
+// is not in the list (including "").
+func (w WizardModel) helloSealModelIndex(id string) int {
+	for i, m := range w.hsModels {
+		if m.ID == id {
+			return i
+		}
+	}
+	return 0
+}
+
+// helloSealLastModel is the model the last HelloSeal session used, or "".
+func (w WizardModel) helloSealLastModel() string {
+	if w.config == nil {
+		return ""
+	}
+	return w.config.OpenAICompat.Recent[helloSealProvider].Model
+}
+
+// updateHelloSealKeys handles keys on the HelloSeal step: the connection rows
+// take typing like the endpoint step (letters never navigate), the model list
+// navigates with arrows and j/k.
+func (w WizardModel) updateHelloSealKeys(msg tea.KeyPressMsg) (WizardModel, tea.Cmd) {
+	key := msg.String()
+	if w.hsLoading {
+		// Only backing out interrupts a fetch.
+		if key == "esc" {
+			return w.goBack()
+		}
+		return w, nil
+	}
+	if w.hsModels != nil {
+		switch key {
+		case "enter":
+			return w.advance()
+		case "esc":
+			return w.goBack()
+		case "up", "k":
+			if w.cursor > 0 {
+				w.cursor--
+			}
+		case "down", "j":
+			w.cursor = min(w.cursor+1, len(w.hsModels)-1)
+		}
+		return w, nil
+	}
+	switch key {
+	case "enter":
+		// Enter moves down; on the last row it validates and fetches.
+		if w.cursor < hsRowCount-1 {
+			w.cursor++
+			return w, nil
+		}
+		return w.advance()
+	case "esc":
+		return w.goBack()
+	case "up", "shift+tab":
+		if w.cursor > 0 {
+			w.cursor--
+		}
+	case "down", "tab":
+		if w.cursor < hsRowCount-1 {
+			w.cursor++
+		}
+	case "backspace":
+		// Delete the last character of the focused row.
+		if in := w.hsInputs[w.cursor]; len(in) > 0 {
+			w.hsInputs[w.cursor] = in[:len(in)-1]
+		}
+		w.hsErr = ""
+	default:
+		// Append printable ASCII (typed or pasted) to the focused row.
+		for _, ch := range msg.Text {
+			if ch >= ' ' && ch <= '~' {
+				w.hsInputs[w.cursor] += string(ch)
+				w.hsErr = ""
+			}
+		}
+	}
+	return w, nil
+}
+
+// advanceHelloSeal is enter on the HelloSeal step. With the connection rows
+// shown it validates the base URL and starts the model fetch; with the list
+// shown it commits the selected model as the session's endpoint.
+func (w WizardModel) advanceHelloSeal() (WizardModel, tea.Cmd) {
+	if w.hsModels == nil {
+		baseURL := strings.TrimSpace(w.hsInputs[hsRowBaseURL])
+		if err := ValidateOpenAICompatBaseURL(baseURL); err != nil {
+			w.hsErr = err.Error()
+			return w, nil
+		}
+		// A typed key is used as typed; blank means the saved/exported slot.
+		apiKey := cleanEnvToken(w.hsInputs[hsRowAPIKey])
+		if apiKey == "" {
+			apiKey = ResolveOpenAICompatKey(w.config, helloSealVendor)
+		}
+		w.hsErr = ""
+		w.hsLoading = true
+		return w, func() tea.Msg {
+			models, err := FetchOpenAICompatModels(context.Background(), helloSealVendor, baseURL, apiKey)
+			return helloSealModelsMsg{models: models, err: err}
+		}
+	}
+	if w.cursor < 0 || w.cursor >= len(w.hsModels) {
+		return w, nil
+	}
+	baseURL, model := strings.TrimSpace(w.hsInputs[hsRowBaseURL]), w.hsModels[w.cursor].ID
+	// The HelloSeal step fills the same endpoint state as the Endpoint step,
+	// so Confirm, the result and every launch path stay unchanged.
+	w.oacInputs[oacRowBaseURL], w.oacInputs[oacRowVendor], w.oacInputs[oacRowModel] = baseURL, helloSealVendor, model
+	// Remember the endpoint and model for the next run and store a newly
+	// typed key in HelloSeal's own slot (a blank key keeps the saved one):
+	// exactly how the Endpoint step persists its settings.
+	if w.config != nil {
+		w.config.RememberEndpoint(w.selectedProviderKey(), baseURL, helloSealVendor, model)
+		w.config.SaveOpenAICompatKey(helloSealVendor, w.hsInputs[hsRowAPIKey])
+		_ = SaveConfig(w.config, ConfigPath())
+	}
+	// Drop the typed key from wizard state now that it is stored.
+	w.hsInputs[hsRowAPIKey] = ""
+	w.step = StepBranch
+	w.cursor = 0
+	w.cursorToCurrentBranch()
+	return w, nil
+}
+
+// receiveHelloSealModels applies a fetch result. A result that arrives after
+// the user backed out of the step is ignored. On failure the connection rows
+// stay up with the error and nothing is chosen for the user; enter retries.
+func (w WizardModel) receiveHelloSealModels(msg helloSealModelsMsg) WizardModel {
+	if w.step != StepHelloSealConfig || !w.hsLoading {
+		return w
+	}
+	w.hsLoading = false
+	if msg.err != nil {
+		w.hsErr = msg.err.Error()
+		return w
+	}
+	w.hsModels = msg.models
+	// Pre-select the model used last time, when it is still offered.
+	w.cursor = w.helloSealModelIndex(w.helloSealLastModel())
+	return w
+}
+
+// viewHelloSeal renders the HelloSeal step: the connection rows, then the
+// live model list. The API key is masked and never echoed.
+func (w WizardModel) viewHelloSeal() string {
+	var b strings.Builder
+	dim := lipgloss.NewStyle().Foreground(dimColor)
+	cursorMark := lipgloss.NewStyle().Foreground(accentColor).Render("█")
+	baseURL := strings.TrimSpace(w.hsInputs[hsRowBaseURL])
+
+	if w.hsModels != nil {
+		b.WriteString("Select a HelloSeal model:\n")
+		b.WriteString(dim.Render(fmt.Sprintf("(%d models listed by %s)", len(w.hsModels), displayEndpointURL(baseURL))))
+		b.WriteString("\n\n")
+		last := w.helloSealLastModel()
+		start, end := listWindow(w.cursor, len(w.hsModels), hsModelRows)
+		if start > 0 {
+			b.WriteString(dim.Render(fmt.Sprintf("  … %d more above", start)) + "\n")
+		}
+		for i := start; i < end; i++ {
+			m := w.hsModels[i]
+			line := m.ID
+			if m.Description != "" && m.Description != m.ID {
+				line += "  " + dim.Render(m.Description)
+			}
+			if m.ID == last {
+				line += dim.Render("  ← last used")
+			}
+			if i == w.cursor {
+				b.WriteString("> " + line + "\n")
+			} else {
+				b.WriteString("  " + line + "\n")
+			}
+		}
+		if end < len(w.hsModels) {
+			b.WriteString(dim.Render(fmt.Sprintf("  … %d more below", len(w.hsModels)-end)) + "\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(helpStyle.Render("j/k: navigate  enter: select  esc: back to connection"))
+		return b.String()
+	}
+
+	b.WriteString("Connect to HelloSeal:\n")
+	b.WriteString(dim.Render("(OpenAI-compatible API — the model list is fetched live from <base URL>/v1/models)"))
+	b.WriteString("\n\n")
+	labels := [hsRowCount]string{"Base URL", "API key "}
+	for row, label := range labels {
+		value := w.hsInputs[row]
+		if row == hsRowAPIKey {
+			// Mask the key: one bullet per character, never the characters.
+			value = strings.Repeat("•", len(value))
+		}
+		line := fmt.Sprintf("%s: %s", label, value)
+		if row == w.cursor {
+			b.WriteString("> " + line + cursorMark + "\n")
+		} else {
+			b.WriteString("  " + line + "\n")
+		}
+	}
+	keyHint := "enter your HelloSeal API key, or export " + OpenAICompatKeyEnvName(helloSealVendor)
+	if ResolveOpenAICompatKey(w.config, helloSealVendor) != "" {
+		keyHint = "a key is already saved for HelloSeal — leave blank to keep using it"
+	}
+	b.WriteString("\n" + dim.Render(keyHint) + "\n")
+	switch {
+	case w.hsLoading:
+		b.WriteString(dim.Render("Fetching models from HelloSeal…") + "\n")
+	case w.hsErr != "":
+		b.WriteString(lipgloss.NewStyle().Foreground(errorColor).Render("✗ "+w.hsErr) + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(helpStyle.Render("↑/↓/tab: move  type to edit  enter: next / fetch models  esc: back"))
+	return b.String()
+}
+
+// listWindow returns the [start, end) range of n rows that keeps cursor
+// visible in a window of size rows.
+func listWindow(cursor, n, size int) (int, int) {
+	if n <= size {
+		return 0, n
+	}
+	start := cursor - size/2
+	if start < 0 {
+		start = 0
+	}
+	if start+size > n {
+		start = n - size
+	}
+	return start, start + size
 }

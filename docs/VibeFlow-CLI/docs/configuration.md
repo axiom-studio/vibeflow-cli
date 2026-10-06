@@ -98,6 +98,8 @@ Set `openshell.enabled: true` to wrap launched provider commands in NVIDIA OpenS
 | `VIBEFLOW_URL` | Overrides `server_url` |
 | `VIBEFLOW_TOKEN` | Overrides `api_token` |
 | `VIBEFLOW_ROOT` | Overrides the root directory for config, sessions, and logs (equivalent to `--root`). The `--root` flag takes precedence when both are set. |
+| `HELLOSEAL_BASE_URL` | Base URL of the HelloSeal API for the `helloseal` provider; takes precedence over the URL remembered from the last HelloSeal session. See [Providers — HelloSeal](providers.md#helloseal). |
+| `OPENAI_COMPAT_API_KEY_<VENDOR>` | API key for a compatible endpoint (for HelloSeal: `OPENAI_COMPAT_API_KEY_HELLOSEAL`); an exported value takes precedence over the key saved by the wizard. |
 
 ## CLI overrides
 
@@ -124,7 +126,8 @@ You may see these fields in your `config.yaml`; they are managed by the CLI auto
 
 | Field | Purpose |
 |-------|---------|
-| `saved_env_vars` | Persisted environment variable values captured during wizard env-token steps (e.g. `OPENAI_API_KEY` for Qwen). |
+| `saved_env_vars` | Persisted environment variable values captured during wizard env-token steps (e.g. `OPENAI_API_KEY` for Qwen) and compatible-endpoint keys entered in the wizard (`OPENAI_COMPAT_API_KEY_<VENDOR>`, e.g. `OPENAI_COMPAT_API_KEY_HELLOSEAL`). |
+| `openai_compatible` | Compatible endpoints the wizard remembers per provider (`recent.<provider>`: `base_url`, `vendor`, `model`) and the provider used last. HelloSeal's URL and model live under `recent.helloseal`. Never holds a key. |
 | `directory_history` | History of working directories used in the wizard's directory picker. |
 
 ## Next steps

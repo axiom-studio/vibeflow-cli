@@ -13,6 +13,7 @@ A **provider** is a configured AI agent CLI: display name, binary name, launch t
 | `qwen` | Qwen Code | `qwen` | `--yolo` |
 | `kiro` | Kiro CLI | `kiro-cli` | `--trust-all-tools` |
 | `copilot` | GitHub Copilot CLI | `copilot` | `--yolo --autopilot --no-ask-user --max-autopilot-continues 1000` |
+| `helloseal` | HelloSeal | `qwen` | `--yolo` |
 
 The **Cursor** provider uses the official Cursor CLI binary name **`agent`**, not `cursor`. Install the CLI from Cursor’s documentation if `agent` is not on your `PATH`.
 
@@ -31,6 +32,38 @@ Copilot is the one provider where permissions and autonomy are **separate flags*
 Model selection uses `--model`; `auto` works on every plan, while concrete slugs are plan-gated server-side.
 vibeflow-cli pre-seeds `~/.copilot/config.json` (trusted folder + first-run nudge markers) at launch so unattended sessions never stall on Copilot's first-run dialogs, and sets `COPILOT_AUTO_UPDATE=false` so a mid-session self-update cannot break the tmux session.
 The customer's Copilot org policy must allow Copilot CLI and MCP servers; every session turn consumes Copilot AI credits (premium requests).
+
+**HelloSeal** is a hosted OpenAI-compatible model API rather than a CLI, so the `helloseal` provider runs the **Qwen Code binary** (`qwen`, the same install as the `qwen` provider) pointed at HelloSeal. Pick **HelloSeal** in the wizard's Provider step, enter the HelloSeal base URL and API key, choose a model from the list HelloSeal serves, and the session's LLM traffic goes to HelloSeal while VibeFlow keeps managing the project workflow. See [HelloSeal](#helloseal) below.
+
+## HelloSeal
+
+HelloSeal exposes an OpenAI-compatible API: models are listed at `GET <base URL>/v1/models` and requests authenticate with an API key sent as a bearer token. vibeflow-cli treats a HelloSeal session as a [compatible endpoint](#compatible-endpoint) session that is pinned to HelloSeal, so nothing about the endpoint wiring, session metadata or restart is HelloSeal-specific.
+
+**Wizard.** After choosing **HelloSeal** on the Provider step the wizard skips Routing and shows a **HelloSeal** step instead:
+
+1. **Base URL** — prefilled from `HELLOSEAL_BASE_URL` or the URL used last time. Same rules as any endpoint: an absolute `http(s)` URL, usually ending in `/v1`, with no credentials, query string or fragment.
+2. **API key** — masked as you type. Leave it blank to keep the key already saved for HelloSeal (the step says so when one exists), or export `OPENAI_COMPAT_API_KEY_HELLOSEAL` from your shell to keep it off disk.
+3. `enter` on the key row fetches the model list live from HelloSeal. If HelloSeal is unreachable, the key is rejected (HTTP 401/403), the response is not a model list or the list is empty, the step stays up with the reason (the key itself is never shown) and `enter` retries. **No model is ever picked for you**, and a rejected key is not saved.
+4. **Model** — the live list, with the model used last time pre-selected. `enter` continues to Branch.
+
+The Confirm screen shows the routing as **HelloSeal (compatible endpoint)** with the base URL and model. The key is never shown.
+
+**What is saved.** Exactly what the compatible endpoint step saves, in `~/.vibeflow-cli/config.yaml`: the base URL, vendor (`HelloSeal`) and model under `openai_compatible.recent.helloseal`, and a newly typed key in `saved_env_vars.OPENAI_COMPAT_API_KEY_HELLOSEAL`. Session metadata keeps `routing: endpoint`, `vendor: HelloSeal`, `base_url` and `model` (never the key), so `vibeflow restart` reconnects to the same model.
+
+**What the session gets.** Qwen Code's endpoint wiring: `OPENAI_BASE_URL`, `OPENAI_MODEL` and `OPENAI_API_KEY` (HelloSeal's key, never a key exported as `OPENAI_API_KEY` in your shell), plus `--auth-type openai --openai-base-url … --model …`. See the [routing matrix](routing-matrix.md): only `endpoint` applies to `helloseal`; direct, gateway and shell are refused because HelloSeal is itself the model endpoint.
+
+**Headless.** `--routing`, `--base-url` and `--vendor` are optional for HelloSeal; the defaults are endpoint routing, `HELLOSEAL_BASE_URL` (or the URL the wizard remembered) and the `HelloSeal` key slot:
+
+```bash
+export HELLOSEAL_BASE_URL=https://<helloseal-host>/v1
+export OPENAI_COMPAT_API_KEY_HELLOSEAL=<api-key>      # or enter it once in the wizard
+vibeflow models helloseal                             # the live model list
+vibeflow launch --provider helloseal --model <model-id> --skip-permissions
+```
+
+`--routing direct|gateway|shell` is rejected for HelloSeal, and a launch with no base URL anywhere fails before anything is created. `vibeflow models` without a provider stays offline and does not list HelloSeal; `vibeflow models helloseal` queries HelloSeal and reports the same errors as the wizard.
+
+**VibeFlow sessions.** The qwen binary reads `QWEN.md` and its MCP config, so run `vibeflow bootstrap --agents qwen --api-key <key>` once per machine (the same bootstrap target as the `qwen` provider).
 
 ## VibeFlow-integrated providers
 
@@ -130,7 +163,7 @@ After you pick a harness, the wizard's **Routing** step ("Configure routing for 
 | **Axiom Studio AI Gateway** | `gateway` (or `--llm-gateway`) | VibeFlow sessions with an API token, on harnesses the gateway supports (Claude Code, Codex, Gemini CLI, Qwen Code). Copilot, Cursor and Kiro show the option disabled with the reason. See [LLM Gateway](#llm-gateway). |
 | **Use detected endpoint** | `shell` | The harness's endpoint variable is already set in your shell. See [Detected endpoint](#detected-endpoint). |
 | **Connect directly to the provider** | `direct` | Always. The harness uses its own login or provider API key. |
-| **Connect to a compatible endpoint** | `endpoint` | Copilot, Qwen Code, Codex, Claude Code and Gemini CLI. Shown disabled for Cursor and Kiro, which have no way to point at a custom endpoint. |
+| **Connect to a compatible endpoint** | `endpoint` | Copilot, Qwen Code, Codex, Claude Code and Gemini CLI. Shown disabled for Cursor and Kiro, which have no way to point at a custom endpoint. [HelloSeal](#helloseal) skips the Routing step: it is always an endpoint session pinned to HelloSeal. |
 
 Without `--routing`, headless launches behave as before: `--llm-gateway` or the saved gateway preference where the harness supports it, otherwise direct.
 

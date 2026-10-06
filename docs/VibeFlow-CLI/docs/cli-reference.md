@@ -103,6 +103,7 @@ vibeflow launch --provider claude --personas developer,architect --model sonnet 
 vibeflow launch --provider codex --project nimbus --personas developer,architect --reuse
 vibeflow launch --provider qwen --skip-permissions
 vibeflow launch --provider copilot --routing endpoint --base-url http://localhost:4000/v1 --model <model-name>
+vibeflow launch --provider helloseal --model <model-id>   # endpoint routing at HELLOSEAL_BASE_URL (or the remembered URL), HelloSeal key slot
 vibeflow launch --provider claude --routing shell
 vibeflow launch --provider codex --openshell --openshell-sandbox vf-main
 ```
@@ -275,11 +276,12 @@ Failed executions remain failed; richer diagnostics do not retry a finished serv
 
 ### `vibeflow models [provider]`
 
-List curated model ids for the built-in providers. Pass a provider key to show one provider:
+List curated model ids for the built-in providers. Pass a provider key to show one provider. `vibeflow models helloseal` has no curated list: it queries HelloSeal live (`HELLOSEAL_BASE_URL` or the URL the wizard remembered, with the saved or exported HelloSeal key) and fails with the reason when HelloSeal is unreachable or rejects the key. The listing without a provider stays offline and skips HelloSeal.
 
 ```bash
 vibeflow models
 vibeflow models codex
+vibeflow models helloseal
 ```
 
 ### `vibeflow list` (alias: `ls`)

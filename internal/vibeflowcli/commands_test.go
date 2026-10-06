@@ -235,7 +235,9 @@ func TestModelsCmd_ProviderListTracksTheRegistry(t *testing.T) {
 
 	var uncatalogued string
 	for _, key := range keys {
-		if len(ModelsForProvider(key)) == 0 {
+		// An endpoint-only provider (helloseal) is listed live, not from a
+		// curated catalog, so it is not the "no catalog" case this test probes.
+		if len(ModelsForProvider(key)) == 0 && !providerIsEndpointOnly(key) {
 			uncatalogued = key
 			break
 		}

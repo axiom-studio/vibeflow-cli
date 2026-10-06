@@ -41,16 +41,18 @@ const (
 
 // endpointAPIFormats lists the harnesses that can use a compatible endpoint
 // and the API the endpoint must speak for each. A harness missing from this
-// map (Cursor, Kiro) has no way to point at a custom endpoint.
+// map (Cursor, Kiro) has no way to point at a custom endpoint. HelloSeal is
+// the qwen binary routed to the HelloSeal API, so it speaks what qwen speaks.
 // The endpoint is a compatible server (LiteLLM, vLLM, a hosted vendor), not
 // the vendor's own API, so each value says "compatible" and names the wire
 // format only where the harness needs a specific one.
 var endpointAPIFormats = map[string]string{
-	"copilot": "OpenAI-compatible",
-	"qwen":    "OpenAI-compatible",
-	"codex":   "OpenAI-compatible, Responses API",
-	"claude":  "Anthropic-compatible, Messages API",
-	"gemini":  "Gemini-compatible",
+	"copilot":   "OpenAI-compatible",
+	"qwen":      "OpenAI-compatible",
+	"helloseal": "OpenAI-compatible",
+	"codex":     "OpenAI-compatible, Responses API",
+	"claude":    "Anthropic-compatible, Messages API",
+	"gemini":    "Gemini-compatible",
 }
 
 // EndpointAPIFormat returns the API a compatible endpoint must speak for the
@@ -141,8 +143,9 @@ func BuildEndpointEnv(providerKey string, cfg *Config, vendor, baseURL, model st
 		env["COPILOT_PROVIDER_BEARER_TOKEN"] = ""
 		env["COPILOT_PROVIDER_WIRE_API"] = ""
 		env["COPILOT_MODEL"] = model
-	case "qwen":
-		// Qwen Code reads the OpenAI-compatible env trio.
+	case "qwen", helloSealProvider:
+		// Qwen Code (and HelloSeal, which runs it) reads the
+		// OpenAI-compatible env trio.
 		applyOpenAICompatEnv(env, cfg, vendor, baseURL, model)
 	case "codex":
 		// Codex gets the endpoint through -c model_provider flags (see
@@ -195,8 +198,8 @@ const codexEndpointProviderID = "vibeflow-endpoint"
 // env to use a compatible endpoint. Must run before the init-prompt append.
 //   - codex: a temporary model provider (Responses API, key read from
 //     OPENAI_API_KEY via env_key — never on the command line).
-//   - qwen: --auth-type openai, so a fresh install does not stop on its
-//     interactive sign-in picker.
+//   - qwen (and helloseal, which runs the qwen binary): --auth-type openai, so
+//     a fresh install does not stop on its interactive sign-in picker.
 func AppendEndpointFlags(command, providerKey, baseURL string) string {
 	switch providerKey {
 	case "codex":
@@ -210,7 +213,7 @@ func AppendEndpointFlags(command, providerKey, baseURL string) string {
 		} {
 			command += " -c " + flag
 		}
-	case "qwen":
+	case "qwen", helloSealProvider:
 		command += " --auth-type openai"
 	}
 	return command

@@ -45,6 +45,8 @@ var providerDocFile = map[string]string{
 	// (its --no-custom-instructions flag disables exactly that) — same
 	// template as Codex/Cursor. Verified on v1.0.79.
 	"copilot": "AGENTS.md",
+	// HelloSeal runs the qwen binary (see usesQwenHarness), so it reads QWEN.md.
+	"helloseal": "QWEN.md",
 }
 
 // vibeflowSectionMarker is the heading used to identify the vibeflow rules
@@ -56,7 +58,7 @@ const vibeflowSectionMarker = "## vibeflow Agent Session Rules"
 func GetAgentDoc(providerKey string) ([]byte, error) {
 	docFile, ok := providerDocFile[providerKey]
 	if !ok {
-		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini, cursor, qwen, copilot)", providerKey)
+		return nil, fmt.Errorf("unknown provider %q (valid: claude, codex, gemini, cursor, qwen, copilot, helloseal)", providerKey)
 	}
 	return agentDocsFS.ReadFile("agentdocs/" + docFile)
 }

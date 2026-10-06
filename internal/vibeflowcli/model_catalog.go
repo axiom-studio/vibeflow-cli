@@ -16,6 +16,19 @@
 
 package vibeflowcli
 
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"time"
+)
+
 // ModelOption describes a model id accepted by a built-in provider.
 type ModelOption struct {
 	ID          string
@@ -75,4 +88,83 @@ func IsKnownModelForProvider(provider, model string) bool {
 		}
 	}
 	return false
+}
+
+// modelListTimeout bounds a live model-list request so the wizard never hangs
+// on an endpoint that accepts the connection and then stalls.
+const modelListTimeout = 15 * time.Second
+
+// modelListMaxBytes caps a model-list response body; a real list is a few KB.
+const modelListMaxBytes = 1 << 20
+
+// openAICompatModelList is the shape of an OpenAI-compatible GET /v1/models
+// response. Only the fields the picker shows are decoded.
+type openAICompatModelList struct {
+	Data []struct {
+		ID          string `json:"id"`
+		OwnedBy     string `json:"owned_by"`
+		DisplayName string `json:"display_name"`
+	} `json:"data"`
+}
+
+// FetchOpenAICompatModels lists the models an OpenAI-compatible endpoint
+// serves: GET <root>/v1/models with apiKey as a bearer token (no header when
+// the key is empty). The result is sorted by id in the catalog's ModelOption
+// shape, so a live list renders exactly like a curated one.
+//
+// It never falls back. An unreachable host, a rejected key (401/403), any
+// other non-2xx status, an unreadable body or an empty list is an error that
+// names the endpoint (name plus the credential-free URL) and the failure,
+// never the key. baseURL is shaped like the endpoint step's, with or without
+// a trailing /v1 (endpointRootURL removes one so the path is never /v1/v1).
+func FetchOpenAICompatModels(ctx context.Context, name, baseURL, apiKey string) ([]ModelOption, error) {
+	listURL := endpointRootURL(strings.TrimSpace(baseURL)) + "/v1/models"
+	where := name + " (" + displayEndpointURL(listURL) + ")"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid base URL: %w", where, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: modelListTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		// url.Error repeats the URL that `where` already carries; keep the
+		// cause only.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return nil, fmt.Errorf("%s is unreachable: %w", where, err)
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return nil, fmt.Errorf("%s rejected the API key (HTTP %d)", where, resp.StatusCode)
+	case resp.StatusCode < 200 || resp.StatusCode > 299:
+		return nil, fmt.Errorf("%s returned HTTP %d", where, resp.StatusCode)
+	}
+	var list openAICompatModelList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, modelListMaxBytes)).Decode(&list); err != nil {
+		return nil, fmt.Errorf("%s returned an unreadable model list: %w", where, err)
+	}
+	options := make([]ModelOption, 0, len(list.Data))
+	for _, m := range list.Data {
+		if m.ID == "" {
+			continue
+		}
+		description := m.DisplayName
+		if description == "" {
+			description = m.OwnedBy
+		}
+		options = append(options, ModelOption{ID: m.ID, Description: description})
+	}
+	if len(options) == 0 {
+		return nil, fmt.Errorf("%s returned no models", where)
+	}
+	// O(n log n) over the handful of models an endpoint serves.
+	sort.Slice(options, func(i, j int) bool { return options[i].ID < options[j].ID })
+	return options, nil
 }

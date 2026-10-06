@@ -393,6 +393,23 @@ func DefaultConfig() *Config {
 				SessionFile:        "",
 				Default:            false,
 			},
+			"helloseal": {
+				Name: "HelloSeal",
+				// HelloSeal is a hosted OpenAI-compatible model API, not a
+				// CLI, so a HelloSeal session runs Qwen Code — the harness
+				// this project runs against OpenAI chat-completions endpoints
+				// — pointed at HelloSeal through endpoint routing (see
+				// routing.go and usesQwenHarness). Same launch template as
+				// qwen: the endpoint, model and key reach the binary through
+				// the session env and AppendQwenAPIFlags, never argv secrets.
+				Binary:             "qwen",
+				LaunchTemplate:     "{{.Binary}}{{ if .SkipPermissions }} --yolo{{ end }}",
+				PromptTemplate:     "",
+				Env:                map[string]string{},
+				VibeFlowIntegrated: false,
+				SessionFile:        "",
+				Default:            false,
+			},
 		},
 	}
 }
@@ -778,6 +795,45 @@ func cleanEnvToken(val string) string {
 // compatible endpoints; migrateProviders removes it from existing configs.
 const legacyOpenAICompatProvider = "openai-compatible"
 
+// helloSealProvider is the registry key of the HelloSeal provider: HelloSeal's
+// OpenAI-compatible API, reached through the qwen binary with endpoint routing.
+const helloSealProvider = "helloseal"
+
+// helloSealVendor is the endpoint vendor label of every HelloSeal session. It
+// names the API key slot (OPENAI_COMPAT_API_KEY_HELLOSEAL) and the remembered
+// endpoint, so HelloSeal never shares a key with another vendor.
+const helloSealVendor = "HelloSeal"
+
+// helloSealBaseURLEnv overrides the HelloSeal API base URL from the shell.
+const helloSealBaseURLEnv = "HELLOSEAL_BASE_URL"
+
+// usesQwenHarness reports whether a provider launches the qwen binary, and so
+// takes qwen's prompt shape, OPENAI_* env and --openai-base-url/--model flags.
+func usesQwenHarness(providerKey string) bool {
+	return providerKey == "qwen" || providerKey == helloSealProvider
+}
+
+// providerIsEndpointOnly reports whether a provider IS a model endpoint rather
+// than a harness with its own backend. Its only routing mode is endpoint:
+// direct, gateway and shell would point the harness somewhere that is not the
+// provider the user picked.
+func providerIsEndpointOnly(providerKey string) bool {
+	return providerKey == helloSealProvider
+}
+
+// ResolveHelloSealBaseURL returns the HelloSeal API base URL: HELLOSEAL_BASE_URL
+// from the shell wins over the URL remembered from the last HelloSeal session.
+// "" means neither is set and the user has to enter one.
+func ResolveHelloSealBaseURL(cfg *Config) string {
+	if v := strings.TrimSpace(os.Getenv(helloSealBaseURLEnv)); v != "" {
+		return v
+	}
+	if cfg != nil {
+		return cfg.OpenAICompat.Recent[helloSealProvider].BaseURL
+	}
+	return ""
+}
+
 // openAICompatKeyPrefix names the per-vendor API key slots used by endpoint
 // routing, e.g. OPENAI_COMPAT_API_KEY_MY_PROXY.
 const openAICompatKeyPrefix = "OPENAI_COMPAT_API_KEY_"
@@ -839,6 +895,21 @@ func (c *Config) SaveOpenAICompatKey(vendor, key string) {
 // session (wizard step and `vibeflow launch` flags share it). It returns the
 // first problem as a user-facing message, or nil when all three are usable.
 func ValidateOpenAICompatEndpoint(baseURL, vendor, model string) error {
+	if err := ValidateOpenAICompatBaseURL(baseURL); err != nil {
+		return err
+	}
+	// The vendor is an optional label, so it is not validated here.
+	// The model id is passed verbatim to the endpoint.
+	if strings.TrimSpace(model) == "" {
+		return fmt.Errorf("model is required")
+	}
+	return nil
+}
+
+// ValidateOpenAICompatBaseURL checks a compatible-endpoint base URL on its
+// own, for the HelloSeal step that needs the URL before it has a model to
+// validate. Same rules as ValidateOpenAICompatEndpoint.
+func ValidateOpenAICompatBaseURL(baseURL string) error {
 	// The base URL must be an absolute http(s) URL with a host.
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -852,11 +923,6 @@ func ValidateOpenAICompatEndpoint(baseURL, vendor, model string) error {
 	}
 	if u.RawQuery != "" || u.Fragment != "" || strings.Contains(baseURL, "?") || strings.Contains(baseURL, "#") {
 		return fmt.Errorf("base URL must not contain a query string or fragment — put an API key in the API key field or OPENAI_COMPAT_API_KEY_<VENDOR>")
-	}
-	// The vendor is an optional label, so it is not validated here.
-	// The model id is passed verbatim to the endpoint.
-	if strings.TrimSpace(model) == "" {
-		return fmt.Errorf("model is required")
 	}
 	return nil
 }

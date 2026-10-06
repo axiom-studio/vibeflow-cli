@@ -25,6 +25,7 @@ Which coding agent can use which routing mode, and what each one is verified aga
 | `copilot` | yes | yes | yes | yes |
 | `cursor` | yes | no | no | no |
 | `gemini` | yes | yes | yes | yes |
+| `helloseal` | no | no | yes | no |
 | `kiro` | yes | no | no | no |
 | `qwen` | yes | yes | yes | yes |
 
@@ -42,6 +43,9 @@ None. Every mode an agent can support is wired.
 - **`kiro` / `gateway`** — Kiro authenticates with its own KIRO_API_KEY against its own backend
 - **`kiro` / `endpoint`** — Kiro authenticates with its own KIRO_API_KEY against its own backend
 - **`kiro` / `shell`** — Kiro authenticates with its own KIRO_API_KEY against its own backend
+- **`helloseal` / `direct`** — HelloSeal is itself the model endpoint: a HelloSeal session is the qwen binary routed to the HelloSeal API, so only endpoint routing applies
+- **`helloseal` / `gateway`** — HelloSeal is itself the model endpoint: a HelloSeal session is the qwen binary routed to the HelloSeal API, so only endpoint routing applies
+- **`helloseal` / `shell`** — HelloSeal is itself the model endpoint: a HelloSeal session is the qwen binary routed to the HelloSeal API, so only endpoint routing applies
 
 These are shown in the wizard with the reason rather than hidden, so the mode is never silently missing.
 
@@ -72,6 +76,7 @@ These are shown in the wizard with the reason rather than hidden, so the mode is
 | `gemini` | `gateway` | Gemini-compatible | `GEMINI_API_KEY`, `GOOGLE_GEMINI_BASE_URL` | — | — | not yet |
 | `gemini` | `endpoint` | Gemini-compatible | `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY` | — | — | not yet |
 | `gemini` | `shell` | Gemini-compatible | `GOOGLE_GEMINI_BASE_URL` | — | `GEMINI_API_KEY` | not yet |
+| `helloseal` | `endpoint` | OpenAI-compatible | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY` | — | — | not yet |
 | `kiro` | `direct` | — | — | — | — | not yet |
 | `qwen` | `direct` | — | — | — | — | not yet |
 | `qwen` | `gateway` | OpenAI-compatible | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `QWEN_CUSTOM_API_KEY_*` | — | — | not yet |
