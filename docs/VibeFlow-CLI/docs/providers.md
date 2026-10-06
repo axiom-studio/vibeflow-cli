@@ -46,6 +46,10 @@ HelloSeal exposes an OpenAI-compatible API: models are listed at `GET <base URL>
 3. `enter` on the key row fetches the model list live from HelloSeal. If HelloSeal is unreachable, the key is rejected (HTTP 401/403), the response is not a model list or the list is empty, the step stays up with the reason (the key itself is never shown) and `enter` retries. **No model is ever picked for you**, and a rejected key is not saved.
 4. **Model** — the live list, with the model used last time pre-selected. `enter` continues to Branch.
 
+**Which key is used.** When `OPENAI_COMPAT_API_KEY_HELLOSEAL` is exported in your shell, it is the key every HelloSeal session launches with, so the step fetches the model list with it too and says so under the key row. A key typed on the row is then only saved for later runs.
+
+**Model ids.** Model ids from HelloSeal must be 1–128 characters of letters, digits and `. _ - : /`. Entries outside that set are left out of the list (the error names how many were rejected when none remain), and descriptions are stripped of control characters. Launch and restart refuse a HelloSeal session whose stored model does not meet the same rule.
+
 The Confirm screen shows the routing as **HelloSeal (compatible endpoint)** with the base URL and model. The key is never shown.
 
 **What is saved.** Exactly what the compatible endpoint step saves, in `~/.vibeflow-cli/config.yaml`: the base URL, vendor (`HelloSeal`) and model under `openai_compatible.recent.helloseal`, and a newly typed key in `saved_env_vars.OPENAI_COMPAT_API_KEY_HELLOSEAL`. Session metadata keeps `routing: endpoint`, `vendor: HelloSeal`, `base_url` and `model` (never the key), so `vibeflow restart` reconnects to the same model.

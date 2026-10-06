@@ -349,6 +349,15 @@ func launchCmd() *cobra.Command {
 			if err := validatePersonaModels(personaModels, personasToLaunch); err != nil {
 				return err
 			}
+			// An endpoint-only provider's model reaches the $-expanded tmux
+			// env, so every model this launch can use is checked first.
+			if providerIsEndpointOnly(provider) {
+				for _, p := range personasToLaunch {
+					if err := ValidateLiveModelID(modelForPersona(model, personaModels, p)); err != nil {
+						return fmt.Errorf("provider %q: %w", provider, err)
+					}
+				}
+			}
 			var reuseSessionIDs map[string]string
 			if replace || reuse {
 				reuseSessionIDs, err = preparePersonaSessions(tmux, store, NewSessionCache(), workDir, sessionProject, personasToLaunch, reuse)
@@ -960,6 +969,12 @@ func restartSession(meta SessionMeta, cfg *Config, tmux *TmuxManager, store *Sto
 	// than start the harness pointed at its default backend.
 	if routing == RoutingEndpoint && (meta.BaseURL == "" || meta.Model == "") {
 		return SessionMeta{}, fmt.Errorf("restart %s session %q: session metadata is missing the endpoint base URL or model — launch a new session instead", provider, meta.Name)
+	}
+	// A model stored by an older build never went through the live-list check.
+	if providerIsEndpointOnly(provider) {
+		if err := ValidateLiveModelID(meta.Model); err != nil {
+			return SessionMeta{}, fmt.Errorf("restart %s session %q: %w — launch a new session instead", provider, meta.Name, err)
+		}
 	}
 	// A shell-routed session needs the endpoint to still be set in this
 	// environment; otherwise it would silently restart direct.

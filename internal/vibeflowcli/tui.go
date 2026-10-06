@@ -1741,6 +1741,12 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 		if err := ValidateOpenAICompatEndpoint(result.BaseURL, result.Vendor, result.Model); err != nil {
 			return sessionsMsg{err: fmt.Errorf("%s session needs a compatible endpoint — use New Session to enter it: %w", result.ProviderKey, err)}
 		}
+		// An endpoint-only provider's model comes from a remote list.
+		if providerIsEndpointOnly(result.ProviderKey) {
+			if err := ValidateLiveModelID(result.Model); err != nil {
+				return sessionsMsg{err: fmt.Errorf("%s session: %w", result.ProviderKey, err)}
+			}
+		}
 	}
 	// Shell routing needs the endpoint to still be configured in this
 	// environment; otherwise the session would silently go direct.

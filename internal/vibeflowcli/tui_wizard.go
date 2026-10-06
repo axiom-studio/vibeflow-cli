@@ -3535,11 +3535,9 @@ func (w WizardModel) advanceHelloSeal() (WizardModel, tea.Cmd) {
 			w.hsErr = err.Error()
 			return w, nil
 		}
-		// A typed key is used as typed; blank means the saved/exported slot.
-		apiKey := cleanEnvToken(w.hsInputs[hsRowAPIKey])
-		if apiKey == "" {
-			apiKey = ResolveOpenAICompatKey(w.config, helloSealVendor)
-		}
+		// Fetch with the key the session will launch with, so the list is
+		// proven with the session's own credential.
+		apiKey := helloSealSessionKey(w.config, w.hsInputs[hsRowAPIKey])
 		w.hsErr = ""
 		w.hsLoading = true
 		return w, func() tea.Msg {
@@ -3551,6 +3549,12 @@ func (w WizardModel) advanceHelloSeal() (WizardModel, tea.Cmd) {
 		return w, nil
 	}
 	baseURL, model := strings.TrimSpace(w.hsInputs[hsRowBaseURL]), w.hsModels[w.cursor].ID
+	// Re-check at the point the id is persisted and launched, independent
+	// of the fetch-time filter.
+	if err := ValidateLiveModelID(model); err != nil {
+		w.hsErr = err.Error()
+		return w, nil
+	}
 	// The HelloSeal step fills the same endpoint state as the Endpoint step,
 	// so Confirm, the result and every launch path stay unchanged.
 	w.oacInputs[oacRowBaseURL], w.oacInputs[oacRowVendor], w.oacInputs[oacRowModel] = baseURL, helloSealVendor, model
@@ -3645,8 +3649,13 @@ func (w WizardModel) viewHelloSeal() string {
 			b.WriteString("  " + line + "\n")
 		}
 	}
-	keyHint := "enter your HelloSeal API key, or export " + OpenAICompatKeyEnvName(helloSealVendor)
-	if ResolveOpenAICompatKey(w.config, helloSealVendor) != "" {
+	keyName := OpenAICompatKeyEnvName(helloSealVendor)
+	keyHint := "enter your HelloSeal API key, or export " + keyName
+	switch {
+	case helloSealExportedKey() != "":
+		// The export wins on every launch path, so say which key is used.
+		keyHint = keyName + " is exported in your shell and will be used for the session; a key typed here is saved for later runs"
+	case ResolveOpenAICompatKey(w.config, helloSealVendor) != "":
 		keyHint = "a key is already saved for HelloSeal — leave blank to keep using it"
 	}
 	b.WriteString("\n" + dim.Render(keyHint) + "\n")
@@ -3675,4 +3684,22 @@ func listWindow(cursor, n, size int) (int, int) {
 		start = n - size
 	}
 	return start, start + size
+}
+
+// helloSealExportedKey returns the HelloSeal key exported in the shell, or "".
+func helloSealExportedKey() string {
+	return cleanEnvToken(os.Getenv(OpenAICompatKeyEnvName(helloSealVendor)))
+}
+
+// helloSealSessionKey returns the key a HelloSeal session will launch with,
+// in ResolveOpenAICompatKey's order: the shell export, then the key typed on
+// the row (saved at commit), then the saved key.
+func helloSealSessionKey(cfg *Config, typed string) string {
+	if k := helloSealExportedKey(); k != "" {
+		return k
+	}
+	if k := cleanEnvToken(typed); k != "" {
+		return k
+	}
+	return ResolveOpenAICompatKey(cfg, helloSealVendor)
 }

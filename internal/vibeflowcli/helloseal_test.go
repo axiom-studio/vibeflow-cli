@@ -654,3 +654,172 @@ func TestLaunchCmd_HelloSealDefaultsToItsEndpoint(t *testing.T) {
 		t.Error("API key written to sessions.json")
 	}
 }
+
+func TestValidateLiveModelID(t *testing.T) {
+	for _, id := range []string{"gpt-4o", "qwen3-coder-plus", "org/model:v1.2_beta", strings.Repeat("a", 128)} {
+		if err := ValidateLiveModelID(id); err != nil {
+			t.Errorf("%q rejected: %v", id, err)
+		}
+	}
+	for _, id := range []string{"", "$OPENAI_API_KEY", "${HOME}", "gpt 4o", "gpt\x1b[2K\rx", "m\n", "modèle", strings.Repeat("a", 129), "a;b", "a'b"} {
+		err := ValidateLiveModelID(id)
+		if err == nil {
+			t.Errorf("%q accepted", id)
+			continue
+		}
+		// The message is printed, so it must not carry raw control bytes.
+		if strings.ContainsAny(err.Error(), "\x1b\r\n") {
+			t.Errorf("error for %q contains control bytes: %q", id, err)
+		}
+	}
+}
+
+// hostileModelServer serves a /v1/models list built from raw JSON entries.
+func hostileModelServer(t *testing.T, entries string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":[`+entries+`]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestFetchOpenAICompatModels_DropsHostileIDsAndSanitizesDescriptions(t *testing.T) {
+	long := strings.Repeat("x", 200)
+	srv := hostileModelServer(t, `{"id":"$OPENAI_API_KEY\u001b[2K\rgpt-4o","owned_by":"x"},`+
+		`{"id":"${HOME}"},{"id":"has space"},{"id":"`+long+`"},`+
+		`{"id":"gpt-4o","display_name":"GPT\u001b]52;c;Zm9v\u0007-4o"}`)
+	got, err := FetchOpenAICompatModels(context.Background(), "HelloSeal", srv.URL+"/v1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "gpt-4o" {
+		t.Fatalf("models = %q, want only gpt-4o", got)
+	}
+	if strings.ContainsAny(got[0].Description, "\x1b\x07") {
+		t.Errorf("description not sanitized: %q", got[0].Description)
+	}
+
+	only := hostileModelServer(t, `{"id":"$OPENAI_API_KEY"},{"id":"a\u001bb"}`)
+	t.Setenv("OPENAI_API_KEY", "sk-must-not-appear")
+	_, err = FetchOpenAICompatModels(context.Background(), "HelloSeal", only.URL+"/v1", "sk-secret")
+	if err == nil || !strings.Contains(err.Error(), "no usable models (2 rejected") {
+		t.Fatalf("err = %v, want a rejection error", err)
+	}
+	if strings.Contains(err.Error(), "sk-") || strings.ContainsAny(err.Error(), "\x1b") {
+		t.Errorf("error leaks a secret or control bytes: %q", err)
+	}
+}
+
+func TestWizard_HelloSealHostileModelIsNeverPersistedOrLaunched(t *testing.T) {
+	srv := hostileModelServer(t, `{"id":"$OPENAI_API_KEY"},{"id":"good-model"}`)
+	cfg := DefaultConfig()
+	w := helloSealWizard(t, cfg)
+	w, _ = w.advance()
+	w.hsInputs[hsRowBaseURL] = srv.URL + "/v1"
+	w.cursor = hsRowAPIKey
+	w = fetchHelloSealModels(t, w)
+	if len(w.hsModels) != 1 || w.hsModels[0].ID != "good-model" {
+		t.Fatalf("offered models = %v", w.hsModels)
+	}
+	// A bad id that slipped into the list (e.g. an older build) is refused at commit.
+	w.hsModels = []ModelOption{{ID: "$OPENAI_API_KEY"}}
+	w.cursor = 0
+	w = press(w, keyEnter)
+	if w.step != StepHelloSealConfig || !strings.Contains(w.hsErr, "invalid model id") {
+		t.Fatalf("commit of a bad id: step=%v err=%q", w.step, w.hsErr)
+	}
+	if _, ok := cfg.OpenAICompat.Recent[helloSealProvider]; ok {
+		t.Error("bad id persisted to config")
+	}
+
+	// TUI launch refuses a stored bad id before creating anything.
+	m := Model{config: &Config{}}
+	msg := m.executeLaunch(WizardResult{ProviderKey: helloSealProvider, Routing: RoutingEndpoint, BaseURL: "http://h/v1", Vendor: helloSealVendor, Model: "$OPENAI_API_KEY", WorktreeChoice: WorktreeCurrent})
+	if sm, ok := msg.(sessionsMsg); !ok || sm.err == nil || !strings.Contains(sm.err.Error(), "invalid model id") {
+		t.Errorf("executeLaunch = %#v, want an invalid model id error", msg)
+	}
+	// Other providers keep accepting free-text endpoint models (no new check).
+	msg = m.executeLaunch(WizardResult{ProviderKey: "qwen", Routing: RoutingEndpoint, WorktreeChoice: WorktreeCurrent})
+	if sm, ok := msg.(sessionsMsg); !ok || sm.err == nil || strings.Contains(sm.err.Error(), "invalid model id") {
+		t.Errorf("qwen launch error changed: %#v", msg)
+	}
+}
+
+func TestRestartSession_HelloSealRefusesStoredBadModel(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	tm := NewTmuxManager(fmt.Sprintf("vftest-hs-badmodel-%d-%d", os.Getpid(), time.Now().UnixNano()))
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	cfg := DefaultConfig()
+	meta := SessionMeta{Name: "bad", Provider: helloSealProvider, Routing: RoutingEndpoint, Vendor: helloSealVendor,
+		BaseURL: "http://h/v1", Model: "$OPENAI_API_KEY", WorkingDir: t.TempDir()}
+	meta.TmuxSession = tm.FullSessionName(meta.Provider, meta.Name)
+	_, err := RestartSession(meta, cfg, tm, NewStore(), NewSessionCache(), NewProviderRegistry(cfg))
+	if err == nil || !strings.Contains(err.Error(), "invalid model id") {
+		t.Fatalf("err = %v", err)
+	}
+	if tm.HasSession(meta.TmuxSession) {
+		t.Error("a session was launched with a bad model")
+	}
+}
+
+func TestLaunchCmd_HelloSealRejectsBadModelBeforeCreatingSessions(t *testing.T) {
+	repo := newTestRepo(t, "")
+	t.Chdir(repo)
+	t.Setenv("VIBEFLOW_ROOT", t.TempDir())
+	t.Setenv(helloSealBaseURLEnv, "http://helloseal.local/v1")
+	for _, args := range [][]string{
+		{"--model", "$OPENAI_API_KEY"},
+		{"--model", "ok-model", "--session-type", "vibeflow", "--project", "p", "--personas", "developer,qa_lead", "--models", "qa_lead=${HOME}"},
+	} {
+		root := &cobra.Command{Use: "vibeflow"}
+		root.PersistentFlags().String("config", "", "")
+		root.PersistentFlags().String("mcp", "", "")
+		root.AddCommand(launchCmd())
+		root.SilenceErrors, root.SilenceUsage = true, true
+		root.SetArgs(append([]string{"launch", "--provider", helloSealProvider}, args...))
+		if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "invalid model id") {
+			t.Errorf("%v: err = %v", args, err)
+		}
+	}
+	if metas, _ := NewStore().List(); len(metas) != 0 {
+		t.Errorf("sessions created: %v", metas)
+	}
+}
+
+func TestWizard_HelloSealFetchUsesTheKeyTheSessionLaunchesWith(t *testing.T) {
+	srv := newModelListServer(t, "sk-exported", "alpha")
+	cfg := DefaultConfig()
+	w := helloSealWizard(t, cfg)
+	t.Setenv(OpenAICompatKeyEnvName(helloSealVendor), "sk-exported")
+	w, _ = w.advance()
+	if !strings.Contains(w.View(), "is exported in your shell and will be used for the session") {
+		t.Errorf("export hint missing:\n%s", w.View())
+	}
+	w.hsInputs[hsRowBaseURL] = srv.URL + "/v1"
+	w.hsInputs[hsRowAPIKey] = "sk-typed"
+	w.cursor = hsRowAPIKey
+	w = fetchHelloSealModels(t, w)
+	if w.hsErr != "" || len(w.hsModels) != 1 {
+		t.Fatalf("fetch: err=%q models=%v", w.hsErr, w.hsModels)
+	}
+	if got := srv.seen(); len(got) != 1 || got[0] != "/v1/models auth=Bearer sk-exported" {
+		t.Errorf("fetch used %v, want the exported key", got)
+	}
+	w = press(w, keyEnter)
+	if w.step != StepBranch {
+		t.Fatalf("step = %v", w.step)
+	}
+	// The typed key is saved for later runs; this session uses the export,
+	// the same key the list was fetched with.
+	if cfg.SavedEnvVars["OPENAI_COMPAT_API_KEY_HELLOSEAL"] != "sk-typed" {
+		t.Errorf("typed key not saved: %v", cfg.SavedEnvVars)
+	}
+	env := BuildEndpointEnv(helloSealProvider, cfg, helloSealVendor, srv.URL+"/v1", "alpha")
+	if env["OPENAI_API_KEY"] != "sk-exported" {
+		t.Errorf("session key = %q, want the fetch key sk-exported", env["OPENAI_API_KEY"])
+	}
+}

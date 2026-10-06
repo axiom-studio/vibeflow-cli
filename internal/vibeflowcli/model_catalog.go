@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -151,20 +152,67 @@ func FetchOpenAICompatModels(ctx context.Context, name, baseURL, apiKey string) 
 		return nil, fmt.Errorf("%s returned an unreadable model list: %w", where, err)
 	}
 	options := make([]ModelOption, 0, len(list.Data))
+	rejected := 0
 	for _, m := range list.Data {
 		if m.ID == "" {
+			continue
+		}
+		// The id comes from a remote response and reaches the terminal, the
+		// session env (where tmux -e values are $-expanded) and config, so
+		// anything outside the model-id character set is dropped.
+		if ValidateLiveModelID(m.ID) != nil {
+			rejected++
 			continue
 		}
 		description := m.DisplayName
 		if description == "" {
 			description = m.OwnedBy
 		}
-		options = append(options, ModelOption{ID: m.ID, Description: description})
+		// Display-only, but still printed: strip control characters.
+		options = append(options, ModelOption{ID: m.ID, Description: sanitizeWorkbenchTitle(description)})
 	}
 	if len(options) == 0 {
+		if rejected > 0 {
+			return nil, fmt.Errorf("%s returned no usable models (%d rejected: %s)", where, rejected, liveModelIDRule)
+		}
 		return nil, fmt.Errorf("%s returned no models", where)
 	}
 	// O(n log n) over the handful of models an endpoint serves.
 	sort.Slice(options, func(i, j int) bool { return options[i].ID < options[j].ID })
 	return options, nil
+}
+
+// liveModelIDMaxLen caps a model id taken from a remote model list.
+const liveModelIDMaxLen = 128
+
+// liveModelIDRule describes the accepted model-id shape in error messages.
+const liveModelIDRule = "model ids must be 1-128 characters of letters, digits and . _ - : /"
+
+// ValidateLiveModelID checks a model id that came from (or was chosen from) a
+// remote model list. Real OpenAI-compatible ids fit [A-Za-z0-9._:/-]; refusing
+// everything else keeps control characters off the terminal and `$`
+// references out of the tmux -e env, where values are $-expanded. The error
+// quotes a truncated, escaped copy of the id so it is safe to print.
+func ValidateLiveModelID(id string) error {
+	if id == "" || len(id) > liveModelIDMaxLen {
+		return fmt.Errorf("invalid model id %s: %s", quoteModelID(id), liveModelIDRule)
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '-' || c == ':' || c == '/'
+		if !ok {
+			return fmt.Errorf("invalid model id %s: %s", quoteModelID(id), liveModelIDRule)
+		}
+	}
+	return nil
+}
+
+// quoteModelID renders an untrusted id for an error message: at most 40
+// bytes, Go-quoted so control bytes appear as escapes.
+func quoteModelID(id string) string {
+	if len(id) > 40 {
+		return strconv.QuoteToASCII(id[:40]) + "…"
+	}
+	return strconv.QuoteToASCII(id)
 }
