@@ -866,7 +866,9 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	setStage("checkout")
 	var proxy []reviewGitProxy
 	if p.Execution.Review.Provider == "azure_devops" {
-		// Azure credentials stay on the server; fetch through this attempt's proxy.
+		// Azure credentials stay on the server; fetch through this attempt's
+		// proxy with the CLI's VibeFlow API token, which the proxy re-authorizes
+		// against the live attempt on every request.
 		proxy = append(proxy, reviewGitProxy{URL: strings.TrimRight(w.client.baseURL, "/") + "/rest/v1/vibeflow" + w.attemptPath(p) + "/git", Token: w.client.token})
 	}
 	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution, proxy...); err != nil {

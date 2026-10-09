@@ -15,11 +15,14 @@ import (
 
 func TestReviewAzureRemoteIdentity(t *testing.T) {
 	for raw, want := range map[string]string{
-		"https://dev.azure.com/org/Project/_git/Repo":                  "dev.azure.com project/repo",
-		"https://org@dev.azure.com/org/My%20Project/_git/Repo":         "dev.azure.com my project/repo",
-		"https://dev.azure.com/org/_git/Repo":                          "dev.azure.com repo/repo",
-		"https://tfs.example.com/DefaultCollection/Project/_git/Repo/": "tfs.example.com project/repo",
-		"git@ssh.dev.azure.com:v3/org/Project/Repo":                    "dev.azure.com project/repo",
+		"https://dev.azure.com/org/Project/_git/Repo":                          "dev.azure.com project/repo",
+		"https://org@dev.azure.com/org/My%20Project/_git/Repo":                 "dev.azure.com my project/repo",
+		"https://dev.azure.com/org/_git/Repo":                                  "dev.azure.com repo/repo",
+		"https://tfs.example.com/DefaultCollection/Project/_git/Repo/":         "tfs.example.com project/repo",
+		"git@ssh.dev.azure.com:v3/org/Project/Repo":                            "dev.azure.com project/repo",
+		"git@ssh.dev.azure.com:v3/org/My%20Project/Repo":                       "dev.azure.com my project/repo",
+		"https://org.visualstudio.com/Project/_git/Repo":                       "org.visualstudio.com project/repo",
+		"https://org.visualstudio.com/DefaultCollection/Project/_git/Repo.git": "org.visualstudio.com project/repo",
 	} {
 		host, name, err := reviewAzureRemoteIdentity(raw)
 		if err != nil || host+" "+name != want {
@@ -90,7 +93,16 @@ func TestReviewAzureCheckoutFetchesMissingCommitsThroughProxy(t *testing.T) {
 			return
 		}
 		rest, ok := strings.CutPrefix(r.URL.Path, prefix)
-		if !ok || r.Header.Get("Authorization") != "Bearer "+token {
+		// Enforce the server proxy contract exactly.
+		contract := (r.Method == http.MethodGet && rest == "/info/refs" && r.URL.RawQuery == "service=git-upload-pack") ||
+			(r.Method == http.MethodPost && rest == "/git-upload-pack" && r.Header.Get("Content-Type") == "application/x-git-upload-pack-request")
+		if !contract {
+			t.Errorf("request outside the proxy contract: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		if len(r.Header.Values("Authorization")) != 1 {
+			t.Errorf("Authorization headers = %q", r.Header.Values("Authorization"))
+		}
+		if !ok || !contract || r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "denied", http.StatusForbidden)
 			return
 		}
@@ -103,10 +115,16 @@ func TestReviewAzureCheckoutFetchesMissingCommitsThroughProxy(t *testing.T) {
 	source := t.TempDir()
 	reviewTestGit(t, source, "init")
 	reviewTestGit(t, source, "remote", "add", "origin", "https://dev.azure.com/org/My%20Project/_git/Repo")
-	root := t.TempDir()
-	if err := prepareReviewCheckout(context.Background(), source, root, e); err == nil {
+	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e); err == nil {
 		t.Fatal("missing Azure commits were fetched without the VibeFlow proxy")
 	}
+	// A user's global extra header must not be sent alongside the proxy token.
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalConfig, []byte("[http]\n\textraHeader = Authorization: Bearer user-global\n[credential]\n\thelper = !false\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	root := t.TempDir()
 	proxy := reviewGitProxy{URL: server.URL + prefix, Token: token}
 	if err := prepareReviewCheckout(context.Background(), source, root, e, proxy); err != nil {
 		t.Fatalf("fetch through proxy: %v", err)
@@ -115,8 +133,13 @@ func TestReviewAzureCheckoutFetchesMissingCommitsThroughProxy(t *testing.T) {
 		t.Fatalf("head worktree content: %q %v", data, err)
 	}
 	mu.Lock()
-	if len(auth) == 0 || auth[0] != "Bearer "+token {
-		t.Fatalf("proxy fetch was not authorized with the runner token: %q", auth)
+	if len(auth) == 0 {
+		t.Fatal("proxy was not used")
+	}
+	for _, a := range auth {
+		if a != "Bearer "+token {
+			t.Fatalf("proxy request not authorized with only the VibeFlow token: %q", auth)
+		}
 	}
 	mu.Unlock()
 	if config, err := os.ReadFile(filepath.Join(root, "objects.git", "config")); err != nil || strings.Contains(string(config), token) {

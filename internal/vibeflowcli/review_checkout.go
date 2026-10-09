@@ -329,9 +329,15 @@ func prepareAzureReviewCheckout(ctx context.Context, source, root string, execut
 				return fmt.Errorf("Azure review fetch requires the VibeFlow Git proxy")
 			}
 			fetch = proxy[0].URL
-			env = []string{"GIT_CONFIG_COUNT=2",
-				"GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0=Authorization: Bearer " + proxy[0].Token,
-				"GIT_CONFIG_KEY_1=http.followRedirects", "GIT_CONFIG_VALUE_1=false"}
+			// An empty http.extraHeader and credential.helper clear inherited
+			// values, so only this header is sent and a 401 never invokes the
+			// user's credential helper (which could prompt on a headless runner).
+			env = []string{"GIT_CONFIG_COUNT=5",
+				"GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0=",
+				"GIT_CONFIG_KEY_1=http.extraHeader", "GIT_CONFIG_VALUE_1=Authorization: Bearer " + proxy[0].Token,
+				"GIT_CONFIG_KEY_2=http.followRedirects", "GIT_CONFIG_VALUE_2=false",
+				"GIT_CONFIG_KEY_3=credential.helper", "GIT_CONFIG_VALUE_3=",
+				"GIT_CONFIG_KEY_4=credential.interactive", "GIT_CONFIG_VALUE_4=never"}
 		}
 		if err = fetchReviewObjects(ctx, objects, fetch, sha, reviewGitObjectBudget, env...); err != nil {
 			return err
@@ -386,8 +392,10 @@ func reviewAzureRemoteIdentity(raw string) (string, string, error) {
 		return "", "", invalid
 	}
 	project, repo := parts[i-1], strings.TrimSuffix(parts[i+1], ".git")
-	if i == 1 {
-		project = repo // .../{org}/_git/{repo} names the default project.
+	if i == 1 && !strings.HasSuffix(strings.ToLower(u.Hostname()), ".visualstudio.com") {
+		// dev.azure.com/{org}/_git/{repo} names the default project; on
+		// {org}.visualstudio.com the first segment is already the project.
+		project = repo
 	}
 	if !segment(project) || !segment(repo) {
 		return "", "", invalid
