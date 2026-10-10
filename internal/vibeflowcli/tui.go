@@ -421,7 +421,10 @@ func (m Model) refreshSessions() tea.Msg {
 				row.Status, row.CurrentWork = veraRowStatus(meta, m.config.ServerURL, dead)
 			}
 			row.Provider = meta.Provider
-			row.Branch = meta.Branch
+			if meta.Vera == nil {
+				// Vera reviews PRs on every branch; its checkout's branch is not its scope.
+				row.Branch = meta.Branch
+			}
 			row.WorktreePath = meta.WorktreePath
 			row.Project = meta.Project
 			row.Persona = meta.Persona
