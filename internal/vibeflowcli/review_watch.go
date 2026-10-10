@@ -239,8 +239,8 @@ func reviewWatchCmd() *cobra.Command {
 		if o.PollInterval < time.Second || o.PollInterval > time.Minute {
 			return fmt.Errorf("interval must be between 1s and 60s; the server treats a runner as offline after 2 minutes")
 		}
-		if o.GitProvider != "github" && o.GitProvider != "bitbucket" {
-			return fmt.Errorf("review repository integration must be github or bitbucket")
+		if o.GitProvider != "github" && o.GitProvider != "bitbucket" && o.GitProvider != "azure_devops" {
+			return fmt.Errorf("review repository integration must be github, bitbucket or azure_devops")
 		}
 		if strings.TrimSpace(o.Name) == "" || strings.ContainsAny(o.Name+o.Model, "\x00\r\n\t") || len(o.Name) > 100 || len(o.Model) > 200 {
 			return fmt.Errorf("invalid runner name or model; runner names must be 1 to 100 bytes")
@@ -290,7 +290,7 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Project, "project", "", "VibeFlow project name or ID")
 	cmd.Flags().StringVar(&o.Repository, "repo", "", "Local checkout for the linked repository (default: current directory)")
 	cmd.Flags().Int64Var(&o.RepositoryLinkID, "repository-link", 0, "VibeFlow repository link ID")
-	cmd.Flags().StringVar(&o.GitProvider, "git-provider", "github", "Repository integration: github or bitbucket")
+	cmd.Flags().StringVar(&o.GitProvider, "git-provider", "github", "Repository integration: github, bitbucket or azure_devops")
 	cmd.Flags().StringVar(&o.Provider, "provider", "", "Coding harness for Vera: "+strings.Join(reviewHarnessKeys, ", ")+" (default: configured provider); it runs with your normal login and full permissions in a disposable worktree")
 	cmd.Flags().StringVar(&o.Model, "model", "", "Model selection; required for gateway reviews")
 	cmd.Flags().StringVar(&o.Kind, "runner-kind", "local", "local or explicitly authorized shared runner")
@@ -864,7 +864,14 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		return nil, fmt.Errorf("review brief digest does not match its content")
 	}
 	setStage("checkout")
-	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution); err != nil {
+	var proxy []reviewGitProxy
+	if p.Execution.Review.Provider == "azure_devops" {
+		// Azure credentials stay on the server; fetch through this attempt's
+		// proxy with the CLI's VibeFlow API token, which the proxy re-authorizes
+		// against the live attempt on every request.
+		proxy = append(proxy, reviewGitProxy{URL: strings.TrimRight(w.client.baseURL, "/") + "/rest/v1/vibeflow" + w.attemptPath(p) + "/git", Token: w.client.token})
+	}
+	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution, proxy...); err != nil {
 		return nil, err
 	}
 	fmt.Fprintf(w.output, "Review worktree ready: %s\n", filepath.Join(root, "input", "head"))

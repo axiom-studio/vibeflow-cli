@@ -186,6 +186,11 @@ func TestUpdate_EKeyUnchangedConfirmKeepsVera(t *testing.T) {
 	}
 	dir := running[0].WorkingDir
 	cfg := DefaultConfig()
+	// The wizard only advances past an installed provider; don't depend on
+	// the host having the claude CLI on PATH.
+	claude := cfg.Providers["claude"]
+	claude.Binary = "sh"
+	cfg.Providers["claude"] = claude
 	m.registry, m.config = NewProviderRegistry(cfg), cfg
 	m.repoRootCache = map[string]string{dir: dir}
 	m.sessions = []SessionRow{{Name: "claude-a", WorkingDir: dir, Branch: "main"}, {Name: "claude-b", WorkingDir: dir, Branch: "old"}}
