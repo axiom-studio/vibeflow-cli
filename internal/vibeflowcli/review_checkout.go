@@ -62,10 +62,16 @@ func reviewRemoteIdentity(raw string) (string, string, error) {
 }
 
 func reviewGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return reviewGitEnv(ctx, dir, nil, args...)
+}
+
+// reviewGitEnv passes secrets such as the proxy authorization through the
+// environment, never argv, so they are not visible in the process list.
+func reviewGitEnv(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	argv := append([]string{"-c", "core.hooksPath=/dev/null", "-c", "diff.external=", "-c", "protocol.ext.allow=never", "-C", dir}, args...)
 	cmd := exec.Command("git", argv...)
 	// The private object store has no remote, so LFS could never fetch content.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_LFS_SKIP_SMUDGE=1")
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_LFS_SKIP_SMUDGE=1"), env...)
 	var output limitedReviewBuffer
 	output.limit = 16 << 20
 	cmd.Stdout = &output
@@ -75,7 +81,7 @@ func reviewGit(ctx context.Context, dir string, args ...string) ([]byte, error) 
 	return output.Bytes(), nil
 }
 
-func fetchReviewObjects(ctx context.Context, objects, remote, sha string, budget int64) error {
+func fetchReviewObjects(ctx context.Context, objects, remote, sha string, budget int64, env ...string) error {
 	check := func() error {
 		var total int64
 		return filepath.WalkDir(objects, func(path string, entry os.DirEntry, err error) error {
@@ -130,7 +136,7 @@ func fetchReviewObjects(ctx context.Context, objects, remote, sha string, budget
 	}()
 	// Keep incoming objects packed so the budget scan stays small; prevent
 	// maintenance and submodule work from adding unrelated acquisition.
-	_, err := reviewGit(fetchCtx, objects, "-c", "protocol.file.allow=always", "-c", "fetch.unpackLimit=0", "-c", "gc.auto=0", "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--no-auto-maintenance", remote, sha)
+	_, err := reviewGitEnv(fetchCtx, objects, env, "-c", "protocol.file.allow=always", "-c", "fetch.unpackLimit=0", "-c", "gc.auto=0", "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--no-auto-maintenance", remote, sha)
 	close(stop)
 	<-done
 	if cause := context.Cause(fetchCtx); cause != nil {
@@ -241,7 +247,14 @@ func exportReviewTree(ctx context.Context, objects, sha, dest string) error {
 	return nil
 }
 
-func prepareReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution) error {
+// reviewGitProxy is the server's attempt-scoped, read-only Git endpoint for
+// providers whose credentials stay server-side (Azure Repos).
+type reviewGitProxy struct {
+	URL   string
+	Token string
+}
+
+func prepareReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution, proxy ...reviewGitProxy) error {
 	round := execution.Attempt.Round
 	if !reviewSHA(round.BaseSHA) || !reviewSHA(round.HeadSHA) {
 		return fmt.Errorf("review requires exact commit SHAs")
@@ -249,6 +262,9 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 	remote, err := reviewGit(ctx, source, "remote", "get-url", "origin")
 	if err != nil {
 		return err
+	}
+	if execution.Review.Provider == "azure_devops" {
+		return prepareAzureReviewCheckout(ctx, source, root, execution, strings.TrimSpace(string(remote)), proxy)
 	}
 	host, name, err := reviewRemoteIdentity(strings.TrimSpace(string(remote)))
 	if err != nil || host != execution.Review.ProviderHost || name != strings.ToLower(round.Details.BaseRepositoryName) {
@@ -285,6 +301,110 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 			return err
 		}
 	}
+	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA)
+}
+
+// prepareAzureReviewCheckout uses the selected checkout when it already has
+// the exact commits and otherwise fetches them through the server proxy. The
+// runner token reaches Git only through GIT_CONFIG_* for that one fetch; no
+// Azure credential exists on the runner and nothing is written to Git config.
+func prepareAzureReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution, remote string, proxy []reviewGitProxy) error {
+	round := execution.Attempt.Round
+	host, name, err := reviewAzureRemoteIdentity(remote)
+	if err != nil || host != strings.ToLower(execution.Review.ProviderHost) || name != strings.ToLower(round.Details.BaseRepositoryName) ||
+		!strings.EqualFold(round.Details.HeadRepositoryName, round.Details.BaseRepositoryName) {
+		return fmt.Errorf("selected checkout does not match the review repository")
+	}
+	objects := filepath.Join(root, "objects.git")
+	if err = os.MkdirAll(objects, 0700); err != nil {
+		return err
+	}
+	if _, err = reviewGit(ctx, objects, "init", "--bare"); err != nil {
+		return err
+	}
+	for _, sha := range []string{round.BaseSHA, round.HeadSHA} {
+		fetch, env := source, []string(nil)
+		if _, err := reviewGit(ctx, source, "cat-file", "-e", sha+"^{commit}"); err != nil {
+			if len(proxy) != 1 || !reviewProxyURL(proxy[0].URL) || proxy[0].Token == "" || strings.ContainsAny(proxy[0].Token, "\r\n") {
+				return fmt.Errorf("Azure review fetch requires the VibeFlow Git proxy")
+			}
+			fetch = proxy[0].URL
+			// An empty http.extraHeader and credential.helper clear inherited
+			// values, so only this header is sent and a 401 never invokes the
+			// user's credential helper (which could prompt on a headless runner).
+			env = []string{"GIT_CONFIG_COUNT=5",
+				"GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0=",
+				"GIT_CONFIG_KEY_1=http.extraHeader", "GIT_CONFIG_VALUE_1=Authorization: Bearer " + proxy[0].Token,
+				"GIT_CONFIG_KEY_2=http.followRedirects", "GIT_CONFIG_VALUE_2=false",
+				"GIT_CONFIG_KEY_3=credential.helper", "GIT_CONFIG_VALUE_3=",
+				"GIT_CONFIG_KEY_4=credential.interactive", "GIT_CONFIG_VALUE_4=never"}
+		}
+		if err = fetchReviewObjects(ctx, objects, fetch, sha, reviewGitObjectBudget, env...); err != nil {
+			return err
+		}
+		if _, err = reviewGit(ctx, objects, "cat-file", "-e", sha+"^{commit}"); err != nil {
+			return err
+		}
+	}
+	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA)
+}
+
+func reviewProxyURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && strings.HasSuffix(u.Path, "/git") &&
+		(u.Scheme == "https" || (u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1")))
+}
+
+// reviewAzureRemoteIdentity maps an Azure Repos remote to its host and
+// lowercased project/repository. It accepts HTTPS (.../{project}/_git/{repo},
+// the default-project .../_git/{repo} form, and an org@ username without a
+// password) and dev.azure.com SSH v3 remotes.
+func reviewAzureRemoteIdentity(raw string) (string, string, error) {
+	invalid := fmt.Errorf("invalid Azure Repos remote")
+	if strings.ContainsAny(raw, "\\\x00\r\n\t") {
+		return "", "", invalid
+	}
+	segment := func(s string) bool { return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\\?#") }
+	if rest, ok := strings.CutPrefix(raw, "git@ssh.dev.azure.com:v3/"); ok {
+		parts := strings.Split(rest, "/")
+		if len(parts) != 3 || !segment(parts[0]) {
+			return "", "", invalid
+		}
+		project, err1 := url.PathUnescape(parts[1])
+		repo, err2 := url.PathUnescape(strings.TrimSuffix(parts[2], ".git"))
+		if err1 != nil || err2 != nil || !segment(project) || !segment(repo) {
+			return "", "", invalid
+		}
+		return "dev.azure.com", strings.ToLower(project + "/" + repo), nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", "", invalid
+	}
+	if u.User != nil {
+		if _, password := u.User.Password(); password {
+			return "", "", invalid
+		}
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	i := len(parts) - 2
+	if i < 1 || parts[i] != "_git" {
+		return "", "", invalid
+	}
+	project, repo := parts[i-1], strings.TrimSuffix(parts[i+1], ".git")
+	if i == 1 && !strings.HasSuffix(strings.ToLower(u.Hostname()), ".visualstudio.com") {
+		// dev.azure.com/{org}/_git/{repo} names the default project; on
+		// {org}.visualstudio.com the first segment is already the project.
+		project = repo
+	}
+	if !segment(project) || !segment(repo) {
+		return "", "", invalid
+	}
+	return strings.ToLower(u.Hostname()), strings.ToLower(project + "/" + repo), nil
+}
+
+func finishReviewCheckout(ctx context.Context, root, objects, baseSHA, headSHA string) error {
+	round := struct{ BaseSHA, HeadSHA string }{baseSHA, headSHA}
 	bases, err := reviewGit(ctx, objects, "merge-base", "--all", round.BaseSHA, round.HeadSHA)
 	if err != nil {
 		return fmt.Errorf("cannot establish PR merge base; fetch complete base and head history in the selected checkout")
