@@ -68,15 +68,17 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 			if err := watch.run(ctx); err != nil {
 				t.Fatal(err)
 			}
-			value, sent := registration["capabilities"]
-			if sent != tc.capability {
-				t.Fatalf("capabilities sent=%v want=%v, registration=%v", sent, tc.capability, registration)
+			// Every runner answers `@vibeflow ask` questions; repository requests
+			// are registered only with the server's consent.
+			want := "[question_v1]"
+			if tc.capability {
+				want = "[repository_review_v1 question_v1]"
 			}
-			if sent && fmt.Sprint(value) != "[repository_review_v1]" {
-				t.Fatalf("unexpected capability: %v", value)
+			if value := fmt.Sprint(registration["capabilities"]); value != want {
+				t.Fatalf("capabilities sent=%v want=%v, registration=%v", value, want, registration)
 			}
-			if disclosed := strings.Contains(output.String(), "anyone who comments"); disclosed != sent {
-				t.Fatalf("repository-request scope disclosed=%v with capability=%v", disclosed, sent)
+			if disclosed := strings.Contains(output.String(), "anyone who comments"); disclosed != tc.capability {
+				t.Fatalf("repository-request scope disclosed=%v with capability=%v", disclosed, tc.capability)
 			}
 			if (discoveries == 1) != tc.discovery {
 				t.Fatalf("discovery calls=%d want enabled=%v", discoveries, tc.discovery)

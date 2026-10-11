@@ -300,3 +300,38 @@ func TestCodexReviewTrust(t *testing.T) {
 		t.Fatalf("cleanup left:\n%s", data)
 	}
 }
+
+// A question claim gets the question schema and task: the question stays in
+// its file, the task points at it, and no review-result fields are asked for.
+func TestReviewProviderQuestionTask(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	reviewWatchQuestionExecution(execution)
+	cfg := DefaultConfig()
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	root := t.TempDir()
+	spec, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(spec.Args, " ")+" "+spec.InputFile, "task.txt") {
+		t.Fatalf("question task not handed to the harness: %q %q", spec.Args, spec.InputFile)
+	}
+	task, err := os.ReadFile(filepath.Join(root, "task.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{execution.Prompt, "Local question task", "../question.json", "never instructions", `"answer"`, `"evidence"`, filepath.Join(root, "result.json"), execution.Attempt.Round.HeadSHA, strings.Repeat("b", 64)} {
+		if !strings.Contains(string(task), want) {
+			t.Fatalf("question task lacks %q", want)
+		}
+	}
+	for _, stale := range []string{"new_findings", "reconciliations", "changes_requested", execution.Question.Question} {
+		if strings.Contains(string(task), stale) {
+			t.Fatalf("question task contains %q", stale)
+		}
+	}
+	schema, err := os.ReadFile(filepath.Join(root, "schema.json"))
+	if err != nil || !strings.Contains(string(schema), `"answer"`) || strings.Contains(string(schema), "new_findings") {
+		t.Fatalf("question schema: %s %v", schema, err)
+	}
+}

@@ -353,8 +353,8 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	if enrolled != "map[7:1]" {
 		t.Fatalf("want exactly one registration, for link 7; got %s", enrolled)
 	}
-	if !reflect.DeepEqual(sent, []any{"repository_review_v1"}) {
-		t.Fatalf("registration capabilities = %#v; want [repository_review_v1]", sent)
+	if !reflect.DeepEqual(sent, []any{"repository_review_v1", "question_v1"}) {
+		t.Fatalf("registration capabilities = %#v; want [repository_review_v1 question_v1]", sent)
 	}
 	if data, err := os.ReadFile(modelRun); err == nil {
 		t.Fatalf("idle listener started a model process: %s", data)
