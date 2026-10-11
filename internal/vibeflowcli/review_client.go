@@ -32,12 +32,30 @@ type reviewJob struct {
 	State            string `json:"state"`
 }
 
+// reviewQuestion is a developer's `@vibeflow ask` question, carried as data
+// beside the prompt. The runner writes it to a file; it never joins the prompt.
+type reviewQuestion struct {
+	ID          string `json:"id"`
+	Question    string `json:"question"`
+	AskedBy     string `json:"asked_by,omitempty"`
+	CommentID   string `json:"comment_id"`
+	RoundNumber int    `json:"round_number"`
+	HeadSHA     string `json:"head_sha"`
+	BaseSHA     string `json:"base_sha"`
+}
+
+const reviewQuestionCapability = "question_v1"
+
 type reviewExecution struct {
 	Version                  int       `json:"version"`
 	ProgressReportingVersion int       `json:"progress_reporting_version,omitempty"`
 	Review                   reviewJob `json:"review"`
 	Prompt                   string    `json:"prompt"`
-	Attempt                  struct {
+	// Kind is "question" for an `ask` claim. The attempt's round is then the
+	// completed round the answer is about, which may trail the PR's head.
+	Kind     string          `json:"kind,omitempty"`
+	Question *reviewQuestion `json:"question,omitempty"`
+	Attempt  struct {
 		ID             string `json:"id"`
 		RunnerID       string `json:"runner_id"`
 		SessionID      string `json:"session_id"`
@@ -52,6 +70,8 @@ type reviewExecution struct {
 		} `json:"round"`
 	} `json:"attempt"`
 }
+
+func (e *reviewExecution) isQuestion() bool { return e != nil && e.Kind == "question" }
 
 type reviewProgressInput struct {
 	HeadSHA          string `json:"head_sha"`

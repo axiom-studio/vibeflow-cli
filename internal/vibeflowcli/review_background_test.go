@@ -62,7 +62,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 				t.Error(err)
 			}
 			registrations.Add(1)
-			if fmt.Sprint(body["capabilities"]) != "[repository_review_v1]" {
+			if fmt.Sprint(body["capabilities"]) != "[repository_review_v1 question_v1]" {
 				t.Error("explicit background launch lost repository consent")
 			}
 			json.NewEncoder(w).Encode(map[string]any{"id": body["id"], "user_id": 42, "provider": "github", "repository_link_id": 7})

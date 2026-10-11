@@ -48,6 +48,7 @@ Past reviews keep only their recorded result and findings; the live harness tran
 If the review API is unreachable, the list keeps the last good entries and its status line says so until the next successful refresh.
 The session list status and output preview always come from the listener pane, whichever pane has focus.
 Starting that session is the explicit consent for repository requests on that one repository, registered only when the server advertises `repository_review_v1`.
+Every listener also registers `question_v1`, so a server that supports it hands the runner `@vibeflow ask` questions about reviewed pull requests; the runner answers from a checkout of the reviewed revision and the server posts the reply.
 Anyone who comments `@vibeflow review` on that repository can then request a review using your harness credentials until you delete the session.
 Because Vera runs with full permissions, PR content and comments from those commenters reach an unrestricted agent on your machine; only its working directory is disposable.
 Attach to the session to watch it: it prints a listening line, then for each review the claimed PR number and head commit, the worktree it prepared, and the harness's own interactive UI in the pane, followed by the result, the worktree removal and the listening line again.

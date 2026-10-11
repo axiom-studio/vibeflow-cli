@@ -364,7 +364,10 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		Provider         string `json:"provider"`
 		RepositoryLinkID int64  `json:"repository_link_id"`
 	}
-	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID}
+	// Every runner of this version answers `@vibeflow ask` questions; the
+	// server hands them only to runners that say so.
+	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID, "capabilities": []string{reviewQuestionCapability}}
+	repositoryRequests := false
 	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
 	if w.options.GitProvider == "github" {
 		var discovery reviewStartupRepositoriesResponse
@@ -378,7 +381,8 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			}
 		}
 		if supported {
-			registration["capabilities"] = []string{"repository_review_v1"}
+			registration["capabilities"] = []string{"repository_review_v1", reviewQuestionCapability}
+			repositoryRequests = true
 		} else {
 			idleStatus = reviewLegacyRoutingNotice
 		}
@@ -396,7 +400,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	if err = w.save(); err != nil {
 		return err
 	}
-	if _, ok := registration["capabilities"]; ok {
+	if repositoryRequests {
 		w.repositoryRequests = true
 		fmt.Fprintln(w.output, "Repository requests enabled: anyone who comments @vibeflow review on this linked repository can request a review from this runner.")
 	}
@@ -594,8 +598,23 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 			p.Completed = true
 			return w.finishReceipt(p)
 		}
-		if execution.Version != 2 || execution.Review.ID != p.JobID || execution.Attempt.Round.JobID != p.JobID || execution.Attempt.RunnerID != w.state.ID || execution.Prompt == "" || execution.Attempt.Round.HeadSHA != execution.Review.HeadSHA || execution.Attempt.Round.BaseSHA != execution.Review.BaseSHA || execution.Review.RepositoryLinkID != w.options.RepositoryLinkID || execution.Review.Provider != w.options.GitProvider {
+		if execution.Version != 2 || execution.Review.ID != p.JobID || execution.Attempt.Round.JobID != p.JobID || execution.Attempt.RunnerID != w.state.ID || execution.Prompt == "" || execution.Review.RepositoryLinkID != w.options.RepositoryLinkID || execution.Review.Provider != w.options.GitProvider {
 			return fmt.Errorf("review execution identity or version is invalid")
+		}
+		switch execution.Kind {
+		case "":
+			if execution.Attempt.Round.HeadSHA != execution.Review.HeadSHA || execution.Attempt.Round.BaseSHA != execution.Review.BaseSHA {
+				return fmt.Errorf("review execution identity or version is invalid")
+			}
+		case "question":
+			// The answer is about the reviewed revision in the attempt's round,
+			// which the PR may have moved past; the question must name the same one.
+			q := execution.Question
+			if q == nil || strings.TrimSpace(q.Question) == "" || q.HeadSHA != execution.Attempt.Round.HeadSHA || q.BaseSHA != execution.Attempt.Round.BaseSHA {
+				return fmt.Errorf("question execution is missing its question or names another revision")
+			}
+		default:
+			return fmt.Errorf("review execution kind %q is not supported by this runner", execution.Kind)
 		}
 		p.Execution = &execution
 		if err = w.save(); err != nil {
@@ -606,7 +625,11 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		fresh = true
 	}
 	if len(p.Result) == 0 && p.Failure == "" && fresh {
-		fmt.Fprintf(w.output, "\nClaimed %s at %.12s; starting a fresh Vera with %s.\n", reviewPRLabel(p.Execution.Review), p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
+		claimed := "Claimed " + reviewPRLabel(p.Execution.Review)
+		if p.Execution.isQuestion() {
+			claimed = "Claimed a question on " + reviewPRLabel(p.Execution.Review)
+		}
+		fmt.Fprintf(w.output, "\n%s at %.12s; starting a fresh Vera with %s.\n", claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
 		result, err := w.execute(ctx, p)
 		if err != nil {
 			p.Failure = err.Error()
@@ -648,6 +671,8 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		fmt.Fprintln(w.output, "Review attempt is no longer accepted; its receipt was retained.")
 	} else if p.Failure != "" {
 		fmt.Fprintln(w.output, "Failure reported to VibeFlow.")
+	} else if p.Execution.isQuestion() {
+		fmt.Fprintln(w.output, "Answer sent to VibeFlow; the server posts the reply on the PR.")
 	} else {
 		fmt.Fprintln(w.output, "Result sent to VibeFlow; the server handles tickets and PR publication.")
 	}
@@ -878,6 +903,12 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	markProgress(1)
 	if err := os.WriteFile(filepath.Join(root, "input", "brief.json"), brief.Content, 0600); err != nil {
 		return nil, err
+	}
+	if p.Execution.isQuestion() {
+		// The question is data for the task, kept beside the brief, never in the prompt.
+		if err := saveReviewJSON(filepath.Join(root, "input", "question.json"), p.Execution.Question); err != nil {
+			return nil, err
+		}
 	}
 	var findings []json.RawMessage
 	setStage("findings")
@@ -1331,7 +1362,7 @@ func removeReviewDir(dir string) error {
 	return os.RemoveAll(dir)
 }
 
-const reviewListeningLine = "Listening for @vibeflow review requests; no model runs while idle."
+const reviewListeningLine = "Listening for @vibeflow review requests and questions; no model runs while idle."
 
 func reviewPRLabel(job reviewJob) string {
 	if job.Number > 0 {
@@ -1348,8 +1379,13 @@ func reviewOutcomeLine(p *reviewReceipt) string {
 	var result struct {
 		Outcome  string            `json:"outcome"`
 		Findings []json.RawMessage `json:"new_findings"`
+		Answer   string            `json:"answer"`
+		Evidence []json.RawMessage `json:"evidence"`
 	}
 	_ = json.Unmarshal(p.Result, &result)
+	if p.Execution.isQuestion() {
+		return fmt.Sprintf("Result: answered with %d citations.", len(result.Evidence))
+	}
 	if result.Outcome == "changes_requested" {
 		return fmt.Sprintf("Result: changes requested with %d new findings.", len(result.Findings))
 	}
