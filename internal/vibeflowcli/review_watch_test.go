@@ -541,3 +541,96 @@ func TestWaitReviewHarnessNotice(t *testing.T) {
 		t.Fatalf("finished=%v notices=%d", finished, notices)
 	}
 }
+
+// reviewWatchQuestionExecution turns a review execution into a question claim
+// about the same revision.
+func reviewWatchQuestionExecution(e *reviewExecution) *reviewExecution {
+	e.Kind = "question"
+	e.Prompt = "You are in question mode: answer the developer's question and stop."
+	e.Question = &reviewQuestion{ID: reviewUUID(), Question: "Why does value() return 2 now?", AskedBy: "reviewer", CommentID: "901", RoundNumber: 1, HeadSHA: e.Attempt.Round.HeadSHA, BaseSHA: e.Attempt.Round.BaseSHA}
+	return e
+}
+
+// reviewWatchQuestionResult writes a harness answer for e.
+func reviewWatchQuestionResult(t *testing.T, e *reviewExecution) string {
+	t.Helper()
+	digest := sha256.Sum256([]byte("{}"))
+	path := filepath.Join(t.TempDir(), "result.json")
+	result := map[string]any{"schema_version": 1, "brief_digest": hex.EncodeToString(digest[:]), "head_sha": e.Attempt.Round.HeadSHA, "base_sha": e.Attempt.Round.BaseSHA, "answer": "Because the head commit changed the constant.", "evidence": []any{map[string]any{"path": "main.go", "line": 2, "note": "return 2"}}}
+	if err := saveReviewJSON(path, map[string]any{"result": result, "failure_reason": nil}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A question claim runs like a review: same checkout, brief and submission,
+// with the question written beside the brief as data and an answer result.
+func TestReviewWatchQuestionLifecycle(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	e.Review.Number = 42
+	// The PR moved on since the reviewed round; the question is still about the round.
+	e.Review.HeadSHA = strings.Repeat("f", 40)
+	reviewWatchQuestionExecution(e)
+	server, claims, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	provider := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\ngrep -q 'Why does value() return 2 now' ../question.json || exit 7\ngrep -q 'Local question task' ../../task.txt || exit 8\ngrep -q new_findings ../../schema.json && exit 9\ncat " + shellQuote(reviewWatchQuestionResult(t, e)) + " > ../../result.json\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "stream-api-canary"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "question-test", "--once"); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	text := out.String()
+	last := 0
+	for _, want := range []string{reviewListeningLine, "Claimed a question on PR #42 at " + e.Attempt.Round.HeadSHA[:12] + "; starting a fresh Vera with claude.", "Review worktree ready: ", "Result: answered with 1 citations.", "Review worktree removed.", "Answer sent to VibeFlow; the server posts the reply on the PR."} {
+		i := strings.Index(text[last:], want)
+		if i < 0 {
+			t.Fatalf("missing %q after offset %d:\n%s", want, last, text)
+		}
+		last += i + len(want)
+	}
+	if strings.Contains(text, e.Question.Question) {
+		t.Fatalf("the question text reached the runner's output:\n%s", text)
+	}
+	if claims[7].Load() != 1 || results.Load() != 1 {
+		t.Fatalf("claims=%d results=%d", claims[7].Load(), results.Load())
+	}
+}
+
+// A question claim that omits its question, or names a revision other than
+// the attempt's round, is refused before any checkout.
+func TestReviewWatchQuestionClaimIdentity(t *testing.T) {
+	for name, mutate := range map[string]func(*reviewExecution){
+		"missing question": func(e *reviewExecution) { e.Question = nil },
+		"empty question":   func(e *reviewExecution) { e.Question.Question = " " },
+		"other revision":   func(e *reviewExecution) { e.Question.HeadSHA = strings.Repeat("e", 40) },
+		"unknown kind":     func(e *reviewExecution) { e.Kind = "repair" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			withTempRoot(t)
+			repo, e := reviewTestRepo(t)
+			reviewWatchQuestionExecution(e)
+			mutate(e)
+			server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+			cfg := DefaultConfig()
+			cfg.ServerURL, cfg.APIToken = server.URL, "stream-api-canary"
+			cfg.Providers["claude"] = Provider{Binary: filepath.Join(t.TempDir(), "never-run")}
+			if err := SaveConfig(cfg, ConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "question-test", "--once")
+			if err == nil || results.Load() != 0 || strings.Contains(out.String(), "Review worktree ready") {
+				t.Fatalf("invalid question claim was run: %v\n%s", err, out.String())
+			}
+		})
+	}
+}
