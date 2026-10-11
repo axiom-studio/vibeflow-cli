@@ -903,6 +903,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// tmux attach exited — refresh sessions to pick up status changes.
 		// No ClearScreen needed: RestoreTerminal already re-enters alt screen
 		// which clears the screen and calls repaint() internally.
+		if msg.err != nil {
+			m.logger.Error("attach: %v", msg.err)
+			m.err = fmt.Errorf("attach: %w", msg.err)
+			return m, tea.Batch(m.refreshSessions, tea.Tick(10*time.Second, func(time.Time) tea.Msg { return errClearMsg{} }))
+		}
 		return m, m.refreshSessions
 	case workbenchReadyMsg:
 		// Composition finished off-goroutine. On success, attach natively to the

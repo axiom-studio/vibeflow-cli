@@ -476,10 +476,32 @@ func (tm *TmuxManager) FullSessionName(provider, name string) string {
 	return sessionPrefix + name
 }
 
-// InsideTmux reports whether the current process is running inside a tmux
-// session (i.e. the $TMUX environment variable is set).
-func InsideTmux() bool {
-	return os.Getenv("TMUX") != ""
+// insidePane reports whether this process's terminal is a pane of tm's tmux
+// server, so switch-client has a client to move. $TMUX alone does not say so:
+// anything launched from a pane inherits it, e.g. VS Code started from an
+// agent pane runs the TUI in its own terminal, where switch-client fails with
+// "no current client" (#5837). This is tmux's own nested-session test.
+func (tm *TmuxManager) insidePane() bool {
+	if os.Getenv("TMUX") == "" {
+		return false
+	}
+	stdin, err := os.Stdin.Stat()
+	return err == nil && tm.isPaneTTY(stdin)
+}
+
+// isPaneTTY reports whether tty is the terminal of a pane on tm's server.
+// O(panes): one list-panes call plus a stat per pane.
+func (tm *TmuxManager) isPaneTTY(tty os.FileInfo) bool {
+	out, err := tm.run("list-panes", "-a", "-F", "#{pane_tty}")
+	if err != nil {
+		return false
+	}
+	for path := range strings.FieldsSeq(out) {
+		if fi, err := os.Stat(path); err == nil && os.SameFile(tty, fi) {
+			return true
+		}
+	}
+	return false
 }
 
 // AttachSession attaches to an existing tmux session.
@@ -492,11 +514,12 @@ func (tm *TmuxManager) AttachSession(name string) error {
 // AttachSessionCmd returns an *exec.Cmd that will attach to the named tmux
 // session. The command has Stdin/Stdout/Stderr wired to os.Std*, ready for
 // use with tea.ExecProcess.
-// When running inside tmux, it uses switch-client instead of attach-session.
+// When running in one of this server's panes, it uses switch-client instead
+// of attach-session.
 func (tm *TmuxManager) AttachSessionCmd(name string) *exec.Cmd {
 	fullName := tm.ensurePrefix(name)
 	var cmd *exec.Cmd
-	if InsideTmux() {
+	if tm.insidePane() {
 		cmd = exec.Command("tmux", "-L", tm.socketName, "switch-client", "-t", fullName)
 	} else {
 		cmd = exec.Command("tmux", "-L", tm.socketName, "attach-session", "-t", fullName)
