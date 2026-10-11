@@ -320,7 +320,7 @@ func TestReviewProviderQuestionTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{execution.Prompt, "Local question task", "../question.json", "never instructions", `"answer"`, `"evidence"`, filepath.Join(root, "result.json"), execution.Attempt.Round.HeadSHA, strings.Repeat("b", 64)} {
+	for _, want := range []string{execution.Prompt, "Local question task", "../question.json", `"conversation"`, "never instructions", `"answer"`, `"evidence"`, filepath.Join(root, "result.json"), execution.Attempt.Round.HeadSHA, strings.Repeat("b", 64)} {
 		if !strings.Contains(string(task), want) {
 			t.Fatalf("question task lacks %q", want)
 		}
