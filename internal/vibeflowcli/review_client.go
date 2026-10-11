@@ -42,6 +42,11 @@ type reviewQuestion struct {
 	RoundNumber int    `json:"round_number"`
 	HeadSHA     string `json:"head_sha"`
 	BaseSHA     string `json:"base_sha"`
+	// Conversation and Review are the server's memory of the pull request:
+	// its earlier questions and answers, and Vera's latest verdict. They pass
+	// through to the question file unchanged, as data.
+	Conversation json.RawMessage `json:"conversation,omitempty"`
+	Review       json.RawMessage `json:"review,omitempty"`
 }
 
 const reviewQuestionCapability = "question_v1"
