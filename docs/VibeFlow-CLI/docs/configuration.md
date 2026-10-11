@@ -24,6 +24,7 @@ Vera, the PR reviewer, is part of the normal binary and needs no flag or configu
 `vibeflow` starts straight into the session list; Vera runs only in a Vera session you start from New Agent, one per repository.
 Starting that session permits requests from PR commenters on its one linked repository, including commenters without a Cloud account, until you delete the session.
 Repository routing is enabled only when the server advertises `repository_review_v1` when the session's listener starts.
+Question answering (`@vibeflow ask`) needs no configuration: the listener registers `question_v1` and a question runs like a review, in a disposable worktree of the reviewed revision, with the question supplied as a file beside the brief.
 Detached-runner records do not grant this consent for another repository.
 Use explicit `vibeflow review-watch --background` for a detached runner on a machine without tmux.
 Vera can use any entry under `providers` whose `binary` is installed: `claude`, `codex`, `copilot`, `cursor`, `gemini`, `kiro` or `qwen`.
