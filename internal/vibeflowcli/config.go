@@ -115,13 +115,19 @@ type OpenShellConfig struct {
 
 // Config holds all vibeflow-cli configuration.
 type Config struct {
-	ServerURL         string              `yaml:"server_url"`
-	APIToken          string              `yaml:"api_token"`
-	DefaultProject    string              `yaml:"default_project"`
-	DefaultWorkDir    string              `yaml:"default_work_dir"`
-	TmuxSocket        string              `yaml:"tmux_socket"`
-	PollInterval      int                 `yaml:"poll_interval_seconds"`
-	ReviewConcurrency int                 `yaml:"review_concurrency"`
+	ServerURL         string `yaml:"server_url"`
+	APIToken          string `yaml:"api_token"`
+	DefaultProject    string `yaml:"default_project"`
+	DefaultWorkDir    string `yaml:"default_work_dir"`
+	TmuxSocket        string `yaml:"tmux_socket"`
+	PollInterval      int    `yaml:"poll_interval_seconds"`
+	ReviewConcurrency int    `yaml:"review_concurrency"`
+	// ReviewAnswerSlots and ReviewReviewSlots split one Vera listener into
+	// slots: answer slots take only questions, review slots prefer reviews
+	// and take questions only when no review waits. Both 0 (the default)
+	// keeps the single shared slot.
+	ReviewAnswerSlots int                 `yaml:"review_answer_slots,omitempty"`
+	ReviewReviewSlots int                 `yaml:"review_review_slots,omitempty"`
 	ClaudeBinary      string              `yaml:"claude_binary"`
 	Providers         map[string]Provider `yaml:"providers"`
 	Worktree          WorktreeConfig      `yaml:"worktree"`
@@ -439,6 +445,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.ReviewConcurrency <= 0 {
 		return nil, fmt.Errorf("review_concurrency must be a positive integer")
+	}
+	if cfg.ReviewAnswerSlots < 0 || cfg.ReviewAnswerSlots > maxReviewSlots || cfg.ReviewReviewSlots < 0 || cfg.ReviewReviewSlots > maxReviewSlots {
+		return nil, fmt.Errorf("review_answer_slots and review_review_slots must be 0 to %d", maxReviewSlots)
 	}
 
 	// Migrate built-in provider configs to current defaults.

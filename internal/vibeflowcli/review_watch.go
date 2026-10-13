@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -34,14 +35,18 @@ type reviewWatchOptions struct {
 	Model            string
 	Kind             string
 	Name             string
-	Once             bool
-	PollInterval     time.Duration
-	Timeout          time.Duration
+	// SlotKind is "question" or "review" for one slot of a split listener,
+	// "" for the single shared slot.
+	SlotKind     string
+	Once         bool
+	PollInterval time.Duration
+	Timeout      time.Duration
 }
 
 type reviewReceipt struct {
 	JobID     string             `json:"job_id"`
 	RequestID string             `json:"request_id"`
+	ClaimKind string             `json:"claim_kind,omitempty"` // Sent with the claim when the slot names a kind.
 	Execution *reviewExecution   `json:"execution,omitempty"`
 	Result    json.RawMessage    `json:"result,omitempty"`
 	Failure   string             `json:"failure,omitempty"`
@@ -160,6 +165,7 @@ func reviewWatchCmd() *cobra.Command {
 	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
 	var background, status, history bool
 	var stop, managed, serverURL, detail string
+	answerSlots, reviewSlots := -1, -1
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		// Flags parsed; runtime failures print their message, not the usage text.
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true // main prints the error once.
@@ -272,6 +278,19 @@ func reviewWatchCmd() *cobra.Command {
 		if o.ProjectID <= 0 {
 			return fmt.Errorf("review project not found")
 		}
+		if answerSlots < 0 {
+			answerSlots = cfg.ReviewAnswerSlots
+		}
+		if reviewSlots < 0 {
+			reviewSlots = cfg.ReviewReviewSlots
+		}
+		slotted := answerSlots > 0 || reviewSlots > 0
+		if answerSlots > maxReviewSlots || reviewSlots > maxReviewSlots {
+			return fmt.Errorf("--answer-slots and --review-slots must be 0 to %d", maxReviewSlots)
+		}
+		if slotted && (background || o.Once) {
+			return fmt.Errorf("answer and review slots run in the foreground listener only; drop --background or --once, or set both slot counts to 0")
+		}
 		if background {
 			return startReviewBackground(cmd.Context(), cfg, path, o, cmd.OutOrStdout())
 		}
@@ -282,6 +301,9 @@ func reviewWatchCmd() *cobra.Command {
 		capacity, err := sharedReviewCapacity(RootDir(), cfg.ReviewConcurrency)
 		if err != nil {
 			return err
+		}
+		if slotted {
+			return runReviewSlots(ctx, client, cfg, o, capacity, answerSlots, reviewSlots, cmd.OutOrStdout())
 		}
 		// A terminal (a Vera tmux pane) shows each harness's interactive UI.
 		watch := &reviewWatch{client: client, cfg: cfg, options: o, output: cmd.OutOrStdout(), capacity: capacity, tty: openReviewTerminal(cmd.OutOrStdout())}
@@ -302,6 +324,8 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&detail, "review-detail", "", "Show one review's recorded result and findings (opened from Vera's history pane)")
 	_ = cmd.Flags().MarkHidden("review-detail")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
+	cmd.Flags().IntVar(&answerSlots, "answer-slots", -1, fmt.Sprintf("Slots that only answer @vibeflow ask questions, 0 to %d (default: review_answer_slots, else 0)", maxReviewSlots))
+	cmd.Flags().IntVar(&reviewSlots, "review-slots", -1, fmt.Sprintf("Slots that run reviews and, when idle, questions, 0 to %d (default: review_review_slots, else 0); both 0 keeps one shared slot", maxReviewSlots))
 	cmd.Flags().BoolVar(&background, "background", false, "Run this explicit binding in the background independently of the TUI")
 	cmd.Flags().BoolVar(&status, "status", false, "Show managed review runners in this root")
 	cmd.Flags().StringVar(&stop, "stop", "", "Stop and disable a detached runner ID")
@@ -369,11 +393,16 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID, "capabilities": []string{reviewQuestionCapability}}
 	repositoryRequests := false
 	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
-	if w.options.GitProvider == "github" {
-		var discovery reviewStartupRepositoriesResponse
+	var discovery reviewStartupRepositoriesResponse
+	if w.options.GitProvider == "github" || w.options.SlotKind != "" {
 		if err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery); err != nil {
 			return err
 		}
+	}
+	if w.options.SlotKind != "" && !slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability) {
+		return fmt.Errorf("this VibeFlow server cannot route work to separate answer and review slots; upgrade the server or run without slots")
+	}
+	if w.options.GitProvider == "github" {
 		supported := false
 		for _, capability := range discovery.SupportedRunnerCapabilities {
 			if capability == "repository_review_v1" {
@@ -557,15 +586,12 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 		if page.Next != "" && page.Next <= w.state.Cursor {
 			return fmt.Errorf("review work cursor did not advance")
 		}
-		for _, job := range page.Reviews {
-			if job.RepositoryLinkID == w.options.RepositoryLinkID && job.Provider == w.options.GitProvider {
-				w.state.Pending = &reviewReceipt{JobID: job.ID, RequestID: reviewUUID()}
-				acquired, err := w.acquireCapacity()
-				if err != nil || !acquired {
-					w.state.Pending = nil
-					return err
-				}
-				break
+		if job, kind, ok := reviewSlotPick(w.options, page.Reviews); ok {
+			w.state.Pending = &reviewReceipt{JobID: job.ID, RequestID: reviewUUID(), ClaimKind: kind}
+			acquired, err := w.acquireCapacity()
+			if err != nil || !acquired {
+				w.state.Pending = nil
+				return err
 			}
 		}
 		w.state.Cursor = page.Next
@@ -586,7 +612,11 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 	}
 	if p.Execution == nil {
 		var execution reviewExecution
-		err := w.client.reviewRequest(ctx, "POST", w.prefix()+"/jobs/"+url.PathEscape(p.JobID)+"/claim", map[string]string{"request_id": p.RequestID}, &execution)
+		claim := map[string]string{"request_id": p.RequestID}
+		if p.ClaimKind != "" {
+			claim["kind"] = p.ClaimKind
+		}
+		err := w.client.reviewRequest(ctx, "POST", w.prefix()+"/jobs/"+url.PathEscape(p.JobID)+"/claim", claim, &execution)
 		if err != nil {
 			if reviewPermanent(err) {
 				p.Completed = true

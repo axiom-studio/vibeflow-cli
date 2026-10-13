@@ -30,6 +30,8 @@ type reviewJob struct {
 	HeadSHA          string `json:"head_sha"`
 	BaseSHA          string `json:"base_sha"`
 	State            string `json:"state"`
+	// PendingQuestions counts queued `@vibeflow ask` questions on the job.
+	PendingQuestions int `json:"pending_questions,omitempty"`
 }
 
 // reviewQuestion is a developer's `@vibeflow ask` question, carried as data
