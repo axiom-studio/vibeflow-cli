@@ -88,6 +88,9 @@ An answer slot claims only questions, so an answer never waits behind a long rev
 Each slot is its own runner record ("<name> · answer 1") with its own receipt, and all slots share `review_concurrency`, so raise it to run more harnesses at once.
 Slots need a server that advertises `claim_kind_v1`, run in the foreground listener only, and run their harnesses headless.
 Both counts at 0, the default, keep the single shared slot exactly as before.
+In the TUI, a Vera session with slots becomes a console: its first window shows a dashboard (slot use and each slot's job with elapsed time) beside the history pane, and every slot runs the ordinary interactive listener in its own tmux window.
+A busy slot's window is named after its job (`answer #34`, `review #106`) and returns to its slot name (`answer 1`) when it listens again, so the live harness session of every running job is one window switch away.
+The session row lists every slot's job, for example `reviewing PR #106 · answering on PR #34`.
 Zero, negative, null, and noninteger values are configuration errors.
 All foreground `review-watch` listeners in one root, including every Vera session, share this limit: at most that many reviews run at once, and a listener at the limit keeps listening without claiming work.
 The limit covers each attempt through provider shutdown and result acknowledgement, including saved results awaiting restored authorization.

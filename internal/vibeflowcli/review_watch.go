@@ -37,7 +37,9 @@ type reviewWatchOptions struct {
 	Name             string
 	// SlotKind is "question" or "review" for one slot of a split listener,
 	// "" for the single shared slot.
-	SlotKind     string
+	SlotKind string
+	// SlotLabel names this slot's tmux window while it listens (\"answer 1\").
+	SlotLabel    string
 	Once         bool
 	PollInterval time.Duration
 	Timeout      time.Duration
@@ -47,6 +49,7 @@ type reviewReceipt struct {
 	JobID     string             `json:"job_id"`
 	RequestID string             `json:"request_id"`
 	ClaimKind string             `json:"claim_kind,omitempty"` // Sent with the claim when the slot names a kind.
+	ClaimedAt int64              `json:"claimed_at,omitempty"` // Unix ms when the server handed over the job.
 	Execution *reviewExecution   `json:"execution,omitempty"`
 	Result    json.RawMessage    `json:"result,omitempty"`
 	Failure   string             `json:"failure,omitempty"`
@@ -104,6 +107,7 @@ func (w *reviewWatch) browse(on bool) {
 
 // listening says the runner is idle again.
 func (w *reviewWatch) listening() {
+	w.nameWindow(w.options.SlotLabel)
 	fmt.Fprintln(w.output, reviewListeningLine)
 	if w.tty != nil {
 		fmt.Fprintln(w.output, veraBrowseHint)
@@ -166,6 +170,7 @@ func reviewWatchCmd() *cobra.Command {
 	var background, status, history bool
 	var stop, managed, serverURL, detail string
 	answerSlots, reviewSlots := -1, -1
+	var dashboard bool
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		// Flags parsed; runtime failures print their message, not the usage text.
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true // main prints the error once.
@@ -288,6 +293,18 @@ func reviewWatchCmd() *cobra.Command {
 		if answerSlots > maxReviewSlots || reviewSlots > maxReviewSlots {
 			return fmt.Errorf("--answer-slots and --review-slots must be 0 to %d", maxReviewSlots)
 		}
+		if dashboard {
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+			defer cancel()
+			return runVeraDashboard(ctx, cfg, o, max(answerSlots, 0), max(reviewSlots, 0), cmd.OutOrStdout())
+		}
+		if o.SlotKind != "" {
+			// One slot of a Vera console, in its own tmux window: the ordinary
+			// interactive listener, claiming only its kind.
+			if (o.SlotKind != "question" && o.SlotKind != "review") || slotted || background || o.Once || o.SlotLabel == "" {
+				return fmt.Errorf("--slot-kind must be question or review, with --slot-label, and without slot counts, --background or --once")
+			}
+		}
 		if slotted && (background || o.Once) {
 			return fmt.Errorf("answer and review slots run in the foreground listener only; drop --background or --once, or set both slot counts to 0")
 		}
@@ -324,6 +341,12 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&detail, "review-detail", "", "Show one review's recorded result and findings (opened from Vera's history pane)")
 	_ = cmd.Flags().MarkHidden("review-detail")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
+	cmd.Flags().StringVar(&o.SlotKind, "slot-kind", "", "Internal: run one console slot that claims only questions or reviews")
+	cmd.Flags().StringVar(&o.SlotLabel, "slot-label", "", "Internal: the console slot's tmux window name while idle")
+	cmd.Flags().BoolVar(&dashboard, "dashboard", false, "Internal: show the Vera console dashboard for this repository's slots")
+	_ = cmd.Flags().MarkHidden("slot-kind")
+	_ = cmd.Flags().MarkHidden("slot-label")
+	_ = cmd.Flags().MarkHidden("dashboard")
 	cmd.Flags().IntVar(&answerSlots, "answer-slots", -1, fmt.Sprintf("Slots that only answer @vibeflow ask questions, 0 to %d (default: review_answer_slots, else 0)", maxReviewSlots))
 	cmd.Flags().IntVar(&reviewSlots, "review-slots", -1, fmt.Sprintf("Slots that run reviews and, when idle, questions, 0 to %d (default: review_review_slots, else 0); both 0 keeps one shared slot", maxReviewSlots))
 	cmd.Flags().BoolVar(&background, "background", false, "Run this explicit binding in the background independently of the TUI")
@@ -647,6 +670,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 			return fmt.Errorf("review execution kind %q is not supported by this runner", execution.Kind)
 		}
 		p.Execution = &execution
+		p.ClaimedAt = time.Now().UnixMilli()
 		if err = w.save(); err != nil {
 			return err
 		}
@@ -660,6 +684,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 			claimed = "Claimed a question on " + reviewPRLabel(p.Execution.Review)
 		}
 		fmt.Fprintf(w.output, "\n%s at %.12s; starting a fresh Vera with %s.\n", claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
+		w.nameWindow(veraJobWindowName(p))
 		result, err := w.execute(ctx, p)
 		if err != nil {
 			p.Failure = err.Error()

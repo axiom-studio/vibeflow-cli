@@ -212,4 +212,12 @@ func TestReviewSlotsRequireClaimKindServer(t *testing.T) {
 	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--answer-slots", "1", "--background"); err == nil || !strings.Contains(err.Error(), "foreground listener only") {
 		t.Fatalf("background slots accepted: %v", err)
 	}
+	// A console slot window: invalid kinds are refused, and a valid slot still
+	// needs a server that routes by kind.
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--slot-kind", "everything", "--slot-label", "answer 1"); err == nil || !strings.Contains(err.Error(), "--slot-kind must be question or review") {
+		t.Fatalf("invalid slot kind accepted: %v", err)
+	}
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac · answer 1", "--slot-kind", "question", "--slot-label", "answer 1"); err == nil || !strings.Contains(err.Error(), "cannot route work to separate answer and review slots") {
+		t.Fatalf("slot window started against an old server: %v", err)
+	}
 }
