@@ -49,6 +49,11 @@ type reviewQuestion struct {
 	// through to the question file unchanged, as data.
 	Conversation json.RawMessage `json:"conversation,omitempty"`
 	Review       json.RawMessage `json:"review,omitempty"`
+	// Discussion is the pull request's own provider conversation, passed
+	// through unchanged; DiscussionUnavailable reports that the server could
+	// not read it.
+	Discussion            json.RawMessage `json:"discussion,omitempty"`
+	DiscussionUnavailable bool            `json:"discussion_unavailable,omitempty"`
 }
 
 const reviewQuestionCapability = "question_v1"

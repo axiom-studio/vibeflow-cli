@@ -313,6 +313,9 @@ func TestReviewProviderQuestionTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(spec.Args) < len(reviewReadOnlyClaudeArgs) || strings.Join(spec.Args[:len(reviewReadOnlyClaudeArgs)], " ") != strings.Join(reviewReadOnlyClaudeArgs, " ") {
+		t.Fatalf("question harness does not start with the read-only tool list: %q", spec.Args)
+	}
 	if !strings.Contains(strings.Join(spec.Args, " ")+" "+spec.InputFile, "task.txt") {
 		t.Fatalf("question task not handed to the harness: %q %q", spec.Args, spec.InputFile)
 	}

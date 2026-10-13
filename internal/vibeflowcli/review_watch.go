@@ -990,7 +990,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	spec.DeadlineAt = deadline.UnixMilli()
 	interactive := w.tty != nil
 	if interactive {
-		if err = makeReviewSpecInteractive(spec, w.cfg, w.options.Provider, w.options.Model, root); err != nil {
+		if err = makeReviewSpecInteractive(spec, w.cfg, w.options.Provider, w.options.Model, root, p.Execution.isQuestion()); err != nil {
 			return nil, err
 		}
 	}
@@ -1006,6 +1006,15 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	}
 	if err = saveReviewJSON(filepath.Join(root, "child.json"), spec); err != nil {
 		return nil, err
+	}
+	if p.Execution.isQuestion() {
+		// Answers are read-only: after every setup step that writes into the
+		// worktree, the checked-out files lose write permission. Git's own
+		// metadata stays writable so read commands keep working; result files
+		// live outside these trees.
+		if err := makeReviewTreesReadOnly(filepath.Join(root, "input")); err != nil {
+			return nil, err
+		}
 	}
 	executable, err := cliExecutable()
 	if err != nil {
@@ -1379,6 +1388,35 @@ func reviewReadBounded(path string, limit int64) ([]byte, error) {
 // removeReviewDir deletes a finished review, including its worktree. Tools run
 // by the harness may leave read-only directories, so it retries after making
 // every directory writable.
+// makeReviewTreesReadOnly removes write permission from the head worktree's
+// files and the base and merge-base snapshots. Symlinks and the worktree's
+// .git pointer are left alone; removeReviewDir restores directory access.
+func makeReviewTreesReadOnly(input string) error {
+	for _, name := range []string{"head", "base", "merge-base"} {
+		top := filepath.Join(input, name)
+		if _, err := os.Lstat(top); os.IsNotExist(err) {
+			continue
+		}
+		err := filepath.WalkDir(top, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.Type()&os.ModeSymlink != 0 || (name == "head" && path == filepath.Join(top, ".git")) {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			return os.Chmod(path, info.Mode().Perm()&^0222)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func removeReviewDir(dir string) error {
 	if os.RemoveAll(dir) == nil {
 		return nil
