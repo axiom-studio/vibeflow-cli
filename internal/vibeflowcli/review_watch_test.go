@@ -120,7 +120,8 @@ func TestReviewWatchForegroundLifecycle(t *testing.T) {
 	e.Review.Number = 42
 	server, claims, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
 	provider := filepath.Join(t.TempDir(), "claude")
-	script := "#!/bin/sh\necho HARNESS-LIVE-LINE\necho HARNESS-ERR-LINE >&2\ncat " + shellQuote(reviewWatchResult(t, e, 2)) + " > ../../result.json\n"
+	// A review keeps a writable worktree so Vera can build and test.
+	script := "#!/bin/sh\n[ -w main.go ] || exit 5\necho HARNESS-LIVE-LINE\necho HARNESS-ERR-LINE >&2\ncat " + shellQuote(reviewWatchResult(t, e, 2)) + " > ../../result.json\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -548,6 +549,7 @@ func reviewWatchQuestionExecution(e *reviewExecution) *reviewExecution {
 	e.Kind = "question"
 	e.Prompt = "You are in question mode: answer the developer's question and stop."
 	e.Question = &reviewQuestion{ID: reviewUUID(), Question: "Why does value() return 2 now?", AskedBy: "reviewer", CommentID: "901", RoundNumber: 1, HeadSHA: e.Attempt.Round.HeadSHA, BaseSHA: e.Attempt.Round.BaseSHA,
+		Discussion:   json.RawMessage(`[{"author":"author","created_at":"2026-10-12T10:00:00Z","kind":"review_comment","path":"main.go","line":2,"body":"Why return 2?"}]`),
 		Conversation: json.RawMessage(`[{"comment_id":"900","asked_by":"reviewer","question":"What changed?","answer":"The constant moved to value().","head_sha":"` + e.Attempt.Round.HeadSHA + `","answered_at":1}]`),
 		Review:       json.RawMessage(`{"round_number":1,"head_sha":"` + e.Attempt.Round.HeadSHA + `","outcome":"clean","summary":"verified fixture"}`)}
 	return e
@@ -576,7 +578,7 @@ func TestReviewWatchQuestionLifecycle(t *testing.T) {
 	reviewWatchQuestionExecution(e)
 	server, claims, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
 	provider := filepath.Join(t.TempDir(), "claude")
-	script := "#!/bin/sh\ngrep -q 'Why does value() return 2 now' ../question.json || exit 7\ngrep -q 'The constant moved to value()' ../question.json || exit 6\ngrep -q 'verified fixture' ../question.json || exit 5\ngrep -q 'Local question task' ../../task.txt || exit 8\ngrep -q new_findings ../../schema.json && exit 9\ncat " + shellQuote(reviewWatchQuestionResult(t, e)) + " > ../../result.json\n"
+	script := "#!/bin/sh\ngrep -q 'Why does value() return 2 now' ../question.json || exit 7\ngrep -q 'Why return 2?' ../question.json || exit 3\n[ -w main.go ] && exit 4\n[ -w ../base/main.go ] && exit 4\ngrep -q 'The constant moved to value()' ../question.json || exit 6\ngrep -q 'verified fixture' ../question.json || exit 5\ngrep -q 'Local question task' ../../task.txt || exit 8\ngrep -q new_findings ../../schema.json && exit 9\ncat " + shellQuote(reviewWatchQuestionResult(t, e)) + " > ../../result.json\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

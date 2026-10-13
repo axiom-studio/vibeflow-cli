@@ -240,6 +240,9 @@ Every review runs in its own disposable git worktree, never in the developer che
 The worktree is detached at the exact head commit and is created from a private object store under `<root>/review-runners/<ID>/work/<request>/`, so the developer repository never gains a worktree entry or branch.
 Beside it are `base/`, `merge-base/` (when the target advanced), `revisions.json`, `review.diff`, `brief.json` and `prior-findings.json`.
 The agent may build and run project code and tests inside the worktree; it is told not to push, not to publish PR comments, and not to touch any other checkout.
+For an `@vibeflow ask` question the checkout is read-only: before the harness starts, the head worktree's files and the base and merge-base snapshots lose write permission (Git's own metadata stays writable so read commands work), and Claude starts without its Edit, MultiEdit and NotebookEdit tools.
+Your configured MCP servers stay available to answers.
+The question file also carries the pull request's own discussion from the server (comments and inline review comments), so Vera answers in the context of the thread.
 The developer checkout stays untouched.
 The PR diff uses the unique merge base, while the exact target tip remains separate integration context.
 `revisions.json` identifies both baselines; missing or ambiguous history fails visibly instead of producing a misleading diff.
