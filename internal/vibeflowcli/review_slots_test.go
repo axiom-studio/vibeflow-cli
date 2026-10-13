@@ -212,4 +212,72 @@ func TestReviewSlotsRequireClaimKindServer(t *testing.T) {
 	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--answer-slots", "1", "--background"); err == nil || !strings.Contains(err.Error(), "foreground listener only") {
 		t.Fatalf("background slots accepted: %v", err)
 	}
+	// A console slot window: invalid kinds are refused, and a valid slot still
+	// needs a server that routes by kind.
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--slot-kind", "everything", "--slot-label", "answer 1"); err == nil || !strings.Contains(err.Error(), "--slot-kind must be question or review") {
+		t.Fatalf("invalid slot kind accepted: %v", err)
+	}
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac · answer 1", "--slot-kind", "question", "--slot-label", "answer 1"); err == nil || !strings.Contains(err.Error(), "cannot route work to separate answer and review slots") {
+		t.Fatalf("slot window started against an old server: %v", err)
+	}
+}
+
+// Vera's blocker on #27: a console slot window must start even though the
+// config it reads sets the console's slot counts.
+func TestReviewSlotWindowIgnoresConfigSlotCounts(t *testing.T) {
+	withTempRoot(t)
+	repo, review, question := slotExecutions(t)
+	server, _, _ := slotServer(t, review, question, []string{"repository_review_v1", reviewClaimKindCapability})
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "slot-token"
+	cfg.ReviewAnswerSlots, cfg.ReviewReviewSlots = 1, 1
+	provider := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	var mu sync.Mutex
+	done := make(chan error, 1)
+	go func() {
+		w := &lockedBuffer{mu: &mu, b: &out}
+		cmd := reviewWatchCmd()
+		cmd.SetArgs([]string{"--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac · answer 1", "--interval", "1s", "--slot-kind", "question", "--slot-label", "answer 1"})
+		cmd.SetOut(w)
+		cmd.SetErr(w)
+		done <- cmd.ExecuteContext(ctx)
+	}()
+	online := false
+	for !online && ctx.Err() == nil {
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		online = strings.Contains(out.String(), "Review runner mac · answer 1 is online")
+		mu.Unlock()
+	}
+	cancel()
+	if err := <-done; err != nil || !online {
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("slot window did not start: %v\n%s", err, out.String())
+	}
+	var b bytes.Buffer
+	if err := runReviewWatch(context.Background(), &b, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--slot-kind", "question", "--slot-label", "answer 1", "--answer-slots", "1"); err == nil || !strings.Contains(err.Error(), "--slot-kind runs one slot") {
+		t.Fatalf("explicit slot counts with --slot-kind accepted: %v", err)
+	}
+}
+
+type lockedBuffer struct {
+	mu *sync.Mutex
+	b  *bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
 }

@@ -52,12 +52,38 @@ func veraOptions(meta SessionMeta) reviewWatchOptions {
 // veraListenerCommand is the foreground review-watch a Vera session runs.
 // Credentials come from the config
 // file, so no token appears on the command line or in the session env.
-func veraListenerCommand(meta SessionMeta) (string, error) { return veraCommand(meta, false) }
+func veraListenerCommand(meta SessionMeta) (string, error) { return veraCommand(meta, false, nil) }
 
 // veraHistoryCommand is the read-only review list beside the listener.
-func veraHistoryCommand(meta SessionMeta) (string, error) { return veraCommand(meta, true) }
+func veraHistoryCommand(meta SessionMeta) (string, error) { return veraCommand(meta, true, nil) }
 
-func veraCommand(meta SessionMeta, history bool) (string, error) {
+// veraDashboardCommand is the first window of a Vera console with slots.
+func veraDashboardCommand(meta SessionMeta, answerSlots, reviewSlots int) (string, error) {
+	return veraCommand(meta, false, []string{"--dashboard", "--answer-slots", strconv.Itoa(answerSlots), "--review-slots", strconv.Itoa(reviewSlots)})
+}
+
+// veraSlotCommand runs one console slot: the ordinary interactive listener
+// under the slot's own runner name, claiming only its kind.
+func veraSlotCommand(meta SessionMeta, slot reviewSlotSpec) (string, error) {
+	o := reviewSlotOptions(veraOptions(meta), slot)
+	return veraCommand(meta, false, []string{"--name", o.Name, "--slot-kind", slot.Kind, "--slot-label", slot.Label})
+}
+
+// veraSlotCounts reads the console slot counts from the config; both 0, the
+// default, keeps the single listener.
+func veraSlotCounts() (answerSlots, reviewSlots int) {
+	path := flagConfigPath
+	if path == "" {
+		path = ConfigPath()
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		return 0, 0
+	}
+	return cfg.ReviewAnswerSlots, cfg.ReviewReviewSlots
+}
+
+func veraCommand(meta SessionMeta, history bool, extra []string) (string, error) {
 	bin, err := cliExecutable()
 	if err != nil {
 		return "", err
@@ -83,6 +109,7 @@ func veraCommand(meta SessionMeta, history bool) (string, error) {
 		args = append(args, "--model", o.Model)
 	}
 	args = append(args, "--name", o.Name)
+	args = append(args, extra...) // A later --name (a slot's own) wins.
 	// exec: the process itself gets the hangup when its session is deleted.
 	return "exec " + shellJoin(args), nil
 }
@@ -102,6 +129,9 @@ func veraPendingReceipt(serverURL string, o reviewWatchOptions) *reviewReceipt {
 func veraRowStatus(meta SessionMeta, serverURL string, paneDead bool) (status, work string) {
 	if paneDead {
 		return "stopped", "stopped"
+	}
+	if a, r := veraSlotCounts(); a+r > 0 {
+		return veraSlotsRowStatus(serverURL, veraOptions(meta), a, r)
 	}
 	if p := veraPendingReceipt(serverURL, veraOptions(meta)); p != nil {
 		if e := p.Execution; e != nil {
@@ -191,7 +221,11 @@ func (m Model) launchVeraSession(o reviewWatchOptions, projectName string) tea.M
 // startVeraTmuxSession runs the listener in meta's tmux session, or respawns
 // it in an exited pane, with the history list beside it.
 func startVeraTmuxSession(tmux *TmuxManager, meta SessionMeta, respawnPane string) error {
+	answerSlots, reviewSlots := veraSlotCounts()
 	command, err := veraListenerCommand(meta)
+	if answerSlots+reviewSlots > 0 {
+		command, err = veraDashboardCommand(meta, answerSlots, reviewSlots)
+	}
 	if err != nil {
 		return err
 	}
@@ -204,11 +238,53 @@ func startVeraTmuxSession(tmux *TmuxManager, meta SessionMeta, respawnPane strin
 	if err := startVeraHistoryPane(tmux, meta, respawnPane); err != nil {
 		return err
 	}
+	if err := startVeraSlotWindows(tmux, meta, answerSlots, reviewSlots); err != nil {
+		return err
+	}
 	// Clicks and the wheel reach the history pane; only this session's option.
 	if _, err := tmux.run("set-option", "-t", meta.TmuxSession, "mouse", "on"); err != nil {
 		return err
 	}
 	_ = tmux.BindSessionKeys(meta.TmuxSession)
+	return nil
+}
+
+// startVeraSlotWindows gives every console slot its own window running its
+// listener: it respawns a slot whose listener exited and creates a missing
+// one. Windows are found by the @vibeflow_vera_slot option because a busy
+// slot renames its window after its job.
+func startVeraSlotWindows(tmux *TmuxManager, meta SessionMeta, answerSlots, reviewSlots int) error {
+	if answerSlots+reviewSlots == 0 {
+		return nil
+	}
+	out, _ := tmux.run("list-windows", "-t", meta.TmuxSession, "-F", "#{window_id}\t#{pane_dead}\t#{@vibeflow_vera_slot}")
+	existing := map[string][2]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Split(line, "\t"); len(f) == 3 && f[2] != "" {
+			existing[f[2]] = [2]string{f[0], f[1]}
+		}
+	}
+	for _, slot := range reviewSlotList(answerSlots, reviewSlots) {
+		command, err := veraSlotCommand(meta, slot)
+		if err != nil {
+			return err
+		}
+		if w, ok := existing[slot.Label]; ok {
+			if w[1] == "1" {
+				if _, err := tmux.run("respawn-pane", "-t", w[0], "-c", meta.WorkingDir, command); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		id, err := tmux.run("new-window", "-d", "-t", meta.TmuxSession+":", "-n", slot.Label, "-c", meta.WorkingDir, "-P", "-F", "#{window_id}", command)
+		if err != nil {
+			return fmt.Errorf("open Vera slot window %s: %w", slot.Label, err)
+		}
+		if _, err := tmux.run("set-option", "-w", "-t", strings.TrimSpace(id), "@vibeflow_vera_slot", slot.Label); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
