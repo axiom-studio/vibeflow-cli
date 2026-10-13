@@ -283,6 +283,14 @@ func reviewWatchCmd() *cobra.Command {
 		if o.ProjectID <= 0 {
 			return fmt.Errorf("review project not found")
 		}
+		if o.SlotKind != "" {
+			// A console slot window is one slot; the config's slot counts
+			// describe the console it belongs to, not this process.
+			if answerSlots > 0 || reviewSlots > 0 {
+				return fmt.Errorf("--slot-kind runs one slot; drop --answer-slots and --review-slots")
+			}
+			answerSlots, reviewSlots = 0, 0
+		}
 		if answerSlots < 0 {
 			answerSlots = cfg.ReviewAnswerSlots
 		}
