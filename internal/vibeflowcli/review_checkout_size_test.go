@@ -95,17 +95,29 @@ func TestReviewCheckoutRepositoryAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			f, err := os.Open(filepath.Join(root, "input", name, string(parts[1])))
-			if err != nil {
-				t.Fatalf("missing tracked file %s/%s: %v", name, parts[1], err)
-			}
+			path := filepath.Join(root, "input", name, string(parts[1]))
 			var digest hash.Hash = sha1.New()
 			if len(meta[2]) == 64 {
 				digest = sha256.New()
 			}
 			fmt.Fprintf(digest, "blob %d\x00", n)
-			copied, copyErr := io.Copy(digest, f)
-			f.Close()
+			var copied int64
+			var copyErr error
+			if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+				// The head is a real worktree, so a tracked symlink stays a
+				// symlink; its blob is the link target, not the file it names.
+				target, err := os.Readlink(path)
+				copyErr = err
+				written, _ := io.WriteString(digest, target)
+				copied = int64(written)
+			} else {
+				f, err := os.Open(path)
+				if err != nil {
+					t.Fatalf("missing tracked file %s/%s: %v", name, parts[1], err)
+				}
+				copied, copyErr = io.Copy(digest, f)
+				f.Close()
+			}
 			if copyErr != nil || copied != n || fmt.Sprintf("%x", digest.Sum(nil)) != meta[2] {
 				t.Fatalf("tracked content changed %s/%s: %v", name, parts[1], copyErr)
 			}

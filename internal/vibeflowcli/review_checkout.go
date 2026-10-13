@@ -254,6 +254,39 @@ type reviewGitProxy struct {
 	Token string
 }
 
+// shareReviewObjects lets the private object store read the selected
+// checkout's objects through Git alternates instead of copying its history.
+// The store keeps its own refs, config and worktree metadata, so the
+// developer's repository is only read. Shallow and partial clones cannot
+// supply complete history through alternates; they keep the copying path.
+func shareReviewObjects(ctx context.Context, source, objects string) bool {
+	if shallow, err := reviewGit(ctx, source, "rev-parse", "--is-shallow-repository"); err != nil || strings.TrimSpace(string(shallow)) != "false" {
+		return false
+	}
+	if _, err := reviewGit(ctx, source, "config", "--get", "extensions.partialClone"); err == nil {
+		return false
+	}
+	dir, err := reviewGit(ctx, source, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+	if err != nil {
+		return false
+	}
+	shared := strings.TrimSpace(string(dir))
+	if !filepath.IsAbs(shared) || strings.ContainsAny(shared, "\r\n") {
+		return false
+	}
+	if info, err := os.Stat(shared); err != nil || !info.IsDir() {
+		return false
+	}
+	return os.WriteFile(filepath.Join(objects, "objects", "info", "alternates"), []byte(shared+"\n"), 0600) == nil
+}
+
+// reviewObjectPresent reports whether the store, directly or through its
+// alternate, already has the complete commit.
+func reviewObjectPresent(ctx context.Context, objects, sha string) bool {
+	_, err := reviewGit(ctx, objects, "cat-file", "-e", sha+"^{commit}")
+	return err == nil
+}
+
 func prepareReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution, proxy ...reviewGitProxy) error {
 	round := execution.Attempt.Round
 	if !reviewSHA(round.BaseSHA) || !reviewSHA(round.HeadSHA) {
@@ -278,7 +311,11 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 	if _, err = reviewGit(ctx, objects, "init", "--bare"); err != nil {
 		return err
 	}
+	shared := shareReviewObjects(ctx, source, objects)
 	for _, item := range []struct{ sha, remote, name string }{{round.BaseSHA, round.Details.BaseCloneURL, round.Details.BaseRepositoryName}, {round.HeadSHA, round.Details.HeadCloneURL, round.Details.HeadRepositoryName}} {
+		if shared && reviewObjectPresent(ctx, objects, item.sha) {
+			continue // Read through the alternate; nothing is copied.
+		}
 		fetch := source
 		if _, err := reviewGit(ctx, source, "cat-file", "-e", item.sha+"^{commit}"); err != nil {
 			fetch = item.remote
@@ -322,7 +359,11 @@ func prepareAzureReviewCheckout(ctx context.Context, source, root string, execut
 	if _, err = reviewGit(ctx, objects, "init", "--bare"); err != nil {
 		return err
 	}
+	shared := shareReviewObjects(ctx, source, objects)
 	for _, sha := range []string{round.BaseSHA, round.HeadSHA} {
+		if shared && reviewObjectPresent(ctx, objects, sha) {
+			continue
+		}
 		fetch, env := source, []string(nil)
 		if _, err := reviewGit(ctx, source, "cat-file", "-e", sha+"^{commit}"); err != nil {
 			if len(proxy) != 1 || !reviewProxyURL(proxy[0].URL) || proxy[0].Token == "" || strings.ContainsAny(proxy[0].Token, "\r\n") {

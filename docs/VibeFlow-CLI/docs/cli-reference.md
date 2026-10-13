@@ -238,6 +238,9 @@ Relay restrictions have real HTTP coverage, but an actual model call through the
 
 Every review runs in its own disposable git worktree, never in the developer checkout.
 The worktree is detached at the exact head commit and is created from a private object store under `<root>/review-runners/<ID>/work/<request>/`, so the developer repository never gains a worktree entry or branch.
+The private object store reads the selected checkout's Git objects through Git alternates, read-only, instead of copying its history.
+Commits already on the machine need no fetch; only commits the checkout lacks are fetched from the remote.
+A shallow or partial clone cannot supply complete history this way, so for those the runner copies the needed objects as before.
 Beside it are `base/`, `merge-base/` (when the target advanced), `revisions.json`, `review.diff`, `brief.json` and `prior-findings.json`.
 The agent may build and run project code and tests inside the worktree; it is told not to push, not to publish PR comments, and not to touch any other checkout.
 The developer checkout stays untouched.
