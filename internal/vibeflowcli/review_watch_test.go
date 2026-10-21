@@ -638,3 +638,37 @@ func TestReviewWatchQuestionClaimIdentity(t *testing.T) {
 		})
 	}
 }
+
+// LoadConfig lets a VIBEFLOW_TOKEN export replace the config token. A
+// listener using one says so, so a following HTTP 401 points at the
+// environment rather than at the config file.
+func TestReviewWatchNamesEnvironmentTokenOverride(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	server, _, _ := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	provider := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > ../../result.json\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "config-token-canary"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	notice := "Using the VIBEFLOW_TOKEN environment variable instead of api_token in " + ConfigPath() + "."
+	for _, ambient := range []string{"", "env-token-canary"} {
+		t.Setenv("VIBEFLOW_TOKEN", ambient)
+		var out bytes.Buffer
+		if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "env-test", "--once"); err != nil {
+			t.Fatalf("VIBEFLOW_TOKEN=%q: %v\n%s", ambient, err, out.String())
+		}
+		if shown := strings.Contains(out.String(), notice); shown != (ambient != "") {
+			t.Errorf("VIBEFLOW_TOKEN=%q: notice shown = %v\n%s", ambient, shown, out.String())
+		}
+		if ambient != "" && strings.Contains(out.String(), ambient) {
+			t.Errorf("VIBEFLOW_TOKEN=%q: token value relayed\n%s", ambient, out.String())
+		}
+	}
+}

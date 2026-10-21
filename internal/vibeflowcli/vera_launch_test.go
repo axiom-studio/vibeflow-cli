@@ -746,3 +746,30 @@ func TestVeraLaunchErrorStaysVisible(t *testing.T) {
 		t.Fatalf("launch error cleared before it was shown: %v", m.err)
 	}
 }
+
+// The tmux server keeps the environment of whichever shell first started it,
+// so a stale VIBEFLOW_TOKEN there would override the config file inside Vera
+// and fail every review API call with HTTP 401. A Vera session clears it.
+func TestVeraSessionClearsAmbientVibeflowCredentials(t *testing.T) {
+	withTempRoot(t)
+	t.Setenv("VIBEFLOW_TOKEN", "stale-token-canary")
+	t.Setenv("VIBEFLOW_URL", "https://stale.invalid")
+	setVeraExecutable(t, builtVibeflow(t))
+	tm := NewTmuxManager(fmt.Sprintf("vftest-vera-env-%d", os.Getpid()))
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	// Without a server the listener exits at once; keep its pane to inspect.
+	if _, err := tm.run("start-server", ";", "set-option", "-g", "remain-on-exit", "on"); err != nil {
+		t.Fatal(err)
+	}
+	meta := SessionMeta{Name: "vera-env", Provider: "claude", Persona: "code_reviewer", WorkingDir: t.TempDir(), Vera: &veraBinding{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", RunnerName: "env"}}
+	meta.TmuxSession = tm.FullSessionName(meta.Provider, meta.Name)
+	if err := startVeraTmuxSession(tm, meta, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"VIBEFLOW_TOKEN", "VIBEFLOW_URL"} {
+		out, err := tm.run("show-environment", "-t", meta.TmuxSession, key)
+		if err != nil || strings.TrimSpace(out) != key+"=" {
+			t.Errorf("%s in the Vera session = %q, %v; want it empty", key, strings.TrimSpace(out), err)
+		}
+	}
+}

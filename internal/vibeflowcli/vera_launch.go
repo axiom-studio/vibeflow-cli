@@ -195,7 +195,12 @@ func startVeraTmuxSession(tmux *TmuxManager, meta SessionMeta, respawnPane strin
 	if err != nil {
 		return err
 	}
-	if err := tmux.CreateSessionWithOpts(SessionOpts{PaneID: respawnPane, Name: meta.Name, Provider: meta.Provider, WorkDir: meta.WorkingDir, Command: command, Branch: meta.Branch, Project: meta.Project, Persona: meta.Persona}); err != nil {
+	// The tmux server keeps the environment of the shell that started it, so a
+	// VIBEFLOW_TOKEN or VIBEFLOW_URL from an earlier login would otherwise reach
+	// the listener and override the config file: every review API call then
+	// fails with HTTP 401. Empty values make LoadConfig use the file.
+	env := map[string]string{"VIBEFLOW_TOKEN": "", "VIBEFLOW_URL": ""}
+	if err := tmux.CreateSessionWithOpts(SessionOpts{PaneID: respawnPane, Name: meta.Name, Provider: meta.Provider, WorkDir: meta.WorkingDir, Command: command, Env: env, Branch: meta.Branch, Project: meta.Project, Persona: meta.Persona}); err != nil {
 		return err
 	}
 	if !tmux.HasSession(meta.TmuxSession) {

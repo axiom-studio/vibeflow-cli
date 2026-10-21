@@ -48,6 +48,8 @@ PR review automation (Vera, the code reviewer) is part of the normal binary; no 
 `vibeflow` starts straight into the session list with no startup review prompt.
 Vera reviews run only in a Vera session you start from New Agent, one per repository.
 Review runners share `review_concurrency` slots (default `2`).
+A Vera session reads its VibeFlow token from `config.yaml` only; `VIBEFLOW_TOKEN` and `VIBEFLOW_URL` in your shell or tmux environment are cleared for it.
+A manual `vibeflow review-watch` honors `VIBEFLOW_TOKEN` and says so on start, so an `HTTP 401` after that line means the exported token is stale.
 
 - **Multi-agent TUI** - Interactive terminal UI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) for launching and managing sessions
 - **Two session modes** - *VibeFlow mode* connects agents to a VibeFlow server for autonomous task polling and execution; *Vanilla mode* launches agents standalone

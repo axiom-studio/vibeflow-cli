@@ -257,6 +257,11 @@ func reviewWatchCmd() *cobra.Command {
 		if cfg.APIToken == "" {
 			return fmt.Errorf("connect VibeFlow before starting a review runner")
 		}
+		if !background && os.Getenv("VIBEFLOW_TOKEN") != "" {
+			// LoadConfig prefers the ambient token; name it, so a stale shell
+			// export shows up as more than "HTTP 401".
+			fmt.Fprintf(cmd.OutOrStdout(), "Using the VIBEFLOW_TOKEN environment variable instead of api_token in %s.\n", path)
+		}
 		client := NewClient(cfg.ServerURL, cfg.APIToken)
 		o.ProjectID, err = strconv.ParseInt(o.Project, 10, 64)
 		if err != nil {
