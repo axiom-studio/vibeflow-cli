@@ -33,6 +33,7 @@ type reviewTerminal struct{ files [3]*os.File }
 func openReviewTerminal(any) *reviewTerminal       { return nil }
 func (*reviewTerminal) save()                      {}
 func (*reviewTerminal) reclaim(bool)               {}
+func (*reviewTerminal) clear()                     {}
 func (*reviewTerminal) browse(func([]byte)) func() { return func() {} }
 
 func reviewTerminalFiles(int) ([3]*os.File, error) {

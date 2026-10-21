@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -389,6 +390,14 @@ func TestReviewWatchInteractiveHarnessInPane(t *testing.T) {
 		return v.results.Load() == 1 && i >= 0 && strings.Contains(text[i:], "Review worktree removed.") && strings.Contains(text[i:], reviewListeningLine)
 	})
 	t.Logf("Vera pane after the review:\n%s", v.capture())
+	// A saved result clears the harness's screen; scrollback keeps it (issue #6197).
+	visible, _ := v.tm.run("capture-pane", "-p", "-t", v.session)
+	if strings.Contains(visible, "FAKE HARNESS UI") || !regexp.MustCompile(`\d\d:\d\d Result: clean\.`).MatchString(visible) {
+		t.Fatalf("visible pane after a saved result:\n%s", visible)
+	}
+	if !strings.Contains(v.capture(), "FAKE HARNESS UI") {
+		t.Fatal("harness output lost from the pane's scrollback")
+	}
 	args, _ := os.ReadFile(v.mark("args"))
 	if !strings.Contains(string(args), "--dangerously-skip-permissions") || !strings.Contains(string(args), "task.txt") {
 		t.Fatalf("harness launch did not use the persona template and task prompt: %q", args)

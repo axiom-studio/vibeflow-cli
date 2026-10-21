@@ -217,7 +217,11 @@ func reviewStateLabel(state string) string {
 	case "closed":
 		return "Closed"
 	default:
-		return reviewDisplay(strings.ReplaceAll(state, "_", " "))
+		label := reviewDisplay(strings.ReplaceAll(state, "_", " "))
+		if label != "" {
+			label = strings.ToUpper(label[:1]) + label[1:] // "idle" reads like the others: "Idle".
+		}
+		return label
 	}
 }
 func printReviewSessions(ctx context.Context, out io.Writer, cfg *Config, project, after string) error {

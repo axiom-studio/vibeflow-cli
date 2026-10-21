@@ -486,7 +486,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 	}
 	backoff := w.options.PollInterval
-	unavailable := false // One line when an outage starts and one when it ends.
+	var unavailableSince time.Time // One line when an outage starts and one when it ends.
 	status := idleStatus
 	if status != "" {
 		if w.onStatus != nil {
@@ -535,14 +535,14 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			if w.options.Once || !retry {
 				return err
 			}
-			if !unavailable {
-				unavailable = true
-				fmt.Fprintln(w.output, "Review API unavailable; retrying with backoff up to 1m. The pending receipt is safe.")
+			if unavailableSince.IsZero() {
+				unavailableSince = time.Now()
+				fmt.Fprintln(w.output, reviewClock()+" Review API unavailable; retrying with backoff up to 1m. The pending receipt is safe.")
 			}
 		} else {
-			if unavailable {
-				unavailable = false
-				fmt.Fprintln(w.output, "Review API reachable again.")
+			if !unavailableSince.IsZero() {
+				fmt.Fprintf(w.output, "%s Review API reachable again after %s.\n", reviewClock(), time.Since(unavailableSince).Round(time.Second))
+				unavailableSince = time.Time{}
 			}
 			backoff = w.options.PollInterval
 			if w.options.Once {
@@ -696,7 +696,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		if p.Execution.isQuestion() {
 			claimed = "Claimed a question on " + reviewPRLabel(p.Execution.Review)
 		}
-		fmt.Fprintf(w.output, "\n%s at %.12s; starting a fresh Vera with %s.\n", claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
+		fmt.Fprintf(w.output, "\n%s %s at %.12s; starting a fresh Vera with %s.\n", reviewClock(), claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
 		result, err := w.execute(ctx, p)
 		if err != nil {
 			p.Failure = err.Error()
@@ -706,7 +706,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		if err = w.save(); err != nil {
 			return err
 		}
-		fmt.Fprintln(w.output, reviewOutcomeLine(p))
+		fmt.Fprintln(w.output, reviewClock()+" "+reviewOutcomeLine(p))
 	}
 	// Cleanup precedes network publication, and the exact submission remains
 	// durable even if a successful server response is lost.
@@ -1141,7 +1141,13 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if interactive {
 		// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
 		w.tty.reclaim(diagnostic.Signal == int(syscall.SIGTERM) || diagnostic.Signal == int(syscall.SIGKILL))
-		if written, _ := adoptReviewResult(resultPath, p, brief.Digest); !finished && ctx.Err() == nil && !written {
+		written, _ := adoptReviewResult(resultPath, p, brief.Digest)
+		if written {
+			// The harness's screen, including its "resume this session" hint,
+			// is not useful once its result is saved; a failure keeps it.
+			w.tty.clear()
+		}
+		if !finished && ctx.Err() == nil && !written {
 			// Only the user closes an interactive harness early, unless it
 			// could not start its review at all.
 			if ran < reviewQuickExit && diagnostic.Signal != int(syscall.SIGINT) {
@@ -1516,6 +1522,10 @@ func reviewPRLabel(job reviewJob) string {
 	}
 	return "review " + job.ID
 }
+
+// reviewClock prefixes the listener's lifecycle lines, so a pane read hours
+// later still says when each review ran.
+func reviewClock() string { return time.Now().Format("15:04") }
 
 // reviewOutcomeLine summarizes a finished attempt for the runner's own output.
 func reviewOutcomeLine(p *reviewReceipt) string {
