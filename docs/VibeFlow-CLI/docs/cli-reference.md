@@ -242,7 +242,7 @@ The private object store reads the selected checkout's Git objects through Git a
 Commits already on the machine need no fetch; only commits the checkout lacks are fetched from the remote.
 A shallow or partial clone cannot supply complete history this way, so for those the runner copies the needed objects as before.
 Beside it are `base/`, `merge-base/` (when the target advanced), `revisions.json`, `review.diff`, `brief.json` and `prior-findings.json`.
-The agent may build and run project code and tests inside the worktree; it is told not to push, not to publish PR comments, and not to touch any other checkout.
+The agent reviews code without building it: it is told not to build the project, install dependencies or run test suites, because CI already does that and reports on the pull request. It may run at most one targeted check that needs no build, with a 60-second limit for all its commands, and states defects it cannot run from file and line evidence. It is told not to push, not to publish PR comments, and not to touch any other checkout.
 For an `@vibeflow ask` question the checkout is read-only: before the harness starts, the head worktree's files and the base and merge-base snapshots lose write permission (Git's own metadata stays writable so read commands work), and Claude starts without its Edit, MultiEdit and NotebookEdit tools.
 Your configured MCP servers stay available to answers.
 The question file also carries the pull request's own discussion from the server (comments and inline review comments), so Vera answers in the context of the thread.

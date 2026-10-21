@@ -338,3 +338,37 @@ func TestReviewProviderQuestionTask(t *testing.T) {
 		t.Fatalf("question schema: %s %v", schema, err)
 	}
 }
+
+// Reviews and answers read code; CI owns builds and tests (issue #6188). Both
+// task kinds carry the build-free policy and no permission to build.
+func TestReviewProviderTasksForbidBuilds(t *testing.T) {
+	for _, question := range []bool{false, true} {
+		_, execution := reviewTestRepo(t)
+		if question {
+			reviewWatchQuestionExecution(execution)
+		}
+		cfg := DefaultConfig()
+		fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+		root := t.TempDir()
+		if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		task, err := os.ReadFile(filepath.Join(root, "task.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(task)
+		if !strings.Contains(text, "- "+reviewCheckPolicy+" Do not") {
+			t.Errorf("question=%v: task lacks the build-free policy:\n%s", question, text)
+		}
+		for _, stale := range []string{"You may build", "and run its tests", "build and run project code"} {
+			if strings.Contains(text, stale) {
+				t.Errorf("question=%v: task still grants %q", question, stale)
+			}
+		}
+		// The policy sits before the result instructions, which still name the absolute result path.
+		if i, j := strings.Index(text, reviewCheckPolicy), strings.Index(text, filepath.Join(root, "result.json")); i < 0 || j < i {
+			t.Errorf("question=%v: policy and result path out of order", question)
+		}
+	}
+}
