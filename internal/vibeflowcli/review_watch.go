@@ -1113,7 +1113,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if interactive {
 		// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
 		w.tty.reclaim(diagnostic.Signal == int(syscall.SIGTERM) || diagnostic.Signal == int(syscall.SIGKILL))
-		if _, _, resultErr := readReviewResult(resultPath, p, brief.Digest); !finished && ctx.Err() == nil && resultErr != nil {
+		if written, _ := adoptReviewResult(resultPath, p, brief.Digest); !finished && ctx.Err() == nil && !written {
 			// Only the user closes an interactive harness early, unless it
 			// could not start its review at all.
 			if ran < reviewQuickExit && diagnostic.Signal != int(syscall.SIGINT) {
@@ -1139,6 +1139,9 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	}
 	setStage("result")
 	diagnostic.Category = "invalid_result"
+	if _, stray := adoptReviewResult(resultPath, p, brief.Digest); stray != "" {
+		fmt.Fprintf(w.output, "%s wrote result.json at %s instead of %s; using it.\n", w.options.Provider, stray, resultPath)
+	}
 	// Every harness writes its result to the same file; a missing file after
 	// exit is an invalid result.
 	result, reported, err := readReviewResult(resultPath, p, brief.Digest)
@@ -1185,6 +1188,30 @@ func readReviewResult(path string, p *reviewReceipt, digest string) (result json
 	return envelope.Result, false, nil
 }
 
+// reviewStrayResults are where a harness that wrote result.json relative to
+// its cwd (the checkout) leaves it, relative to the attempt's root.
+var reviewStrayResults = []string{"input/head/result.json", "input/head/*/result.json", "input/result.json"}
+
+// adoptReviewResult reports whether path holds a complete envelope for this
+// attempt, first moving one from a stray location into place. A stray file
+// counts only when it names this attempt's revision and brief, so the
+// repository's own result.json files are never taken (issue #5733).
+func adoptReviewResult(path string, p *reviewReceipt, digest string) (ok bool, stray string) {
+	if _, _, err := readReviewResult(path, p, digest); err == nil {
+		return true, ""
+	}
+	root := filepath.Dir(path)
+	for _, pattern := range reviewStrayResults {
+		matches, _ := filepath.Glob(filepath.Join(root, pattern))
+		for _, candidate := range matches {
+			if _, _, err := readReviewResult(candidate, p, digest); err == nil && os.Rename(candidate, path) == nil {
+				return true, candidate
+			}
+		}
+	}
+	return false, ""
+}
+
 // watchReviewResult closes its channel once result.json holds a complete
 // envelope for this attempt; a partly written file is read again later.
 func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, digest string) <-chan struct{} {
@@ -1196,7 +1223,7 @@ func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, diges
 				return
 			case <-time.After(250 * time.Millisecond):
 			}
-			if _, _, err := readReviewResult(path, p, digest); err == nil {
+			if ok, _ := adoptReviewResult(path, p, digest); ok {
 				close(written)
 				return
 			}

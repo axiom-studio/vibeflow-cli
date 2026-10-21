@@ -714,3 +714,51 @@ func TestReviewProviderTaskOmitsAbsentPullRequestText(t *testing.T) {
 		t.Fatalf("task names ../pr.json without pull request text:\n%s", task)
 	}
 }
+
+// A harness that writes result.json relative to its cwd (the checkout) still
+// gets its review submitted instead of leaving the runner idle (issue #5733).
+func TestReviewWatchAdoptsResultWrittenInTheCheckout(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	provider := filepath.Join(t.TempDir(), "claude")
+	// The task names the cwd and warns against relative paths; this harness ignores both.
+	script := "#!/bin/sh\ngrep -qF \"Your current directory is $(pwd -P),\" ../../task.txt || exit 8\ngrep -q 'a relative path lands inside the checkout' ../../task.txt || exit 9\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > result.json\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "stray"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "stray", "--once"); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if results.Load() != 1 || !strings.Contains(out.String(), "/input/head/result.json instead of ") {
+		t.Fatalf("stray result not adopted (results=%d):\n%s", results.Load(), out.String())
+	}
+}
+
+// Only a result for this attempt is adopted: a repository's own result.json
+// in the checkout is left alone and the review fails as before.
+func TestAdoptReviewResultIgnoresUnrelatedFiles(t *testing.T) {
+	_, e := reviewTestRepo(t)
+	root := t.TempDir()
+	stray := filepath.Join(root, "input", "head", "result.json")
+	if err := os.MkdirAll(filepath.Dir(stray), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stray, []byte(`{"result":{"schema_version":1,"head_sha":"other","base_sha":"other","brief_digest":"other"},"failure_reason":null}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	receipt := &reviewReceipt{Execution: e}
+	if ok, _ := adoptReviewResult(filepath.Join(root, "result.json"), receipt, "digest"); ok {
+		t.Fatal("adopted a result for another revision")
+	}
+	if _, err := os.Stat(stray); err != nil {
+		t.Fatal("unrelated result.json was moved")
+	}
+}
