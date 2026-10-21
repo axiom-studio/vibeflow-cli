@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -404,7 +405,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	var discovery reviewStartupRepositoriesResponse
 	err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery)
 	if err != nil && (w.options.GitProvider == "github" || w.options.SlotKind != "") {
-		return err
+		return reviewServerUpgradeHint(err)
 	}
 	// Without this, a runner started from the wrong clone goes online and
 	// spends every claimed review's attempts failing at checkout.
@@ -440,7 +441,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	}
 	registration["capabilities"] = capabilities
 	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), registration, &registered); err != nil {
-		return err
+		return reviewServerUpgradeHint(err)
 	}
 	if registered.ID != w.state.ID || registered.UserID <= 0 || (w.state.OwnerID != 0 && w.state.OwnerID != registered.UserID) {
 		return fmt.Errorf("review runner owner changed; use a separate runner name")
@@ -560,6 +561,16 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// reviewServerUpgradeHint explains a 404 from the runner endpoints: the
+// server predates PR review runners, which no retry or flag can fix.
+func reviewServerUpgradeHint(err error) error {
+	var response *reviewHTTPError
+	if errors.As(err, &response) && response.Status == http.StatusNotFound {
+		return fmt.Errorf("this VibeFlow server does not support PR review runners (HTTP 404); upgrade the VibeFlow backend")
+	}
+	return err
 }
 
 func (w *reviewWatch) poll(ctx context.Context) error {
