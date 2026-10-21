@@ -284,6 +284,33 @@ func resolveReviewStartup(ctx context.Context, cfg *Config, o reviewWatchOptions
 	return o, nil, nil
 }
 
+// reviewCheckoutMatchesLink refuses a checkout whose origin is not the linked
+// repository the server lists for linkID. A link the server does not list
+// cannot be verified here and is left to the checkout.
+func reviewCheckoutMatchesLink(ctx context.Context, path string, linkID int64, repositories []reviewStartupRepository) error {
+	for _, repo := range repositories {
+		if repo.ID != linkID {
+			continue
+		}
+		if findReviewStartupCheckout(ctx, path, []reviewStartupRepository{repo}) != nil {
+			return nil
+		}
+		want := repo.Host + "/" + repo.Name
+		have := "has no supported origin remote"
+		if remote, err := reviewGit(ctx, path, "remote", "get-url", "origin"); err == nil {
+			host, name, err := reviewRemoteIdentity(strings.TrimSpace(string(remote)))
+			if err != nil {
+				host, name, err = reviewAzureRemoteIdentity(strings.TrimSpace(string(remote)))
+			}
+			if err == nil {
+				have = "is " + host + "/" + name
+			}
+		}
+		return fmt.Errorf("%s %s, but repository link %d is %s; run Vera from a clone of %s or pass --repo", path, have, linkID, want, want)
+	}
+	return nil
+}
+
 type reviewStartupCheckout struct {
 	Path, Name, Identity string
 	Links                []reviewStartupChoice

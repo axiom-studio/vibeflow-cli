@@ -31,11 +31,14 @@ type reviewProcessReport struct {
 }
 
 type reviewExecutionDiagnostic struct {
-	Version            int    `json:"version"`
-	AttemptID          string `json:"attempt_id"`
-	Provider           string `json:"provider"`
-	Stage              string `json:"stage"`
-	Category           string `json:"category"`
+	Version   int    `json:"version"`
+	AttemptID string `json:"attempt_id"`
+	Provider  string `json:"provider"`
+	Stage     string `json:"stage"`
+	Category  string `json:"category"`
+	// Reason is a checkout failure's own message. It names repositories and
+	// commits, never local paths or Git output, so it is safe to report.
+	Reason             string `json:"reason,omitempty"`
 	ExitCode           *int   `json:"exit_code,omitempty"`
 	Signal             int    `json:"signal,omitempty"`
 	APIErrorStatus     int    `json:"api_error_status,omitempty"`
@@ -162,5 +165,8 @@ func (d reviewExecutionDiagnostic) failure() error {
 	if d.APIErrorStatus != 0 {
 		detail += fmt.Sprintf(", HTTP %d", d.APIErrorStatus)
 	}
-	return fmt.Errorf("review failed at %s (%s%s); see private last-provider-diagnostic.json", d.Stage, d.Category, detail)
+	if d.Reason != "" {
+		return fmt.Errorf("review failed at %s (%s%s): %s", d.Stage, d.Category, detail, d.Reason)
+	}
+	return fmt.Errorf("review failed at %s (%s%s); see the private last-provider-diagnostic.json", d.Stage, d.Category, detail)
 }

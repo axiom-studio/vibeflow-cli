@@ -399,10 +399,14 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	repositoryRequests := false
 	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
 	var discovery reviewStartupRepositoriesResponse
-	if w.options.GitProvider == "github" || w.options.SlotKind != "" {
-		if err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery); err != nil {
-			return err
-		}
+	err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery)
+	if err != nil && (w.options.GitProvider == "github" || w.options.SlotKind != "") {
+		return err
+	}
+	// Without this, a runner started from the wrong clone goes online and
+	// spends every claimed review's attempts failing at checkout.
+	if err = reviewCheckoutMatchesLink(ctx, w.options.Repository, w.options.RepositoryLinkID, discovery.Repositories); err != nil {
+		return err
 	}
 	if w.options.SlotKind != "" && !slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability) {
 		return fmt.Errorf("this VibeFlow server cannot route work to separate answer and review slots; upgrade the server or run without slots")
@@ -891,9 +895,13 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.DurationMS = time.Since(started).Milliseconds()
 		diagnostic.StageDurationMS = time.Since(stageStarted).Milliseconds()
 		diagnostic.RecordedAt = time.Now().UnixMilli()
-		if err := saveReviewJSON(filepath.Join(w.root, "last-provider-diagnostic.json"), diagnostic); err != nil {
+		path := filepath.Join(w.root, "last-provider-diagnostic.json")
+		if err := saveReviewJSON(path, diagnostic); err != nil {
 			failureErr = fmt.Errorf("review failed at %s (%s); private diagnostic could not be saved", diagnostic.Stage, diagnostic.Category)
 			return
+		}
+		if w.output != nil { // Local only; the failure reason sent to VibeFlow carries no paths.
+			fmt.Fprintf(w.output, "Diagnostic saved to %s\n", path)
 		}
 		failureErr = diagnostic.failure()
 	}()
@@ -932,6 +940,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		proxy = append(proxy, reviewGitProxy{URL: strings.TrimRight(w.client.baseURL, "/") + "/rest/v1/vibeflow" + w.attemptPath(p) + "/git", Token: w.client.token})
 	}
 	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution, proxy...); err != nil {
+		diagnostic.Reason = err.Error()
 		return nil, err
 	}
 	fmt.Fprintf(w.output, "Review worktree ready: %s\n", filepath.Join(root, "input", "head"))

@@ -22,7 +22,8 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 		{"supported", `"repository_review_v1"`, "github", true, true},
 		{"old_server", "", "github", false, true},
 		{"unknown_capability", `"future_review_v2"`, "github", false, true},
-		{"bitbucket_unchanged", `"repository_review_v1"`, "bitbucket", false, false},
+		// Bitbucket still reads discovery, to check the checkout against its link.
+		{"bitbucket_unchanged", `"repository_review_v1"`, "bitbucket", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withTempRoot(t)
@@ -83,7 +84,7 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 			if (discoveries == 1) != tc.discovery {
 				t.Fatalf("discovery calls=%d want enabled=%v", discoveries, tc.discovery)
 			}
-			downgraded := tc.discovery && !tc.capability
+			downgraded := tc.provider == "github" && !tc.capability
 			if downgraded && !strings.Contains(output.String(), "server upgrade") {
 				t.Fatal("legacy downgrade lacks upgrade guidance")
 			}
