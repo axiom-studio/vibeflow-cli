@@ -47,7 +47,7 @@ func reviewWatchServer(t *testing.T, executions map[int64]*reviewExecution) (ser
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-sessions"): // Vera's history pane.
 			fmt.Fprint(w, `{"sessions":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
-			json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}, "supported_runner_capabilities": []string{"repository_review_v1"}})
+			json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}, "supported_runner_capabilities": []string{"repository_review_v1", "question_v1"}})
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)

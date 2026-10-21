@@ -71,7 +71,7 @@ type reviewExecution struct {
 	// and provider discussion, passed through unchanged as data (axiomcloud
 	// #6189). Older servers omit it.
 	PullRequest json.RawMessage `json:"pull_request,omitempty"`
-	Attempt  struct {
+	Attempt     struct {
 		ID             string `json:"id"`
 		RunnerID       string `json:"runner_id"`
 		SessionID      string `json:"session_id"`

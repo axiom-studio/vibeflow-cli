@@ -66,6 +66,7 @@ const reviewLegacyRoutingNotice = "Repository-request routing requires a server 
 
 type reviewWatch struct {
 	repositoryRequests bool // Registered with repository_review_v1 for this run.
+	questions          bool // Registered with question_v1, with the server's consent.
 	client             *Client
 	cfg                *Config
 	options            reviewWatchOptions
@@ -104,7 +105,11 @@ func (w *reviewWatch) browse(on bool) {
 
 // listening says the runner is idle again.
 func (w *reviewWatch) listening() {
-	fmt.Fprintln(w.output, reviewListeningLine)
+	line := reviewListeningLine
+	if !w.questions {
+		line = reviewListeningNoQuestionsLine
+	}
+	fmt.Fprintln(w.output, line)
 	if w.tty != nil {
 		fmt.Fprintln(w.output, veraBrowseHint)
 	}
@@ -393,9 +398,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		Provider         string `json:"provider"`
 		RepositoryLinkID int64  `json:"repository_link_id"`
 	}
-	// Every runner of this version answers `@vibeflow ask` questions; the
-	// server hands them only to runners that say so.
-	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID, "capabilities": []string{reviewQuestionCapability}}
+	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID}
 	repositoryRequests := false
 	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
 	var discovery reviewStartupRepositoriesResponse
@@ -419,12 +422,23 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			}
 		}
 		if supported {
-			registration["capabilities"] = []string{"repository_review_v1", reviewQuestionCapability}
 			repositoryRequests = true
 		} else {
 			idleStatus = reviewLegacyRoutingNotice
 		}
 	}
+	// Commenter-written question text reaches the harness, so questions are
+	// taken only with the server's consent: question_v1, or claim_kind_v1,
+	// which a server offers only once it routes question claims (issue #5737).
+	w.questions = slices.Contains(discovery.SupportedRunnerCapabilities, reviewQuestionCapability) || slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability)
+	capabilities := []string{}
+	if repositoryRequests {
+		capabilities = append(capabilities, "repository_review_v1")
+	}
+	if w.questions {
+		capabilities = append(capabilities, reviewQuestionCapability)
+	}
+	registration["capabilities"] = capabilities
 	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), registration, &registered); err != nil {
 		return err
 	}
@@ -441,6 +455,9 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	if repositoryRequests {
 		w.repositoryRequests = true
 		fmt.Fprintln(w.output, "Repository requests enabled: anyone who comments @vibeflow review on this linked repository can request a review from this runner.")
+	}
+	if w.questions {
+		fmt.Fprintln(w.output, "Questions enabled: collaborators who comment @vibeflow ask on a pull request of this linked repository get answers from this runner, which reads their question text.")
 	}
 	defer func() {
 		if w.state.Pending == nil {
@@ -1477,6 +1494,10 @@ func removeReviewDir(dir string) error {
 }
 
 const reviewListeningLine = "Listening for @vibeflow review requests and questions; no model runs while idle."
+
+// reviewListeningNoQuestionsLine is the idle line on a server that has not
+// agreed to send questions.
+const reviewListeningNoQuestionsLine = "Listening for @vibeflow review requests; no model runs while idle."
 
 func reviewPRLabel(job reviewJob) string {
 	if job.Number > 0 {

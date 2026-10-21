@@ -16,14 +16,17 @@ import (
 
 func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 	for _, tc := range []struct {
-		name, advertisement, provider string
-		capability, discovery         bool
+		name, advertisement, provider    string
+		capability, discovery, questions bool
 	}{
-		{"supported", `"repository_review_v1"`, "github", true, true},
-		{"old_server", "", "github", false, true},
-		{"unknown_capability", `"future_review_v2"`, "github", false, true},
+		{"supported", `"repository_review_v1","question_v1"`, "github", true, true, true},
+		{"reviews_only", `"repository_review_v1"`, "github", true, true, false},
+		// A server routing claim kinds already routes question claims.
+		{"claim_kinds", `"repository_review_v1","claim_kind_v1"`, "github", true, true, true},
+		{"old_server", "", "github", false, true, false},
+		{"unknown_capability", `"future_review_v2"`, "github", false, true, false},
 		// Bitbucket still reads discovery, to check the checkout against its link.
-		{"bitbucket_unchanged", `"repository_review_v1"`, "bitbucket", false, true},
+		{"bitbucket_unchanged", `"repository_review_v1","question_v1"`, "bitbucket", false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withTempRoot(t)
@@ -69,17 +72,27 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 			if err := watch.run(ctx); err != nil {
 				t.Fatal(err)
 			}
-			// Every runner answers `@vibeflow ask` questions; repository requests
-			// are registered only with the server's consent.
-			want := "[question_v1]"
+			// Repository requests and questions are registered only with the
+			// server's consent (issue #5737).
+			var caps []string
 			if tc.capability {
-				want = "[repository_review_v1 question_v1]"
+				caps = append(caps, "repository_review_v1")
 			}
+			if tc.questions {
+				caps = append(caps, "question_v1")
+			}
+			want := fmt.Sprint(caps)
 			if value := fmt.Sprint(registration["capabilities"]); value != want {
 				t.Fatalf("capabilities sent=%v want=%v, registration=%v", value, want, registration)
 			}
 			if disclosed := strings.Contains(output.String(), "anyone who comments"); disclosed != tc.capability {
 				t.Fatalf("repository-request scope disclosed=%v with capability=%v", disclosed, tc.capability)
+			}
+			if disclosed := strings.Contains(output.String(), "Questions enabled: collaborators who comment @vibeflow ask"); disclosed != tc.questions {
+				t.Fatalf("question scope disclosed=%v with questions=%v:\n%s", disclosed, tc.questions, output.String())
+			}
+			if listening := strings.Contains(output.String(), reviewListeningLine); listening != tc.questions {
+				t.Fatalf("listening line offers questions=%v with questions=%v", listening, tc.questions)
 			}
 			if (discoveries == 1) != tc.discovery {
 				t.Fatalf("discovery calls=%d want enabled=%v", discoveries, tc.discovery)

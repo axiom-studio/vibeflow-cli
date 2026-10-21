@@ -89,7 +89,7 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 			fmt.Fprint(w, `[{"id":66,"name":"Axiom"}]`)
 		case r.Method == "GET" && path == "/projects/66/pr-review-repositories":
 			repositoryReads++
-			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"},{"provider":"github","provider_host":"github.com","repository_link_id":8,"repository_name":"acme/two"}],"supported_runner_capabilities":["repository_review_v1"]}`)
+			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"},{"provider":"github","provider_host":"github.com","repository_link_id":8,"repository_name":"acme/two"}],"supported_runner_capabilities":["repository_review_v1","question_v1"]}`)
 		case r.Method == "GET" && path == "/projects/66/sessions":
 			fmt.Fprint(w, `[]`)
 		case r.Method == "GET" && path == "/projects/66/pr-review-sessions":

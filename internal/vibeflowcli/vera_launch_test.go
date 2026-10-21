@@ -180,7 +180,7 @@ func newVeraFixture(t *testing.T) (cfg *Config, repo string, registrations, poll
 		case strings.HasSuffix(r.URL.Path, "/projects"):
 			fmt.Fprint(w, `[{"id":66,"name":"Selected"}]`)
 		case strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
-			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"},{"provider":"github","provider_host":"github.com","repository_link_id":8,"repository_name":"acme/second"}],"supported_runner_capabilities":["repository_review_v1"]}`)
+			fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"},{"provider":"github","provider_host":"github.com","repository_link_id":8,"repository_name":"acme/second"}],"supported_runner_capabilities":["repository_review_v1","question_v1"]}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
