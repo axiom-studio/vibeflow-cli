@@ -23,3 +23,8 @@ Thumbs.db
 
 # Isolated development worktrees
 .worktrees/
+
+# Personal mise overrides
+mise.local.toml
+mise.*.local.toml
+.mise-local/
