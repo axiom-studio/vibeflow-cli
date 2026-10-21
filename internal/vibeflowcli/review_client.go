@@ -67,6 +67,10 @@ type reviewExecution struct {
 	// completed round the answer is about, which may trail the PR's head.
 	Kind     string          `json:"kind,omitempty"`
 	Question *reviewQuestion `json:"question,omitempty"`
+	// PullRequest is the reviewed pull request's title, description, author
+	// and provider discussion, passed through unchanged as data (axiomcloud
+	// #6189). Older servers omit it.
+	PullRequest json.RawMessage `json:"pull_request,omitempty"`
 	Attempt  struct {
 		ID             string `json:"id"`
 		RunnerID       string `json:"runner_id"`

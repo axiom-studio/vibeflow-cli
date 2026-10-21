@@ -953,6 +953,11 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		if err := saveReviewJSON(filepath.Join(root, "input", "question.json"), p.Execution.Question); err != nil {
 			return nil, err
 		}
+	} else if len(p.Execution.PullRequest) > 0 {
+		// Like the question, the pull request's own text stays out of the prompt.
+		if err := os.WriteFile(filepath.Join(root, "input", "pr.json"), p.Execution.PullRequest, 0600); err != nil {
+			return nil, err
+		}
 	}
 	var findings []json.RawMessage
 	setStage("findings")
