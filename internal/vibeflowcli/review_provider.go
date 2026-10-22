@@ -343,6 +343,11 @@ func preflightReviewProvider(ctx context.Context, cfg *Config, provider, model s
 	if cfg.LLMGatewayEnabled && strings.TrimSpace(model) == "" {
 		return fmt.Errorf("gateway reviews require an explicit --model")
 	}
+	// Only Claude is routed through the review relay (execute, provider_setup);
+	// any other harness would run on its own login while the gateway is on.
+	if cfg.LLMGatewayEnabled && provider != "claude" {
+		return fmt.Errorf("gateway reviews run only with the claude harness; %s would bypass the LLM gateway. Use --provider claude, or turn off llm_gateway_enabled for this runner", provider)
+	}
 	if _, _, err := reviewHarnessArgs(provider, model, ""); err != nil {
 		return err
 	}

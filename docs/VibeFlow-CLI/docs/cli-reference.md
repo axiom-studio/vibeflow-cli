@@ -184,6 +184,7 @@ The stop command waits up to 10 seconds, then reports if shutdown is still pendi
 No service manager, login item, deployment, or machine-boot autostart is installed.
 
 Vera runs on any supported coding harness on macOS or Linux, in normal mode like the other personas.
+With `llm_gateway_enabled`, reviews run only with the `claude` harness, which reaches the gateway through a loopback relay; any other harness is refused at start, because it would use its own login and skip the gateway.
 Startup only checks that the harness is configured and its binary is installed; it makes no model call.
 In a terminal, Vera also runs the harness's own login status command before claiming any review, and refuses to start with the login command when it reports that it is not logged in: `claude auth status`, `codex login status`, `agent status` (Cursor) and `kiro-cli whoami`.
 Copilot, Gemini and Qwen have no non-interactive status command, so for them a login screen shows up in the pane instead.

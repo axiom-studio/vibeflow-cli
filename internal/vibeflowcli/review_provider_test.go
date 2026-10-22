@@ -135,6 +135,14 @@ func TestReviewPreflightRequiresOnlyAnInstalledHarness(t *testing.T) {
 	if err := preflightReviewProvider(context.Background(), cfg, "claude", ""); err == nil {
 		t.Fatal("gateway accepted missing model")
 	}
+	// Only Claude is relayed; another harness would silently skip the gateway.
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	if err := preflightReviewProvider(context.Background(), cfg, "codex", "gpt-5.1-codex"); err == nil || !strings.Contains(err.Error(), "codex would bypass the LLM gateway") {
+		t.Fatalf("gateway codex review accepted: %v", err)
+	}
+	if err := preflightReviewProvider(context.Background(), cfg, "claude", "sonnet"); err != nil {
+		t.Fatalf("gateway claude review refused: %v", err)
+	}
 }
 
 // reviewResultEnvelope is the result.json a harness writes on success.
