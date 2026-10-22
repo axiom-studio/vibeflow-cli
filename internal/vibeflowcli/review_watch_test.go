@@ -732,7 +732,7 @@ func TestReviewWatchAdoptsResultWrittenInTheCheckout(t *testing.T) {
 	server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
 	provider := filepath.Join(t.TempDir(), "claude")
 	// The task names the cwd and warns against relative paths; this harness ignores both.
-	script := "#!/bin/sh\ngrep -qF \"Your current directory is $(pwd -P),\" ../../task.txt || exit 8\ngrep -q 'a relative path lands inside the checkout' ../../task.txt || exit 9\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > result.json\n"
+	script := "#!/bin/sh\ngrep -qF \"Your current directory is $(pwd -P),\" ../../task.txt || exit 8\ngrep -q 'never ../result.json or any other relative path' ../../task.txt || exit 9\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > result.json\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -771,3 +771,30 @@ func TestAdoptReviewResultIgnoresUnrelatedFiles(t *testing.T) {
 		t.Fatal("unrelated result.json was moved")
 	}
 }
+
+// The prod case behind issue #6193: the agent followed the "../" pattern of
+// its inputs and wrote ../result.json, beside them in input/. It is adopted.
+func TestReviewWatchAdoptsResultWrittenBesideTheInputs(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	provider := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > ../result.json\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "beside"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "beside", "--once"); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if results.Load() != 1 || !strings.Contains(out.String(), "/input/result.json instead of ") {
+		t.Fatalf("result beside the inputs not adopted (results=%d):\n%s", results.Load(), out.String())
+	}
+}
+
