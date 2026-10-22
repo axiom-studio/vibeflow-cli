@@ -264,6 +264,8 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 	}
 	cfg := DefaultConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, v.token
+	personal := false // A saved choice: the pane would otherwise ask the one-time setup question.
+	cfg.ReviewIsolated = &personal
 	cfg.Providers["claude"] = Provider{Name: "Claude", Binary: harness, LaunchTemplate: "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}"}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
 		t.Fatal(err)
@@ -795,5 +797,53 @@ func TestReviewWatchAdoptsResultWrittenBesideTheInputs(t *testing.T) {
 	}
 	if results.Load() != 1 || !strings.Contains(out.String(), "/input/result.json instead of ") {
 		t.Fatalf("result beside the inputs not adopted (results=%d):\n%s", results.Load(), out.String())
+	}
+}
+
+// On a terminal with no saved choice, review-watch asks once, saves the
+// answer in the config file (without the environment's token) and names
+// the setup when it goes online (issue #6195).
+func TestReviewWatchAsksOnceForIsolation(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	server, _, _ := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "file-token"
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	tm := NewTmuxManager(fmt.Sprintf("vftest-isolation-%d", os.Getpid()))
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	command := shellJoin([]string{builtVibeflow(t), "--root", RootDir(), "--config", ConfigPath(), "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "ask"})
+	if _, err := tm.run("new-session", "-d", "-s", "ask", "-x", "160", "-y", "40", "-e", "VIBEFLOW_TOKEN=", "exec "+command); err != nil {
+		t.Fatal(err)
+	}
+	waitPane := func(want string) string {
+		t.Helper()
+		var pane string
+		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+			pane, _ = tm.run("capture-pane", "-p", "-J", "-t", "ask")
+			if strings.Contains(pane, want) {
+				return pane
+			}
+		}
+		t.Fatalf("pane never showed %q:\n%s", want, pane)
+		return ""
+	}
+	waitPane("[p]ersonal / [i]solated:")
+	if _, err := tm.run("send-keys", "-t", "ask", "i", "Enter"); err != nil {
+		t.Fatal(err)
+	}
+	waitPane("is online (local, claude, isolated).")
+	saved, err := LoadConfig(ConfigPath())
+	if err != nil || !reviewIsolated(saved) {
+		t.Fatalf("choice not saved: %v %v", err, saved.ReviewIsolated)
+	}
+	if data, _ := os.ReadFile(ConfigPath()); !strings.Contains(string(data), "api_token: file-token") {
+		t.Fatalf("saving the choice changed the token:\n%s", data)
 	}
 }

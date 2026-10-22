@@ -81,6 +81,18 @@ func reviewHarnessSupported(key string) bool { return slices.Contains(reviewHarn
 // available for result.json outside the read-only checkout; MCP tools stay.
 var reviewReadOnlyClaudeArgs = []string{"--disallowedTools", "Edit", "MultiEdit", "NotebookEdit"}
 
+// reviewIsolatedClaudeArgs start Claude Code without the user's settings
+// (hooks, plugins, output style) or the review checkout's own project
+// settings, and with no MCP servers, while keeping its normal login (unlike
+// --bare). --mcp-config takes several values, so a flag must follow it.
+// Verified 2026-10-22 against Claude Code 2.1.305 (issue #6195).
+var reviewIsolatedClaudeArgs = []string{"--mcp-config", `{"mcpServers":{}}`, "--strict-mcp-config", "--setting-sources", "local"}
+
+// reviewIsolated reports whether Vera runs isolated with cfg.
+func reviewIsolated(cfg *Config) bool {
+	return cfg != nil && cfg.ReviewIsolated != nil && *cfg.ReviewIsolated
+}
+
 // reviewHarnessArgs returns the headless, normal-mode (full permission) argv
 // for one review, without the binary. stdin reports whether the harness reads
 // the prompt from stdin; otherwise the prompt is the last argument.
@@ -215,6 +227,9 @@ Schema:
 	if execution.isQuestion() && provider == "claude" {
 		args = append(append([]string{}, reviewReadOnlyClaudeArgs...), args...)
 	}
+	if reviewIsolated(cfg) && provider == "claude" {
+		args = append(append([]string{}, reviewIsolatedClaudeArgs...), args...)
+	}
 	spec := &reviewChildSpec{Binary: binary, Args: args, Dir: workDir, InputFile: os.DevNull, DeadlineAt: round.DeadlineAt}
 	if stdin {
 		spec.InputFile = taskPath
@@ -280,11 +295,19 @@ func makeReviewSpecInteractive(spec *reviewChildSpec, cfg *Config, provider, mod
 	if command == "" {
 		command = shellQuote(spec.Binary)
 	}
+	var front []string // Right after the binary, before any other option.
+	if reviewIsolated(cfg) && provider == "claude" {
+		for _, arg := range reviewIsolatedClaudeArgs {
+			front = append(front, shellQuote(arg))
+		}
+	}
 	if readOnly && provider == "claude" {
-		// Right after the binary, before any other option (see reviewReadOnlyClaudeArgs).
+		front = append(front, reviewReadOnlyClaudeArgs...) // See reviewReadOnlyClaudeArgs.
+	}
+	if len(front) > 0 {
 		for _, binary := range []string{shellQuote(spec.Binary), spec.Binary} {
 			if rest, ok := strings.CutPrefix(command, binary); ok && (rest == "" || rest[0] == ' ') {
-				command = binary + " " + strings.Join(reviewReadOnlyClaudeArgs, " ") + rest
+				command = binary + " " + strings.Join(front, " ") + rest
 				break
 			}
 		}

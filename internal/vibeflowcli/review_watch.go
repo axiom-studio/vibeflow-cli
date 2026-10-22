@@ -1,6 +1,7 @@
 package vibeflowcli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -23,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
 
@@ -169,7 +171,7 @@ func saveReviewJSON(path string, value any) error {
 
 func reviewWatchCmd() *cobra.Command {
 	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
-	var background, status, history bool
+	var background, status, history, isolated bool
 	var stop, managed, serverURL, detail string
 	answerSlots, reviewSlots := -1, -1
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -263,6 +265,9 @@ func reviewWatchCmd() *cobra.Command {
 		if cfg.APIToken == "" {
 			return fmt.Errorf("connect VibeFlow before starting a review runner")
 		}
+		if err := chooseReviewIsolation(cfg, path, o.Provider, isolated, !background && !o.Once, os.Stdin, cmd.OutOrStdout()); err != nil {
+			return err
+		}
 		if !background && os.Getenv("VIBEFLOW_TOKEN") != "" {
 			// LoadConfig prefers the ambient token; name it, so a stale shell
 			// export shows up as more than "HTTP 401".
@@ -335,6 +340,7 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&detail, "review-detail", "", "Show one review's recorded result and findings (opened from Vera's history pane)")
 	_ = cmd.Flags().MarkHidden("review-detail")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
+	cmd.Flags().BoolVar(&isolated, "isolated", false, "Run Vera's Claude Code without your hooks, MCP servers, plugins and output style (default: review_isolated, else your own setup)")
 	cmd.Flags().IntVar(&answerSlots, "answer-slots", -1, fmt.Sprintf("Slots that only answer @vibeflow ask questions, 0 to %d (default: review_answer_slots, else 0)", maxReviewSlots))
 	cmd.Flags().IntVar(&reviewSlots, "review-slots", -1, fmt.Sprintf("Slots that run reviews and, when idle, questions, 0 to %d (default: review_review_slots, else 0); both 0 keeps one shared slot", maxReviewSlots))
 	cmd.Flags().BoolVar(&background, "background", false, "Run this explicit binding in the background independently of the TUI")
@@ -471,7 +477,11 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	if w.tty != nil {
 		stopHint = "Ctrl-C stops it while listening; during a review Ctrl-C goes to the harness, and Vera then offers to stop."
 	}
-	fmt.Fprintf(w.output, "Review runner %s is online (%s, %s). %s\n", w.options.Name, w.options.Kind, w.options.Provider, stopHint)
+	setup := "personal setup"
+	if reviewIsolated(w.cfg) {
+		setup = "isolated"
+	}
+	fmt.Fprintf(w.output, "Review runner %s is online (%s, %s, %s). %s\n", w.options.Name, w.options.Kind, w.options.Provider, setup, stopHint)
 	w.listening()
 	w.browse(true)
 	defer w.browse(false)
@@ -561,6 +571,47 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// chooseReviewIsolation settles whether Vera runs isolated: --isolated wins
+// for this run; otherwise the saved review_isolated; otherwise, on a terminal,
+// it asks once and saves the answer (issue #6195). Without a terminal and
+// without a choice, Vera keeps the developer's own setup, as before.
+func chooseReviewIsolation(cfg *Config, path, provider string, flag, ask bool, in *os.File, out io.Writer) error {
+	if flag {
+		if provider != "claude" {
+			return fmt.Errorf("--isolated is supported for the claude harness only")
+		}
+		on := true
+		cfg.ReviewIsolated = &on
+		return nil
+	}
+	if cfg.ReviewIsolated != nil || provider != "claude" || !ask || !term.IsTerminal(in.Fd()) {
+		return nil
+	}
+	fmt.Fprint(out, "Run Vera with your personal Claude Code setup (hooks, MCP servers, plugins, output style) or isolated?\nPersonal MCP servers are reachable from a session that reads untrusted pull request text. [p]ersonal / [i]solated: ")
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("no answer to the Vera setup question; start again or pass --isolated")
+	}
+	choice := strings.ToLower(strings.TrimSpace(line))
+	if choice != "p" && choice != "personal" && choice != "i" && choice != "isolated" {
+		return fmt.Errorf("answer p or i; start Vera again to choose")
+	}
+	on := choice == "i" || choice == "isolated"
+	cfg.ReviewIsolated = &on
+	// Save into the file as written, not the loaded config: an environment
+	// token or server override must never reach config.yaml.
+	saved, err := loadReviewBackgroundConfig(path)
+	if err != nil {
+		return err
+	}
+	saved.ReviewIsolated = &on
+	if err := SaveConfig(saved, path); err != nil {
+		return fmt.Errorf("could not save review_isolated in %s: %w", path, err)
+	}
+	fmt.Fprintf(out, "Saved review_isolated: %v in %s.\n", on, path)
+	return nil
 }
 
 // reviewServerUpgradeHint explains a 404 from the runner endpoints: the

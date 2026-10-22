@@ -3,6 +3,7 @@ package vibeflowcli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -435,5 +436,74 @@ func TestDropInvalidReviewSuggestions(t *testing.T) {
 		if _, has := parsed.Findings[0]["suggestion"]; has == (tc.dropped == 1) {
 			t.Errorf("%s: suggestion present=%v after dropped=%d", tc.name, has, dropped)
 		}
+	}
+}
+
+// Isolation flags reach Claude's argv only when Vera runs isolated, in both
+// the headless and the interactive launch, and never another harness's
+// (issue #6195).
+func TestReviewIsolationFlagsOnlyWhenChosen(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	isolatedFlags := strings.Join(reviewIsolatedClaudeArgs[2:], " ") // "--strict-mcp-config --setting-sources local"
+	for _, tc := range []struct {
+		name     string
+		choice   *bool
+		provider string
+		want     bool
+	}{
+		{"not chosen", nil, "claude", false},
+		{"personal", boolPtr(false), "claude", false},
+		{"isolated", boolPtr(true), "claude", true},
+		{"isolated codex", boolPtr(true), "codex", false},
+	} {
+		cfg := DefaultConfig()
+		fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+		cfg.ReviewIsolated = tc.choice
+		root := t.TempDir()
+		spec, err := prepareReviewProvider(context.Background(), cfg, tc.provider, "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(strings.Join(spec.Args, " "), isolatedFlags); got != tc.want {
+			t.Errorf("%s headless: isolation flags present=%v, want %v: %q", tc.name, got, tc.want, spec.Args)
+		}
+		if err := makeReviewSpecInteractive(spec, cfg, tc.provider, "", root, false); err != nil {
+			t.Fatal(err)
+		}
+		command := strings.Join(spec.Args, " ")
+		if got := strings.Contains(command, isolatedFlags) && strings.Contains(command, `'{"mcpServers":{}}'`); got != tc.want {
+			t.Errorf("%s interactive: isolation flags present=%v, want %v: %s", tc.name, got, tc.want, command)
+		}
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// --isolated wins for one run without saving; it is refused for a harness
+// that has no isolation flags; without a terminal nothing is asked.
+func TestChooseReviewIsolation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := DefaultConfig()
+	cfg.APIToken = "file-token"
+	if err := SaveConfig(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := chooseReviewIsolation(cfg, path, "claude", true, true, os.Stdin, io.Discard); err != nil || !reviewIsolated(cfg) {
+		t.Fatalf("--isolated: err=%v isolated=%v", err, reviewIsolated(cfg))
+	}
+	if saved, _ := os.ReadFile(path); strings.Contains(string(saved), "review_isolated") {
+		t.Fatal("--isolated was saved; it applies to one run")
+	}
+	if err := chooseReviewIsolation(DefaultConfig(), path, "codex", true, true, os.Stdin, io.Discard); err == nil {
+		t.Fatal("--isolated accepted for codex")
+	}
+	notTerminal, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer notTerminal.Close()
+	fresh := DefaultConfig()
+	if err := chooseReviewIsolation(fresh, path, "claude", false, true, notTerminal, io.Discard); err != nil || fresh.ReviewIsolated != nil {
+		t.Fatalf("asked without a terminal: err=%v choice=%v", err, fresh.ReviewIsolated)
 	}
 }

@@ -243,6 +243,21 @@ Commits already on the machine need no fetch; only commits the checkout lacks ar
 A shallow or partial clone cannot supply complete history this way, so for those the runner copies the needed objects as before.
 Beside it are `base/`, `merge-base/` (when the target advanced), `revisions.json`, `review.diff`, `brief.json` and `prior-findings.json`.
 The agent reviews code without building it: it is told not to build the project, install dependencies or run test suites, because CI already does that and reports on the pull request. When the brief carries CI results (`ci` in `brief.json`), the agent cites a failing check instead of reproducing it, and never treats pending, missing or unavailable CI as passing. It may run at most one targeted check that needs no build, with a 60-second limit for all its commands, and states defects it cannot run from file and line evidence. It is told not to push, not to publish PR comments, and not to touch any other checkout.
+
+#### Personal setup or isolated
+
+By default Vera's Claude Code runs with your own setup: your hooks, MCP servers, plugins, skills and output style.
+These are sometimes useful to a review, but they also run inside a session that reads untrusted pull request text, so a personal MCP server is reachable from it.
+
+`--isolated` starts Vera's Claude Code with `--setting-sources local --strict-mcp-config --mcp-config '{"mcpServers":{}}'`.
+It loads no user settings and none of the review checkout's own project settings, and starts no MCP servers, while keeping your normal Claude login.
+Isolation applies to the `claude` harness only; `--isolated` with another harness is refused.
+
+The choice is saved as `review_isolated: true|false` in `config.yaml`.
+When `review-watch` starts in a terminal and nothing is saved, it asks once and saves the answer.
+`--isolated` applies to one run without changing the saved choice.
+Without a terminal and without a saved choice, Vera keeps your own setup.
+The startup line names the mode, for example `online (local, claude, isolated)`.
 For an `@vibeflow ask` question the checkout is read-only: before the harness starts, the head worktree's files and the base and merge-base snapshots lose write permission (Git's own metadata stays writable so read commands work), and Claude starts without its Edit, MultiEdit and NotebookEdit tools.
 Your configured MCP servers stay available to answers.
 The question file also carries the pull request's own discussion from the server (comments and inline review comments), so Vera answers in the context of the thread.
