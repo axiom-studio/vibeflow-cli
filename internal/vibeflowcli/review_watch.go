@@ -1188,8 +1188,53 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		return nil, diagnostic.failure()
 	}
+	if kept, dropped := dropInvalidReviewSuggestions(result, p.Execution.Attempt.Round.HeadSHA); dropped > 0 {
+		fmt.Fprintf(w.output, "Dropped %d suggestion(s) the server would reject; their findings are kept.\n", dropped)
+		result = kept
+	}
 	markProgress(2)
 	return result, nil
+}
+
+// dropInvalidReviewSuggestions removes each suggestion the server would
+// reject, mirroring its validPRReviewSuggestion: the server refuses the whole
+// result over one bad suggestion, which would lose a finished review.
+func dropInvalidReviewSuggestions(result json.RawMessage, headSHA string) (json.RawMessage, int) {
+	var top map[string]json.RawMessage
+	var findings []map[string]json.RawMessage
+	if json.Unmarshal(result, &top) != nil || json.Unmarshal(top["new_findings"], &findings) != nil {
+		return result, 0
+	}
+	dropped := 0
+	for _, f := range findings {
+		raw, ok := f["suggestion"]
+		if !ok || string(raw) == "null" {
+			continue
+		}
+		var path string
+		var line int
+		var s struct {
+			Revision    string  `json:"revision"`
+			Path        string  `json:"path"`
+			Side        string  `json:"side"`
+			StartLine   int     `json:"start_line"`
+			EndLine     int     `json:"end_line"`
+			Replacement *string `json:"replacement"`
+		}
+		_ = json.Unmarshal(f["path"], &path)
+		_ = json.Unmarshal(f["line"], &line)
+		if json.Unmarshal(raw, &s) == nil && s.Revision == headSHA && s.Path == path && s.Side == "RIGHT" && s.StartLine >= 1 && s.StartLine <= line && line <= s.EndLine && s.EndLine-s.StartLine < 100 && s.Replacement != nil && len(*s.Replacement) <= 16<<10 && !strings.ContainsRune(*s.Replacement, 0) {
+			continue
+		}
+		delete(f, "suggestion")
+		dropped++
+	}
+	if dropped == 0 {
+		return result, 0
+	}
+	top["new_findings"], _ = json.Marshal(findings)
+	out, _ := json.Marshal(top)
+	return out, dropped
 }
 
 // readReviewResult reads a harness's result.json. A complete envelope returns

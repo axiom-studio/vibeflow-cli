@@ -378,3 +378,62 @@ func TestReviewProviderTasksForbidBuilds(t *testing.T) {
 		}
 	}
 }
+
+// The review schema offers the server's suggestion shape, and the task
+// carries Vera's voice rules (issue #6215).
+func TestReviewProviderTaskOffersSuggestionsAndVoice(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	cfg := DefaultConfig()
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	root := t.TempDir()
+	if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := os.ReadFile(filepath.Join(root, "task.txt"))
+	if !strings.Contains(string(task), "- "+reviewVoice+"\n") {
+		t.Fatalf("review task lacks the voice rules:\n%s", task)
+	}
+	schema, _ := os.ReadFile(filepath.Join(root, "schema.json"))
+	for _, want := range []string{`"suggestion"`, `"start_line"`, `"end_line"`, `"replacement"`, `"RIGHT"`} {
+		if !strings.Contains(string(schema), want) {
+			t.Fatalf("review schema lacks %s", want)
+		}
+	}
+}
+
+// One bad suggestion would make the server reject the whole result, so the
+// runner drops it and keeps the finding; a valid one passes through.
+func TestDropInvalidReviewSuggestions(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	finding := func(suggestion string) string {
+		return `{"key":"k","title":"t","path":"main.go","line":2,"suggestion":` + suggestion + `}`
+	}
+	valid := `{"revision":"` + head + `","path":"main.go","side":"RIGHT","start_line":2,"end_line":2,"replacement":"return 1"}`
+	for _, tc := range []struct {
+		name, suggestion string
+		dropped          int
+	}{
+		{"valid", valid, 0},
+		{"null", "null", 0},
+		{"wrong revision", strings.Replace(valid, head, strings.Repeat("b", 40), 1), 1},
+		{"other file", strings.Replace(valid, `"path":"main.go"`, `"path":"other.go"`, 1), 1},
+		{"range misses the line", strings.Replace(valid, `"end_line":2`, `"end_line":1`, 1), 1},
+		{"no replacement", strings.Replace(valid, `,"replacement":"return 1"`, "", 1), 1},
+		{"LEFT side", strings.Replace(valid, "RIGHT", "LEFT", 1), 1},
+	} {
+		result := json.RawMessage(`{"schema_version":1,"new_findings":[` + finding(tc.suggestion) + `]}`)
+		out, dropped := dropInvalidReviewSuggestions(result, head)
+		if dropped != tc.dropped {
+			t.Errorf("%s: dropped %d, want %d", tc.name, dropped, tc.dropped)
+		}
+		var parsed struct {
+			Findings []map[string]json.RawMessage `json:"new_findings"`
+		}
+		if json.Unmarshal(out, &parsed) != nil || len(parsed.Findings) != 1 || string(parsed.Findings[0]["title"]) != `"t"` {
+			t.Errorf("%s: finding not kept intact: %s", tc.name, out)
+		}
+		if _, has := parsed.Findings[0]["suggestion"]; has == (tc.dropped == 1) {
+			t.Errorf("%s: suggestion present=%v after dropped=%d", tc.name, has, dropped)
+		}
+	}
+}

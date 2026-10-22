@@ -797,4 +797,3 @@ func TestReviewWatchAdoptsResultWrittenBesideTheInputs(t *testing.T) {
 		t.Fatalf("result beside the inputs not adopted (results=%d):\n%s", results.Load(), out.String())
 	}
 }
-
