@@ -361,6 +361,12 @@ func TestReviewProviderTasksForbidBuilds(t *testing.T) {
 		if !strings.Contains(text, "- "+reviewCheckPolicy+" Do not") {
 			t.Errorf("question=%v: task lacks the build-free policy:\n%s", question, text)
 		}
+		// CI results arrive in brief.json "ci" (axiomcloud #6202); missing results are not a pass.
+		for _, want := range []string{`"ci" object in ../brief.json`, "cite a failing check by name", "never treat a state of pending, none or unavailable as passing"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("question=%v: task lacks %q", question, want)
+			}
+		}
 		for _, stale := range []string{"You may build", "and run its tests", "build and run project code"} {
 			if strings.Contains(text, stale) {
 				t.Errorf("question=%v: task still grants %q", question, stale)
