@@ -300,8 +300,11 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 		return prepareAzureReviewCheckout(ctx, source, root, execution, strings.TrimSpace(string(remote)), proxy)
 	}
 	host, name, err := reviewRemoteIdentity(strings.TrimSpace(string(remote)))
-	if err != nil || host != execution.Review.ProviderHost || name != strings.ToLower(round.Details.BaseRepositoryName) {
-		return fmt.Errorf("selected checkout does not match the review repository")
+	if err != nil {
+		return fmt.Errorf("this checkout's origin is not a supported repository remote")
+	}
+	if host != execution.Review.ProviderHost || name != strings.ToLower(round.Details.BaseRepositoryName) {
+		return fmt.Errorf("this checkout is %s/%s, but the review is for %s/%s", host, name, execution.Review.ProviderHost, round.Details.BaseRepositoryName)
 	}
 	origin, _ := reviewRemoteURL(strings.TrimSpace(string(remote)))
 	objects := filepath.Join(root, "objects.git")
@@ -332,10 +335,10 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 			}
 		}
 		if err = fetchReviewObjects(ctx, objects, fetch, item.sha, reviewGitObjectBudget); err != nil {
-			return err
+			return fmt.Errorf("commit %.12s is not in this checkout and could not be fetched from %s/%s: %w", item.sha, host, strings.ToLower(item.name), err)
 		}
 		if _, err = reviewGit(ctx, objects, "cat-file", "-e", item.sha+"^{commit}"); err != nil {
-			return err
+			return fmt.Errorf("commit %.12s is missing after fetching it from %s/%s", item.sha, host, strings.ToLower(item.name))
 		}
 	}
 	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA)
@@ -480,6 +483,19 @@ func finishReviewCheckout(ctx context.Context, root, objects, baseSHA, headSHA s
 		return err
 	}
 	return os.WriteFile(filepath.Join(input, "review.diff"), diff, 0600)
+}
+
+// reviewChangedLines counts the added and removed lines of a unified diff,
+// without the "+++" and "---" file headers.
+func reviewChangedLines(diff []byte) int {
+	n := 0
+	for _, line := range bytes.Split(diff, []byte("\n")) {
+		if len(line) == 0 || (line[0] != '+' && line[0] != '-') || bytes.HasPrefix(line, []byte("+++ ")) || bytes.HasPrefix(line, []byte("--- ")) {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 type limitedReviewBuffer struct {

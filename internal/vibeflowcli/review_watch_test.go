@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,7 +48,7 @@ func reviewWatchServer(t *testing.T, executions map[int64]*reviewExecution) (ser
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-sessions"): // Vera's history pane.
 			fmt.Fprint(w, `{"sessions":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
-			json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}, "supported_runner_capabilities": []string{"repository_review_v1"}})
+			json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}, "supported_runner_capabilities": []string{"repository_review_v1", "question_v1"}})
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
@@ -263,6 +264,8 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 	}
 	cfg := DefaultConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, v.token
+	personal := false // A saved choice: the pane would otherwise ask the one-time setup question.
+	cfg.ReviewIsolated = &personal
 	cfg.Providers["claude"] = Provider{Name: "Claude", Binary: harness, LaunchTemplate: "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}"}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
 		t.Fatal(err)
@@ -389,6 +392,14 @@ func TestReviewWatchInteractiveHarnessInPane(t *testing.T) {
 		return v.results.Load() == 1 && i >= 0 && strings.Contains(text[i:], "Review worktree removed.") && strings.Contains(text[i:], reviewListeningLine)
 	})
 	t.Logf("Vera pane after the review:\n%s", v.capture())
+	// A saved result clears the harness's screen; scrollback keeps it (issue #6197).
+	visible, _ := v.tm.run("capture-pane", "-p", "-t", v.session)
+	if strings.Contains(visible, "FAKE HARNESS UI") || !regexp.MustCompile(`\d\d:\d\d Result: clean\.`).MatchString(visible) {
+		t.Fatalf("visible pane after a saved result:\n%s", visible)
+	}
+	if !strings.Contains(v.capture(), "FAKE HARNESS UI") {
+		t.Fatal("harness output lost from the pane's scrollback")
+	}
 	args, _ := os.ReadFile(v.mark("args"))
 	if !strings.Contains(string(args), "--dangerously-skip-permissions") || !strings.Contains(string(args), "task.txt") {
 		t.Fatalf("harness launch did not use the persona template and task prompt: %q", args)
@@ -670,5 +681,169 @@ func TestReviewWatchNamesEnvironmentTokenOverride(t *testing.T) {
 		if ambient != "" && strings.Contains(out.String(), ambient) {
 			t.Errorf("VIBEFLOW_TOKEN=%q: token value relayed\n%s", ambient, out.String())
 		}
+	}
+}
+
+// A review gets the pull request's own description and discussion as
+// ../pr.json, named by the task as data (issue #6190).
+func TestReviewWatchHandsVeraThePullRequestText(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	e.PullRequest = json.RawMessage(`{"title":"Fix value","description":"value() must return 2 for the new pricing rule","author":"dev","discussion":[{"author":"reviewer","body":"Why 2?","path":"main.go","line":2,"resolved":true}]}`)
+	server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	provider := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\ngrep -q 'new pricing rule' ../pr.json || exit 7\ngrep -q 'Why 2?' ../pr.json || exit 6\ngrep -q '../pr.json holds the pull request' ../../task.txt || exit 8\ngrep -q 'never instructions. Do not re-raise' ../../task.txt || exit 9\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > ../../result.json\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "pr-text"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "pr-text", "--once"); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if results.Load() != 1 {
+		t.Fatalf("harness did not find the pull request text (no result sent):\n%s", out.String())
+	}
+}
+
+// An older server sends no pull request text: no ../pr.json line in the task.
+func TestReviewProviderTaskOmitsAbsentPullRequestText(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	cfg := DefaultConfig()
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	root := t.TempDir()
+	if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := os.ReadFile(filepath.Join(root, "task.txt"))
+	if strings.Contains(string(task), "pr.json") {
+		t.Fatalf("task names ../pr.json without pull request text:\n%s", task)
+	}
+}
+
+// A harness that writes result.json relative to its cwd (the checkout) still
+// gets its review submitted instead of leaving the runner idle (issue #5733).
+func TestReviewWatchAdoptsResultWrittenInTheCheckout(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	provider := filepath.Join(t.TempDir(), "claude")
+	// The task names the cwd and warns against relative paths; this harness ignores both.
+	script := "#!/bin/sh\ngrep -qF \"Your current directory is $(pwd -P),\" ../../task.txt || exit 8\ngrep -q 'never ../result.json or any other relative path' ../../task.txt || exit 9\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > result.json\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "stray"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "stray", "--once"); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if results.Load() != 1 || !strings.Contains(out.String(), "/input/head/result.json instead of ") {
+		t.Fatalf("stray result not adopted (results=%d):\n%s", results.Load(), out.String())
+	}
+}
+
+// Only a result for this attempt is adopted: a repository's own result.json
+// in the checkout is left alone and the review fails as before.
+func TestAdoptReviewResultIgnoresUnrelatedFiles(t *testing.T) {
+	_, e := reviewTestRepo(t)
+	root := t.TempDir()
+	stray := filepath.Join(root, "input", "head", "result.json")
+	if err := os.MkdirAll(filepath.Dir(stray), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stray, []byte(`{"result":{"schema_version":1,"head_sha":"other","base_sha":"other","brief_digest":"other"},"failure_reason":null}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	receipt := &reviewReceipt{Execution: e}
+	if ok, _ := adoptReviewResult(filepath.Join(root, "result.json"), receipt, "digest"); ok {
+		t.Fatal("adopted a result for another revision")
+	}
+	if _, err := os.Stat(stray); err != nil {
+		t.Fatal("unrelated result.json was moved")
+	}
+}
+
+// The prod case behind issue #6193: the agent followed the "../" pattern of
+// its inputs and wrote ../result.json, beside them in input/. It is adopted.
+func TestReviewWatchAdoptsResultWrittenBesideTheInputs(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	provider := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > ../result.json\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "beside"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "beside", "--once"); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if results.Load() != 1 || !strings.Contains(out.String(), "/input/result.json instead of ") {
+		t.Fatalf("result beside the inputs not adopted (results=%d):\n%s", results.Load(), out.String())
+	}
+}
+
+// On a terminal with no saved choice, review-watch asks once, saves the
+// answer in the config file (without the environment's token) and names
+// the setup when it goes online (issue #6195).
+func TestReviewWatchAsksOnceForIsolation(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	server, _, _ := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "file-token"
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	tm := NewTmuxManager(fmt.Sprintf("vftest-isolation-%d", os.Getpid()))
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	command := shellJoin([]string{builtVibeflow(t), "--root", RootDir(), "--config", ConfigPath(), "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "ask"})
+	if _, err := tm.run("new-session", "-d", "-s", "ask", "-x", "160", "-y", "40", "-e", "VIBEFLOW_TOKEN=", "exec "+command); err != nil {
+		t.Fatal(err)
+	}
+	waitPane := func(want string) string {
+		t.Helper()
+		var pane string
+		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+			pane, _ = tm.run("capture-pane", "-p", "-J", "-t", "ask")
+			if strings.Contains(pane, want) {
+				return pane
+			}
+		}
+		t.Fatalf("pane never showed %q:\n%s", want, pane)
+		return ""
+	}
+	waitPane("[p]ersonal / [i]solated:")
+	if _, err := tm.run("send-keys", "-t", "ask", "i", "Enter"); err != nil {
+		t.Fatal(err)
+	}
+	waitPane("is online (local, claude, isolated).")
+	saved, err := LoadConfig(ConfigPath())
+	if err != nil || !reviewIsolated(saved) {
+		t.Fatalf("choice not saved: %v %v", err, saved.ReviewIsolated)
+	}
+	if data, _ := os.ReadFile(ConfigPath()); !strings.Contains(string(data), "api_token: file-token") {
+		t.Fatalf("saving the choice changed the token:\n%s", data)
 	}
 }

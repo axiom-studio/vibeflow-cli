@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -180,5 +181,41 @@ func TestReviewListCommandSurvivesReviewAPIFailure(t *testing.T) {
 				t.Fatalf("review outage broke local listing: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+// review-watch against a server without PR review runner routes prints one
+// upgrade hint, once, without the usage text (issue #5287).
+func TestReviewWatchCommandExplainsServerWithoutReviewRoutes(t *testing.T) {
+	binary := builtVibeflow(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/pr-review") {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer server.Close()
+	repo, _ := reviewTestRepo(t)
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "fixture-token"
+	harness := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(harness, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Providers["claude"] = Provider{Binary: harness}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := SaveConfig(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	for _, gitProvider := range []string{"github", "bitbucket"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		cmd := exec.CommandContext(ctx, binary, "--root", t.TempDir(), "--config", path, "review-watch", "--project", "42", "--repo", repo, "--repository-link", "7", "--git-provider", gitProvider, "--provider", "claude", "--once")
+		out, err := cmd.CombinedOutput()
+		cancel()
+		const hint = "this VibeFlow server does not support PR review runners (HTTP 404); upgrade the VibeFlow backend"
+		if err == nil || strings.Count(string(out), hint) != 1 || strings.Contains(string(out), "Usage:") || strings.Contains(string(out), "Flags:") {
+			t.Fatalf("%s: err=%v output:\n%s", gitProvider, err, out)
+		}
 	}
 }

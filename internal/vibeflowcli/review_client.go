@@ -67,7 +67,11 @@ type reviewExecution struct {
 	// completed round the answer is about, which may trail the PR's head.
 	Kind     string          `json:"kind,omitempty"`
 	Question *reviewQuestion `json:"question,omitempty"`
-	Attempt  struct {
+	// PullRequest is the reviewed pull request's title, description, author
+	// and provider discussion, passed through unchanged as data (axiomcloud
+	// #6189). Older servers omit it.
+	PullRequest json.RawMessage `json:"pull_request,omitempty"`
+	Attempt     struct {
 		ID             string `json:"id"`
 		RunnerID       string `json:"runner_id"`
 		SessionID      string `json:"session_id"`
@@ -90,20 +94,27 @@ type reviewProgressInput struct {
 	BaseSHA          string `json:"base_sha"`
 	CheckoutPrepared bool   `json:"checkout_prepared"`
 	ReviewCompleted  bool   `json:"review_completed"`
+	// ChangedLines is the size of ../review.diff, reported with the prepared
+	// checkout so the server can scale the round deadline (axiomcloud #6300).
+	ChangedLines int `json:"changed_lines,omitempty"`
 }
 
-func reviewRenewBody(execution reviewExecution, checkoutPrepared, reviewCompleted bool) any {
+func reviewRenewBody(execution reviewExecution, checkoutPrepared, reviewCompleted bool, changedLines int) any {
 	if execution.ProgressReportingVersion != 1 {
 		return struct{}{}
 	}
-	return struct {
-		Progress reviewProgressInput `json:"progress"`
-	}{Progress: reviewProgressInput{
+	progress := reviewProgressInput{
 		HeadSHA:          execution.Attempt.Round.HeadSHA,
 		BaseSHA:          execution.Attempt.Round.BaseSHA,
 		CheckoutPrepared: checkoutPrepared,
 		ReviewCompleted:  reviewCompleted,
-	}}
+	}
+	if checkoutPrepared {
+		progress.ChangedLines = changedLines
+	}
+	return struct {
+		Progress reviewProgressInput `json:"progress"`
+	}{Progress: progress}
 }
 
 type reviewBrief struct {

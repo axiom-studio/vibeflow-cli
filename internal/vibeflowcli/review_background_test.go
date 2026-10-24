@@ -55,7 +55,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 		}
 		switch {
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
-			fmt.Fprint(w, `{"repositories":[],"supported_runner_capabilities":["repository_review_v1"]}`)
+			fmt.Fprint(w, `{"repositories":[],"supported_runner_capabilities":["repository_review_v1","question_v1"]}`)
 		case r.URL.Path == "/rest/v1/vibeflow/projects/23/pr-review-runners":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

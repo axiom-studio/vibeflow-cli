@@ -126,8 +126,11 @@ type Config struct {
 	// slots: answer slots take only questions, review slots prefer reviews
 	// and take questions only when no review waits. Both 0 (the default)
 	// keeps the single shared slot.
-	ReviewAnswerSlots int                 `yaml:"review_answer_slots,omitempty"`
-	ReviewReviewSlots int                 `yaml:"review_review_slots,omitempty"`
+	ReviewAnswerSlots int `yaml:"review_answer_slots,omitempty"`
+	ReviewReviewSlots int `yaml:"review_review_slots,omitempty"`
+	// ReviewIsolated runs Vera's Claude Code without the developer's own
+	// hooks, MCP servers, plugins and output style. nil means not chosen yet.
+	ReviewIsolated    *bool               `yaml:"review_isolated,omitempty"`
 	ClaudeBinary      string              `yaml:"claude_binary"`
 	Providers         map[string]Provider `yaml:"providers"`
 	Worktree          WorktreeConfig      `yaml:"worktree"`
