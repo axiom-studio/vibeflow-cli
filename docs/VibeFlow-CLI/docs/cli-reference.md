@@ -138,7 +138,7 @@ vibeflow review-watch --project 42 --repository-link 123 --provider claude --mod
 | `--runner-kind` | `local` or `shared`; shared execution requires an existing server grant |
 | `--name` | Stable runner name, 1 to 100 bytes; defaults to hostname |
 | `--interval` | Idle polling interval, `1s` to `60s`; default `5s`. Each poll also sends the runner heartbeat, and the server marks a runner offline after 2 minutes without one |
-| `--timeout` | Per-attempt maximum, `1m` to `1h`; default `15m`, also bounded by the server deadline |
+| `--timeout` | Shortens the attempt limit below the server's round deadline, `1m` to `1h`; default `0`, which follows the server deadline. The server may extend the round for a large diff after the runner reports it; `--timeout` still caps that. Each attempt prints its effective limit, for example `Attempt limit: 30m0s (server deadline)` |
 | `--once` | Check one work page, process at most one review, then exit |
 | `--server-url` | Explicit VibeFlow server URL; overrides configuration and `VIBEFLOW_URL`, and is pinned for a background runner |
 | `--background` | Save an explicit repository binding and start a detached runner; requires explicit `--project`, `--repo`, and `--repository-link`; incompatible with `--once` |

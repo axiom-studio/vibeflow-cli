@@ -144,9 +144,6 @@ func resolveReviewStartup(ctx context.Context, cfg *Config, o reviewWatchOptions
 	if o.PollInterval == 0 {
 		o.PollInterval = 5 * time.Second
 	}
-	if o.Timeout == 0 {
-		o.Timeout = 15 * time.Minute
-	}
 
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
 	var projects []Project

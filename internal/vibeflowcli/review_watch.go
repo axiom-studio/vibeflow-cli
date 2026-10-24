@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -170,7 +172,7 @@ func saveReviewJSON(path string, value any) error {
 }
 
 func reviewWatchCmd() *cobra.Command {
-	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
+	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second}
 	var background, status, history, isolated bool
 	var stop, managed, serverURL, detail string
 	answerSlots, reviewSlots := -1, -1
@@ -245,8 +247,8 @@ func reviewWatchCmd() *cobra.Command {
 			}
 			return runReviewHistory(ctx, cfg, o)
 		}
-		if o.RepositoryLinkID <= 0 || o.Project == "" || (o.Kind != "local" && o.Kind != "shared") || o.Timeout < time.Minute || o.Timeout > time.Hour {
-			return fmt.Errorf("provide --project and --repository-link; timeout must be 1m to 1h")
+		if o.RepositoryLinkID <= 0 || o.Project == "" || (o.Kind != "local" && o.Kind != "shared") || (o.Timeout != 0 && (o.Timeout < time.Minute || o.Timeout > time.Hour)) {
+			return fmt.Errorf("provide --project and --repository-link; timeout must be 0 or 1m to 1h")
 		}
 		// Heartbeats ride on each idle poll, so a long interval makes the server
 		// mark this runner offline and route its work to shared runners.
@@ -334,7 +336,7 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Kind, "runner-kind", "local", "local or explicitly authorized shared runner")
 	cmd.Flags().StringVar(&o.Name, "name", "", "Runner name (default: hostname)")
 	cmd.Flags().DurationVar(&o.PollInterval, "interval", o.PollInterval, "Idle API polling interval, 1s to 60s; each poll also heartbeats the runner, no LLM runs while idle")
-	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Maximum time per attempt, also bounded by the server deadline")
+	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Shorten the attempt limit below the server's round deadline, 1m to 1h; 0 follows the server deadline, which it may extend for a large diff")
 	cmd.Flags().BoolVar(&history, "history", false, "Show this repository's reviews as a scrollable read-only list (Vera's right-hand pane)")
 	_ = cmd.Flags().MarkHidden("history")
 	cmd.Flags().StringVar(&detail, "review-detail", "", "Show one review's recorded result and findings (opened from Vera's history pane)")
@@ -819,6 +821,54 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 	return nil
 }
 
+// reviewDeadline ends a context at an attempt deadline the server may move
+// later during the attempt, which context.WithDeadline cannot do. A cap, when
+// set, is the --timeout bound no extension passes.
+type reviewDeadline struct {
+	mu      sync.Mutex
+	at, cap time.Time
+	timer   *time.Timer
+	cancel  context.CancelCauseFunc
+	moved   chan struct{} // One pending signal that at changed.
+}
+
+func newReviewDeadline(parent context.Context, at, cap time.Time) (context.Context, *reviewDeadline) {
+	ctx, cancel := context.WithCancelCause(parent)
+	d := &reviewDeadline{at: at, cap: cap, cancel: cancel, moved: make(chan struct{}, 1)}
+	d.timer = time.AfterFunc(time.Until(at), func() { cancel(context.DeadlineExceeded) })
+	return ctx, d
+}
+
+// extend moves the deadline to at when that is later and not yet passed.
+func (d *reviewDeadline) extend(at time.Time) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.cap.IsZero() && at.After(d.cap) {
+		at = d.cap
+	}
+	if !at.After(d.at) || !d.timer.Stop() {
+		return false
+	}
+	d.at = at
+	d.timer.Reset(time.Until(at))
+	select {
+	case d.moved <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (d *reviewDeadline) time() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.at
+}
+
+func (d *reviewDeadline) stop() {
+	d.timer.Stop()
+	d.cancel(nil)
+}
+
 func reviewPermanent(err error) bool {
 	var e *reviewHTTPError
 	return errors.As(err, &e) && (e.Status == 400 || e.Status == 401 || e.Status == 403 || e.Status == 404 || e.Status == 409)
@@ -879,12 +929,19 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.Stage = stage
 		stageStarted = time.Now()
 	}
-	deadline := time.UnixMilli(p.Execution.Attempt.Round.DeadlineAt)
-	if local := time.Now().Add(w.options.Timeout); local.Before(deadline) {
-		deadline = local
+	deadline, limit := time.UnixMilli(p.Execution.Attempt.Round.DeadlineAt), "server deadline"
+	var localCap time.Time
+	if w.options.Timeout > 0 {
+		localCap = started.Add(w.options.Timeout)
+		if localCap.Before(deadline) {
+			deadline, limit = localCap, "--timeout"
+		}
 	}
-	deadlineCtx, cancelDeadline := context.WithDeadline(parent, deadline)
-	defer cancelDeadline()
+	if w.output != nil {
+		fmt.Fprintf(w.output, "Attempt limit: %s (%s)\n", time.Until(deadline).Round(time.Second), limit)
+	}
+	deadlineCtx, attemptDeadline := newReviewDeadline(parent, deadline, localCap)
+	defer attemptDeadline.stop()
 	ctx, cancel := context.WithCancelCause(deadlineCtx)
 	defer cancel(nil)
 	var progress atomic.Uint32
@@ -951,6 +1008,8 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 				return
 			}
 			expiry = time.UnixMilli(renewed.Attempt.LeaseExpiresAt)
+			// The server may lengthen the round once it knows the diff size.
+			attemptDeadline.extend(time.UnixMilli(renewed.Attempt.Round.DeadlineAt))
 		}
 	}()
 	// Capture the cause before our cleanup defers cancel the execution context.
@@ -1085,7 +1144,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if err != nil {
 		return nil, err
 	}
-	spec.DeadlineAt = deadline.UnixMilli()
+	spec.DeadlineAt = attemptDeadline.time().UnixMilli()
 	interactive := w.tty != nil
 	if interactive {
 		if err = makeReviewSpecInteractive(spec, w.cfg, w.options.Provider, w.options.Model, root, p.Execution.isQuestion()); err != nil {
@@ -1158,6 +1217,21 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		return nil, fmt.Errorf("review child guard failed")
 	}
+	// Each later deadline follows on the same pipe; a closed pipe ends this.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-attemptDeadline.moved:
+			}
+			var frame [8]byte
+			binary.BigEndian.PutUint64(frame[:], uint64(attemptDeadline.time().UnixMilli()))
+			if _, err := pipe.Write(frame[:]); err != nil {
+				return
+			}
+		}
+	}()
 	resultPath := filepath.Join(root, "result.json")
 	var written <-chan struct{} // An interactive harness stays open after writing its result.
 	if interactive {
@@ -1390,8 +1464,8 @@ func reviewChildCmd() *cobra.Command {
 		}
 		signalCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer stopSignals()
-		ctx, cancel := context.WithDeadline(signalCtx, time.UnixMilli(spec.DeadlineAt))
-		defer cancel()
+		ctx, deadline := newReviewDeadline(signalCtx, time.UnixMilli(spec.DeadlineAt), time.Time{})
+		defer deadline.stop()
 		supervisor := cmd.InOrStdin()
 		if closer, ok := supervisor.(io.Closer); ok {
 			defer closer.Close()
@@ -1404,8 +1478,16 @@ func reviewChildCmd() *cobra.Command {
 				return
 			}
 			ready <- nil
-			io.Copy(io.Discard, supervisor)
-			cancel()
+			// Each later deadline arrives as 8 big-endian bytes of Unix
+			// milliseconds; EOF means the supervisor is gone.
+			var frame [8]byte
+			for {
+				if _, err := io.ReadFull(supervisor, frame[:]); err != nil {
+					break
+				}
+				deadline.extend(time.UnixMilli(int64(binary.BigEndian.Uint64(frame[:]))))
+			}
+			deadline.stop()
 		}()
 		select {
 		case err := <-ready:

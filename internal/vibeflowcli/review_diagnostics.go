@@ -58,7 +58,7 @@ func reviewCancellationCategory(ctx context.Context) string {
 		return "lease_rejected"
 	case errors.Is(context.Cause(ctx), errReviewLeaseIdentity):
 		return "lease_identity_changed"
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+	case errors.Is(context.Cause(ctx), context.DeadlineExceeded):
 		return "deadline_exceeded"
 	case ctx.Err() != nil:
 		return "cancelled"
