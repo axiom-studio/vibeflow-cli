@@ -970,6 +970,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	go func() {
 		defer close(renewDone)
 		expiry := time.UnixMilli(p.Execution.Attempt.LeaseExpiresAt)
+		sendChangedLines := true // Cleared for this attempt once the server rejects the field.
 		for {
 			delay := 10 * time.Second
 			if left := time.Until(expiry); left < delay {
@@ -988,9 +989,26 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			callCtx, stop := context.WithDeadline(ctx, expiry)
 			var renewed reviewExecution
 			milestones := progress.Load()
+			renew := func(lines int) error {
+				return w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", reviewRenewBody(*p.Execution, milestones&1 != 0, milestones&2 != 0, lines), &renewed)
+			}
 			err := w.client.reviewRequest(callCtx, "POST", w.prefix()+"/heartbeat", struct{}{}, nil)
 			if err == nil {
-				err = w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", reviewRenewBody(*p.Execution, milestones&1 != 0, milestones&2 != 0, changedLines), &renewed)
+				lines := 0
+				if sendChangedLines {
+					lines = changedLines
+				}
+				err = renew(lines)
+				var response *reviewHTTPError
+				if lines != 0 && milestones&1 != 0 && errors.As(err, &response) && response.Status == 400 {
+					// A server without axiomcloud #173 refuses the unknown field
+					// (DisallowUnknownFields); keep the lease without it.
+					sendChangedLines = false
+					if w.output != nil {
+						fmt.Fprintln(w.output, "Server ignores changed_lines; the round keeps its default deadline")
+					}
+					err = renew(0)
+				}
 			}
 			stop()
 			if err != nil {

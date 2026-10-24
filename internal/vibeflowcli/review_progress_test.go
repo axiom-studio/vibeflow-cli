@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -232,6 +233,129 @@ func TestReviewProgressReportsCheckoutWithoutBlockingCompletion(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A server without axiomcloud #173 decodes renew bodies with
+// DisallowUnknownFields and answers HTTP 400 to changed_lines. The runner must
+// retry once without the field and stop sending it, instead of losing the lease.
+func TestReviewRenewFallsBackWithoutChangedLines(t *testing.T) {
+	for name, reject := range map[string]bool{"rejected": true, "accepted": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel() // Each case waits one 10s renew cycle for the renew after the fallback.
+			source, execution := reviewTestRepo(t)
+			execution.ProgressReportingVersion = 1
+			content := json.RawMessage(`{"findings":[]}`)
+			digest := sha256.Sum256(content)
+			brief := reviewBrief{RoundID: execution.Attempt.Round.ID, Digest: hex.EncodeToString(digest[:]), Content: content}
+			result := map[string]any{
+				"schema_version": 1, "brief_digest": brief.Digest,
+				"head_sha": execution.Review.HeadSHA, "base_sha": execution.Review.BaseSHA,
+				"outcome": "clean", "summary": "fixture", "new_findings": []any{}, "reconciliations": []any{},
+			}
+			// Rejected: the first renew, its retry without the field, and one later renew.
+			// Accepted: the first renew and one later renew, both carrying the field.
+			want := 2
+			if reject {
+				want = 3
+			}
+			root := t.TempDir()
+			release := filepath.Join(root, "release-provider")
+			provider := filepath.Join(root, "provider")
+			script := "#!/bin/sh\nwhile [ ! -f " + shellQuote(release) + " ]; do sleep 0.02; done\n" + reviewWriteResult(reviewResultEnvelope(t, result))
+			if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+
+			var mu sync.Mutex
+			var carried []bool // Per post-checkout renew: did the body carry changed_lines?
+			rejected := false
+			enough := make(chan struct{}, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/brief"):
+					json.NewEncoder(w).Encode(brief)
+				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/heartbeat"):
+					w.WriteHeader(http.StatusNoContent)
+				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/renew"):
+					data, _ := io.ReadAll(r.Body)
+					var body struct {
+						Progress reviewProgressInput `json:"progress"`
+					}
+					if err := json.Unmarshal(data, &body); err != nil {
+						t.Error(err)
+					}
+					renewed := *execution
+					// The loop renews every 10s or at the lease expiry, whichever is
+					// sooner, so the lease must outlast 10s for the next renew to land.
+					renewed.Attempt.LeaseExpiresAt = time.Now().Add(10500 * time.Millisecond).UnixMilli()
+					if !body.Progress.CheckoutPrepared {
+						json.NewEncoder(w).Encode(renewed)
+						return
+					}
+					has := strings.Contains(string(data), "changed_lines")
+					mu.Lock()
+					carried = append(carried, has)
+					n := len(carried)
+					refuse := reject && has && !rejected
+					rejected = rejected || refuse
+					mu.Unlock()
+					if refuse {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					if n >= want {
+						select {
+						case enough <- struct{}{}:
+						default:
+						}
+					}
+					json.NewEncoder(w).Encode(renewed)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			cfg := DefaultConfig()
+			cfg.Providers["claude"] = Provider{Binary: provider}
+			watch := &reviewWatch{
+				client: NewClient(server.URL, "token"), cfg: cfg, root: root, output: io.Discard,
+				state:   reviewRunnerState{ID: execution.Attempt.RunnerID},
+				options: reviewWatchOptions{ProjectID: 1, Repository: source, Provider: "claude", Timeout: time.Minute},
+			}
+			receipt := &reviewReceipt{JobID: execution.Review.ID, RequestID: reviewUUID(), Execution: execution}
+			done := make(chan error, 1)
+			go func() {
+				_, err := watch.execute(context.Background(), receipt)
+				done <- err
+			}()
+			select {
+			case <-enough:
+			case err := <-done:
+				t.Fatalf("execution ended before %d post-checkout renews: %v", want, err)
+			case <-time.After(20 * time.Second):
+				t.Fatal("post-checkout renews did not arrive promptly")
+			}
+			if err := os.WriteFile(release, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("review failed instead of falling back: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(carried) < want || !carried[0] {
+				t.Fatalf("first post-checkout renew must carry changed_lines: %v", carried)
+			}
+			for i, has := range carried[1:] {
+				if has == reject { // rejected: the retry and every later renew omit it; accepted: all keep it.
+					t.Fatalf("renew %d carried changed_lines=%v after reject=%v: %v", i+1, has, reject, carried)
+				}
+			}
+		})
 	}
 }
 
