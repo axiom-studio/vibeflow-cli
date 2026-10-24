@@ -1,15 +1,18 @@
 package vibeflowcli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -18,10 +21,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
 
@@ -66,6 +71,7 @@ const reviewLegacyRoutingNotice = "Repository-request routing requires a server 
 
 type reviewWatch struct {
 	repositoryRequests bool // Registered with repository_review_v1 for this run.
+	questions          bool // Registered with question_v1, with the server's consent.
 	client             *Client
 	cfg                *Config
 	options            reviewWatchOptions
@@ -104,7 +110,11 @@ func (w *reviewWatch) browse(on bool) {
 
 // listening says the runner is idle again.
 func (w *reviewWatch) listening() {
-	fmt.Fprintln(w.output, reviewListeningLine)
+	line := reviewListeningLine
+	if !w.questions {
+		line = reviewListeningNoQuestionsLine
+	}
+	fmt.Fprintln(w.output, line)
 	if w.tty != nil {
 		fmt.Fprintln(w.output, veraBrowseHint)
 	}
@@ -162,8 +172,8 @@ func saveReviewJSON(path string, value any) error {
 }
 
 func reviewWatchCmd() *cobra.Command {
-	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second, Timeout: 15 * time.Minute}
-	var background, status, history bool
+	o := reviewWatchOptions{Kind: "local", PollInterval: 5 * time.Second}
+	var background, status, history, isolated bool
 	var stop, managed, serverURL, detail string
 	answerSlots, reviewSlots := -1, -1
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -237,8 +247,8 @@ func reviewWatchCmd() *cobra.Command {
 			}
 			return runReviewHistory(ctx, cfg, o)
 		}
-		if o.RepositoryLinkID <= 0 || o.Project == "" || (o.Kind != "local" && o.Kind != "shared") || o.Timeout < time.Minute || o.Timeout > time.Hour {
-			return fmt.Errorf("provide --project and --repository-link; timeout must be 1m to 1h")
+		if o.RepositoryLinkID <= 0 || o.Project == "" || (o.Kind != "local" && o.Kind != "shared") || (o.Timeout != 0 && (o.Timeout < time.Minute || o.Timeout > time.Hour)) {
+			return fmt.Errorf("provide --project and --repository-link; timeout must be 0 or 1m to 1h")
 		}
 		// Heartbeats ride on each idle poll, so a long interval makes the server
 		// mark this runner offline and route its work to shared runners.
@@ -256,6 +266,14 @@ func reviewWatchCmd() *cobra.Command {
 		}
 		if cfg.APIToken == "" {
 			return fmt.Errorf("connect VibeFlow before starting a review runner")
+		}
+		if background && isolated {
+			// The managed runner is another process that reloads config.yaml, so a
+			// one-run flag would be silently dropped there (issue #6311).
+			return fmt.Errorf("--isolated applies to a foreground run only; for a background runner set review_isolated: true in %s and start it again", path)
+		}
+		if err := chooseReviewIsolation(cfg, path, o.Provider, isolated, !background && !o.Once, os.Stdin, cmd.OutOrStdout()); err != nil {
+			return err
 		}
 		if !background && os.Getenv("VIBEFLOW_TOKEN") != "" {
 			// LoadConfig prefers the ambient token; name it, so a stale shell
@@ -323,12 +341,13 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Kind, "runner-kind", "local", "local or explicitly authorized shared runner")
 	cmd.Flags().StringVar(&o.Name, "name", "", "Runner name (default: hostname)")
 	cmd.Flags().DurationVar(&o.PollInterval, "interval", o.PollInterval, "Idle API polling interval, 1s to 60s; each poll also heartbeats the runner, no LLM runs while idle")
-	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Maximum time per attempt, also bounded by the server deadline")
+	cmd.Flags().DurationVar(&o.Timeout, "timeout", o.Timeout, "Shorten the attempt limit below the server's round deadline, 1m to 1h; 0 follows the server deadline, which it may extend for a large diff")
 	cmd.Flags().BoolVar(&history, "history", false, "Show this repository's reviews as a scrollable read-only list (Vera's right-hand pane)")
 	_ = cmd.Flags().MarkHidden("history")
 	cmd.Flags().StringVar(&detail, "review-detail", "", "Show one review's recorded result and findings (opened from Vera's history pane)")
 	_ = cmd.Flags().MarkHidden("review-detail")
 	cmd.Flags().BoolVar(&o.Once, "once", false, "Check one page of available work and exit after at most one review")
+	cmd.Flags().BoolVar(&isolated, "isolated", false, "Run Vera's Claude Code without your hooks, MCP servers, plugins and output style (default: review_isolated, else your own setup)")
 	cmd.Flags().IntVar(&answerSlots, "answer-slots", -1, fmt.Sprintf("Slots that only answer @vibeflow ask questions, 0 to %d (default: review_answer_slots, else 0)", maxReviewSlots))
 	cmd.Flags().IntVar(&reviewSlots, "review-slots", -1, fmt.Sprintf("Slots that run reviews and, when idle, questions, 0 to %d (default: review_review_slots, else 0); both 0 keeps one shared slot", maxReviewSlots))
 	cmd.Flags().BoolVar(&background, "background", false, "Run this explicit binding in the background independently of the TUI")
@@ -393,16 +412,18 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		Provider         string `json:"provider"`
 		RepositoryLinkID int64  `json:"repository_link_id"`
 	}
-	// Every runner of this version answers `@vibeflow ask` questions; the
-	// server hands them only to runners that say so.
-	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID, "capabilities": []string{reviewQuestionCapability}}
+	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID}
 	repositoryRequests := false
 	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
 	var discovery reviewStartupRepositoriesResponse
-	if w.options.GitProvider == "github" || w.options.SlotKind != "" {
-		if err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery); err != nil {
-			return err
-		}
+	err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery)
+	if err != nil && (w.options.GitProvider == "github" || w.options.SlotKind != "") {
+		return reviewServerUpgradeHint(err)
+	}
+	// Without this, a runner started from the wrong clone goes online and
+	// spends every claimed review's attempts failing at checkout.
+	if err = reviewCheckoutMatchesLink(ctx, w.options.Repository, w.options.RepositoryLinkID, discovery.Repositories); err != nil {
+		return err
 	}
 	if w.options.SlotKind != "" && !slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability) {
 		return fmt.Errorf("this VibeFlow server cannot route work to separate answer and review slots; upgrade the server or run without slots")
@@ -415,14 +436,25 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			}
 		}
 		if supported {
-			registration["capabilities"] = []string{"repository_review_v1", reviewQuestionCapability}
 			repositoryRequests = true
 		} else {
 			idleStatus = reviewLegacyRoutingNotice
 		}
 	}
+	// Commenter-written question text reaches the harness, so questions are
+	// taken only with the server's consent: question_v1, or claim_kind_v1,
+	// which a server offers only once it routes question claims (issue #5737).
+	w.questions = slices.Contains(discovery.SupportedRunnerCapabilities, reviewQuestionCapability) || slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability)
+	capabilities := []string{}
+	if repositoryRequests {
+		capabilities = append(capabilities, "repository_review_v1")
+	}
+	if w.questions {
+		capabilities = append(capabilities, reviewQuestionCapability)
+	}
+	registration["capabilities"] = capabilities
 	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), registration, &registered); err != nil {
-		return err
+		return reviewServerUpgradeHint(err)
 	}
 	if registered.ID != w.state.ID || registered.UserID <= 0 || (w.state.OwnerID != 0 && w.state.OwnerID != registered.UserID) {
 		return fmt.Errorf("review runner owner changed; use a separate runner name")
@@ -438,6 +470,9 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		w.repositoryRequests = true
 		fmt.Fprintln(w.output, "Repository requests enabled: anyone who comments @vibeflow review on this linked repository can request a review from this runner.")
 	}
+	if w.questions {
+		fmt.Fprintln(w.output, "Questions enabled: collaborators who comment @vibeflow ask on a pull request of this linked repository get answers from this runner, which reads their question text.")
+	}
 	defer func() {
 		if w.state.Pending == nil {
 			stopCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
@@ -449,7 +484,11 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	if w.tty != nil {
 		stopHint = "Ctrl-C stops it while listening; during a review Ctrl-C goes to the harness, and Vera then offers to stop."
 	}
-	fmt.Fprintf(w.output, "Review runner %s is online (%s, %s). %s\n", w.options.Name, w.options.Kind, w.options.Provider, stopHint)
+	setup := "personal setup"
+	if reviewIsolated(w.cfg) {
+		setup = "isolated"
+	}
+	fmt.Fprintf(w.output, "Review runner %s is online (%s, %s, %s). %s\n", w.options.Name, w.options.Kind, w.options.Provider, setup, stopHint)
 	w.listening()
 	w.browse(true)
 	defer w.browse(false)
@@ -464,7 +503,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		}
 	}
 	backoff := w.options.PollInterval
-	unavailable := false // One line when an outage starts and one when it ends.
+	var unavailableSince time.Time // One line when an outage starts and one when it ends.
 	status := idleStatus
 	if status != "" {
 		if w.onStatus != nil {
@@ -513,14 +552,14 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			if w.options.Once || !retry {
 				return err
 			}
-			if !unavailable {
-				unavailable = true
-				fmt.Fprintln(w.output, "Review API unavailable; retrying with backoff up to 1m. The pending receipt is safe.")
+			if unavailableSince.IsZero() {
+				unavailableSince = time.Now()
+				fmt.Fprintln(w.output, reviewClock()+" Review API unavailable; retrying with backoff up to 1m. The pending receipt is safe.")
 			}
 		} else {
-			if unavailable {
-				unavailable = false
-				fmt.Fprintln(w.output, "Review API reachable again.")
+			if !unavailableSince.IsZero() {
+				fmt.Fprintf(w.output, "%s Review API reachable again after %s.\n", reviewClock(), time.Since(unavailableSince).Round(time.Second))
+				unavailableSince = time.Time{}
 			}
 			backoff = w.options.PollInterval
 			if w.options.Once {
@@ -539,6 +578,57 @@ func (w *reviewWatch) run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// chooseReviewIsolation settles whether Vera runs isolated: --isolated wins
+// for this run; otherwise the saved review_isolated; otherwise, on a terminal,
+// it asks once and saves the answer (issue #6195). Without a terminal and
+// without a choice, Vera keeps the developer's own setup, as before.
+func chooseReviewIsolation(cfg *Config, path, provider string, flag, ask bool, in *os.File, out io.Writer) error {
+	if flag {
+		if provider != "claude" {
+			return fmt.Errorf("--isolated is supported for the claude harness only")
+		}
+		on := true
+		cfg.ReviewIsolated = &on
+		return nil
+	}
+	if cfg.ReviewIsolated != nil || provider != "claude" || !ask || !term.IsTerminal(in.Fd()) {
+		return nil
+	}
+	fmt.Fprint(out, "Run Vera with your personal Claude Code setup (hooks, MCP servers, plugins, output style) or isolated?\nPersonal MCP servers are reachable from a session that reads untrusted pull request text. [p]ersonal / [i]solated: ")
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("no answer to the Vera setup question; start again or pass --isolated")
+	}
+	choice := strings.ToLower(strings.TrimSpace(line))
+	if choice != "p" && choice != "personal" && choice != "i" && choice != "isolated" {
+		return fmt.Errorf("answer p or i; start Vera again to choose")
+	}
+	on := choice == "i" || choice == "isolated"
+	cfg.ReviewIsolated = &on
+	// Save into the file as written, not the loaded config: an environment
+	// token or server override must never reach config.yaml.
+	saved, err := loadReviewBackgroundConfig(path)
+	if err != nil {
+		return err
+	}
+	saved.ReviewIsolated = &on
+	if err := SaveConfig(saved, path); err != nil {
+		return fmt.Errorf("could not save review_isolated in %s: %w", path, err)
+	}
+	fmt.Fprintf(out, "Saved review_isolated: %v in %s.\n", on, path)
+	return nil
+}
+
+// reviewServerUpgradeHint explains a 404 from the runner endpoints: the
+// server predates PR review runners, which no retry or flag can fix.
+func reviewServerUpgradeHint(err error) error {
+	var response *reviewHTTPError
+	if errors.As(err, &response) && response.Status == http.StatusNotFound {
+		return fmt.Errorf("this VibeFlow server does not support PR review runners (HTTP 404); upgrade the VibeFlow backend")
+	}
+	return err
 }
 
 func (w *reviewWatch) poll(ctx context.Context) error {
@@ -664,7 +754,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		if p.Execution.isQuestion() {
 			claimed = "Claimed a question on " + reviewPRLabel(p.Execution.Review)
 		}
-		fmt.Fprintf(w.output, "\n%s at %.12s; starting a fresh Vera with %s.\n", claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
+		fmt.Fprintf(w.output, "\n%s %s at %.12s; starting a fresh Vera with %s.\n", reviewClock(), claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
 		result, err := w.execute(ctx, p)
 		if err != nil {
 			p.Failure = err.Error()
@@ -674,7 +764,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		if err = w.save(); err != nil {
 			return err
 		}
-		fmt.Fprintln(w.output, reviewOutcomeLine(p))
+		fmt.Fprintln(w.output, reviewClock()+" "+reviewOutcomeLine(p))
 	}
 	// Cleanup precedes network publication, and the exact submission remains
 	// durable even if a successful server response is lost.
@@ -734,6 +824,54 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 	}
 	w.listening()
 	return nil
+}
+
+// reviewDeadline ends a context at an attempt deadline the server may move
+// later during the attempt, which context.WithDeadline cannot do. A cap, when
+// set, is the --timeout bound no extension passes.
+type reviewDeadline struct {
+	mu      sync.Mutex
+	at, cap time.Time
+	timer   *time.Timer
+	cancel  context.CancelCauseFunc
+	moved   chan struct{} // One pending signal that at changed.
+}
+
+func newReviewDeadline(parent context.Context, at, cap time.Time) (context.Context, *reviewDeadline) {
+	ctx, cancel := context.WithCancelCause(parent)
+	d := &reviewDeadline{at: at, cap: cap, cancel: cancel, moved: make(chan struct{}, 1)}
+	d.timer = time.AfterFunc(time.Until(at), func() { cancel(context.DeadlineExceeded) })
+	return ctx, d
+}
+
+// extend moves the deadline to at when that is later and not yet passed.
+func (d *reviewDeadline) extend(at time.Time) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.cap.IsZero() && at.After(d.cap) {
+		at = d.cap
+	}
+	if !at.After(d.at) || !d.timer.Stop() {
+		return false
+	}
+	d.at = at
+	d.timer.Reset(time.Until(at))
+	select {
+	case d.moved <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (d *reviewDeadline) time() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.at
+}
+
+func (d *reviewDeadline) stop() {
+	d.timer.Stop()
+	d.cancel(nil)
 }
 
 func reviewPermanent(err error) bool {
@@ -796,15 +934,23 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.Stage = stage
 		stageStarted = time.Now()
 	}
-	deadline := time.UnixMilli(p.Execution.Attempt.Round.DeadlineAt)
-	if local := time.Now().Add(w.options.Timeout); local.Before(deadline) {
-		deadline = local
+	deadline, limit := time.UnixMilli(p.Execution.Attempt.Round.DeadlineAt), "server deadline"
+	var localCap time.Time
+	if w.options.Timeout > 0 {
+		localCap = started.Add(w.options.Timeout)
+		if localCap.Before(deadline) {
+			deadline, limit = localCap, "--timeout"
+		}
 	}
-	deadlineCtx, cancelDeadline := context.WithDeadline(parent, deadline)
-	defer cancelDeadline()
+	if w.output != nil {
+		fmt.Fprintf(w.output, "Attempt limit: %s (%s)\n", time.Until(deadline).Round(time.Second), limit)
+	}
+	deadlineCtx, attemptDeadline := newReviewDeadline(parent, deadline, localCap)
+	defer attemptDeadline.stop()
 	ctx, cancel := context.WithCancelCause(deadlineCtx)
 	defer cancel(nil)
 	var progress atomic.Uint32
+	var changedLines int // Written before the checkout milestone, read after it.
 	progressSignal := make(chan struct{}, 1)
 	markProgress := func(bit uint32) {
 		for {
@@ -829,6 +975,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	go func() {
 		defer close(renewDone)
 		expiry := time.UnixMilli(p.Execution.Attempt.LeaseExpiresAt)
+		sendChangedLines := true // Cleared for this attempt once the server rejects the field.
 		for {
 			delay := 10 * time.Second
 			if left := time.Until(expiry); left < delay {
@@ -847,9 +994,26 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			callCtx, stop := context.WithDeadline(ctx, expiry)
 			var renewed reviewExecution
 			milestones := progress.Load()
+			renew := func(lines int) error {
+				return w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", reviewRenewBody(*p.Execution, milestones&1 != 0, milestones&2 != 0, lines), &renewed)
+			}
 			err := w.client.reviewRequest(callCtx, "POST", w.prefix()+"/heartbeat", struct{}{}, nil)
 			if err == nil {
-				err = w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", reviewRenewBody(*p.Execution, milestones&1 != 0, milestones&2 != 0), &renewed)
+				lines := 0
+				if sendChangedLines && milestones&1 != 0 {
+					lines = changedLines // Published by markProgress(1), loaded above.
+				}
+				err = renew(lines)
+				var response *reviewHTTPError
+				if lines != 0 && milestones&1 != 0 && errors.As(err, &response) && response.Status == 400 {
+					// A server without axiomcloud #173 refuses the unknown field
+					// (DisallowUnknownFields); keep the lease without it.
+					sendChangedLines = false
+					if w.output != nil {
+						fmt.Fprintln(w.output, "Server ignores changed_lines; the round keeps its default deadline")
+					}
+					err = renew(0)
+				}
 			}
 			stop()
 			if err != nil {
@@ -868,6 +1032,8 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 				return
 			}
 			expiry = time.UnixMilli(renewed.Attempt.LeaseExpiresAt)
+			// The server may lengthen the round once it knows the diff size.
+			attemptDeadline.extend(time.UnixMilli(renewed.Attempt.Round.DeadlineAt))
 		}
 	}()
 	// Capture the cause before our cleanup defers cancel the execution context.
@@ -891,9 +1057,13 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.DurationMS = time.Since(started).Milliseconds()
 		diagnostic.StageDurationMS = time.Since(stageStarted).Milliseconds()
 		diagnostic.RecordedAt = time.Now().UnixMilli()
-		if err := saveReviewJSON(filepath.Join(w.root, "last-provider-diagnostic.json"), diagnostic); err != nil {
+		path := filepath.Join(w.root, "last-provider-diagnostic.json")
+		if err := saveReviewJSON(path, diagnostic); err != nil {
 			failureErr = fmt.Errorf("review failed at %s (%s); private diagnostic could not be saved", diagnostic.Stage, diagnostic.Category)
 			return
+		}
+		if w.output != nil { // Local only; the failure reason sent to VibeFlow carries no paths.
+			fmt.Fprintf(w.output, "Diagnostic saved to %s\n", path)
 		}
 		failureErr = diagnostic.failure()
 	}()
@@ -932,9 +1102,13 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		proxy = append(proxy, reviewGitProxy{URL: strings.TrimRight(w.client.baseURL, "/") + "/rest/v1/vibeflow" + w.attemptPath(p) + "/git", Token: w.client.token})
 	}
 	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution, proxy...); err != nil {
+		diagnostic.Reason = err.Error()
 		return nil, err
 	}
 	fmt.Fprintf(w.output, "Review worktree ready: %s\n", filepath.Join(root, "input", "head"))
+	if diff, err := os.ReadFile(filepath.Join(root, "input", "review.diff")); err == nil {
+		changedLines = reviewChangedLines(diff)
+	}
 	markProgress(1)
 	if err := os.WriteFile(filepath.Join(root, "input", "brief.json"), brief.Content, 0600); err != nil {
 		return nil, err
@@ -942,6 +1116,11 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if p.Execution.isQuestion() {
 		// The question is data for the task, kept beside the brief, never in the prompt.
 		if err := saveReviewJSON(filepath.Join(root, "input", "question.json"), p.Execution.Question); err != nil {
+			return nil, err
+		}
+	} else if len(p.Execution.PullRequest) > 0 {
+		// Like the question, the pull request's own text stays out of the prompt.
+		if err := os.WriteFile(filepath.Join(root, "input", "pr.json"), p.Execution.PullRequest, 0600); err != nil {
 			return nil, err
 		}
 	}
@@ -992,7 +1171,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if err != nil {
 		return nil, err
 	}
-	spec.DeadlineAt = deadline.UnixMilli()
+	spec.DeadlineAt = attemptDeadline.time().UnixMilli()
 	interactive := w.tty != nil
 	if interactive {
 		if err = makeReviewSpecInteractive(spec, w.cfg, w.options.Provider, w.options.Model, root, p.Execution.isQuestion()); err != nil {
@@ -1065,6 +1244,21 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		return nil, fmt.Errorf("review child guard failed")
 	}
+	// Each later deadline follows on the same pipe; a closed pipe ends this.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-attemptDeadline.moved:
+			}
+			var frame [8]byte
+			binary.BigEndian.PutUint64(frame[:], uint64(attemptDeadline.time().UnixMilli()))
+			if _, err := pipe.Write(frame[:]); err != nil {
+				return
+			}
+		}
+	}()
 	resultPath := filepath.Join(root, "result.json")
 	var written <-chan struct{} // An interactive harness stays open after writing its result.
 	if interactive {
@@ -1099,7 +1293,13 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if interactive {
 		// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
 		w.tty.reclaim(diagnostic.Signal == int(syscall.SIGTERM) || diagnostic.Signal == int(syscall.SIGKILL))
-		if _, _, resultErr := readReviewResult(resultPath, p, brief.Digest); !finished && ctx.Err() == nil && resultErr != nil {
+		written, _ := adoptReviewResult(resultPath, p, brief.Digest)
+		if written {
+			// The harness's screen, including its "resume this session" hint,
+			// is not useful once its result is saved; a failure keeps it.
+			w.tty.clear()
+		}
+		if !finished && ctx.Err() == nil && !written {
 			// Only the user closes an interactive harness early, unless it
 			// could not start its review at all.
 			if ran < reviewQuickExit && diagnostic.Signal != int(syscall.SIGINT) {
@@ -1125,6 +1325,9 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	}
 	setStage("result")
 	diagnostic.Category = "invalid_result"
+	if _, stray := adoptReviewResult(resultPath, p, brief.Digest); stray != "" {
+		fmt.Fprintf(w.output, "%s wrote result.json at %s instead of %s; using it.\n", w.options.Provider, stray, resultPath)
+	}
 	// Every harness writes its result to the same file; a missing file after
 	// exit is an invalid result.
 	result, reported, err := readReviewResult(resultPath, p, brief.Digest)
@@ -1137,8 +1340,53 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		return nil, diagnostic.failure()
 	}
+	if kept, dropped := dropInvalidReviewSuggestions(result, p.Execution.Attempt.Round.HeadSHA); dropped > 0 {
+		fmt.Fprintf(w.output, "Dropped %d suggestion(s) the server would reject; their findings are kept.\n", dropped)
+		result = kept
+	}
 	markProgress(2)
 	return result, nil
+}
+
+// dropInvalidReviewSuggestions removes each suggestion the server would
+// reject, mirroring its validPRReviewSuggestion: the server refuses the whole
+// result over one bad suggestion, which would lose a finished review.
+func dropInvalidReviewSuggestions(result json.RawMessage, headSHA string) (json.RawMessage, int) {
+	var top map[string]json.RawMessage
+	var findings []map[string]json.RawMessage
+	if json.Unmarshal(result, &top) != nil || json.Unmarshal(top["new_findings"], &findings) != nil {
+		return result, 0
+	}
+	dropped := 0
+	for _, f := range findings {
+		raw, ok := f["suggestion"]
+		if !ok || string(raw) == "null" {
+			continue
+		}
+		var path string
+		var line int
+		var s struct {
+			Revision    string  `json:"revision"`
+			Path        string  `json:"path"`
+			Side        string  `json:"side"`
+			StartLine   int     `json:"start_line"`
+			EndLine     int     `json:"end_line"`
+			Replacement *string `json:"replacement"`
+		}
+		_ = json.Unmarshal(f["path"], &path)
+		_ = json.Unmarshal(f["line"], &line)
+		if json.Unmarshal(raw, &s) == nil && s.Revision == headSHA && s.Path == path && s.Side == "RIGHT" && s.StartLine >= 1 && s.StartLine <= line && line <= s.EndLine && s.EndLine-s.StartLine < 100 && s.Replacement != nil && len(*s.Replacement) <= 16<<10 && !strings.ContainsRune(*s.Replacement, 0) {
+			continue
+		}
+		delete(f, "suggestion")
+		dropped++
+	}
+	if dropped == 0 {
+		return result, 0
+	}
+	top["new_findings"], _ = json.Marshal(findings)
+	out, _ := json.Marshal(top)
+	return out, dropped
 }
 
 // readReviewResult reads a harness's result.json. A complete envelope returns
@@ -1171,6 +1419,30 @@ func readReviewResult(path string, p *reviewReceipt, digest string) (result json
 	return envelope.Result, false, nil
 }
 
+// reviewStrayResults are where a harness that wrote result.json relative to
+// its cwd (the checkout) leaves it, relative to the attempt's root.
+var reviewStrayResults = []string{"input/head/result.json", "input/head/*/result.json", "input/result.json"}
+
+// adoptReviewResult reports whether path holds a complete envelope for this
+// attempt, first moving one from a stray location into place. A stray file
+// counts only when it names this attempt's revision and brief, so the
+// repository's own result.json files are never taken (issue #5733).
+func adoptReviewResult(path string, p *reviewReceipt, digest string) (ok bool, stray string) {
+	if _, _, err := readReviewResult(path, p, digest); err == nil {
+		return true, ""
+	}
+	root := filepath.Dir(path)
+	for _, pattern := range reviewStrayResults {
+		matches, _ := filepath.Glob(filepath.Join(root, pattern))
+		for _, candidate := range matches {
+			if _, _, err := readReviewResult(candidate, p, digest); err == nil && os.Rename(candidate, path) == nil {
+				return true, candidate
+			}
+		}
+	}
+	return false, ""
+}
+
 // watchReviewResult closes its channel once result.json holds a complete
 // envelope for this attempt; a partly written file is read again later.
 func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, digest string) <-chan struct{} {
@@ -1182,7 +1454,7 @@ func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, diges
 				return
 			case <-time.After(250 * time.Millisecond):
 			}
-			if _, _, err := readReviewResult(path, p, digest); err == nil {
+			if ok, _ := adoptReviewResult(path, p, digest); ok {
 				close(written)
 				return
 			}
@@ -1219,8 +1491,8 @@ func reviewChildCmd() *cobra.Command {
 		}
 		signalCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer stopSignals()
-		ctx, cancel := context.WithDeadline(signalCtx, time.UnixMilli(spec.DeadlineAt))
-		defer cancel()
+		ctx, deadline := newReviewDeadline(signalCtx, time.UnixMilli(spec.DeadlineAt), time.Time{})
+		defer deadline.stop()
 		supervisor := cmd.InOrStdin()
 		if closer, ok := supervisor.(io.Closer); ok {
 			defer closer.Close()
@@ -1233,8 +1505,16 @@ func reviewChildCmd() *cobra.Command {
 				return
 			}
 			ready <- nil
-			io.Copy(io.Discard, supervisor)
-			cancel()
+			// Each later deadline arrives as 8 big-endian bytes of Unix
+			// milliseconds; EOF means the supervisor is gone.
+			var frame [8]byte
+			for {
+				if _, err := io.ReadFull(supervisor, frame[:]); err != nil {
+					break
+				}
+				deadline.extend(time.UnixMilli(int64(binary.BigEndian.Uint64(frame[:]))))
+			}
+			deadline.stop()
 		}()
 		select {
 		case err := <-ready:
@@ -1437,12 +1717,20 @@ func removeReviewDir(dir string) error {
 
 const reviewListeningLine = "Listening for @vibeflow review requests and questions; no model runs while idle."
 
+// reviewListeningNoQuestionsLine is the idle line on a server that has not
+// agreed to send questions.
+const reviewListeningNoQuestionsLine = "Listening for @vibeflow review requests; no model runs while idle."
+
 func reviewPRLabel(job reviewJob) string {
 	if job.Number > 0 {
 		return fmt.Sprintf("PR #%d", job.Number)
 	}
 	return "review " + job.ID
 }
+
+// reviewClock prefixes the listener's lifecycle lines, so a pane read hours
+// later still says when each review ran.
+func reviewClock() string { return time.Now().Format("15:04") }
 
 // reviewOutcomeLine summarizes a finished attempt for the runner's own output.
 func reviewOutcomeLine(p *reviewReceipt) string {

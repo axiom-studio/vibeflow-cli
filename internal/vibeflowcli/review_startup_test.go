@@ -1,6 +1,7 @@
 package vibeflowcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReviewDiscoveryPagesAndPartialFailures(t *testing.T) {
@@ -550,5 +552,61 @@ func TestReviewStartupStaleRememberedLinkRequiresCorrection(t *testing.T) {
 	got, input, err := resolveReviewStartup(context.Background(), cfg, reviewWatchOptions{RepositoryLinkID: 7, GitProvider: "github"}, false)
 	if err != nil || input == nil || input.Field != "repository_link" || len(input.Choices) != 1 || input.Choices[0].Value != "github:8" || got.RepositoryLinkID != 7 {
 		t.Fatalf("remembered link silently selected a different repository: %+v %+v %v", got, input, err)
+	}
+}
+
+// A runner started from a clone of another repository must not go online:
+// every review it claimed would fail at checkout (issue #6187).
+func TestReviewWatchRefusesCheckoutOfAnotherRepository(t *testing.T) {
+	withTempRoot(t)
+	repo, _ := reviewTestRepo(t) // origin is github.com/acme/repo
+	registered := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
+			fmt.Fprint(w, `{"repositories":[{"provider":"bitbucket","provider_host":"bitbucket.org","repository_link_id":100,"repository_name":"acme/other"}],"supported_runner_capabilities":["repository_review_v1"]}`)
+		case strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
+			registered = true
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
+	provider := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	var out bytes.Buffer
+	watch := reviewWatch{client: NewClient(server.URL, "fixture"), cfg: cfg, output: &out, options: reviewWatchOptions{
+		ProjectID: 231, Repository: repo, RepositoryLinkID: 100, GitProvider: "bitbucket", Kind: "local", Name: "wrong-clone",
+		Provider: "claude", Once: true, PollInterval: time.Second,
+	}}
+	err := watch.run(context.Background())
+	want := repo + " is github.com/acme/repo, but repository link 100 is bitbucket.org/acme/other; run Vera from a clone of bitbucket.org/acme/other or pass --repo"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v\nwant %s", err, want)
+	}
+	if registered {
+		t.Fatal("runner registered before refusing the checkout")
+	}
+}
+
+// A link the server does not list cannot be checked and must not block a
+// runner, so older servers and unlisted links keep working.
+func TestReviewCheckoutMatchesLinkSkipsUnlistedLink(t *testing.T) {
+	repo, _ := reviewTestRepo(t)
+	listed := []reviewStartupRepository{{Provider: "github", Host: "github.com", ID: 7, Name: "acme/repo"}}
+	for _, tc := range []struct {
+		name  string
+		link  int64
+		repos []reviewStartupRepository
+	}{{"matching link", 7, listed}, {"unlisted link", 9, listed}, {"no repositories", 7, nil}} {
+		if err := reviewCheckoutMatchesLink(context.Background(), repo, tc.link, tc.repos); err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+		}
 	}
 }

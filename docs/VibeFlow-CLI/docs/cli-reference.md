@@ -138,7 +138,7 @@ vibeflow review-watch --project 42 --repository-link 123 --provider claude --mod
 | `--runner-kind` | `local` or `shared`; shared execution requires an existing server grant |
 | `--name` | Stable runner name, 1 to 100 bytes; defaults to hostname |
 | `--interval` | Idle polling interval, `1s` to `60s`; default `5s`. Each poll also sends the runner heartbeat, and the server marks a runner offline after 2 minutes without one |
-| `--timeout` | Per-attempt maximum, `1m` to `1h`; default `15m`, also bounded by the server deadline |
+| `--timeout` | Shortens the attempt limit below the server's round deadline, `1m` to `1h`; default `0`, which follows the server deadline. The server may extend the round for a large diff after the runner reports it; `--timeout` still caps that. Each attempt prints its effective limit, for example `Attempt limit: 30m0s (server deadline)` |
 | `--once` | Check one work page, process at most one review, then exit |
 | `--server-url` | Explicit VibeFlow server URL; overrides configuration and `VIBEFLOW_URL`, and is pinned for a background runner |
 | `--background` | Save an explicit repository binding and start a detached runner; requires explicit `--project`, `--repo`, and `--repository-link`; incompatible with `--once` |
@@ -184,6 +184,7 @@ The stop command waits up to 10 seconds, then reports if shutdown is still pendi
 No service manager, login item, deployment, or machine-boot autostart is installed.
 
 Vera runs on any supported coding harness on macOS or Linux, in normal mode like the other personas.
+With `llm_gateway_enabled`, reviews run only with the `claude` harness, which reaches the gateway through a loopback relay; any other harness is refused at start, because it would use its own login and skip the gateway.
 Startup only checks that the harness is configured and its binary is installed; it makes no model call.
 In a terminal, Vera also runs the harness's own login status command before claiming any review, and refuses to start with the login command when it reports that it is not logged in: `claude auth status`, `codex login status`, `agent status` (Cursor) and `kiro-cli whoami`.
 Copilot, Gemini and Qwen have no non-interactive status command, so for them a login screen shows up in the pane instead.
@@ -242,7 +243,22 @@ The private object store reads the selected checkout's Git objects through Git a
 Commits already on the machine need no fetch; only commits the checkout lacks are fetched from the remote.
 A shallow or partial clone cannot supply complete history this way, so for those the runner copies the needed objects as before.
 Beside it are `base/`, `merge-base/` (when the target advanced), `revisions.json`, `review.diff`, `brief.json` and `prior-findings.json`.
-The agent may build and run project code and tests inside the worktree; it is told not to push, not to publish PR comments, and not to touch any other checkout.
+The agent reviews code without building it: it is told not to build the project, install dependencies or run test suites, because CI already does that and reports on the pull request. When the brief carries CI results (`ci` in `brief.json`), the agent cites a failing check instead of reproducing it, and never treats pending, missing or unavailable CI as passing. The agent decides by risk whether a check is required: when CI for the changed area is missing, failed to run or is unavailable, or a blocker cannot be shown from the code alone, it may run the smallest targeted test or check for the changed package only, never the full suite and never an install or dependency download, with a 5-minute limit for all its commands together, and records exactly what ran and its output in the finding's verification. Otherwise it states defects from file and line evidence, marked uncertain when the reasoning is not conclusive, and never claims a build or test result it did not observe. It is told not to push, not to publish PR comments, and not to touch any other checkout.
+
+#### Personal setup or isolated
+
+By default Vera's Claude Code runs with your own setup: your hooks, MCP servers, plugins, skills and output style.
+These are sometimes useful to a review, but they also run inside a session that reads untrusted pull request text, so a personal MCP server is reachable from it.
+
+`--isolated` starts Vera's Claude Code with `--setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'`.
+It loads no user settings and none of the review checkout's own project settings, and starts no MCP servers, while keeping your normal Claude login.
+Isolation applies to the `claude` harness only; `--isolated` with another harness is refused.
+
+The choice is saved as `review_isolated: true|false` in `config.yaml`.
+When `review-watch` starts in a terminal and nothing is saved, it asks once and saves the answer.
+`--isolated` applies to one foreground run without changing the saved choice; it is refused with `--background`, because the background runner is a separate process that reads `config.yaml`, so set `review_isolated: true` there instead.
+Without a terminal and without a saved choice, Vera keeps your own setup.
+The startup line names the mode, for example `online (local, claude, isolated)`.
 For an `@vibeflow ask` question the checkout is read-only: before the harness starts, the head worktree's files and the base and merge-base snapshots lose write permission (Git's own metadata stays writable so read commands work), and Claude starts without its Edit, MultiEdit and NotebookEdit tools.
 Your configured MCP servers stay available to answers.
 The question file also carries the pull request's own discussion from the server (comments and inline review comments), so Vera answers in the context of the thread.

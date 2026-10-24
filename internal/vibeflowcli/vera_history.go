@@ -355,13 +355,24 @@ func reviewHistoryMeta(s reviewSummary) string {
 		findings = "finding"
 	}
 	parts = append(parts, fmt.Sprintf("%d %s", s.FindingCount, findings))
+	// The date comes before the SHA: a narrow pane truncates from the right,
+	// and when a review ran matters more than which commit it saw.
+	if t := reviewHistoryTime(s); t > 0 {
+		parts = append(parts, reviewShortTime(time.UnixMilli(t), time.Now()))
+	}
 	if sha := reviewShortSHA(s.Review.HeadSHA); sha != "" {
 		parts = append(parts, sha[:min(7, len(sha))])
 	}
-	if t := reviewHistoryTime(s); t > 0 {
-		parts = append(parts, time.UnixMilli(t).Local().Format("Jan 2 15:04"))
-	}
 	return strings.Join(parts, " · ")
+}
+
+// reviewShortTime is HH:MM for today and "Jan 2" otherwise.
+func reviewShortTime(t, now time.Time) string {
+	t, now = t.Local(), now.Local()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	return t.Format("Jan 2")
 }
 
 // runReviewHistory runs the history list in the terminal until interrupted.

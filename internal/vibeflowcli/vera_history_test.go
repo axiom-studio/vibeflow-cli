@@ -89,7 +89,7 @@ func TestReviewHistoryViewHighlightsCurrentAndScrolls(t *testing.T) {
 	h := historyModel(t, 60, 12, rows, "b")
 	view := ansi.Strip(h.render())
 	checkHistoryFits(t, h.render(), 60, 12)
-	for _, want := range []string{"acme/repo", "#40 Add late payment", "Clean · round 1 · 0 findings · aaaaaaa", "▶ #41 Title b", "Changes requested · round 2 · 1 finding", "Needs human review"} {
+	for _, want := range []string{"acme/repo", "#40 Add late payment", "Clean · round 1 · 0 findings · ", " · aaaaaaa", "▶ #41 Title b", "Changes requested · round 2 · 1 finding", "Needs human review"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("history view lacks %q:\n%s", want, view)
 		}
@@ -222,5 +222,25 @@ func TestReviewHistoryFooterFitsPane(t *testing.T) {
 		if strings.Contains(footer, "…") || !strings.Contains(footer, "Enter") {
 			t.Errorf("width %d: footer %q is cut off", width, footer)
 		}
+	}
+}
+
+// A narrow pane cuts history rows from the right, so the date must come
+// before the SHA and stay short (issue #6197).
+func TestReviewHistoryMetaKeepsTheDateBeforeTheSHA(t *testing.T) {
+	now := time.Date(2026, 10, 22, 15, 0, 0, 0, time.Local)
+	if got := reviewShortTime(now.Add(-2*time.Hour), now); got != "13:00" {
+		t.Errorf("today = %q, want 13:00", got)
+	}
+	if got := reviewShortTime(now.AddDate(0, 0, -1), now); got != "Oct 21" {
+		t.Errorf("yesterday = %q, want Oct 21", got)
+	}
+	s := historySummary("a", 138, 7, "github", "clean", 1, 0, time.Now().UnixMilli())
+	meta := reviewHistoryMeta(s)
+	if date, sha := strings.Index(meta, time.Now().Format("15:04")), strings.Index(meta, "aaaaaaa"); date < 0 || sha < date {
+		t.Fatalf("meta %q does not put the date before the SHA", meta)
+	}
+	if got := reviewStateLabel("idle"); got != "Idle" {
+		t.Errorf("unknown state label = %q, want Idle", got)
 	}
 }

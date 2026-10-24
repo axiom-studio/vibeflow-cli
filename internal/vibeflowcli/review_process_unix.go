@@ -205,6 +205,10 @@ func (t *reviewTerminal) reclaim(forced bool) {
 	_, _ = t.files[1].WriteString(reset)
 }
 
+// clear wipes the visible screen and homes the cursor. tmux keeps the
+// scrollback, so the harness's session stays readable by scrolling up.
+func (t *reviewTerminal) clear() { _, _ = t.files[1].WriteString("\x1b[H\x1b[2J") }
+
 // veraQuietTermios is the listener's idle mode: keys are neither echoed nor
 // line-edited, one at a time, while Ctrl-C still raises SIGINT and output
 // keeps its newline handling.

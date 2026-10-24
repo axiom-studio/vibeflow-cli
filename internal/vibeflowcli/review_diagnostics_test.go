@@ -70,3 +70,22 @@ func TestReviewCancellationDiagnosticsPreserveCause(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// A checkout failure says why inline instead of pointing at a diagnostic
+// file, and the reason names repositories, never local paths (issue #6187).
+func TestReviewCheckoutFailureNamesReason(t *testing.T) {
+	repo, e := reviewTestRepo(t)
+	e.Review.ProviderHost = "bitbucket.org"
+	err := prepareReviewCheckout(context.Background(), repo, t.TempDir(), e)
+	want := "this checkout is github.com/acme/repo, but the review is for bitbucket.org/acme/repo"
+	if err == nil || err.Error() != want {
+		t.Fatalf("checkout err = %v, want %q", err, want)
+	}
+	d := reviewExecutionDiagnostic{Stage: "checkout", Category: "execution_failed", Reason: err.Error()}
+	if got := d.failure().Error(); got != "review failed at checkout (execution_failed): "+want {
+		t.Fatalf("failure = %q", got)
+	}
+	if strings.Contains(d.failure().Error(), repo) {
+		t.Fatal("failure reason leaks the local checkout path")
+	}
+}

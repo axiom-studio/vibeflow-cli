@@ -1,8 +1,10 @@
 package vibeflowcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -133,6 +135,14 @@ func TestReviewPreflightRequiresOnlyAnInstalledHarness(t *testing.T) {
 	cfg.LLMGatewayEnabled = true
 	if err := preflightReviewProvider(context.Background(), cfg, "claude", ""); err == nil {
 		t.Fatal("gateway accepted missing model")
+	}
+	// Only Claude is relayed; another harness would silently skip the gateway.
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	if err := preflightReviewProvider(context.Background(), cfg, "codex", "gpt-5.1-codex"); err == nil || !strings.Contains(err.Error(), "codex would bypass the LLM gateway") {
+		t.Fatalf("gateway codex review accepted: %v", err)
+	}
+	if err := preflightReviewProvider(context.Background(), cfg, "claude", "sonnet"); err != nil {
+		t.Fatalf("gateway claude review refused: %v", err)
 	}
 }
 
@@ -336,5 +346,193 @@ func TestReviewProviderQuestionTask(t *testing.T) {
 	schema, err := os.ReadFile(filepath.Join(root, "schema.json"))
 	if err != nil || !strings.Contains(string(schema), `"answer"`) || strings.Contains(string(schema), "new_findings") {
 		t.Fatalf("question schema: %s %v", schema, err)
+	}
+}
+
+// Reviews and answers read code; CI owns builds and tests (issue #6188). Both
+// task kinds carry the check policy: build-free by default, with a small
+// targeted check only when the risk requires one (issue #6301).
+func TestReviewProviderTasksCarryTheCheckPolicy(t *testing.T) {
+	for _, question := range []bool{false, true} {
+		_, execution := reviewTestRepo(t)
+		if question {
+			reviewWatchQuestionExecution(execution)
+		}
+		cfg := DefaultConfig()
+		fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+		root := t.TempDir()
+		if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		task, err := os.ReadFile(filepath.Join(root, "task.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(task)
+		if !strings.Contains(text, "- "+reviewCheckPolicy+" Do not") {
+			t.Errorf("question=%v: task lacks the check policy:\n%s", question, text)
+		}
+		// CI results arrive in brief.json "ci" (axiomcloud #6202); missing results are not a pass.
+		// A check is a risk decision for the changed package only, never a suite or an install.
+		for _, want := range []string{`"ci" object in ../brief.json`, "cite a failing check by name", "never treat a state of pending, none or unavailable as passing", "Decide by risk whether a check is required", "smallest targeted test or check for the changed package only", "never the full suite, never an install or dependency download", "finish within 5 minutes", "Record exactly what ran and its output in verification", "Never claim a build or test result you did not observe"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("question=%v: task lacks %q", question, want)
+			}
+		}
+		for _, stale := range []string{"You may build", "and run its tests", "build and run project code", "At most one targeted check", "within 60 seconds", "one build-free check"} {
+			if strings.Contains(text, stale) {
+				t.Errorf("question=%v: task still grants %q", question, stale)
+			}
+		}
+		// The policy sits before the result instructions, which still name the absolute result path.
+		if i, j := strings.Index(text, reviewCheckPolicy), strings.Index(text, filepath.Join(root, "result.json")); i < 0 || j < i {
+			t.Errorf("question=%v: policy and result path out of order", question)
+		}
+	}
+}
+
+// The review schema offers the server's suggestion shape, and the task
+// carries Vera's voice rules (issue #6215).
+func TestReviewProviderTaskOffersSuggestionsAndVoice(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	cfg := DefaultConfig()
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	root := t.TempDir()
+	if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := os.ReadFile(filepath.Join(root, "task.txt"))
+	if !strings.Contains(string(task), "- "+reviewVoice+"\n") {
+		t.Fatalf("review task lacks the voice rules:\n%s", task)
+	}
+	schema, _ := os.ReadFile(filepath.Join(root, "schema.json"))
+	for _, want := range []string{`"suggestion"`, `"start_line"`, `"end_line"`, `"replacement"`, `"RIGHT"`} {
+		if !strings.Contains(string(schema), want) {
+			t.Fatalf("review schema lacks %s", want)
+		}
+	}
+}
+
+// One bad suggestion would make the server reject the whole result, so the
+// runner drops it and keeps the finding; a valid one passes through.
+func TestDropInvalidReviewSuggestions(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	finding := func(suggestion string) string {
+		return `{"key":"k","title":"t","path":"main.go","line":2,"suggestion":` + suggestion + `}`
+	}
+	valid := `{"revision":"` + head + `","path":"main.go","side":"RIGHT","start_line":2,"end_line":2,"replacement":"return 1"}`
+	for _, tc := range []struct {
+		name, suggestion string
+		dropped          int
+	}{
+		{"valid", valid, 0},
+		{"null", "null", 0},
+		{"wrong revision", strings.Replace(valid, head, strings.Repeat("b", 40), 1), 1},
+		{"other file", strings.Replace(valid, `"path":"main.go"`, `"path":"other.go"`, 1), 1},
+		{"range misses the line", strings.Replace(valid, `"end_line":2`, `"end_line":1`, 1), 1},
+		{"no replacement", strings.Replace(valid, `,"replacement":"return 1"`, "", 1), 1},
+		{"LEFT side", strings.Replace(valid, "RIGHT", "LEFT", 1), 1},
+	} {
+		result := json.RawMessage(`{"schema_version":1,"new_findings":[` + finding(tc.suggestion) + `]}`)
+		out, dropped := dropInvalidReviewSuggestions(result, head)
+		if dropped != tc.dropped {
+			t.Errorf("%s: dropped %d, want %d", tc.name, dropped, tc.dropped)
+		}
+		var parsed struct {
+			Findings []map[string]json.RawMessage `json:"new_findings"`
+		}
+		if json.Unmarshal(out, &parsed) != nil || len(parsed.Findings) != 1 || string(parsed.Findings[0]["title"]) != `"t"` {
+			t.Errorf("%s: finding not kept intact: %s", tc.name, out)
+		}
+		if _, has := parsed.Findings[0]["suggestion"]; has == (tc.dropped == 1) {
+			t.Errorf("%s: suggestion present=%v after dropped=%d", tc.name, has, dropped)
+		}
+	}
+}
+
+// Isolation flags reach Claude's argv only when Vera runs isolated, in both
+// the headless and the interactive launch, and never another harness's
+// (issue #6195).
+func TestReviewIsolationFlagsOnlyWhenChosen(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	isolatedFlags := strings.Join(reviewIsolatedClaudeArgs[2:], " ") // "--strict-mcp-config --setting-sources local"
+	for _, tc := range []struct {
+		name     string
+		choice   *bool
+		provider string
+		want     bool
+	}{
+		{"not chosen", nil, "claude", false},
+		{"personal", boolPtr(false), "claude", false},
+		{"isolated", boolPtr(true), "claude", true},
+		{"isolated codex", boolPtr(true), "codex", false},
+	} {
+		cfg := DefaultConfig()
+		fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+		cfg.ReviewIsolated = tc.choice
+		root := t.TempDir()
+		spec, err := prepareReviewProvider(context.Background(), cfg, tc.provider, "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(strings.Join(spec.Args, " "), isolatedFlags); got != tc.want {
+			t.Errorf("%s headless: isolation flags present=%v, want %v: %q", tc.name, got, tc.want, spec.Args)
+		}
+		if err := makeReviewSpecInteractive(spec, cfg, tc.provider, "", root, false); err != nil {
+			t.Fatal(err)
+		}
+		command := strings.Join(spec.Args, " ")
+		// The empty source list must survive the shell as its own argument.
+		if got := strings.Contains(command, "--setting-sources ''") && strings.Contains(command, `'{"mcpServers":{}}'`); got != tc.want {
+			t.Errorf("%s interactive: isolation flags present=%v, want %v: %s", tc.name, got, tc.want, command)
+		}
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// --isolated wins for one run without saving; it is refused for a harness
+// that has no isolation flags; without a terminal nothing is asked.
+func TestChooseReviewIsolation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := DefaultConfig()
+	cfg.APIToken = "file-token"
+	if err := SaveConfig(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := chooseReviewIsolation(cfg, path, "claude", true, true, os.Stdin, io.Discard); err != nil || !reviewIsolated(cfg) {
+		t.Fatalf("--isolated: err=%v isolated=%v", err, reviewIsolated(cfg))
+	}
+	if saved, _ := os.ReadFile(path); strings.Contains(string(saved), "review_isolated") {
+		t.Fatal("--isolated was saved; it applies to one run")
+	}
+	if err := chooseReviewIsolation(DefaultConfig(), path, "codex", true, true, os.Stdin, io.Discard); err == nil {
+		t.Fatal("--isolated accepted for codex")
+	}
+	notTerminal, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer notTerminal.Close()
+	fresh := DefaultConfig()
+	if err := chooseReviewIsolation(fresh, path, "claude", false, true, notTerminal, io.Discard); err != nil || fresh.ReviewIsolated != nil {
+		t.Fatalf("asked without a terminal: err=%v choice=%v", err, fresh.ReviewIsolated)
+	}
+}
+
+// A background runner is another process that reloads config.yaml, so a
+// one-run --isolated would be dropped there; it is refused instead (#6311).
+func TestReviewWatchRefusesIsolatedBackgroundRunner(t *testing.T) {
+	withTempRoot(t)
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = "https://example.invalid", "file-token"
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := runReviewWatch(context.Background(), &out, "--background", "--isolated", "--project", "1", "--repo", t.TempDir(), "--repository-link", "7", "--provider", "claude")
+	if err == nil || !strings.Contains(err.Error(), "set review_isolated: true in "+ConfigPath()) {
+		t.Fatalf("--background --isolated: err=%v\n%s", err, out.String())
 	}
 }
