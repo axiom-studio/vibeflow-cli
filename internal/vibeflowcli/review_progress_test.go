@@ -19,13 +19,13 @@ import (
 
 func TestReviewRenewBodyCapability(t *testing.T) {
 	_, execution := reviewTestRepo(t)
-	data, err := json.Marshal(reviewRenewBody(*execution, true, false))
+	data, err := json.Marshal(reviewRenewBody(*execution, true, false, 12))
 	if err != nil || string(data) != "{}" {
 		t.Fatalf("legacy body: %s %v", data, err)
 	}
 
 	execution.ProgressReportingVersion = 1
-	data, err = json.Marshal(reviewRenewBody(*execution, true, false))
+	data, err = json.Marshal(reviewRenewBody(*execution, true, false, 12))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,12 +37,38 @@ func TestReviewRenewBodyCapability(t *testing.T) {
 	}
 	if body.Progress.HeadSHA != execution.Attempt.Round.HeadSHA ||
 		body.Progress.BaseSHA != execution.Attempt.Round.BaseSHA ||
-		!body.Progress.CheckoutPrepared || body.Progress.ReviewCompleted {
+		!body.Progress.CheckoutPrepared || body.Progress.ReviewCompleted || body.Progress.ChangedLines != 12 {
 		t.Fatalf("incorrect progress payload: %+v", body.Progress)
 	}
-	data, err = json.Marshal(reviewRenewBody(*execution, true, true))
+	data, err = json.Marshal(reviewRenewBody(*execution, true, true, 12))
 	if err != nil || json.Unmarshal(data, &body) != nil || !body.Progress.ReviewCompleted {
 		t.Fatalf("completion payload: %s %v", data, err)
+	}
+	// The diff size travels with the prepared checkout, never before it (axiomcloud #6300).
+	data, err = json.Marshal(reviewRenewBody(*execution, false, false, 12))
+	if err != nil || strings.Contains(string(data), "changed_lines") {
+		t.Fatalf("premature changed_lines: %s %v", data, err)
+	}
+}
+
+func TestReviewChangedLines(t *testing.T) {
+	diff := []byte(`diff --git a/main.go b/main.go
+index 1111111..2222222 100644
+--- a/main.go
++++ b/main.go
+@@ -1,3 +1,4 @@
+ package main
+-func value() int { return 1 }
++func value() int { return 2 }
++
++// --- not a header, a comment
+\ No newline at end of file
+`)
+	if got := reviewChangedLines(diff); got != 4 {
+		t.Fatalf("changed lines = %d, want 4", got)
+	}
+	if got := reviewChangedLines(nil); got != 0 {
+		t.Fatalf("empty diff = %d", got)
 	}
 }
 
@@ -161,10 +187,16 @@ func TestReviewProgressReportsCheckoutWithoutBlockingCompletion(t *testing.T) {
 				t.Error(err)
 			}
 			if body.Progress.CheckoutPrepared {
+				// The fixture changes main.go and adds files, so ../review.diff is not empty.
+				if body.Progress.ChangedLines <= 0 {
+					t.Errorf("prepared checkout reported no changed lines: %+v", body.Progress)
+				}
 				select {
 				case prepared <- struct{}{}:
 				default:
 				}
+			} else if body.Progress.ChangedLines != 0 {
+				t.Errorf("changed lines before the checkout: %+v", body.Progress)
 			}
 			json.NewEncoder(w).Encode(execution)
 		default:

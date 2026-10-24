@@ -945,6 +945,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	ctx, cancel := context.WithCancelCause(deadlineCtx)
 	defer cancel(nil)
 	var progress atomic.Uint32
+	var changedLines int // Written before the checkout milestone, read after it.
 	progressSignal := make(chan struct{}, 1)
 	markProgress := func(bit uint32) {
 		for {
@@ -989,7 +990,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			milestones := progress.Load()
 			err := w.client.reviewRequest(callCtx, "POST", w.prefix()+"/heartbeat", struct{}{}, nil)
 			if err == nil {
-				err = w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", reviewRenewBody(*p.Execution, milestones&1 != 0, milestones&2 != 0), &renewed)
+				err = w.client.reviewRequest(callCtx, "POST", w.attemptPath(p)+"/renew", reviewRenewBody(*p.Execution, milestones&1 != 0, milestones&2 != 0, changedLines), &renewed)
 			}
 			stop()
 			if err != nil {
@@ -1082,6 +1083,9 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		return nil, err
 	}
 	fmt.Fprintf(w.output, "Review worktree ready: %s\n", filepath.Join(root, "input", "head"))
+	if diff, err := os.ReadFile(filepath.Join(root, "input", "review.diff")); err == nil {
+		changedLines = reviewChangedLines(diff)
+	}
 	markProgress(1)
 	if err := os.WriteFile(filepath.Join(root, "input", "brief.json"), brief.Content, 0600); err != nil {
 		return nil, err

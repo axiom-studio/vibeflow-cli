@@ -485,6 +485,19 @@ func finishReviewCheckout(ctx context.Context, root, objects, baseSHA, headSHA s
 	return os.WriteFile(filepath.Join(input, "review.diff"), diff, 0600)
 }
 
+// reviewChangedLines counts the added and removed lines of a unified diff,
+// without the "+++" and "---" file headers.
+func reviewChangedLines(diff []byte) int {
+	n := 0
+	for _, line := range bytes.Split(diff, []byte("\n")) {
+		if len(line) == 0 || (line[0] != '+' && line[0] != '-') || bytes.HasPrefix(line, []byte("+++ ")) || bytes.HasPrefix(line, []byte("--- ")) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 type limitedReviewBuffer struct {
 	bytes.Buffer
 	limit int
