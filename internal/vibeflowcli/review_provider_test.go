@@ -349,8 +349,9 @@ func TestReviewProviderQuestionTask(t *testing.T) {
 }
 
 // Reviews and answers read code; CI owns builds and tests (issue #6188). Both
-// task kinds carry the build-free policy and no permission to build.
-func TestReviewProviderTasksForbidBuilds(t *testing.T) {
+// task kinds carry the check policy: build-free by default, with a small
+// targeted check only when the risk requires one (issue #6301).
+func TestReviewProviderTasksCarryTheCheckPolicy(t *testing.T) {
 	for _, question := range []bool{false, true} {
 		_, execution := reviewTestRepo(t)
 		if question {
@@ -368,15 +369,16 @@ func TestReviewProviderTasksForbidBuilds(t *testing.T) {
 		}
 		text := string(task)
 		if !strings.Contains(text, "- "+reviewCheckPolicy+" Do not") {
-			t.Errorf("question=%v: task lacks the build-free policy:\n%s", question, text)
+			t.Errorf("question=%v: task lacks the check policy:\n%s", question, text)
 		}
 		// CI results arrive in brief.json "ci" (axiomcloud #6202); missing results are not a pass.
-		for _, want := range []string{`"ci" object in ../brief.json`, "cite a failing check by name", "never treat a state of pending, none or unavailable as passing"} {
+		// A check is a risk decision for the changed package only, never a suite or an install.
+		for _, want := range []string{`"ci" object in ../brief.json`, "cite a failing check by name", "never treat a state of pending, none or unavailable as passing", "Decide by risk whether a check is required", "smallest targeted test or check for the changed package only", "never the full suite, never an install or dependency download", "finish within 5 minutes", "Record exactly what ran and its output in verification", "Never claim a build or test result you did not observe"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("question=%v: task lacks %q", question, want)
 			}
 		}
-		for _, stale := range []string{"You may build", "and run its tests", "build and run project code"} {
+		for _, stale := range []string{"You may build", "and run its tests", "build and run project code", "At most one targeted check", "within 60 seconds", "one build-free check"} {
 			if strings.Contains(text, stale) {
 				t.Errorf("question=%v: task still grants %q", question, stale)
 			}
