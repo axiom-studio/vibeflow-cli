@@ -250,13 +250,13 @@ The agent reviews code without building it: it is told not to build the project,
 By default Vera's Claude Code runs with your own setup: your hooks, MCP servers, plugins, skills and output style.
 These are sometimes useful to a review, but they also run inside a session that reads untrusted pull request text, so a personal MCP server is reachable from it.
 
-`--isolated` starts Vera's Claude Code with `--setting-sources local --strict-mcp-config --mcp-config '{"mcpServers":{}}'`.
+`--isolated` starts Vera's Claude Code with `--setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'`.
 It loads no user settings and none of the review checkout's own project settings, and starts no MCP servers, while keeping your normal Claude login.
 Isolation applies to the `claude` harness only; `--isolated` with another harness is refused.
 
 The choice is saved as `review_isolated: true|false` in `config.yaml`.
 When `review-watch` starts in a terminal and nothing is saved, it asks once and saves the answer.
-`--isolated` applies to one run without changing the saved choice.
+`--isolated` applies to one foreground run without changing the saved choice; it is refused with `--background`, because the background runner is a separate process that reads `config.yaml`, so set `review_isolated: true` there instead.
 Without a terminal and without a saved choice, Vera keeps your own setup.
 The startup line names the mode, for example `online (local, claude, isolated)`.
 For an `@vibeflow ask` question the checkout is read-only: before the harness starts, the head worktree's files and the base and merge-base snapshots lose write permission (Git's own metadata stays writable so read commands work), and Claude starts without its Edit, MultiEdit and NotebookEdit tools.

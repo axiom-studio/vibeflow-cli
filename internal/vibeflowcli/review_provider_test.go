@@ -1,6 +1,7 @@
 package vibeflowcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -481,7 +482,8 @@ func TestReviewIsolationFlagsOnlyWhenChosen(t *testing.T) {
 			t.Fatal(err)
 		}
 		command := strings.Join(spec.Args, " ")
-		if got := strings.Contains(command, isolatedFlags) && strings.Contains(command, `'{"mcpServers":{}}'`); got != tc.want {
+		// The empty source list must survive the shell as its own argument.
+		if got := strings.Contains(command, "--setting-sources ''") && strings.Contains(command, `'{"mcpServers":{}}'`); got != tc.want {
 			t.Errorf("%s interactive: isolation flags present=%v, want %v: %s", tc.name, got, tc.want, command)
 		}
 	}
@@ -515,5 +517,22 @@ func TestChooseReviewIsolation(t *testing.T) {
 	fresh := DefaultConfig()
 	if err := chooseReviewIsolation(fresh, path, "claude", false, true, notTerminal, io.Discard); err != nil || fresh.ReviewIsolated != nil {
 		t.Fatalf("asked without a terminal: err=%v choice=%v", err, fresh.ReviewIsolated)
+	}
+}
+
+// A background runner is another process that reloads config.yaml, so a
+// one-run --isolated would be dropped there; it is refused instead (#6311).
+func TestReviewWatchRefusesIsolatedBackgroundRunner(t *testing.T) {
+	withTempRoot(t)
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = "https://example.invalid", "file-token"
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := runReviewWatch(context.Background(), &out, "--background", "--isolated", "--project", "1", "--repo", t.TempDir(), "--repository-link", "7", "--provider", "claude")
+	if err == nil || !strings.Contains(err.Error(), "set review_isolated: true in "+ConfigPath()) {
+		t.Fatalf("--background --isolated: err=%v\n%s", err, out.String())
 	}
 }

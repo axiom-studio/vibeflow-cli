@@ -267,6 +267,11 @@ func reviewWatchCmd() *cobra.Command {
 		if cfg.APIToken == "" {
 			return fmt.Errorf("connect VibeFlow before starting a review runner")
 		}
+		if background && isolated {
+			// The managed runner is another process that reloads config.yaml, so a
+			// one-run flag would be silently dropped there (issue #6311).
+			return fmt.Errorf("--isolated applies to a foreground run only; for a background runner set review_isolated: true in %s and start it again", path)
+		}
 		if err := chooseReviewIsolation(cfg, path, o.Provider, isolated, !background && !o.Once, os.Stdin, cmd.OutOrStdout()); err != nil {
 			return err
 		}
@@ -995,8 +1000,8 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			err := w.client.reviewRequest(callCtx, "POST", w.prefix()+"/heartbeat", struct{}{}, nil)
 			if err == nil {
 				lines := 0
-				if sendChangedLines {
-					lines = changedLines
+				if sendChangedLines && milestones&1 != 0 {
+					lines = changedLines // Published by markProgress(1), loaded above.
 				}
 				err = renew(lines)
 				var response *reviewHTTPError

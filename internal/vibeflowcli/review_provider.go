@@ -81,12 +81,14 @@ func reviewHarnessSupported(key string) bool { return slices.Contains(reviewHarn
 // available for result.json outside the read-only checkout; MCP tools stay.
 var reviewReadOnlyClaudeArgs = []string{"--disallowedTools", "Edit", "MultiEdit", "NotebookEdit"}
 
-// reviewIsolatedClaudeArgs start Claude Code without the user's settings
-// (hooks, plugins, output style) or the review checkout's own project
-// settings, and with no MCP servers, while keeping its normal login (unlike
-// --bare). --mcp-config takes several values, so a flag must follow it.
-// Verified 2026-10-22 against Claude Code 2.1.305 (issue #6195).
-var reviewIsolatedClaudeArgs = []string{"--mcp-config", `{"mcpServers":{}}`, "--strict-mcp-config", "--setting-sources", "local"}
+// reviewIsolatedClaudeArgs start Claude Code with no setting source at all:
+// not the user's (hooks, plugins, output style), not the checkout's project
+// or local files, which the pull request's author controls; and with no MCP
+// servers, while keeping its normal login (unlike --bare). --mcp-config takes
+// several values, so a flag must follow it. Verified 2026-10-25 against
+// Claude Code 2.1.305: "local" still ran a hook from the checkout's
+// .claude/settings.local.json, the empty list did not (issues #6195, #6311).
+var reviewIsolatedClaudeArgs = []string{"--mcp-config", `{"mcpServers":{}}`, "--strict-mcp-config", "--setting-sources", ""}
 
 // reviewIsolated reports whether Vera runs isolated with cfg.
 func reviewIsolated(cfg *Config) bool {
