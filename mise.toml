@@ -1,0 +1,23 @@
+# Project tools and commands. See MISE.md for setup and prerequisites.
+[tools]
+"go" = "1.25.14"
+
+[tasks."build"]
+description = "Build CLI with version metadata"
+run = "make build"
+
+[tasks."dev"]
+description = "Run CLI from source"
+run = "go run ./cmd/vibeflow"
+
+[tasks."test"]
+description = "Run Go tests"
+run = "make test"
+
+[tasks."lint"]
+description = "Run go vet"
+run = "make vet"
+
+[tasks."versions"]
+description = "Show active Go version"
+run = "go version"
