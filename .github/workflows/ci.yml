@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: self-hosted
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         env:
