@@ -406,14 +406,27 @@ func TestReviewProviderTaskOffersSuggestionsAndVoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	task, _ := os.ReadFile(filepath.Join(root, "task.txt"))
-	if !strings.Contains(string(task), "- "+reviewVoice+"\n") {
+	if !strings.Contains(string(task), "- "+reviewVoice+"\n") || !strings.Contains(reviewVoice, "Set category to security") {
 		t.Fatalf("review task lacks the voice rules:\n%s", task)
 	}
 	schema, _ := os.ReadFile(filepath.Join(root, "schema.json"))
-	for _, want := range []string{`"suggestion"`, `"start_line"`, `"end_line"`, `"replacement"`, `"RIGHT"`} {
+	for _, want := range []string{`"suggestion"`, `"start_line"`, `"end_line"`, `"replacement"`, `"RIGHT"`, `"category"`, `"security","correctness","performance","maintainability"`} {
 		if !strings.Contains(string(schema), want) {
 			t.Fatalf("review schema lacks %s", want)
 		}
+	}
+}
+
+// A server without finding_category_v1 rejects unknown fields, so the runner
+// removes each finding's category before submitting to it (issue #6212).
+func TestStripReviewFindingCategories(t *testing.T) {
+	result := json.RawMessage(`{"schema_version":1,"new_findings":[{"key":"a","category":"security"},{"key":"b","category":null},{"key":"c"}]}`)
+	out := stripReviewFindingCategories(result)
+	if strings.Contains(string(out), "category") || !strings.Contains(string(out), `"key":"c"`) || !strings.Contains(string(out), `"schema_version":1`) {
+		t.Fatalf("categories not stripped: %s", out)
+	}
+	if clean := json.RawMessage(`{"new_findings":[{"key":"c"}]}`); string(stripReviewFindingCategories(clean)) != string(clean) {
+		t.Fatal("a result without categories changed")
 	}
 }
 
