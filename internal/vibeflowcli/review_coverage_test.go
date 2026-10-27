@@ -213,6 +213,12 @@ func TestReviewTaskAsksForCoverage(t *testing.T) {
 	cfg := DefaultConfig()
 	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
 	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "input"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveReviewJSON(filepath.Join(root, "input", "manifest.json"), coverageManifest()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
 		t.Fatal(err)
 	}
