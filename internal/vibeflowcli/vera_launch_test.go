@@ -821,7 +821,7 @@ func TestVeraConsoleSlotWindows(t *testing.T) {
 	if again := windows(); len(again) != 2 {
 		t.Fatalf("slot windows duplicated: %v", again)
 	}
-	if status, work := veraRowStatus(meta, cfg.ServerURL, false); status != "listening" || work != "listening" {
+	if status, work := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "listening" || work != "listening" {
 		t.Fatalf("idle console row: %s %s", status, work)
 	}
 	answer := reviewSlotOptions(veraOptions(meta), reviewSlotSpec{"question", "answer 1"})
@@ -833,12 +833,47 @@ func TestVeraConsoleSlotWindows(t *testing.T) {
 	if err := saveReviewJSON(filepath.Join(dir, "state.json"), reviewRunnerState{ID: "runner", Pending: &reviewReceipt{JobID: "job", Execution: e, ClaimedAt: time.Now().Add(-2 * time.Minute).UnixMilli()}}); err != nil {
 		t.Fatal(err)
 	}
-	if status, work := veraRowStatus(meta, cfg.ServerURL, false); status != "reviewing" || work != "answering on PR #34" {
+	if status, work := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "reviewing" || work != "answering on PR #34" {
 		t.Fatalf("busy console row: %s %s", status, work)
 	}
 	var b strings.Builder
-	renderVeraDashboard(&b, veraOptions(meta), veraSlotActivities(cfg.ServerURL, veraOptions(meta), 1, 1, time.Now()))
+	renderVeraDashboard(&b, veraOptions(meta), veraSlotActivities(cfg.ServerURL, veraOptions(meta), 1, 1, nil, time.Now()))
 	if text := b.String(); !strings.Contains(text, "Answers 1/1 · Reviews 0/1") || !strings.Contains(text, "Answering a question on PR #34") || !strings.Contains(text, "2m0s") {
 		t.Fatalf("dashboard:\n%s", text)
+	}
+	// Issue #6426: an exited slot window shows as stopped in the row and the
+	// dashboard, and a restart respawns only that slot.
+	reviewWindow := ""
+	out, _ := m.tmux.run("list-windows", "-t", meta.TmuxSession, "-F", "#{window_id}\t#{@vibeflow_vera_slot}")
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Split(line, "\t"); len(f) == 2 && f[1] == "review 1" {
+			reviewWindow = f[0]
+		}
+	}
+	if _, err := m.tmux.run("kill-window", "-t", reviewWindow); err != nil {
+		t.Fatal(err)
+	}
+	if status, work := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "stopped" || work != "answering on PR #34 · review 1 stopped" {
+		t.Fatalf("console row with an exited slot: %s %s", status, work)
+	}
+	stopped := veraStoppedSlots(m.tmux.run, meta.TmuxSession, 1, 1)
+	b.Reset()
+	renderVeraDashboard(&b, veraOptions(meta), veraSlotActivities(cfg.ServerURL, veraOptions(meta), 1, 1, stopped, time.Now()))
+	if text := b.String(); !strings.Contains(text, "stopped: its listener exited") || !strings.Contains(text, "restart this Vera session") {
+		t.Fatalf("dashboard with an exited slot:\n%s", text)
+	}
+	// A marker on the session survives only if the restart keeps the session.
+	if _, err := m.tmux.run("set-option", "-t", meta.TmuxSession, "@vera_probe", "kept"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restartVeraSession(meta, m.tmux, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	probe, _ := m.tmux.run("show-options", "-v", "-t", meta.TmuxSession, "@vera_probe")
+	if again := windows(); len(again) != 2 || strings.TrimSpace(probe) != "kept" {
+		t.Fatalf("restart did not respawn just the slot: %v", again)
+	}
+	if status, _ := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "reviewing" {
+		t.Fatalf("console row after the slot restart: %s", status)
 	}
 }

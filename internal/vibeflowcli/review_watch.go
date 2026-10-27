@@ -332,6 +332,12 @@ func reviewWatchCmd() *cobra.Command {
 		if dashboard {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer cancel()
+			// The slot windows start alongside; capacity is shared across them.
+			if capacity, err := sharedReviewCapacity(RootDir(), cfg.ReviewConcurrency); err != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Could not check for a job the shared listener held: %v\n", err)
+			} else {
+				recoverSharedReceipt(ctx, client, cfg, o, capacity, cmd.OutOrStdout(), openReviewTerminal(cmd.OutOrStdout()))
+			}
 			return runVeraDashboard(ctx, cfg, o, max(answerSlots, 0), max(reviewSlots, 0), cmd.OutOrStdout())
 		}
 		if o.SlotKind != "" {

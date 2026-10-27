@@ -317,3 +317,50 @@ func (l *lockedBuffer) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.b.Write(p)
 }
+
+// Issue #6427: a job the single shared listener held when the repository
+// switched to slots is finished by that runner before the slots go online,
+// instead of waiting out its server lease.
+func TestReviewSlotsRecoverSharedReceipt(t *testing.T) {
+	withTempRoot(t)
+	repo, review, question := slotExecutions(t)
+	server, _, _ := slotServer(t, review, question, []string{"repository_review_v1", reviewClaimKindCapability})
+	cfg := singleSlotConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "slot-token"
+	cfg.Providers["claude"] = Provider{Binary: "/bin/true"}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	shared := reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "mac"}
+	dir := filepath.Join(RootDir(), "review-runners", reviewBackgroundID(server.URL, shared))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	review.Attempt.RunnerID = "shared-runner"
+	interrupted := reviewRunnerState{ID: "shared-runner", Pending: &reviewReceipt{JobID: review.Review.ID, RequestID: reviewUUID(), Execution: review}}
+	if err := saveReviewJSON(filepath.Join(dir, "state.json"), interrupted); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	done := make(chan error, 1)
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	text := func() string { mu.Lock(); defer mu.Unlock(); return buf.String() }
+	go func() {
+		w := &lockedBuffer{mu: &mu, b: &buf}
+		cmd := reviewWatchCmd()
+		cmd.SetArgs([]string{"--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac", "--interval", "1s", "--answer-slots", "1", "--review-slots", "0"})
+		cmd.SetOut(w)
+		cmd.SetErr(w)
+		done <- cmd.ExecuteContext(ctx)
+	}()
+	for !strings.Contains(text(), "[answer 1] Review runner") && ctx.Err() == nil {
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if p := veraPendingReceipt(server.URL, shared); p != nil || !strings.Contains(text(), "Finishing the job this listener held") {
+		t.Fatalf("shared receipt left pending: %+v\n%s", p, text())
+	}
+}

@@ -51,6 +51,23 @@ func reviewSlotPick(o reviewWatchOptions, jobs []reviewJob) (reviewJob, string, 
 // registration, so receipts and crash recovery stay per slot. They share the
 // machine's review_concurrency limit. Harnesses run headless: one terminal
 // cannot host several interactive sessions.
+// recoverSharedReceipt finishes the job the single shared listener held when
+// this repository switched to slots. Slots run under their own runner names,
+// so nothing else reads that receipt and the job would wait out its server
+// lease (issue #6427). The shared runner runs once: it replays a saved result
+// or fails an interrupted attempt, and runs a claimed job not yet started.
+func recoverSharedReceipt(ctx context.Context, client *Client, cfg *Config, o reviewWatchOptions, capacity *reviewCapacity, out io.Writer, tty *reviewTerminal) {
+	if veraPendingReceipt(client.baseURL, o) == nil {
+		return
+	}
+	fmt.Fprintln(out, "Finishing the job this listener held before it switched to slots.")
+	o.Once = true
+	w := &reviewWatch{client: client, cfg: cfg, options: o, output: out, capacity: capacity, tty: tty}
+	if err := w.run(ctx); err != nil {
+		fmt.Fprintf(out, "The earlier job is still pending; the next start retries it: %v\n", err)
+	}
+}
+
 func runReviewSlots(ctx context.Context, client *Client, cfg *Config, o reviewWatchOptions, capacity *reviewCapacity, answerSlots, reviewSlots int, out io.Writer) error {
 	slots := reviewSlotList(answerSlots, reviewSlots)
 	for _, s := range slots {
@@ -58,6 +75,7 @@ func runReviewSlots(ctx context.Context, client *Client, cfg *Config, o reviewWa
 			return fmt.Errorf("runner name is too long for slot names; use a shorter --name")
 		}
 	}
+	recoverSharedReceipt(ctx, client, cfg, o, capacity, out, nil)
 	fmt.Fprintf(out, "Vera slots: %d answer, %d review; review_concurrency %d caps harnesses running at once on this machine.\n", answerSlots, reviewSlots, cfg.ReviewConcurrency)
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)

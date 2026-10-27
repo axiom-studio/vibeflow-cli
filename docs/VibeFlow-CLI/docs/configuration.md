@@ -92,6 +92,8 @@ The default is one answer slot and one review slot; both counts at 0 keep the si
 In the TUI, a Vera session with slots becomes a console: its first window shows a dashboard (slot use and each slot's job with elapsed time) beside the history pane, and every slot runs the ordinary interactive listener in its own tmux window.
 A busy slot's window is named after its job (`answer #34`, `review #106`) and returns to its slot name (`answer 1`) when it listens again, so the live harness session of every running job is one window switch away.
 The session row lists every slot's job, for example `reviewing PR #106 · answering on PR #34`.
+A slot whose window exited shows as stopped in the dashboard and the session row (`review 1 stopped`); restarting the Vera session respawns only the stopped slot windows and leaves busy slots running.
+When a listener switches from the single shared slot to slots, it first finishes the job the shared slot still held: it replays a saved result, fails an interrupted attempt, or runs a claimed job that never started.
 Zero, negative, null, and noninteger values are configuration errors.
 All foreground `review-watch` listeners in one root, including every Vera session, share this limit: at most that many reviews run at once, and a listener at the limit keeps listening without claiming work.
 The limit covers each attempt through provider shutdown and result acknowledgement, including saved results awaiting restored authorization.

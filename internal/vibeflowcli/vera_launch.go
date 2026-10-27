@@ -125,13 +125,14 @@ func veraPendingReceipt(serverURL string, o reviewWatchOptions) *reviewReceipt {
 	return state.Pending
 }
 
-// veraRowStatus reads what a Vera session's listener is doing.
-func veraRowStatus(meta SessionMeta, serverURL string, paneDead bool) (status, work string) {
+// veraRowStatus reads what a Vera session's listener is doing; with slots,
+// paneDead is the dashboard's and tmux tells which slot windows exited.
+func veraRowStatus(meta SessionMeta, serverURL string, paneDead bool, tmux veraTmux) (status, work string) {
 	if paneDead {
 		return "stopped", "stopped"
 	}
 	if a, r := veraSlotCounts(); a+r > 0 {
-		return veraSlotsRowStatus(serverURL, veraOptions(meta), a, r)
+		return veraSlotsRowStatus(serverURL, veraOptions(meta), a, r, veraStoppedSlots(tmux, meta.TmuxSession, a, r))
 	}
 	if p := veraPendingReceipt(serverURL, veraOptions(meta)); p != nil {
 		if e := p.Execution; e != nil {
@@ -347,6 +348,10 @@ func restartVeraSession(meta SessionMeta, tmux *TmuxManager, store *Store, cache
 	}
 	if recoveryPane != "" && respawn == "" {
 		return SessionMeta{}, fmt.Errorf("pane %q has not exited", recoveryPane)
+	}
+	if a, r := veraSlotCounts(); respawn == "" && a+r > 0 && tmux.HasSession(meta.TmuxSession) && len(veraStoppedSlots(tmux.run, meta.TmuxSession, a, r)) > 0 {
+		// Only slot windows exited: respawn those and keep busy slots running.
+		return meta, startVeraSlotWindows(tmux, meta, a, r)
 	}
 	if respawn == "" && tmux.HasSession(meta.TmuxSession) {
 		if err := tmux.KillSession(meta.TmuxSession); err != nil {

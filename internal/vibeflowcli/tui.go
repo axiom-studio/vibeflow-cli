@@ -418,7 +418,7 @@ func (m Model) refreshSessions() tea.Msg {
 				if pane, err := m.tmux.agentPaneID(ts.Name); err == nil {
 					dead = m.tmux.paneDead(pane)
 				}
-				row.Status, row.CurrentWork = veraRowStatus(meta, m.config.ServerURL, dead)
+				row.Status, row.CurrentWork = veraRowStatus(meta, m.config.ServerURL, dead, m.tmux.run)
 			}
 			row.Provider = meta.Provider
 			if meta.Vera == nil {
