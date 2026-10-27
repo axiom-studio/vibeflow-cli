@@ -72,6 +72,7 @@ const reviewLegacyRoutingNotice = "Repository-request routing requires a server 
 type reviewWatch struct {
 	repositoryRequests bool // Registered with repository_review_v1 for this run.
 	questions          bool // Registered with question_v1, with the server's consent.
+	categories         bool // The server accepts a finding category (finding_category_v1).
 	client             *Client
 	cfg                *Config
 	options            reviewWatchOptions
@@ -445,6 +446,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	// taken only with the server's consent: question_v1, or claim_kind_v1,
 	// which a server offers only once it routes question claims (issue #5737).
 	w.questions = slices.Contains(discovery.SupportedRunnerCapabilities, reviewQuestionCapability) || slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability)
+	w.categories = slices.Contains(discovery.SupportedRunnerCapabilities, reviewFindingCategoryCapability)
 	capabilities := []string{}
 	if repositoryRequests {
 		capabilities = append(capabilities, "repository_review_v1")
@@ -1344,6 +1346,9 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		fmt.Fprintf(w.output, "Dropped %d suggestion(s) the server would reject; their findings are kept.\n", dropped)
 		result = kept
 	}
+	if !w.categories {
+		result = stripReviewFindingCategories(result)
+	}
 	markProgress(2)
 	return result, nil
 }
@@ -1387,6 +1392,33 @@ func dropInvalidReviewSuggestions(result json.RawMessage, headSHA string) (json.
 	top["new_findings"], _ = json.Marshal(findings)
 	out, _ := json.Marshal(top)
 	return out, dropped
+}
+
+// reviewFindingCategoryCapability is advertised by a server that stores a
+// finding category; an older one rejects the unknown field.
+const reviewFindingCategoryCapability = "finding_category_v1"
+
+// stripReviewFindingCategories removes each new finding's category, for a
+// server that would reject the whole result over the unknown field.
+func stripReviewFindingCategories(result json.RawMessage) json.RawMessage {
+	var top map[string]json.RawMessage
+	var findings []map[string]json.RawMessage
+	if json.Unmarshal(result, &top) != nil || json.Unmarshal(top["new_findings"], &findings) != nil {
+		return result
+	}
+	stripped := false
+	for _, f := range findings {
+		if _, ok := f["category"]; ok {
+			delete(f, "category")
+			stripped = true
+		}
+	}
+	if !stripped {
+		return result
+	}
+	top["new_findings"], _ = json.Marshal(findings)
+	out, _ := json.Marshal(top)
+	return out
 }
 
 // readReviewResult reads a harness's result.json. A complete envelope returns

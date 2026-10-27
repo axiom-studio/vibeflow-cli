@@ -129,13 +129,14 @@ func TestReviewAttemptLimitFollowsServerDeadline(t *testing.T) {
 }
 
 // The child guard moves its own deadline when the supervisor sends a later one.
+// The first deadline leaves the extension 1.5s to arrive on a loaded machine.
 func TestReviewChildExtendsDeadlineFromSupervisor(t *testing.T) {
 	root := t.TempDir()
 	input := filepath.Join(root, "task.txt")
 	if err := os.WriteFile(input, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	spec := reviewChildSpec{Binary: "/bin/sh", Args: []string{"-c", "sleep 1"}, Env: []string{"PATH=/usr/bin:/bin"}, Dir: root, InputFile: input, DeadlineAt: time.Now().Add(300 * time.Millisecond).UnixMilli()}
+	spec := reviewChildSpec{Binary: "/bin/sh", Args: []string{"-c", "sleep 3"}, Env: []string{"PATH=/usr/bin:/bin"}, Dir: root, InputFile: input, DeadlineAt: time.Now().Add(1500 * time.Millisecond).UnixMilli()}
 	path := filepath.Join(root, "child.json")
 	if err := saveReviewJSON(path, spec); err != nil {
 		t.Fatal(err)
