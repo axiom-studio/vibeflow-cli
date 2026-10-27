@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Review credentials belong to the supervisor. These DTOs contain no provider
@@ -76,7 +77,15 @@ type reviewExecution struct {
 	// repository shares project context (axiomcloud #5763). Without it the
 	// agent runs with no VibeFlow MCP server, never with the user's token.
 	VibeflowMCP *reviewMCPCredential `json:"vibeflow_mcp,omitempty"`
-	Attempt     struct {
+	// AllowExecution is the server's decision whether Vera may build the pull
+	// request and run its tests: true only when the repository allows it and
+	// the PR is a trusted author's, from the repository's own branches
+	// (axiomcloud #4504). Older servers omit it; see reviewCheckPolicyFor.
+	AllowExecution *bool `json:"allow_execution,omitempty"`
+	// budgetDeadline is the attempt's effective deadline, including a local
+	// --timeout, set by the watcher before the task is written.
+	budgetDeadline time.Time
+	Attempt        struct {
 		ID             string `json:"id"`
 		RunnerID       string `json:"runner_id"`
 		SessionID      string `json:"session_id"`

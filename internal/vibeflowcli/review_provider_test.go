@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReviewHarnessArgsCoverEveryProvider(t *testing.T) {
@@ -394,6 +395,80 @@ func TestReviewProviderTasksCarryTheCheckPolicy(t *testing.T) {
 		if i, j := strings.Index(text, reviewCheckPolicy), strings.Index(text, filepath.Join(root, "result.json")); i < 0 || j < i {
 			t.Errorf("question=%v: policy and result path out of order", question)
 		}
+	}
+}
+
+// The server's per-claim execution decision (axiomcloud #4504) picks the
+// check policy: allowed lets Vera build and run targeted tests within the
+// attempt's remaining budget; refused forbids running any of the PR's code; a
+// claim without the field (an older server) keeps the earlier policy.
+func TestReviewProviderTaskFollowsExecutionDecision(t *testing.T) {
+	yes, no := true, false
+	var decoded reviewExecution
+	if err := json.Unmarshal([]byte(`{"allow_execution":false}`), &decoded); err != nil || decoded.AllowExecution == nil || *decoded.AllowExecution {
+		t.Fatalf("an explicit refusal must decode as false, not absent: %v %v", decoded.AllowExecution, err)
+	}
+	for _, question := range []bool{false, true} {
+		for _, test := range []struct {
+			name  string
+			allow *bool
+			want  []string
+			never []string
+		}{
+			{"older server", nil, []string{reviewCheckPolicy}, []string{"You may build the project", "does not permit running"}},
+			{"refused", &no, []string{reviewCheckPolicyRefused, "Do not build the project, install dependencies, run tests or run any program or script from this pull request", "cite a failing check by name", "Never claim a build or test result you did not observe"}, []string{reviewCheckPolicy, "You may build the project", "smallest targeted test"}},
+			{"allowed", &yes, []string{"Read the \"ci\" object in ../brief.json first", "You may build the project and run targeted tests or commands inside this worktree", "confirm or refute a specific suspected defect", "minutes left", "Never install global packages", "network only for the dependency fetches the build itself needs", "each command you ran, its exit status and the key output", "Never claim a build or test result you did not observe"}, []string{reviewCheckPolicy, reviewCheckPolicyRefused}},
+		} {
+			_, execution := reviewTestRepo(t)
+			if question {
+				reviewWatchQuestionExecution(execution)
+			}
+			execution.AllowExecution = test.allow
+			execution.Attempt.Round.DeadlineAt = time.Now().Add(25 * time.Minute).UnixMilli()
+			cfg := DefaultConfig()
+			fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+			root := t.TempDir()
+			if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			task, err := os.ReadFile(filepath.Join(root, "task.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(task)
+			for _, want := range test.want {
+				if !strings.Contains(text, want) {
+					t.Errorf("question=%v %s: task lacks %q", question, test.name, want)
+				}
+			}
+			for _, never := range test.never {
+				if strings.Contains(text, never) {
+					t.Errorf("question=%v %s: task carries %q", question, test.name, never)
+				}
+			}
+			if test.allow != nil && *test.allow && !strings.Contains(text, "about 25 minutes left") {
+				t.Errorf("question=%v: allowed task does not state the remaining budget:\n%s", question, text)
+			}
+		}
+	}
+}
+
+// The budget is the attempt's effective deadline, which a local --timeout can
+// shorten, and is never stated as negative.
+func TestReviewExecutionBudget(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	e := &reviewExecution{}
+	e.Attempt.Round.DeadlineAt = now.Add(40 * time.Minute).UnixMilli()
+	if got := reviewExecutionBudget(e, now); got != 40*time.Minute {
+		t.Fatalf("server deadline budget %v", got)
+	}
+	e.budgetDeadline = now.Add(10 * time.Minute)
+	if got := reviewExecutionBudget(e, now); got != 10*time.Minute {
+		t.Fatalf("local cap budget %v", got)
+	}
+	e.budgetDeadline = now.Add(-time.Minute)
+	if got := reviewExecutionBudget(e, now); got != 0 {
+		t.Fatalf("expired budget %v", got)
 	}
 }
 
