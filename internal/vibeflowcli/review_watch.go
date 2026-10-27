@@ -927,7 +927,9 @@ func reviewPermanent(err error) bool {
 
 func (w *reviewWatch) finishReceipt(p *reviewReceipt) error {
 	// Keep one acknowledged receipt; pending submissions are never evicted.
-	if err := saveReviewJSON(filepath.Join(w.root, "last-receipt.json"), p); err != nil {
+	kept := *p
+	kept.Execution = withoutReviewMCPToken(p.Execution) // Spent with its attempt.
+	if err := saveReviewJSON(filepath.Join(w.root, "last-receipt.json"), &kept); err != nil {
 		return err
 	}
 	w.state.Pending = nil

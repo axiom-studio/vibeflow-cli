@@ -71,6 +71,11 @@ type reviewExecution struct {
 	// and provider discussion, passed through unchanged as data (axiomcloud
 	// #6189). Older servers omit it.
 	PullRequest json.RawMessage `json:"pull_request,omitempty"`
+	// VibeflowMCP is the only VibeFlow access the agent gets: a read-only
+	// credential for the reviewed project, sent with a claim when the
+	// repository shares project context (axiomcloud #5763). Without it the
+	// agent runs with no VibeFlow MCP server, never with the user's token.
+	VibeflowMCP *reviewMCPCredential `json:"vibeflow_mcp,omitempty"`
 	Attempt     struct {
 		ID             string `json:"id"`
 		RunnerID       string `json:"runner_id"`
