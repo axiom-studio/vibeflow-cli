@@ -290,7 +290,7 @@ func reviewObjectPresent(ctx context.Context, objects, sha string) bool {
 func prepareReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution, proxy ...reviewGitProxy) error {
 	round := execution.Attempt.Round
 	if !reviewSHA(round.BaseSHA) || !reviewSHA(round.HeadSHA) {
-		return fmt.Errorf("review requires exact commit SHAs")
+		return reviewReportable("review requires exact commit SHAs")
 	}
 	remote, err := reviewGit(ctx, source, "remote", "get-url", "origin")
 	if err != nil {
@@ -301,10 +301,10 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 	}
 	host, name, err := reviewRemoteIdentity(strings.TrimSpace(string(remote)))
 	if err != nil {
-		return fmt.Errorf("this checkout's origin is not a supported repository remote")
+		return reviewReportable("this checkout's origin is not a supported repository remote")
 	}
 	if host != execution.Review.ProviderHost || name != strings.ToLower(round.Details.BaseRepositoryName) {
-		return fmt.Errorf("this checkout is %s/%s, but the review is for %s/%s", host, name, execution.Review.ProviderHost, round.Details.BaseRepositoryName)
+		return reviewReportable("this checkout is %s/%s, but the review is for %s/%s", host, name, execution.Review.ProviderHost, round.Details.BaseRepositoryName)
 	}
 	origin, _ := reviewRemoteURL(strings.TrimSpace(string(remote)))
 	objects := filepath.Join(root, "objects.git")
@@ -324,7 +324,7 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 			fetch = item.remote
 			h, n, err := reviewRemoteIdentity(fetch)
 			if err != nil || h != host || n != strings.ToLower(item.name) {
-				return fmt.Errorf("review clone identity is invalid")
+				return reviewReportable("review clone identity is invalid")
 			}
 			// Keep the operator's Git authentication transport, including for forks
 			// on the same verified provider host. Never copy backend credentials.
@@ -335,10 +335,11 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 			}
 		}
 		if err = fetchReviewObjects(ctx, objects, fetch, item.sha, reviewGitObjectBudget); err != nil {
-			return fmt.Errorf("commit %.12s is not in this checkout and could not be fetched from %s/%s: %w", item.sha, host, strings.ToLower(item.name), err)
+			// The cause can name local paths; it stays out of the reported reason.
+			return &reviewReportableError{msg: fmt.Sprintf("commit %.12s is not in this checkout and could not be fetched from %s/%s", item.sha, host, strings.ToLower(item.name)), err: err}
 		}
 		if _, err = reviewGit(ctx, objects, "cat-file", "-e", item.sha+"^{commit}"); err != nil {
-			return fmt.Errorf("commit %.12s is missing after fetching it from %s/%s", item.sha, host, strings.ToLower(item.name))
+			return reviewReportable("commit %.12s is missing after fetching it from %s/%s", item.sha, host, strings.ToLower(item.name))
 		}
 	}
 	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA)
@@ -353,7 +354,7 @@ func prepareAzureReviewCheckout(ctx context.Context, source, root string, execut
 	host, name, err := reviewAzureRemoteIdentity(remote)
 	if err != nil || host != strings.ToLower(execution.Review.ProviderHost) || name != strings.ToLower(round.Details.BaseRepositoryName) ||
 		!strings.EqualFold(round.Details.HeadRepositoryName, round.Details.BaseRepositoryName) {
-		return fmt.Errorf("selected checkout does not match the review repository")
+		return reviewReportable("selected checkout does not match the review repository")
 	}
 	objects := filepath.Join(root, "objects.git")
 	if err = os.MkdirAll(objects, 0700); err != nil {
@@ -370,7 +371,7 @@ func prepareAzureReviewCheckout(ctx context.Context, source, root string, execut
 		fetch, env := source, []string(nil)
 		if _, err := reviewGit(ctx, source, "cat-file", "-e", sha+"^{commit}"); err != nil {
 			if len(proxy) != 1 || !reviewProxyURL(proxy[0].URL) || proxy[0].Token == "" || strings.ContainsAny(proxy[0].Token, "\r\n") {
-				return fmt.Errorf("Azure review fetch requires the VibeFlow Git proxy")
+				return reviewReportable("Azure review fetch requires the VibeFlow Git proxy")
 			}
 			fetch = proxy[0].URL
 			// An empty http.extraHeader and credential.helper clear inherited
@@ -451,11 +452,11 @@ func finishReviewCheckout(ctx context.Context, root, objects, baseSHA, headSHA s
 	round := struct{ BaseSHA, HeadSHA string }{baseSHA, headSHA}
 	bases, err := reviewGit(ctx, objects, "merge-base", "--all", round.BaseSHA, round.HeadSHA)
 	if err != nil {
-		return fmt.Errorf("cannot establish PR merge base; fetch complete base and head history in the selected checkout")
+		return reviewReportable("cannot establish PR merge base; fetch complete base and head history in the selected checkout")
 	}
 	ancestors := strings.Fields(string(bases))
 	if len(ancestors) != 1 || !reviewSHA(ancestors[0]) {
-		return fmt.Errorf("PR has no unique merge base; resolve divergent history before reviewing")
+		return reviewReportable("PR has no unique merge base; resolve divergent history before reviewing")
 	}
 	mergeBase := ancestors[0]
 	input := filepath.Join(root, "input")

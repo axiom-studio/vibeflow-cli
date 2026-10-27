@@ -407,3 +407,49 @@ func TestReviewWatchOutageMessageOncePerOutage(t *testing.T) {
 		t.Fatalf("outage messages:\n%s", out.String())
 	}
 }
+
+// A lease shorter than the 10-second renew interval is renewed before it
+// expires, not at the moment it does (issue #6305): a 4-second lease survives
+// a 9-second stage through several renewals.
+func TestReviewExecutionRenewsShortLeaseBeforeExpiry(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	const lease = 4 * time.Second
+	execution.Attempt.LeaseExpiresAt = time.Now().Add(lease).UnixMilli()
+	execution.Attempt.Round.DeadlineAt = time.Now().Add(time.Minute).UnixMilli()
+	var renewals atomic.Int64
+	held := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/brief"):
+			select {
+			case <-time.After(9 * time.Second):
+				held <- nil
+				http.Error(w, "stop after the held stage", 503)
+			case <-r.Context().Done():
+				held <- r.Context().Err()
+			}
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
+			w.WriteHeader(204)
+		case strings.HasSuffix(r.URL.Path, "/renew"):
+			renewals.Add(1)
+			renewed := *execution
+			renewed.Attempt.LeaseExpiresAt = time.Now().Add(lease).UnixMilli()
+			json.NewEncoder(w).Encode(&renewed)
+		default:
+			t.Errorf("unexpected API call %s", r.URL.Path)
+			w.WriteHeader(400)
+		}
+	}))
+	defer server.Close()
+	watch := &reviewWatch{client: NewClient(server.URL, "supervisor-key"), root: t.TempDir(), state: reviewRunnerState{ID: execution.Attempt.RunnerID}, options: reviewWatchOptions{ProjectID: 1, Timeout: 30 * time.Second}}
+	receipt := &reviewReceipt{JobID: execution.Review.ID, RequestID: reviewUUID(), Execution: execution}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := watch.execute(ctx, receipt)
+	if stage := <-held; stage != nil || err == nil || strings.Contains(err.Error(), "lease_expired") {
+		t.Fatalf("short lease: stage cancelled=%v err=%v renewals=%d", stage, err, renewals.Load())
+	}
+	if renewals.Load() < 3 {
+		t.Fatalf("a 4-second lease over 9 seconds renewed %d times", renewals.Load())
+	}
+}
