@@ -483,7 +483,15 @@ func finishReviewCheckout(ctx context.Context, root, objects, baseSHA, headSHA s
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(input, "review.diff"), diff, 0600)
+	if err = os.WriteFile(filepath.Join(input, "review.diff"), diff, 0600); err != nil {
+		return err
+	}
+	// The coverage contract: every file here is reviewed or skipped by class.
+	manifest, err := buildReviewManifest(ctx, objects, filepath.Join(input, "head"), mergeBase, round.HeadSHA)
+	if err != nil {
+		return err
+	}
+	return saveReviewJSON(filepath.Join(input, "manifest.json"), manifest)
 }
 
 // reviewChangedLines counts the added and removed lines of a unified diff,
