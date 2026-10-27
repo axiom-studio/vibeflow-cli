@@ -1124,6 +1124,16 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			return nil, err
 		}
 	}
+	if !p.Execution.isQuestion() {
+		// Best effort: a review without this context still runs.
+		input := filepath.Join(root, "input")
+		if err := writeReviewRules(input); err != nil {
+			fmt.Fprintln(w.output, "Could not read the target branch's .vibeflow/review-rules.md; reviewing without repository rules.")
+		}
+		if err := writeReviewCallers(ctx, input); err != nil {
+			fmt.Fprintln(w.output, "Could not list the changed symbols' callers; reviewing without them.")
+		}
+	}
 	var findings []json.RawMessage
 	setStage("findings")
 	json.Unmarshal(content["findings"], &findings)
@@ -1339,6 +1349,10 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			diagnostic.Category = "provider_reported_failure"
 		}
 		return nil, diagnostic.failure()
+	}
+	if kept, demoted := demoteUnverifiedReviewBlockers(result); demoted > 0 {
+		fmt.Fprintf(w.output, "Published %d unverified blocker(s) as advisories.\n", demoted)
+		result = kept
 	}
 	if kept, dropped := dropInvalidReviewSuggestions(result, p.Execution.Attempt.Round.HeadSHA); dropped > 0 {
 		fmt.Fprintf(w.output, "Dropped %d suggestion(s) the server would reject; their findings are kept.\n", dropped)
