@@ -765,7 +765,7 @@ func TestVeraSessionClearsAmbientVibeflowCredentials(t *testing.T) {
 	}
 	meta := SessionMeta{Name: "vera-env", Provider: "claude", Persona: "code_reviewer", WorkingDir: t.TempDir(), Vera: &veraBinding{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", RunnerName: "env"}}
 	meta.TmuxSession = tm.FullSessionName(meta.Provider, meta.Name)
-	if err := startVeraTmuxSession(tm, meta, ""); err != nil {
+	if err := startVeraTmuxSession(tm, meta, "", 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"VIBEFLOW_TOKEN", "VIBEFLOW_URL"} {
@@ -875,5 +875,32 @@ func TestVeraConsoleSlotWindows(t *testing.T) {
 	}
 	if status, _ := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "reviewing" {
 		t.Fatalf("console row after the slot restart: %s", status)
+	}
+	// A session still running the single listener from before the upgrade
+	// (no recorded layout) reads as that listener, not as stopped slots, and
+	// a restart replaces it with a whole console instead of mixing the two.
+	if err := m.tmux.KillSession(meta.TmuxSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := startVeraTmuxSession(m.tmux, meta, "", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.tmux.run("set-option", "-u", "-t", meta.TmuxSession, veraSlotsOption); err != nil {
+		t.Fatal(err)
+	}
+	if status, work := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "listening" || work != "listening" {
+		t.Fatalf("pre-upgrade single listener row: %s %s", status, work)
+	}
+	if _, err := restartVeraSession(meta, m.tmux, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if command := paneCommand(t, m.tmux, meta.TmuxSession); !strings.Contains(command, "--dashboard") {
+		t.Fatalf("restart kept the single listener: %s", command)
+	}
+	if again := windows(); len(again) != 2 {
+		t.Fatalf("restart of a single listener: slot windows %v", again)
+	}
+	if a, r := veraSessionSlots(m.tmux.run, meta.TmuxSession); a != 1 || r != 1 {
+		t.Fatalf("recorded layout %d/%d, want 1/1", a, r)
 	}
 }

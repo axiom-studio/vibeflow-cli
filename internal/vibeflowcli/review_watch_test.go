@@ -288,7 +288,7 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 	meta := SessionMeta{Name: "vera-ui", Provider: "claude", Persona: "code_reviewer", WorkingDir: repo, Vera: &veraBinding{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", RunnerName: "interactive"}}
 	meta.TmuxSession = v.tm.FullSessionName(meta.Provider, meta.Name)
 	v.session = meta.TmuxSession
-	if err := startVeraTmuxSession(v.tm, meta, ""); err != nil {
+	if err := startVeraTmuxSession(v.tm, meta, "", 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	// A dead pane stays visible, so a stopped listener's last words are checked.

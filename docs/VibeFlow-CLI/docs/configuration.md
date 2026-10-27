@@ -93,6 +93,7 @@ In the TUI, a Vera session with slots becomes a console: its first window shows 
 A busy slot's window is named after its job (`answer #34`, `review #106`) and returns to its slot name (`answer 1`) when it listens again, so the live harness session of every running job is one window switch away.
 The session row lists every slot's job, for example `reviewing PR #106 · answering on PR #34`.
 A slot whose window exited shows as stopped in the dashboard and the session row (`review 1 stopped`); restarting the Vera session respawns only the stopped slot windows and leaves busy slots running.
+The session row and restarts follow the slot layout a running session was started with, not the current config: a session still running the single listener, for example from before the 1/1 default, keeps reporting as that listener, and restarting it replaces it with a whole console.
 When a listener switches from the single shared slot to slots, it first finishes the job the shared slot still held: it replays a saved result, fails an interrupted attempt, or runs a claimed job that never started.
 Zero, negative, null, and noninteger values are configuration errors.
 All foreground `review-watch` listeners in one root, including every Vera session, share this limit: at most that many reviews run at once, and a listener at the limit keeps listening without claiming work.
