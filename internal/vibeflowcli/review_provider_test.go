@@ -83,6 +83,8 @@ func TestReviewProviderUsesNormalModeForEveryHarness(t *testing.T) {
 			if key == "claude" { // Never the checkout's settings (issue #6392).
 				want = append(slices.Clone(reviewPersonalClaudeArgs), want...)
 			}
+			// No credential: no VibeFlow MCP server (axiomcloud #5763).
+			want = append(reviewTestNoMCPArgs(key, root), want...)
 			if !slices.Equal(spec.Args, want) {
 				t.Fatalf("args %q, want %q", spec.Args, want)
 			}
@@ -326,7 +328,7 @@ func TestReviewProviderQuestionTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	front := append(slices.Clone(reviewPersonalClaudeArgs), reviewReadOnlyClaudeArgs...)
+	front := append(append(reviewTestNoMCPArgs("claude", root), reviewPersonalClaudeArgs...), reviewReadOnlyClaudeArgs...)
 	if len(spec.Args) < len(front) || strings.Join(spec.Args[:len(front)], " ") != strings.Join(front, " ") {
 		t.Fatalf("question harness does not start with the setting sources and read-only tool list: %q", spec.Args)
 	}
@@ -460,7 +462,7 @@ func TestDropInvalidReviewSuggestions(t *testing.T) {
 func TestReviewIsolationFlagsOnlyWhenChosen(t *testing.T) {
 	isolateReviewHarnessHome(t) // makeReviewSpecInteractive writes folder trust.
 	_, execution := reviewTestRepo(t)
-	isolatedFlags := strings.Join(reviewIsolatedClaudeArgs[2:], " ") // "--strict-mcp-config --setting-sources local"
+	isolatedFlags := "--setting-sources " // The empty source list ends the argv string only when isolated.
 	for _, tc := range []struct {
 		name     string
 		choice   *bool
@@ -480,7 +482,7 @@ func TestReviewIsolationFlagsOnlyWhenChosen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := strings.Contains(strings.Join(spec.Args, " "), isolatedFlags); got != tc.want {
+		if got := slices.Contains(spec.Args, "--setting-sources") && spec.Args[slices.Index(spec.Args, "--setting-sources")+1] == ""; got != tc.want {
 			t.Errorf("%s headless: isolation flags present=%v, want %v: %q", tc.name, got, tc.want, spec.Args)
 		}
 		if err := makeReviewSpecInteractive(spec, cfg, tc.provider, "", root, false); err != nil {
@@ -488,13 +490,27 @@ func TestReviewIsolationFlagsOnlyWhenChosen(t *testing.T) {
 		}
 		command := strings.Join(spec.Args, " ")
 		// The empty source list must survive the shell as its own argument.
-		if got := strings.Contains(command, "--setting-sources ''") && strings.Contains(command, `'{"mcpServers":{}}'`); got != tc.want {
+		if got := strings.Contains(command, isolatedFlags+"''"); got != tc.want {
 			t.Errorf("%s interactive: isolation flags present=%v, want %v: %s", tc.name, got, tc.want, command)
 		}
 	}
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// reviewTestNoMCPArgs is the argv prefix a harness gets with no VibeFlow
+// credential and no MCP servers of the user's own (axiomcloud #5763).
+func reviewTestNoMCPArgs(provider, root string) []string {
+	switch provider {
+	case "claude":
+		return []string{"--mcp-config", filepath.Join(root, "mcp.json"), "--strict-mcp-config"}
+	case "gemini", "qwen":
+		return []string{"--allowed-mcp-server-names=" + reviewNoMCPServer}
+	case "copilot":
+		return []string{"--disable-mcp-server", DefaultMCPToolName}
+	}
+	return nil
+}
 
 // --isolated wins for one run without saving; it is refused for a harness
 // that has no isolation flags; without a terminal nothing is asked.

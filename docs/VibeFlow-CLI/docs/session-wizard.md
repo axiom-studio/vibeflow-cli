@@ -27,7 +27,8 @@ This is the only way to run Vera in the TUI; `vibeflow` starts straight into the
 Selecting only Vera uses the same wizard with fewer steps: **Directory > Type > Project > Team > Provider > Confirm**.
 Env, Routing, Qwen, Endpoint, Branch, Worktree and Permissions are skipped because each review runs in its own disposable worktree with the harness's full-permission mode.
 The **Provider** step is the ordinary provider list; harnesses Vera cannot run are shown dimmed and cannot be selected, and uninstalled ones show **(not installed)**.
-Vera can run Claude, Codex, Copilot, Cursor, Gemini, Kiro or Qwen, in normal mode like the other personas: your own login, environment, MCP servers and credentials, with full permissions.
+Vera can run Claude, Codex, Copilot, Cursor, Gemini, Kiro or Qwen, in normal mode like the other personas: your own login, environment and credentials, with full permissions.
+Her MCP servers are her own: never your VibeFlow token, only the read-only VibeFlow connection the server grants for one review (see [VibeFlow access in reviews](cli-reference.md#vibeflow-access-in-reviews)).
 Codex works with a ChatGPT subscription login as well as an API key.
 There is no model question: Vera uses the harness default model.
 The **Confirm** step shows the project, checkout, harness and "harness default" model, and states that Vera runs in its own tmux session, listening for `@vibeflow review` on the linked repository until you delete the session.

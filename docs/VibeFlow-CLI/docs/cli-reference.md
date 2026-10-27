@@ -27,7 +27,7 @@ Group edit (`e`) offers Vera as well: it is preselected when the group's checkou
 The wizard continues with its ordinary **Provider** step and then **Confirm**; the coding-agent Env, Routing, Branch, Worktree and Permissions steps are skipped.
 Choose any configured coding harness whose binary is installed (Claude, Codex, Gemini, Qwen, Copilot, Cursor or Kiro); other providers cannot be selected for Vera.
 Vera uses the harness default model, so there is no model question.
-Vera runs that harness like your other personas: your normal login, environment, MCP servers and credentials, with full permissions.
+Vera runs that harness like your other personas: your normal login, environment and credentials, with full permissions, but never with your VibeFlow token (see [VibeFlow access in reviews](#vibeflow-access-in-reviews)).
 Codex works with a ChatGPT subscription login as well as an API key.
 The chosen checkout must match a repository linked to that project; only when links are ambiguous or the checkout does not match does a small popup ask for that choice.
 With the LLM gateway enabled, that popup also asks for a model, because gateway reviews require one.
@@ -247,14 +247,15 @@ The agent reviews code without building it: it is told not to build the project,
 
 #### Personal setup or isolated
 
-By default Vera's Claude Code runs with your own setup: your hooks, MCP servers, plugins, skills and output style.
-These are sometimes useful to a review, but they also run inside a session that reads untrusted pull request text, so a personal MCP server is reachable from it.
+By default Vera's Claude Code runs with your own setup: your hooks, plugins, skills and output style.
+These are sometimes useful to a review, but they also run inside a session that reads untrusted pull request text.
+Its MCP servers are never yours, in either mode: it starts with `--strict-mcp-config --mcp-config <attempt>/mcp.json`, which holds only the VibeFlow connection the server granted, or nothing.
 Personal mode loads your user settings only, never the repository's: Vera's Claude Code starts with `--setting-sources user`, so the review checkout's `.claude/settings.json`, `.claude/settings.local.json` and `.mcp.json`, which the pull request's author controls, are not loaded and their hooks and MCP servers never run.
 The other harnesses have no switch that ignores their workspace configuration, so Vera refuses a review whose head adds or changes it, with a reason that names the file: `.codex/` for codex, `.gemini/` or `.env` for gemini, `.qwen/` or `.env` for qwen, `.cursor/` for cursor, `.kiro/` or `.amazonq/` for kiro, and `.github/copilot/`, `.github/hooks/`, `.mcp.json` or `.vscode/mcp.json` for copilot.
 Configuration identical to the target branch's is the repository's own and is allowed; review any other such pull request with the `claude` harness.
 
-`--isolated` starts Vera's Claude Code with `--setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'`.
-It loads no user settings and none of the review checkout's own project settings, and starts no MCP servers, while keeping your normal Claude login.
+`--isolated` starts Vera's Claude Code with `--setting-sources ""`.
+It loads no user settings and none of the review checkout's own project settings, while keeping your normal Claude login.
 Isolation applies to the `claude` harness only; `--isolated` with another harness is refused.
 
 The choice is saved as `review_isolated: true|false` in `config.yaml`.
@@ -281,6 +282,28 @@ Private Git acquisition has a 2 GiB aggregate budget checked before and after ea
 Exceeding that budget stops the Git process group and fails the attempt before source export; ordinary receipt cleanup removes its private directory.
 This sampled guard can overshoot between checks and is not a hard disk quota; shared runner deployments that require a strict ceiling must also apply a filesystem or container storage quota.
 Prior finding evidence is bounded to 20 additional pages and 2 MiB; up to 100 relevant findings can be reconciled per result, with omitted states retained by the server.
+
+#### VibeFlow access in reviews
+
+A review or answer never runs with your VibeFlow token.
+The runner removes `MCP_TOKEN`, `VIBEFLOW_TOKEN` and any variable holding your token's value from the harness's environment, so a VibeFlow MCP server that `vibeflow bootstrap` installed (it reads `${MCP_TOKEN}`) cannot sign in as you.
+When the repository's review settings share VibeFlow project data (axiomcloud **Use this project's VibeFlow data in reviews and answers**), the server sends each review attempt, and each answer to someone who can see the project, a read-only credential for that one project, valid until the attempt ends and for at most an hour.
+The VibeFlow server refuses every write, every other project and every list that does not name the project.
+Without that credential (the setting is off, the asker cannot see the project, or the server is older) the agent starts with no VibeFlow MCP server.
+
+| Harness | With a credential | Without |
+|---|---|---|
+| claude | Only server `vibeflow_review`, from `<attempt>/mcp.json` with `--strict-mcp-config` | `--strict-mcp-config` with no servers |
+| codex | Every `[mcp_servers.*]` of `$CODEX_HOME/config.toml` disabled with `-c mcp_servers.<name>.enabled=false`, plus `vibeflow_review` reading `VIBEFLOW_REVIEW_MCP_TOKEN` | Every configured server disabled |
+| qwen | `--mcp-config <attempt>/mcp.json --allowed-mcp-server-names=vibeflow_review` | `--allowed-mcp-server-names=vera_no_mcp_servers` (no MCP servers) |
+| copilot | `--disable-mcp-server vibeflow --additional-mcp-config @<attempt>/mcp.json` | `--disable-mcp-server vibeflow` |
+| gemini | No VibeFlow tools; the task says so | `--allowed-mcp-server-names=vera_no_mcp_servers` (no MCP servers) |
+| cursor, kiro | No VibeFlow tools; the task says so | No VibeFlow tools |
+
+Gemini CLI, Cursor and Kiro cannot be given an MCP server for one run, so they never get VibeFlow tools in a review; the brief still carries any project context the server shared.
+A Codex configuration that sets `mcp_servers` inline, names a server with characters other than letters, digits, `-` and `_`, or already defines `vibeflow_review` is refused with a reason, because Vera could not disable it for the run.
+The credential never appears in argv; the copy kept in `last-receipt.json` after the attempt drops it.
+
 
 Ctrl-C or SIGTERM stops the child process group and reports cancellation.
 A parent crash, expired lease, server cancellation, or deadline also stops the child.
