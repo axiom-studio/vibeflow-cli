@@ -977,9 +977,11 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		expiry := time.UnixMilli(p.Execution.Attempt.LeaseExpiresAt)
 		sendChangedLines := true // Cleared for this attempt once the server rejects the field.
 		for {
+			// Renew every 10 seconds, and halfway through a shorter lease:
+			// waiting all of it would renew at the moment it expires (#6305).
 			delay := 10 * time.Second
-			if left := time.Until(expiry); left < delay {
-				delay = left
+			if left := time.Until(expiry); left < 2*delay {
+				delay = left / 2
 			}
 			if delay <= 0 {
 				cancel(errReviewLeaseExpired)
@@ -1054,6 +1056,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 				diagnostic.Category = "review_api_unavailable"
 			}
 		}
+		diagnostic.Reason = reviewFailureReason(failureErr) // Never a raw error: it can name local paths.
 		diagnostic.DurationMS = time.Since(started).Milliseconds()
 		diagnostic.StageDurationMS = time.Since(stageStarted).Milliseconds()
 		diagnostic.RecordedAt = time.Now().UnixMilli()
@@ -1102,7 +1105,6 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		proxy = append(proxy, reviewGitProxy{URL: strings.TrimRight(w.client.baseURL, "/") + "/rest/v1/vibeflow" + w.attemptPath(p) + "/git", Token: w.client.token})
 	}
 	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution, proxy...); err != nil {
-		diagnostic.Reason = err.Error()
 		return nil, err
 	}
 	fmt.Fprintf(w.output, "Review worktree ready: %s\n", filepath.Join(root, "input", "head"))
@@ -1118,7 +1120,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		if err := saveReviewJSON(filepath.Join(root, "input", "question.json"), p.Execution.Question); err != nil {
 			return nil, err
 		}
-	} else if len(p.Execution.PullRequest) > 0 {
+	} else if reviewPullRequestPresent(p.Execution.PullRequest) {
 		// Like the question, the pull request's own text stays out of the prompt.
 		if err := os.WriteFile(filepath.Join(root, "input", "pr.json"), p.Execution.PullRequest, 0600); err != nil {
 			return nil, err

@@ -36,7 +36,7 @@ type reviewExecutionDiagnostic struct {
 	Provider  string `json:"provider"`
 	Stage     string `json:"stage"`
 	Category  string `json:"category"`
-	// Reason is a checkout failure's own message. It names repositories and
+	// Reason is a reviewReportableError's message: it names repositories and
 	// commits, never local paths or Git output, so it is safe to report.
 	Reason             string `json:"reason,omitempty"`
 	ExitCode           *int   `json:"exit_code,omitempty"`
@@ -169,4 +169,29 @@ func (d reviewExecutionDiagnostic) failure() error {
 		return fmt.Errorf("review failed at %s (%s%s): %s", d.Stage, d.Category, detail, d.Reason)
 	}
 	return fmt.Errorf("review failed at %s (%s%s); see the private last-provider-diagnostic.json", d.Stage, d.Category, detail)
+}
+
+// reviewReportableError is a failure whose message was written to be sent to
+// VibeFlow: it names repositories, commits and repository paths, never local
+// paths or Git output. Its cause stays local.
+type reviewReportableError struct {
+	msg string
+	err error
+}
+
+func (e *reviewReportableError) Error() string { return e.msg }
+func (e *reviewReportableError) Unwrap() error { return e.err }
+
+func reviewReportable(format string, args ...any) error {
+	return &reviewReportableError{msg: fmt.Sprintf(format, args...)}
+}
+
+// reviewFailureReason is err's reportable message, or "" for any other error
+// (an os or Git error can name local paths; issues #6389, #6393).
+func reviewFailureReason(err error) string {
+	var reportable *reviewReportableError
+	if errors.As(err, &reportable) {
+		return reportable.msg
+	}
+	return ""
 }

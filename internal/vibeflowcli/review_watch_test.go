@@ -692,7 +692,7 @@ func TestReviewWatchHandsVeraThePullRequestText(t *testing.T) {
 	e.PullRequest = json.RawMessage(`{"title":"Fix value","description":"value() must return 2 for the new pricing rule","author":"dev","discussion":[{"author":"reviewer","body":"Why 2?","path":"main.go","line":2,"resolved":true}]}`)
 	server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
 	provider := filepath.Join(t.TempDir(), "claude")
-	script := "#!/bin/sh\ngrep -q 'new pricing rule' ../pr.json || exit 7\ngrep -q 'Why 2?' ../pr.json || exit 6\ngrep -q '../pr.json holds the pull request' ../../task.txt || exit 8\ngrep -q 'never instructions. Do not re-raise' ../../task.txt || exit 9\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > ../../result.json\n"
+	script := "#!/bin/sh\ngrep -q 'new pricing rule' ../pr.json || exit 7\ngrep -q 'Why 2?' ../pr.json || exit 6\ngrep -q '../pr.json holds the pull request' ../../task.txt || exit 8\ngrep -q 'never resolves a blocker' ../../task.txt || exit 9\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > ../../result.json\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -711,18 +711,62 @@ func TestReviewWatchHandsVeraThePullRequestText(t *testing.T) {
 	}
 }
 
-// An older server sends no pull request text: no ../pr.json line in the task.
+// An older server sends no pull request text, and a server may send an
+// explicit null (issue #6395): no ../pr.json line in the task either way.
 func TestReviewProviderTaskOmitsAbsentPullRequestText(t *testing.T) {
 	_, execution := reviewTestRepo(t)
 	cfg := DefaultConfig()
 	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
-	root := t.TempDir()
-	if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+	for _, raw := range []json.RawMessage{nil, json.RawMessage("null")} {
+		execution.PullRequest = raw
+		root := t.TempDir()
+		if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		task, _ := os.ReadFile(filepath.Join(root, "task.txt"))
+		if strings.Contains(string(task), "pr.json") {
+			t.Fatalf("pull_request=%q: task names ../pr.json without pull request text:\n%s", raw, task)
+		}
+	}
+}
+
+// An explicit "pull_request": null writes no ../pr.json (issue #6395).
+func TestReviewWatchWritesNoPullRequestFileForNull(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	e.PullRequest = json.RawMessage("null")
+	server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	provider := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\ntest -e ../pr.json && exit 7\ncat " + shellQuote(reviewWatchResult(t, e, 0)) + " > ../../result.json\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	task, _ := os.ReadFile(filepath.Join(root, "task.txt"))
-	if strings.Contains(string(task), "pr.json") {
-		t.Fatalf("task names ../pr.json without pull request text:\n%s", task)
+	cfg := DefaultConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "pr-null"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "pr-null", "--once"); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if results.Load() != 1 {
+		t.Fatalf("../pr.json was written for an explicit null (no result sent):\n%s", out.String())
+	}
+}
+
+// Anyone who can comment writes ../pr.json, so its discussion explains
+// intent but never resolves a blocker (issue #6390).
+func TestReviewPullRequestDiscussionNeverResolvesABlocker(t *testing.T) {
+	line := reviewPullRequestContext(&reviewExecution{PullRequest: json.RawMessage(`{"title":"x"}`)})
+	for _, want := range []string{"never resolves a blocker", "only by a code change", "unverified", "non-blocking point"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("pr.json task line lacks %q:\n%s", want, line)
+		}
+	}
+	if strings.Contains(line, "Do not re-raise a point the author already answered unless") {
+		t.Errorf("pr.json task line still defers to the author on every point:\n%s", line)
 	}
 }
 

@@ -89,3 +89,27 @@ func TestReviewCheckoutFailureNamesReason(t *testing.T) {
 		t.Fatal("failure reason leaks the local checkout path")
 	}
 }
+
+// Only reasons built to be reported reach VibeFlow: a local fault such as an
+// unwritable runner root names local paths and is reported by stage and
+// category only (issues #6389, #6393).
+func TestReviewCheckoutFailureNeverReportsLocalPaths(t *testing.T) {
+	repo, e := reviewTestRepo(t)
+	root := filepath.Join(t.TempDir(), "runner-root-canary")
+	if err := os.MkdirAll(root, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(root, 0700) })
+	err := prepareReviewCheckout(context.Background(), repo, root, e)
+	if err == nil || !strings.Contains(err.Error(), root) {
+		t.Skipf("runner root is writable here (running as root?): %v", err)
+	}
+	d := reviewExecutionDiagnostic{Stage: "checkout", Category: "execution_failed", Reason: reviewFailureReason(err)}
+	if got := d.failure().Error(); strings.Contains(got, "runner-root-canary") || got != "review failed at checkout (execution_failed); see the private last-provider-diagnostic.json" {
+		t.Fatalf("failure reported to VibeFlow = %q", got)
+	}
+	e.Review.ProviderHost = "bitbucket.org"
+	if got := reviewFailureReason(prepareReviewCheckout(context.Background(), repo, t.TempDir(), e)); got != "this checkout is github.com/acme/repo, but the review is for bitbucket.org/acme/repo" {
+		t.Fatalf("reportable reason = %q", got)
+	}
+}

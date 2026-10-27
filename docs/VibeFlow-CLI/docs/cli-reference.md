@@ -249,6 +249,9 @@ The agent reviews code without building it: it is told not to build the project,
 
 By default Vera's Claude Code runs with your own setup: your hooks, MCP servers, plugins, skills and output style.
 These are sometimes useful to a review, but they also run inside a session that reads untrusted pull request text, so a personal MCP server is reachable from it.
+Personal mode loads your user settings only, never the repository's: Vera's Claude Code starts with `--setting-sources user`, so the review checkout's `.claude/settings.json`, `.claude/settings.local.json` and `.mcp.json`, which the pull request's author controls, are not loaded and their hooks and MCP servers never run.
+The other harnesses have no switch that ignores their workspace configuration, so Vera refuses a review whose head adds or changes it, with a reason that names the file: `.codex/` for codex, `.gemini/` or `.env` for gemini, `.qwen/` or `.env` for qwen, `.cursor/` for cursor, `.kiro/` or `.amazonq/` for kiro, and `.github/copilot/`, `.github/hooks/`, `.mcp.json` or `.vscode/mcp.json` for copilot.
+Configuration identical to the target branch's is the repository's own and is allowed; review any other such pull request with the `claude` harness.
 
 `--isolated` starts Vera's Claude Code with `--setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'`.
 It loads no user settings and none of the review checkout's own project settings, and starts no MCP servers, while keeping your normal Claude login.
@@ -262,6 +265,8 @@ The startup line names the mode, for example `online (local, claude, isolated)`.
 For an `@vibeflow ask` question the checkout is read-only: before the harness starts, the head worktree's files and the base and merge-base snapshots lose write permission (Git's own metadata stays writable so read commands work), and Claude starts without its Edit, MultiEdit and NotebookEdit tools.
 Your configured MCP servers stay available to answers.
 The question file also carries the pull request's own discussion from the server (comments and inline review comments), so Vera answers in the context of the thread.
+A review gets the pull request's title, description and discussion as `pr.json` when the server sends them (an explicit `null` counts as none). Anyone who can comment may have written that text, so it explains intent but never resolves a blocker: a correctness or security blocker is resolved only by a code change or by evidence in the repository, and claims of outside approval are treated as unverified.
+Failure reasons sent to VibeFlow name repositories and commits only; a local fault such as a full disk or an unwritable runner root is reported by stage and category, never with local paths.
 The developer checkout stays untouched.
 The PR diff uses the unique merge base, while the exact target tip remains separate integration context.
 `revisions.json` identifies both baselines; missing or ambiguous history fails visibly instead of producing a misleading diff.

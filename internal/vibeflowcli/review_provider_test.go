@@ -80,6 +80,9 @@ func TestReviewProviderUsesNormalModeForEveryHarness(t *testing.T) {
 			}
 			task := filepath.Join(root, "task.txt")
 			want, stdin, _ := reviewHarnessArgs(key, "some-model", "Your complete PR review task is in the file "+task+". Read that whole file first, then follow it exactly.")
+			if key == "claude" { // Never the checkout's settings (issue #6392).
+				want = append(slices.Clone(reviewPersonalClaudeArgs), want...)
+			}
 			if !slices.Equal(spec.Args, want) {
 				t.Fatalf("args %q, want %q", spec.Args, want)
 			}
@@ -323,8 +326,9 @@ func TestReviewProviderQuestionTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Args) < len(reviewReadOnlyClaudeArgs) || strings.Join(spec.Args[:len(reviewReadOnlyClaudeArgs)], " ") != strings.Join(reviewReadOnlyClaudeArgs, " ") {
-		t.Fatalf("question harness does not start with the read-only tool list: %q", spec.Args)
+	front := append(slices.Clone(reviewPersonalClaudeArgs), reviewReadOnlyClaudeArgs...)
+	if len(spec.Args) < len(front) || strings.Join(spec.Args[:len(front)], " ") != strings.Join(front, " ") {
+		t.Fatalf("question harness does not start with the setting sources and read-only tool list: %q", spec.Args)
 	}
 	if !strings.Contains(strings.Join(spec.Args, " ")+" "+spec.InputFile, "task.txt") {
 		t.Fatalf("question task not handed to the harness: %q %q", spec.Args, spec.InputFile)
@@ -454,6 +458,7 @@ func TestDropInvalidReviewSuggestions(t *testing.T) {
 // the headless and the interactive launch, and never another harness's
 // (issue #6195).
 func TestReviewIsolationFlagsOnlyWhenChosen(t *testing.T) {
+	isolateReviewHarnessHome(t) // makeReviewSpecInteractive writes folder trust.
 	_, execution := reviewTestRepo(t)
 	isolatedFlags := strings.Join(reviewIsolatedClaudeArgs[2:], " ") // "--strict-mcp-config --setting-sources local"
 	for _, tc := range []struct {
@@ -534,5 +539,109 @@ func TestReviewWatchRefusesIsolatedBackgroundRunner(t *testing.T) {
 	err := runReviewWatch(context.Background(), &out, "--background", "--isolated", "--project", "1", "--repo", t.TempDir(), "--repository-link", "7", "--provider", "claude")
 	if err == nil || !strings.Contains(err.Error(), "set review_isolated: true in "+ConfigPath()) {
 		t.Fatalf("--background --isolated: err=%v\n%s", err, out.String())
+	}
+}
+
+// isolateReviewHarnessHome keeps folder-trust writes out of the real
+// ~/.claude.json and ~/.codex/config.toml.
+func isolateReviewHarnessHome(t *testing.T) {
+	t.Helper()
+	withTempRoot(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
+}
+
+// Personal mode keeps the user's own settings, but never the checkout's
+// project or local settings: their hooks are shell commands that run before
+// the model reads anything (issue #6392). Isolated mode keeps no source.
+func TestReviewClaudeNeverLoadsTheCheckoutSettings(t *testing.T) {
+	isolateReviewHarnessHome(t)
+	_, execution := reviewTestRepo(t)
+	for _, tc := range []struct {
+		choice *bool
+		want   string
+	}{{nil, "--setting-sources user"}, {boolPtr(false), "--setting-sources user"}, {boolPtr(true), "--setting-sources ''"}} {
+		cfg := DefaultConfig()
+		fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+		cfg.ReviewIsolated = tc.choice
+		root := t.TempDir()
+		spec, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := slices.Index(spec.Args, "--setting-sources")
+		if i < 0 || i+1 == len(spec.Args) || (spec.Args[i+1] == "user") != (tc.want == "--setting-sources user") || slices.Index(spec.Args[i+1:], "--setting-sources") >= 0 {
+			t.Errorf("isolated=%v headless: want %s once: %q", reviewIsolated(cfg), tc.want, spec.Args)
+		}
+		if err := makeReviewSpecInteractive(spec, cfg, "claude", "", root, false); err != nil {
+			t.Fatal(err)
+		}
+		if command := strings.Join(spec.Args, " "); strings.Count(command, "--setting-sources") != 1 || !strings.Contains(command, tc.want) {
+			t.Errorf("isolated=%v interactive: want %s once: %s", reviewIsolated(cfg), tc.want, command)
+		}
+	}
+}
+
+// The other harnesses have no switch that ignores workspace configuration
+// (codex 0.163.0 started an MCP server from the checkout's .codex/config.toml
+// in exec mode). A review whose head adds or changes that configuration is
+// refused with a reportable reason; configuration identical to the target
+// branch is the repository's own and is allowed (issue #6392).
+func TestReviewRefusesHarnessConfigFromThePullRequest(t *testing.T) {
+	_, execution := reviewTestRepo(t)
+	cfg := DefaultConfig()
+	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct{ provider, path string }{
+		{"codex", ".codex/config.toml"}, {"gemini", ".gemini/settings.json"}, {"gemini", ".env"}, {"qwen", ".qwen/settings.json"},
+		{"cursor", ".cursor/hooks.json"}, {"kiro", ".kiro/settings/mcp.json"}, {"copilot", ".github/hooks/start.json"},
+	} {
+		root := t.TempDir()
+		head, base := filepath.Join(root, "input", "head"), filepath.Join(root, "input", "base")
+		write(filepath.Join(head, tc.path), "run: touch /tmp/owned")
+		write(filepath.Join(base, "main.go"), "package main")
+		_, err := prepareReviewProvider(context.Background(), cfg, tc.provider, "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", "")
+		if reason := reviewFailureReason(err); err == nil || !strings.Contains(reason, filepath.Dir(tc.path)) || strings.Contains(reason, root) {
+			t.Errorf("%s with %s added: err=%v reason=%q", tc.provider, tc.path, err, reason)
+		}
+		write(filepath.Join(base, tc.path), "run: touch /tmp/owned")
+		if _, err := prepareReviewProvider(context.Background(), cfg, tc.provider, "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+			t.Errorf("%s with %s unchanged from the target: %v", tc.provider, tc.path, err)
+		}
+		write(filepath.Join(head, tc.path), "run: something else")
+		if _, err := prepareReviewProvider(context.Background(), cfg, tc.provider, "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err == nil {
+			t.Errorf("%s with %s changed: not refused", tc.provider, tc.path)
+		}
+	}
+	root := t.TempDir()
+	write(filepath.Join(root, "input", "head", ".claude", "settings.json"), `{"hooks":{}}`)
+	if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
+		t.Errorf("claude refused although its project settings never load: %v", err)
+	}
+}
+
+// A symlinked configuration file is refused without being followed.
+func TestReviewWorkspaceConfigRefusesSymlinks(t *testing.T) {
+	root := t.TempDir()
+	head, base := filepath.Join(root, "head"), filepath.Join(root, "base")
+	for _, dir := range []string{filepath.Join(head, ".codex"), base} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("/dev/zero", filepath.Join(head, ".codex", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if reason := reviewFailureReason(checkReviewWorkspaceConfig("codex", head, base)); !strings.Contains(reason, ".codex/config.toml") {
+		t.Fatalf("symlinked config: reason=%q", reason)
 	}
 }
