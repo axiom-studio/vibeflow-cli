@@ -181,7 +181,7 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 		}
 	})
 
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken, cfg.DefaultProject = server.URL, "vera-api-canary", "66"
 	cfg.DefaultWorkDir, cfg.TmuxSocket = "", socket
 	cfg.DirectoryHistory = []string{repo, repo2}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 )
 
@@ -51,18 +52,9 @@ func reviewSlotPick(o reviewWatchOptions, jobs []reviewJob) (reviewJob, string, 
 // machine's review_concurrency limit. Harnesses run headless: one terminal
 // cannot host several interactive sessions.
 func runReviewSlots(ctx context.Context, client *Client, cfg *Config, o reviewWatchOptions, capacity *reviewCapacity, answerSlots, reviewSlots int, out io.Writer) error {
-	type slot struct {
-		kind, label string
-	}
-	var slots []slot
-	for i := 1; i <= answerSlots; i++ {
-		slots = append(slots, slot{"question", fmt.Sprintf("answer %d", i)})
-	}
-	for i := 1; i <= reviewSlots; i++ {
-		slots = append(slots, slot{"review", fmt.Sprintf("review %d", i)})
-	}
+	slots := reviewSlotList(answerSlots, reviewSlots)
 	for _, s := range slots {
-		if len(o.Name+" · "+s.label) > 100 {
+		if len(o.Name+" · "+s.Label) > 100 {
 			return fmt.Errorf("runner name is too long for slot names; use a shorter --name")
 		}
 	}
@@ -73,19 +65,23 @@ func runReviewSlots(ctx context.Context, client *Client, cfg *Config, o reviewWa
 	var wg sync.WaitGroup
 	errs := make([]error, len(slots))
 	for i, s := range slots {
-		opts := o
-		opts.SlotKind, opts.Name = s.kind, o.Name+" · "+s.label
-		watch := &reviewWatch{client: client, cfg: cfg, options: opts, output: &reviewSlotWriter{mu: &mu, out: out, prefix: "[" + s.label + "] "}, capacity: capacity}
+		opts := reviewSlotOptions(o, s)
+		opts.SlotLabel = "" // In-process slots share one terminal; no window to rename.
+		watch := &reviewWatch{client: client, cfg: cfg, options: opts, output: &reviewSlotWriter{mu: &mu, out: out, prefix: "[" + s.Label + "] "}, capacity: capacity}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			if err := watch.run(ctx); err != nil {
-				errs[i] = fmt.Errorf("%s: %w", slots[i].label, err)
+				errs[i] = fmt.Errorf("%s: %w", slots[i].Label, err)
 				cancel(errs[i]) // One failed slot stops the listener, as a single runner would.
 			}
 		}(i)
 	}
 	wg.Wait()
+	// The failed slot's own error, not a sibling's "context canceled".
+	if cause := context.Cause(ctx); cause != nil && slices.Contains(errs, cause) {
+		return cause
+	}
 	for _, err := range errs {
 		if err != nil {
 			return err

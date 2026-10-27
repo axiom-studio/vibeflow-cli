@@ -126,7 +126,7 @@ func TestReviewWatchForegroundLifecycle(t *testing.T) {
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "stream-api-canary"
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -171,7 +171,7 @@ func TestReviewWatchListenersShareCapacity(t *testing.T) {
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken, cfg.ReviewConcurrency = server.URL, "capacity-canary", 1
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -262,7 +262,7 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 	if err := os.WriteFile(harness, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, v.token
 	personal := false // A saved choice: the pane would otherwise ask the one-time setup question.
 	cfg.ReviewIsolated = &personal
@@ -500,7 +500,7 @@ func TestReviewWatchStopMidReviewIsCancelled(t *testing.T) {
 	if err := os.WriteFile(provider, []byte("#!/bin/sh\ntouch "+shellQuote(filepath.Join(marks, "started"))+"\nexec sleep 300\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "stop-canary"
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -593,7 +593,7 @@ func TestReviewWatchQuestionLifecycle(t *testing.T) {
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "stream-api-canary"
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -635,7 +635,7 @@ func TestReviewWatchQuestionClaimIdentity(t *testing.T) {
 			reviewWatchQuestionExecution(e)
 			mutate(e)
 			server, _, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
-			cfg := DefaultConfig()
+			cfg := singleSlotConfig()
 			cfg.ServerURL, cfg.APIToken = server.URL, "stream-api-canary"
 			cfg.Providers["claude"] = Provider{Binary: filepath.Join(t.TempDir(), "never-run")}
 			if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -662,7 +662,7 @@ func TestReviewWatchNamesEnvironmentTokenOverride(t *testing.T) {
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "config-token-canary"
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -696,7 +696,7 @@ func TestReviewWatchHandsVeraThePullRequestText(t *testing.T) {
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "pr-text"
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -714,7 +714,7 @@ func TestReviewWatchHandsVeraThePullRequestText(t *testing.T) {
 // An older server sends no pull request text: no ../pr.json line in the task.
 func TestReviewProviderTaskOmitsAbsentPullRequestText(t *testing.T) {
 	_, execution := reviewTestRepo(t)
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
 	root := t.TempDir()
 	if _, err := prepareReviewProvider(context.Background(), cfg, "claude", "", root, execution, &reviewBrief{Digest: strings.Repeat("b", 64)}, "", ""); err != nil {
@@ -738,7 +738,7 @@ func TestReviewWatchAdoptsResultWrittenInTheCheckout(t *testing.T) {
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "stray"
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -785,7 +785,7 @@ func TestReviewWatchAdoptsResultWrittenBesideTheInputs(t *testing.T) {
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "beside"
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
@@ -810,7 +810,7 @@ func TestReviewWatchAsksOnceForIsolation(t *testing.T) {
 	withTempRoot(t)
 	repo, e := reviewTestRepo(t)
 	server, _, _ := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "file-token"
 	fakeReviewHarnesses(t, cfg, "#!/bin/sh\nexit 0\n")
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
