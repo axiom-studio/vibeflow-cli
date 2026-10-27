@@ -26,7 +26,7 @@ import (
 
 // Vera is part of the normal binary: New Agent always offers her.
 func TestVeraAgentPickerAlwaysOffersVera(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	m := Model{config: cfg, registry: NewProviderRegistry(cfg)}
 	next, _ := m.Update(tea.KeyPressMsg{Text: "n"})
 	w := next.(Model).wizard
@@ -203,7 +203,7 @@ func newVeraFixture(t *testing.T) (cfg *Config, repo string, registrations, poll
 		}
 	}))
 	t.Cleanup(server.Close)
-	cfg = DefaultConfig()
+	cfg = singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "vera-api-canary"
 	cfg.Providers["claude"] = Provider{Name: "Claude", Binary: provider}
 	cfg.Providers["codex"] = Provider{Name: "Codex", Binary: provider}
@@ -531,7 +531,7 @@ func TestVeraSessionDeleteStopsListener(t *testing.T) {
 // Vera is not a coding agent: the wizard routes her to the Vera launch, and
 // the coding-session path refuses her outright.
 func TestVeraSoloLaunchNeverStartsCodingLoop(t *testing.T) {
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	m := Model{config: cfg}
 	msg := m.launchFromWizard(WizardResult{SessionType: "vibeflow", Persona: "code_reviewer", Personas: []string{"code_reviewer"}})
 	if _, ok := msg.(veraLaunchRequestedMsg); !ok {
@@ -673,7 +673,7 @@ func TestVeraAmbiguousLinksRequireSelection(t *testing.T) {
 		fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"},{"provider":"github","provider_host":"github.com","repository_link_id":8,"repository_name":"acme/repo"}]}`)
 	}))
 	defer server.Close()
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "fixture"
 	o := reviewWatchOptions{Project: "66", Repository: repo, Provider: "claude"}
 	_, input, err := resolveReviewStartup(context.Background(), cfg, o, true)
@@ -717,7 +717,7 @@ func TestVeraRowShowsRepositoryWhenNarrow(t *testing.T) {
 // a launch used to clear the error before it was ever drawn.
 func TestVeraLaunchErrorStaysVisible(t *testing.T) {
 	withTempRoot(t)
-	m := veraTmuxModel(t, DefaultConfig())
+	m := veraTmuxModel(t, singleSlotConfig())
 	_ = m.tmux.EnsureServer()
 	next, cmd := m.finishVeraLaunch(veraLaunchedMsg{err: fmt.Errorf("the vibeflow binary this TUI started from (/x) was removed or replaced; restart vibeflow")})
 	m = next.(Model)
@@ -765,7 +765,7 @@ func TestVeraSessionClearsAmbientVibeflowCredentials(t *testing.T) {
 	}
 	meta := SessionMeta{Name: "vera-env", Provider: "claude", Persona: "code_reviewer", WorkingDir: t.TempDir(), Vera: &veraBinding{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", RunnerName: "env"}}
 	meta.TmuxSession = tm.FullSessionName(meta.Provider, meta.Name)
-	if err := startVeraTmuxSession(tm, meta, ""); err != nil {
+	if err := startVeraTmuxSession(tm, meta, "", 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"VIBEFLOW_TOKEN", "VIBEFLOW_URL"} {
@@ -773,5 +773,134 @@ func TestVeraSessionClearsAmbientVibeflowCredentials(t *testing.T) {
 		if err != nil || strings.TrimSpace(out) != key+"=" {
 			t.Errorf("%s in the Vera session = %q, %v; want it empty", key, strings.TrimSpace(out), err)
 		}
+	}
+}
+
+// With slot counts in the config, Vera's session shows the dashboard and
+// gives each slot its own window running a slot listener; the session row
+// reports every slot's job. Without slots nothing changes (tests above).
+func TestVeraConsoleSlotWindows(t *testing.T) {
+	cfg, repo, _, _, _ := newVeraFixture(t)
+	cfg.ReviewAnswerSlots, cfg.ReviewReviewSlots = 1, 1
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(t.TempDir(), "vibeflow")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec sleep 300\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	setVeraExecutable(t, fake)
+	m := veraTmuxModel(t, cfg)
+	m, _ = launchVera(t, m, veraResult(repo, "claude"))
+	meta := storedVera(t)[0]
+	if command := paneCommand(t, m.tmux, meta.TmuxSession); !strings.Contains(command, "--dashboard") || !strings.Contains(command, "--answer-slots 1") {
+		t.Fatalf("console's first pane does not run the dashboard: %s", command)
+	}
+	windows := func() map[string]string {
+		t.Helper()
+		out, err := m.tmux.run("list-windows", "-t", meta.TmuxSession, "-F", "#{@vibeflow_vera_slot}\t#{pane_start_command}")
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := map[string]string{}
+		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+			if f := strings.SplitN(line, "\t", 2); len(f) == 2 && f[0] != "" {
+				found[f[0]] = f[1]
+			}
+		}
+		return found
+	}
+	got := windows()
+	if len(got) != 2 || !strings.Contains(got["answer 1"], "--slot-kind question") || !strings.Contains(got["review 1"], "--slot-kind review") || !strings.Contains(got["answer 1"], "answer 1") {
+		t.Fatalf("slot windows: %v", got)
+	}
+	// A restart reuses the slot windows instead of adding more.
+	if err := startVeraSlotWindows(m.tmux, meta, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if again := windows(); len(again) != 2 {
+		t.Fatalf("slot windows duplicated: %v", again)
+	}
+	if status, work := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "listening" || work != "listening" {
+		t.Fatalf("idle console row: %s %s", status, work)
+	}
+	answer := reviewSlotOptions(veraOptions(meta), reviewSlotSpec{"question", "answer 1"})
+	dir := filepath.Join(RootDir(), "review-runners", reviewBackgroundID(cfg.ServerURL, answer))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	e := &reviewExecution{Kind: "question", Review: reviewJob{ID: "job", Number: 34}}
+	if err := saveReviewJSON(filepath.Join(dir, "state.json"), reviewRunnerState{ID: "runner", Pending: &reviewReceipt{JobID: "job", Execution: e, ClaimedAt: time.Now().Add(-2 * time.Minute).UnixMilli()}}); err != nil {
+		t.Fatal(err)
+	}
+	if status, work := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "reviewing" || work != "answering on PR #34" {
+		t.Fatalf("busy console row: %s %s", status, work)
+	}
+	var b strings.Builder
+	renderVeraDashboard(&b, veraOptions(meta), veraSlotActivities(cfg.ServerURL, veraOptions(meta), 1, 1, nil, time.Now()))
+	if text := b.String(); !strings.Contains(text, "Answers 1/1 · Reviews 0/1") || !strings.Contains(text, "Answering a question on PR #34") || !strings.Contains(text, "2m0s") {
+		t.Fatalf("dashboard:\n%s", text)
+	}
+	// Issue #6426: an exited slot window shows as stopped in the row and the
+	// dashboard, and a restart respawns only that slot.
+	reviewWindow := ""
+	out, _ := m.tmux.run("list-windows", "-t", meta.TmuxSession, "-F", "#{window_id}\t#{@vibeflow_vera_slot}")
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if f := strings.Split(line, "\t"); len(f) == 2 && f[1] == "review 1" {
+			reviewWindow = f[0]
+		}
+	}
+	if _, err := m.tmux.run("kill-window", "-t", reviewWindow); err != nil {
+		t.Fatal(err)
+	}
+	if status, work := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "stopped" || work != "answering on PR #34 · review 1 stopped" {
+		t.Fatalf("console row with an exited slot: %s %s", status, work)
+	}
+	stopped := veraStoppedSlots(m.tmux.run, meta.TmuxSession, 1, 1)
+	b.Reset()
+	renderVeraDashboard(&b, veraOptions(meta), veraSlotActivities(cfg.ServerURL, veraOptions(meta), 1, 1, stopped, time.Now()))
+	if text := b.String(); !strings.Contains(text, "stopped: its listener exited") || !strings.Contains(text, "restart this Vera session") {
+		t.Fatalf("dashboard with an exited slot:\n%s", text)
+	}
+	// A marker on the session survives only if the restart keeps the session.
+	if _, err := m.tmux.run("set-option", "-t", meta.TmuxSession, "@vera_probe", "kept"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restartVeraSession(meta, m.tmux, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	probe, _ := m.tmux.run("show-options", "-v", "-t", meta.TmuxSession, "@vera_probe")
+	if again := windows(); len(again) != 2 || strings.TrimSpace(probe) != "kept" {
+		t.Fatalf("restart did not respawn just the slot: %v", again)
+	}
+	if status, _ := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "reviewing" {
+		t.Fatalf("console row after the slot restart: %s", status)
+	}
+	// A session still running the single listener from before the upgrade
+	// (no recorded layout) reads as that listener, not as stopped slots, and
+	// a restart replaces it with a whole console instead of mixing the two.
+	if err := m.tmux.KillSession(meta.TmuxSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := startVeraTmuxSession(m.tmux, meta, "", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.tmux.run("set-option", "-u", "-t", meta.TmuxSession, veraSlotsOption); err != nil {
+		t.Fatal(err)
+	}
+	if status, work := veraRowStatus(meta, cfg.ServerURL, false, m.tmux.run); status != "listening" || work != "listening" {
+		t.Fatalf("pre-upgrade single listener row: %s %s", status, work)
+	}
+	if _, err := restartVeraSession(meta, m.tmux, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if command := paneCommand(t, m.tmux, meta.TmuxSession); !strings.Contains(command, "--dashboard") {
+		t.Fatalf("restart kept the single listener: %s", command)
+	}
+	if again := windows(); len(again) != 2 {
+		t.Fatalf("restart of a single listener: slot windows %v", again)
+	}
+	if a, r := veraSessionSlots(m.tmux.run, meta.TmuxSession); a != 1 || r != 1 {
+		t.Fatalf("recorded layout %d/%d, want 1/1", a, r)
 	}
 }

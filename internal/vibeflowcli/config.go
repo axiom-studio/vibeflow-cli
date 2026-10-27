@@ -124,10 +124,11 @@ type Config struct {
 	ReviewConcurrency int    `yaml:"review_concurrency"`
 	// ReviewAnswerSlots and ReviewReviewSlots split one Vera listener into
 	// slots: answer slots take only questions, review slots prefer reviews
-	// and take questions only when no review waits. Both 0 (the default)
-	// keeps the single shared slot.
-	ReviewAnswerSlots int `yaml:"review_answer_slots,omitempty"`
-	ReviewReviewSlots int `yaml:"review_review_slots,omitempty"`
+	// and take questions only when no review waits. The default is one of
+	// each; both 0 keeps the single shared slot. Never omitted when saved, so
+	// an explicit 0 survives a save.
+	ReviewAnswerSlots int `yaml:"review_answer_slots"`
+	ReviewReviewSlots int `yaml:"review_review_slots"`
 	// ReviewIsolated runs Vera's Claude Code without the developer's own
 	// hooks, MCP servers, plugins and output style. nil means not chosen yet.
 	ReviewIsolated    *bool               `yaml:"review_isolated,omitempty"`
@@ -267,6 +268,8 @@ func DefaultConfig() *Config {
 		TmuxSocket:        "vibeflow",
 		PollInterval:      5,
 		ReviewConcurrency: 2,
+		ReviewAnswerSlots: 1,
+		ReviewReviewSlots: 1,
 		ClaudeBinary:      "claude",
 		DefaultProvider:   "claude",
 		MCPToolName:       DefaultMCPToolName,

@@ -79,7 +79,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL = foreign.URL // The explicit UAT-style override must be pinned.
 	cfg.APIToken = "configured-api-canary"
 	cfg.Providers["claude"] = Provider{Binary: provider, Env: map[string]string{"ANTHROPIC_API_KEY": "configured-model-canary"}}
@@ -435,7 +435,7 @@ func TestReviewBackgroundFetchUsesPinnedSSHAgent(t *testing.T) {
 	}))
 	defer server.Close()
 	root, modelHome := t.TempDir(), t.TempDir()
-	cfg := DefaultConfig()
+	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, "configured-api-canary"
 	cfg.Providers["claude"] = Provider{Binary: provider}
 	if err := SaveConfig(cfg, filepath.Join(root, "config.yaml")); err != nil {
