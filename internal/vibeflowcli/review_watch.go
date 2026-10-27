@@ -958,22 +958,41 @@ func (w *reviewWatch) cleanup(p *reviewReceipt) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
 	}
-	// The child guard holds this lock until every provider process has stopped.
+	// Each child guard (one per pass) holds its lock until every provider
+	// process it started has stopped.
 	deadline := time.Now().Add(8 * time.Second)
-	for {
-		lock, err := w.lockReviewCleanup(filepath.Join(dir, "child.lock"), p)
-		if err == nil {
-			defer lock.Close()
-			return removeReviewDir(dir)
+	for _, child := range reviewChildDirs(dir) {
+		for {
+			lock, err := w.lockReviewCleanup(filepath.Join(child, "child.lock"), p)
+			if err == nil {
+				defer lock.Close()
+				break
+			}
+			if !errors.Is(err, errReviewLockBusy) {
+				return err
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("prior review child is still shutting down; restart the watcher to retry cleanup")
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		if !errors.Is(err, errReviewLockBusy) {
-			return err
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("prior review child is still shutting down; restart the watcher to retry cleanup")
-		}
-		time.Sleep(100 * time.Millisecond)
 	}
+	return removeReviewDir(dir)
+}
+
+// reviewChildDirs are the directories of an attempt that can hold a child
+// guard's spec, lock and cleanup marker: the attempt itself and each pass.
+func reviewChildDirs(attempt string) []string {
+	passes, _ := filepath.Glob(filepath.Join(attempt, "passes", "*"))
+	return append([]string{attempt}, passes...)
+}
+
+// reviewAttemptDir is the attempt directory of a child guard's directory.
+func reviewAttemptDir(dir string) string {
+	if filepath.Base(filepath.Dir(dir)) == "passes" {
+		return filepath.Dir(filepath.Dir(dir))
+	}
+	return dir
 }
 
 func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.RawMessage, failureErr error) {
@@ -1229,163 +1248,245 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		defer closeRelay()
 	}
-	p.Execution.budgetDeadline = attemptDeadline.time()
-	spec, err := prepareReviewProvider(ctx, w.cfg, w.options.Provider, w.options.Model, root, p.Execution, &brief, relayURL, relayToken)
-	if err != nil {
-		return nil, err
-	}
-	spec.DeadlineAt = attemptDeadline.time().UnixMilli()
 	interactive := w.tty != nil
-	if interactive {
-		if err = makeReviewSpecInteractive(spec, w.cfg, w.options.Provider, w.options.Model, root, p.Execution.isQuestion()); err != nil {
+	// prepare readies one harness session: the single pass when pass is nil.
+	prepare := func(pass *reviewPass) (*reviewChildSpec, error) {
+		p.Execution.budgetDeadline = attemptDeadline.time()
+		spec, err := prepareReviewPass(ctx, w.cfg, w.options.Provider, w.options.Model, root, p.Execution, &brief, relayURL, relayToken, pass)
+		if err != nil {
 			return nil, err
 		}
-	}
-	var extra []*os.File // The guard's descriptors from 3 on.
-	if w.slot != nil {
-		extra = append(extra, w.slot)
-		spec.CapacityFD = 3
-		spec.Cleanup = &reviewProviderCleanup{Reservation: *p.Capacity, RequestID: p.RequestID, JobID: p.JobID, AttemptID: p.Execution.Attempt.ID}
-	}
-	if interactive {
-		spec.TerminalFD = 3 + len(extra)
-		extra = append(extra, w.tty.files[:]...)
-	}
-	if err = saveReviewJSON(filepath.Join(root, "child.json"), spec); err != nil {
-		return nil, err
-	}
-	if p.Execution.isQuestion() {
-		// Answers are read-only: after every setup step that writes into the
-		// worktree, the checked-out files lose write permission. Git's own
-		// metadata stays writable so read commands keep working; result files
-		// live outside these trees.
-		if err := makeReviewTreesReadOnly(filepath.Join(root, "input")); err != nil {
-			return nil, err
+		if !pass.bounded() {
+			spec.DeadlineAt = attemptDeadline.time().UnixMilli()
 		}
-	}
-	executable, err := cliExecutable()
-	if err != nil {
-		return nil, err
-	}
-	guard := exec.Command(executable, "review-child", filepath.Join(root, "child.json"))
-	guard.ExtraFiles = extra
-	setStage("child_guard")
-	guard.WaitDelay = 250 * time.Millisecond
-	guard.Env = []string{"PATH=" + os.Getenv("PATH")}
-	guard.Dir = root
-	// Headless harness output is counted and only its tail is kept, in memory,
-	// to name failures the user must fix (login, trust); it is never relayed
-	// or sent to the server. An interactive harness owns the terminal instead.
-	stdout, stderr := reviewByteCounter{limit: 8 << 20}, reviewByteCounter{limit: 64 << 10}
-	guard.Stdout = &stdout
-	guard.Stderr = &stderr
-	if interactive {
-		fmt.Fprintf(w.output, "Starting %s in this pane; Vera closes it once the review result is written.\n", w.options.Provider)
-		// The harness gets the terminal as it was, and Vera's idle mode back
-		// once the harness is gone.
-		w.browse(false)
-		defer w.browse(true)
-		w.tty.save()
-	} else {
-		fmt.Fprintf(w.output, "Running %s headless; its output is not shown.\n", w.options.Provider)
-	}
-	pipe, err := guard.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err = guard.Start(); err != nil {
-		pipe.Close()
-		return nil, fmt.Errorf("could not start review child guard")
-	}
-	// EOF on this pipe is an independent parent-death signal. The guard owns
-	// termination even when this supervisor is killed without running defers.
-	if _, err = pipe.Write([]byte{'R'}); err != nil {
-		pipe.Close()
-		guard.Wait()
 		if interactive {
-			w.tty.reclaim(false)
-		}
-		return nil, fmt.Errorf("review child guard failed")
-	}
-	// Each later deadline follows on the same pipe; a closed pipe ends this.
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-attemptDeadline.moved:
-			}
-			var frame [8]byte
-			binary.BigEndian.PutUint64(frame[:], uint64(attemptDeadline.time().UnixMilli()))
-			if _, err := pipe.Write(frame[:]); err != nil {
-				return
+			if err = makeReviewSpecInteractive(spec, w.cfg, w.options.Provider, w.options.Model, pass.dir(root), p.Execution.isQuestion()); err != nil {
+				return nil, err
 			}
 		}
-	}()
-	resultPath := filepath.Join(root, "result.json")
-	var written <-chan struct{} // An interactive harness stays open after writing its result.
-	if interactive {
-		written = watchReviewResult(ctx, resultPath, p, brief.Digest)
+		return spec, nil
 	}
-	harnessStarted := time.Now()
-	done := make(chan error, 1)
-	go func() { done <- guard.Wait() }()
-	notice := time.Duration(0) // A headless harness has no screen to answer.
-	if interactive {
-		notice = reviewWaitNotice
-	}
-	finished, err := waitReviewHarness(ctx, done, written, notice, func() { pipe.Close() }, func() {
-		fmt.Fprintf(w.output, "\r\nVera is still waiting for %s; if it is showing a login or trust screen, answer it here or press Ctrl-C twice to stop Vera.\r\n", w.options.Provider)
-	})
-	ran := time.Since(harnessStarted)
-	diagnostic.StdoutBytes, diagnostic.StderrBytes = stdout.n, stderr.n
-	if report, ok := readReviewProcessReport(filepath.Join(root, "child-diagnostic.json")); ok {
-		diagnostic.Stage = "provider"
-		stageStarted = time.Now().Add(-time.Duration(report.DurationMS) * time.Millisecond)
-		diagnostic.ExitCode, diagnostic.Signal = report.ExitCode, report.Signal
-		diagnostic.ProviderDurationMS = report.DurationMS
-		if report.Category != "completed" && !finished {
-			diagnostic.Category = report.Category
+	var stopMu sync.Mutex // Specialist passes run at once, and each can stop Vera.
+	// run runs one prepared session under its own child guard until the
+	// harness ends, recording it in diag; main is the attempt's own session
+	// (the single or integration pass). It returns diag's failure when the
+	// harness did not finish.
+	run := func(ctx context.Context, spec *reviewChildSpec, pass *reviewPass, diag *reviewExecutionDiagnostic) error {
+		dir := pass.dir(root)
+		main := diag == &diagnostic
+		var err error
+		var extra []*os.File // The guard's descriptors from 3 on.
+		if w.slot != nil {
+			extra = append(extra, w.slot)
+			spec.CapacityFD = 3
+			spec.Cleanup = &reviewProviderCleanup{Reservation: *p.Capacity, RequestID: p.RequestID, JobID: p.JobID, AttemptID: p.Execution.Attempt.ID}
 		}
-	} else if guard.ProcessState != nil && !finished {
-		code := guard.ProcessState.ExitCode()
-		diagnostic.ExitCode = &code
-		diagnostic.Signal = reviewProcessSignal(guard.ProcessState)
-		diagnostic.Category = "child_guard_failed"
-	}
-	if interactive {
-		// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
-		w.tty.reclaim(diagnostic.Signal == int(syscall.SIGTERM) || diagnostic.Signal == int(syscall.SIGKILL))
-		written, _ := adoptReviewResult(resultPath, p, brief.Digest)
-		if written {
-			// The harness's screen, including its "resume this session" hint,
-			// is not useful once its result is saved; a failure keeps it.
-			w.tty.clear()
+		if interactive {
+			spec.TerminalFD = 3 + len(extra)
+			extra = append(extra, w.tty.files[:]...)
 		}
-		if !finished && ctx.Err() == nil && !written {
-			// Only the user closes an interactive harness early, unless it
-			// could not start its review at all.
-			if ran < reviewQuickExit && diagnostic.Signal != int(syscall.SIGINT) {
-				exit := ""
-				if diagnostic.ExitCode != nil && *diagnostic.ExitCode >= 0 {
-					exit = fmt.Sprintf(" (exit code %d)", *diagnostic.ExitCode)
+		if err = saveReviewJSON(filepath.Join(dir, "child.json"), spec); err != nil {
+			return err
+		}
+		if p.Execution.isQuestion() {
+			// Answers are read-only: after every setup step that writes into the
+			// worktree, the checked-out files lose write permission. Git's own
+			// metadata stays writable so read commands keep working; result files
+			// live outside these trees.
+			if err := makeReviewTreesReadOnly(filepath.Join(root, "input")); err != nil {
+				return err
+			}
+		}
+		executable, err := cliExecutable()
+		if err != nil {
+			return err
+		}
+		guard := exec.Command(executable, "review-child", filepath.Join(dir, "child.json"))
+		guard.ExtraFiles = extra
+		if main {
+			setStage("child_guard")
+		}
+		guard.WaitDelay = 250 * time.Millisecond
+		guard.Env = []string{"PATH=" + os.Getenv("PATH")}
+		guard.Dir = dir
+		// Headless harness output is counted and only its tail is kept, in memory,
+		// to name failures the user must fix (login, trust); it is never relayed
+		// or sent to the server. An interactive harness owns the terminal instead.
+		stdout, stderr := reviewByteCounter{limit: 8 << 20}, reviewByteCounter{limit: 64 << 10}
+		guard.Stdout = &stdout
+		guard.Stderr = &stderr
+		if interactive {
+			fmt.Fprintf(w.output, "Starting %s%s in this pane; Vera closes it once the review result is written.\n", w.options.Provider, pass.label())
+			// The harness gets the terminal as it was, and Vera's idle mode back
+			// once the harness is gone.
+			w.browse(false)
+			defer w.browse(true)
+			w.tty.save()
+		} else {
+			stopMu.Lock() // Also serializes output from specialists running at once.
+			fmt.Fprintf(w.output, "Running %s headless%s; its output is not shown.\n", w.options.Provider, pass.label())
+			stopMu.Unlock()
+		}
+		pipe, err := guard.StdinPipe()
+		if err != nil {
+			return err
+		}
+		if err = guard.Start(); err != nil {
+			pipe.Close()
+			return fmt.Errorf("could not start review child guard")
+		}
+		// EOF on this pipe is an independent parent-death signal. The guard owns
+		// termination even when this supervisor is killed without running defers.
+		if _, err = pipe.Write([]byte{'R'}); err != nil {
+			pipe.Close()
+			guard.Wait()
+			if interactive {
+				w.tty.reclaim(false)
+			}
+			return fmt.Errorf("review child guard failed")
+		}
+		// Each later deadline follows on the same pipe; a closed pipe ends this.
+		// A plan or specialist pass keeps its own deadline.
+		go func() {
+			if pass.bounded() {
+				return
+			}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-attemptDeadline.moved:
 				}
-				w.harnessFatal = fmt.Errorf("Vera stopped: %s exited within %d s without a review%s; it may need a login or a trust answer (%s). The review stays queued; start Vera again when %s works", w.options.Provider, int(reviewQuickExit.Seconds()), exit, reviewHarnessLoginHint(w.options.Provider), w.options.Provider)
-			} else {
-				w.interrupted = true
-				diagnostic.Category = "cancelled"
+				var frame [8]byte
+				binary.BigEndian.PutUint64(frame[:], uint64(attemptDeadline.time().UnixMilli()))
+				if _, err := pipe.Write(frame[:]); err != nil {
+					return
+				}
 			}
-			return nil, diagnostic.failure()
+		}()
+		resultPath := filepath.Join(dir, "result.json")
+		var written <-chan struct{} // An interactive harness stays open after writing its result.
+		if interactive {
+			written = watchReviewResult(ctx, func() bool {
+				if pass.bounded() {
+					var v json.RawMessage
+					return readReviewPassResult(resultPath, &v)
+				}
+				ok, _ := adoptReviewResult(resultPath, p, brief.Digest)
+				return ok
+			})
+		}
+		harnessStarted := time.Now()
+		done := make(chan error, 1)
+		go func() { done <- guard.Wait() }()
+		notice := time.Duration(0) // A headless harness has no screen to answer.
+		if interactive {
+			notice = reviewWaitNotice
+		}
+		finished, err := waitReviewHarness(ctx, done, written, notice, func() { pipe.Close() }, func() {
+			fmt.Fprintf(w.output, "\r\nVera is still waiting for %s; if it is showing a login or trust screen, answer it here or press Ctrl-C twice to stop Vera.\r\n", w.options.Provider)
+		})
+		ran := time.Since(harnessStarted)
+		diag.StdoutBytes, diag.StderrBytes = stdout.n, stderr.n
+		if report, ok := readReviewProcessReport(filepath.Join(dir, "child-diagnostic.json")); ok {
+			diag.Stage = "provider"
+			if main {
+				stageStarted = time.Now().Add(-time.Duration(report.DurationMS) * time.Millisecond)
+			}
+			diag.ExitCode, diag.Signal = report.ExitCode, report.Signal
+			diag.ProviderDurationMS = report.DurationMS
+			if report.Category != "completed" && !finished {
+				diag.Category = report.Category
+			}
+		} else if guard.ProcessState != nil && !finished {
+			code := guard.ProcessState.ExitCode()
+			diag.ExitCode = &code
+			diag.Signal = reviewProcessSignal(guard.ProcessState)
+			diag.Category = "child_guard_failed"
+		}
+		if interactive {
+			// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
+			w.tty.reclaim(diag.Signal == int(syscall.SIGTERM) || diag.Signal == int(syscall.SIGKILL))
+			written := false
+			if pass.bounded() {
+				var v json.RawMessage
+				written = readReviewPassResult(resultPath, &v)
+			} else {
+				written, _ = adoptReviewResult(resultPath, p, brief.Digest)
+			}
+			if written {
+				// The harness's screen, including its "resume this session" hint,
+				// is not useful once its result is saved; a failure keeps it.
+				w.tty.clear()
+			}
+			if !finished && ctx.Err() == nil && !written {
+				// Only the user closes an interactive harness early, unless it
+				// could not start its review at all.
+				if ran < reviewQuickExit && diag.Signal != int(syscall.SIGINT) {
+					exit := ""
+					if diag.ExitCode != nil && *diag.ExitCode >= 0 {
+						exit = fmt.Sprintf(" (exit code %d)", *diag.ExitCode)
+					}
+					stopMu.Lock()
+					w.harnessFatal = fmt.Errorf("Vera stopped: %s exited within %d s without a review%s; it may need a login or a trust answer (%s). The review stays queued; start Vera again when %s works", w.options.Provider, int(reviewQuickExit.Seconds()), exit, reviewHarnessLoginHint(w.options.Provider), w.options.Provider)
+					stopMu.Unlock()
+				} else {
+					stopMu.Lock()
+					w.interrupted = true
+					stopMu.Unlock()
+					diag.Category = "cancelled"
+				}
+				return diag.failure()
+			}
+		}
+		if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(resultPath)) {
+			diag.Category = category
+			stopMu.Lock()
+			w.harnessFatal = fmt.Errorf("Vera stopped: the %s harness %s on this machine; %s, then start Vera again", w.options.Provider, reviewHarnessProblem(category), reviewHarnessLoginHint(w.options.Provider))
+			stopMu.Unlock()
+			return diag.failure()
+		}
+		if err != nil || ctx.Err() != nil {
+			return diag.failure()
+		}
+		return nil
+	}
+	var specialistCoverage []reviewCoverageFile
+	var final *reviewPass // The single pass, unless the review runs in passes.
+	if !p.Execution.isQuestion() {
+		manifest, manifestErr := readReviewManifest(filepath.Join(root, "input", "manifest.json"))
+		diff, diffErr := os.Stat(filepath.Join(root, "input", "review.diff"))
+		limits := reviewPassLimitsFor(w.cfg)
+		if manifestErr == nil && diffErr == nil && limits.multiPass(reviewableFiles(manifest), int(diff.Size())) {
+			var err error
+			specialistCoverage, err = w.reviewInPasses(ctx, root, manifest, limits, attemptDeadline.time(), reviewPassRunner{prepare: prepare, run: func(ctx context.Context, spec *reviewChildSpec, pass *reviewPass) error {
+				d := reviewExecutionDiagnostic{Version: 1, AttemptID: p.Execution.Attempt.ID, Provider: w.options.Provider, Stage: "provider"}
+				err := run(ctx, spec, pass, &d)
+				stopMu.Lock()
+				defer stopMu.Unlock()
+				if w.harnessFatal != nil || w.interrupted {
+					diagnostic.Stage, diagnostic.Category = d.Stage, d.Category
+					return d.failure()
+				}
+				if err != nil && ctx.Err() == nil {
+					fmt.Fprintf(w.output, "The %s pass ended without finishing (%s).\n", pass.Name, d.Category)
+				}
+				return nil
+			}})
+			if err != nil {
+				return nil, err
+			}
+			final = &reviewPass{Name: reviewIntegrationPass}
 		}
 	}
-	if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(resultPath)) {
-		diagnostic.Category = category
-		w.harnessFatal = fmt.Errorf("Vera stopped: the %s harness %s on this machine; %s, then start Vera again", w.options.Provider, reviewHarnessProblem(category), reviewHarnessLoginHint(w.options.Provider))
-		return nil, diagnostic.failure()
+	spec, err := prepare(final)
+	if err != nil {
+		return nil, err
 	}
-	if err != nil || ctx.Err() != nil {
-		return nil, diagnostic.failure()
+	if err := run(ctx, spec, final, &diagnostic); err != nil {
+		return nil, err
 	}
+	resultPath := filepath.Join(root, "result.json")
 	setStage("result")
 	diagnostic.Category = "invalid_result"
 	if _, stray := adoptReviewResult(resultPath, p, brief.Digest); stray != "" {
@@ -1415,6 +1516,9 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		result = stripReviewFindingCategories(result)
 	}
 	if !p.Execution.isQuestion() {
+		if result, err = mergeReviewCoverage(result, specialistCoverage); err != nil {
+			return nil, err
+		}
 		if result, err = w.checkReviewCoverage(result, filepath.Join(root, "input", "manifest.json")); err != nil {
 			return nil, err
 		}
@@ -1545,9 +1649,9 @@ func adoptReviewResult(path string, p *reviewReceipt, digest string) (ok bool, s
 	return false, ""
 }
 
-// watchReviewResult closes its channel once result.json holds a complete
-// envelope for this attempt; a partly written file is read again later.
-func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, digest string) <-chan struct{} {
+// watchReviewResult closes its channel once complete reports a complete
+// result envelope; a partly written file is read again later.
+func watchReviewResult(ctx context.Context, complete func() bool) <-chan struct{} {
 	written := make(chan struct{})
 	go func() {
 		for {
@@ -1556,7 +1660,7 @@ func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, diges
 				return
 			case <-time.After(250 * time.Millisecond):
 			}
-			if ok, _ := adoptReviewResult(path, p, digest); ok {
+			if complete() {
 				close(written)
 				return
 			}
@@ -1655,7 +1759,7 @@ func reviewChildCmd() *cobra.Command {
 		}
 		marker := filepath.Join(filepath.Dir(path), "provider-cleanup-pending.json")
 		if spec.Cleanup != nil {
-			if filepath.Base(filepath.Dir(path)) != spec.Cleanup.RequestID {
+			if filepath.Base(reviewAttemptDir(filepath.Dir(path))) != spec.Cleanup.RequestID {
 				return fmt.Errorf("invalid review cleanup identity")
 			}
 			if err := saveReviewJSON(marker, spec.Cleanup); err != nil {
@@ -1851,6 +1955,9 @@ func reviewOutcomeLine(p *reviewReceipt) string {
 	}
 	if result.Outcome == "changes_requested" {
 		return fmt.Sprintf("Result: changes requested with %d new findings.", len(result.Findings))
+	}
+	if result.Outcome == "incomplete" {
+		return "Result: partial review (not every changed file was reviewed)."
 	}
 	return "Result: clean."
 }

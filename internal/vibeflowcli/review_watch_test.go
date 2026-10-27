@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,13 @@ import (
 // reviewWatchServer serves one claimable review per repository link. claims
 // counts claims per link; results counts accepted results.
 func reviewWatchServer(t *testing.T, executions map[int64]*reviewExecution) (server *httptest.Server, claims map[int64]*atomic.Int64, results *atomic.Int64) {
+	t.Helper()
+	return reviewWatchServerWith(t, executions, []string{"repository_review_v1", "question_v1"}, nil)
+}
+
+// reviewWatchServerWith is reviewWatchServer advertising capabilities, with
+// onResult (when set) given each submitted result body.
+func reviewWatchServerWith(t *testing.T, executions map[int64]*reviewExecution, capabilities []string, onResult func([]byte)) (server *httptest.Server, claims map[int64]*atomic.Int64, results *atomic.Int64) {
 	t.Helper()
 	claims, results = map[int64]*atomic.Int64{}, new(atomic.Int64)
 	for link := range executions {
@@ -48,7 +56,7 @@ func reviewWatchServer(t *testing.T, executions map[int64]*reviewExecution) (ser
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-sessions"): // Vera's history pane.
 			fmt.Fprint(w, `{"sessions":[]}`)
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pr-review-repositories"):
-			json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}, "supported_runner_capabilities": []string{"repository_review_v1", "question_v1"}})
+			json.NewEncoder(w).Encode(map[string]any{"repositories": []any{}, "supported_runner_capabilities": capabilities})
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/pr-review-runners"):
 			var body map[string]any
 			json.NewDecoder(r.Body).Decode(&body)
@@ -72,6 +80,10 @@ func reviewWatchServer(t *testing.T, executions map[int64]*reviewExecution) (ser
 		case strings.HasSuffix(r.URL.Path, "/brief"):
 			json.NewEncoder(w).Encode(reviewBrief{RoundID: executions[link].Attempt.Round.ID, Digest: hex.EncodeToString(digest[:]), Content: json.RawMessage(`{}`)})
 		case strings.HasSuffix(r.URL.Path, "/result"):
+			if onResult != nil {
+				body, _ := io.ReadAll(r.Body)
+				onResult(body)
+			}
 			results.Add(1)
 			w.WriteHeader(204)
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"), strings.HasSuffix(r.URL.Path, "/fail"), r.Method == "DELETE":
