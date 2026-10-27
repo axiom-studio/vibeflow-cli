@@ -271,6 +271,7 @@ func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, ro
 		return nil, err
 	}
 	round := execution.Attempt.Round
+	checkPolicy := reviewCheckPolicyFor(execution, time.Now())
 	kind := "PR review"
 	var task string
 	if execution.isQuestion() {
@@ -288,7 +289,7 @@ Local question task:
 
 Schema:
 %s
-`, shownDir, round.HeadSHA, round.BaseSHA, brief.Digest, reviewCheckPolicy, mcp.Task, resultPath, schemaPath, schema)
+`, shownDir, round.HeadSHA, round.BaseSHA, brief.Digest, checkPolicy, mcp.Task, resultPath, schemaPath, schema)
 	} else {
 		task = execution.Prompt + fmt.Sprintf(`
 
@@ -305,7 +306,7 @@ Local review task:
 
 Schema:
 %s
-`, shownDir, round.HeadSHA, round.BaseSHA, brief.Digest, reviewPullRequestContext(execution), reviewRepositoryContext(root), reviewVoice, reviewValidation, reviewCheckPolicy, mcp.Task, resultPath, schemaPath, schema)
+`, shownDir, round.HeadSHA, round.BaseSHA, brief.Digest, reviewPullRequestContext(execution), reviewRepositoryContext(root), reviewVoice, reviewValidation, checkPolicy, mcp.Task, resultPath, schemaPath, schema)
 	}
 	if err = os.WriteFile(taskPath, []byte(task), 0600); err != nil {
 		return nil, err
@@ -355,6 +356,45 @@ const reviewVoice = "Write each finding for the pull request's author. Its title
 // every pull request and reports on it, so Vera reads code. The reviewer
 // decides by risk when a small targeted check is required (issue #6301).
 const reviewCheckPolicy = "Do not build the project, install dependencies or run test suites; CI does that and reports on the pull request. Read the \"ci\" object in ../brief.json when present: cite a failing check by name instead of reproducing it, and never treat a state of pending, none or unavailable as passing. Decide by risk whether a check is required: when CI for the changed area is missing, failed to run or is unavailable, or a blocker cannot be shown from the code alone, you may run the smallest targeted test or check for the changed package only; never the full suite, never an install or dependency download, and every command you run together must finish within 5 minutes. Record exactly what ran and its output in verification. Otherwise state the defect from the code with file and line evidence, and say it is uncertain when the reasoning is not conclusive. Never claim a build or test result you did not observe."
+
+// reviewCheckPolicyRefused is the policy when the server refused execution:
+// the repository turned it off, or the pull request comes from a fork or an
+// author the provider does not vouch for. Running its code would run an
+// untrusted author's code on this machine (axiomcloud #4504).
+const reviewCheckPolicyRefused = "Do not build the project, install dependencies, run tests or run any program or script from this pull request: this review's execution policy does not permit running its code (the repository setting is off, or the pull request comes from a fork or from an author the provider does not vouch for). Read-only inspection, such as reading files, searching and git commands, is fine. Read the \"ci\" object in ../brief.json when present: cite a failing check by name instead of reproducing it, and never treat a state of pending, none or unavailable as passing. State each defect from the code with file and line evidence, and say it is uncertain when the reasoning is not conclusive; in Limits, say that nothing was executed because the execution policy does not permit it. Never claim a build or test result you did not observe."
+
+// reviewCheckPolicyAllowed is the policy when the server allowed execution:
+// CI first, then a build or a targeted test only when it settles a specific
+// suspicion, inside the attempt's remaining budget (%d minutes).
+const reviewCheckPolicyAllowed = "Read the \"ci\" object in ../brief.json first: cite a failing check by name instead of reproducing it, and never treat a state of pending, none or unavailable as passing. You may build the project and run targeted tests or commands inside this worktree when that would confirm or refute a specific suspected defect; run nothing without such a suspicion, and prefer the narrowest test that settles it over a full suite. This attempt has about %d minutes left: every command must finish well before then, leaving time to write the result, so give up on a check that would not. Never install global packages or tools, never write outside this worktree other than the result file and the build tools' own caches, and use the network only for the dependency fetches the build itself needs. In verification, and under Checks run in the summary, record each command you ran, its exit status and the key output. Never claim a build or test result you did not observe."
+
+// reviewCheckPolicyFor picks the check policy from the claim's execution
+// decision. A claim without one comes from an older server and keeps the
+// earlier policy, reviewCheckPolicy.
+func reviewCheckPolicyFor(execution *reviewExecution, now time.Time) string {
+	switch {
+	case execution.AllowExecution == nil:
+		return reviewCheckPolicy
+	case *execution.AllowExecution:
+		return fmt.Sprintf(reviewCheckPolicyAllowed, int(reviewExecutionBudget(execution, now).Round(time.Minute)/time.Minute))
+	default:
+		return reviewCheckPolicyRefused
+	}
+}
+
+// reviewExecutionBudget is the time left before the attempt's effective
+// deadline: the watcher's, which a local --timeout can shorten, or else the
+// server's.
+func reviewExecutionBudget(execution *reviewExecution, now time.Time) time.Duration {
+	deadline := execution.budgetDeadline
+	if deadline.IsZero() {
+		deadline = time.UnixMilli(execution.Attempt.Round.DeadlineAt)
+	}
+	if left := deadline.Sub(now); left > 0 {
+		return left
+	}
+	return 0
+}
 
 // reviewProviderEnv is the user's own environment plus the provider's
 // configured variables, which win.

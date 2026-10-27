@@ -1229,6 +1229,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		defer closeRelay()
 	}
+	p.Execution.budgetDeadline = attemptDeadline.time()
 	spec, err := prepareReviewProvider(ctx, w.cfg, w.options.Provider, w.options.Model, root, p.Execution, &brief, relayURL, relayToken)
 	if err != nil {
 		return nil, err
