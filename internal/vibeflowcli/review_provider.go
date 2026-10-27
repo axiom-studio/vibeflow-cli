@@ -38,27 +38,45 @@ type reviewChildSpec struct {
 // Code Insights shows security as a vulnerability and correctness as a bug.
 var reviewFindingCategories = []string{"security", "correctness", "performance", "maintainability"}
 
-func reviewResultSchema() []byte {
-	text := func(max int) any { return map[string]any{"type": "string", "maxLength": max} }
-	object := func(properties map[string]any) any {
-		required := make([]string, 0, len(properties))
-		for k := range properties {
-			required = append(required, k)
-		}
-		// Stable order matters when writing/recovering an invocation.
-		sort.Strings(required)
-		return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
+func reviewSchemaText(max int) any { return map[string]any{"type": "string", "maxLength": max} }
+
+// reviewSchemaObject is a strict object: every property required, no others.
+func reviewSchemaObject(properties map[string]any) any {
+	required := make([]string, 0, len(properties))
+	for k := range properties {
+		required = append(required, k)
 	}
+	// Stable order matters when writing/recovering an invocation.
+	sort.Strings(required)
+	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
+}
+
+// reviewFindingSchema is one new finding, as the server accepts it.
+func reviewFindingSchema() any {
+	text, object := reviewSchemaText, reviewSchemaObject
 	// The server's PRReviewSuggestion: a one-click fix replacing whole lines of
 	// the head revision. null when the fix is not mechanical.
 	line := map[string]any{"type": "integer", "minimum": 1}
 	suggestion := object(map[string]any{"revision": text(64), "path": text(512), "side": map[string]any{"type": "string", "enum": []string{"RIGHT"}}, "start_line": line, "end_line": line, "replacement": text(16 << 10)})
-	finding := object(map[string]any{"key": text(100), "title": text(200), "severity": map[string]any{"enum": []string{"blocker", "advisory"}, "type": "string"}, "path": text(512), "line": line, "symbol": text(256), "category": map[string]any{"anyOf": []any{map[string]any{"type": "string", "enum": reviewFindingCategories}, map[string]any{"type": "null"}}}, "trigger": text(2000), "impact": text(2000), "evidence": text(8192), "verification": text(8192), "suggestion": map[string]any{"anyOf": []any{suggestion, map[string]any{"type": "null"}}}})
-	coverage := object(map[string]any{"path": text(512), "status": map[string]any{"type": "string", "enum": []string{"reviewed", "skipped"}}, "reason": text(200)})
-	reconciliation := object(map[string]any{"finding_id": text(36), "state": map[string]any{"type": "string", "enum": []string{"present", "fixed", "uncertain", "dismissed"}}, "path": text(512), "line": map[string]any{"type": "integer", "minimum": 0}, "symbol": text(256), "evidence": text(8192), "verification": text(8192)})
-	result := object(map[string]any{"schema_version": map[string]any{"type": "integer", "enum": []int{1}}, "brief_digest": text(64), "head_sha": text(64), "base_sha": text(64), "outcome": map[string]any{"type": "string", "enum": []string{"clean", "changes_requested"}}, "summary": text(16000), "new_findings": map[string]any{"type": "array", "items": finding, "maxItems": 50}, "reconciliations": map[string]any{"type": "array", "items": reconciliation, "maxItems": 100}, "coverage": map[string]any{"type": "array", "items": coverage, "maxItems": reviewCoverageMaxFiles}})
-	out, _ := json.Marshal(object(map[string]any{"result": map[string]any{"anyOf": []any{result, map[string]any{"type": "null"}}}, "failure_reason": map[string]any{"anyOf": []any{text(2000), map[string]any{"type": "null"}}}}))
+	return object(map[string]any{"key": text(100), "title": text(200), "severity": map[string]any{"enum": []string{"blocker", "advisory"}, "type": "string"}, "path": text(512), "line": line, "symbol": text(256), "category": map[string]any{"anyOf": []any{map[string]any{"type": "string", "enum": reviewFindingCategories}, map[string]any{"type": "null"}}}, "trigger": text(2000), "impact": text(2000), "evidence": text(8192), "verification": text(8192), "suggestion": map[string]any{"anyOf": []any{suggestion, map[string]any{"type": "null"}}}})
+}
+
+// reviewCoverageSchema is one file's coverage entry.
+func reviewCoverageSchema() any {
+	return reviewSchemaObject(map[string]any{"path": reviewSchemaText(512), "status": map[string]any{"type": "string", "enum": []string{"reviewed", "skipped"}}, "reason": reviewSchemaText(200)})
+}
+
+// reviewEnvelopeSchema is the result file's envelope around result.
+func reviewEnvelopeSchema(result any) []byte {
+	out, _ := json.Marshal(reviewSchemaObject(map[string]any{"result": map[string]any{"anyOf": []any{result, map[string]any{"type": "null"}}}, "failure_reason": map[string]any{"anyOf": []any{reviewSchemaText(2000), map[string]any{"type": "null"}}}}))
 	return out
+}
+
+func reviewResultSchema() []byte {
+	text, object := reviewSchemaText, reviewSchemaObject
+	reconciliation := object(map[string]any{"finding_id": text(36), "state": map[string]any{"type": "string", "enum": []string{"present", "fixed", "uncertain", "dismissed"}}, "path": text(512), "line": map[string]any{"type": "integer", "minimum": 0}, "symbol": text(256), "evidence": text(8192), "verification": text(8192)})
+	result := object(map[string]any{"schema_version": map[string]any{"type": "integer", "enum": []int{1}}, "brief_digest": text(64), "head_sha": text(64), "base_sha": text(64), "outcome": map[string]any{"type": "string", "enum": []string{"clean", "changes_requested"}}, "summary": text(16000), "new_findings": map[string]any{"type": "array", "items": reviewFindingSchema(), "maxItems": 50}, "reconciliations": map[string]any{"type": "array", "items": reconciliation, "maxItems": 100}, "coverage": map[string]any{"type": "array", "items": reviewCoverageSchema(), "maxItems": reviewCoverageMaxFiles}})
+	return reviewEnvelopeSchema(result)
 }
 
 // reviewQuestionResultSchema is the envelope for an `@vibeflow ask` answer: the
@@ -227,6 +245,14 @@ func reviewHarnessChoices(cfg *Config) []reviewStartupChoice {
 // cleanup always removes. Configuration from that worktree, which the pull
 // request's author controls, is never loaded (issue #6392).
 func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, root string, execution *reviewExecution, brief *reviewBrief, relayURL, relayToken string) (*reviewChildSpec, error) {
+	return prepareReviewPass(ctx, cfg, provider, model, root, execution, brief, relayURL, relayToken, nil)
+}
+
+// prepareReviewPass prepares one harness session of a review: the single
+// pass when pass is nil, else one pass of a multi-pass review (see
+// review_passes.go). Every pass launches the same way; only its task, schema
+// and the directory holding them differ.
+func prepareReviewPass(ctx context.Context, cfg *Config, provider, model, root string, execution *reviewExecution, brief *reviewBrief, relayURL, relayToken string, pass *reviewPass) (*reviewChildSpec, error) {
 	p, ok := cfg.Providers[provider]
 	if !ok {
 		return nil, fmt.Errorf("review harness %q is not configured", provider)
@@ -261,7 +287,15 @@ func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, ro
 	if execution.isQuestion() {
 		schema = reviewQuestionResultSchema()
 	}
-	schemaPath, resultPath, taskPath := filepath.Join(root, "schema.json"), filepath.Join(root, "result.json"), filepath.Join(root, "task.txt")
+	dir := pass.dir(root)
+	if pass.bounded() {
+		schema = pass.schema()
+		// Its own policy budget: the pass ends before the attempt does.
+		bounded := *execution
+		bounded.budgetDeadline = pass.Deadline
+		execution = &bounded
+	}
+	schemaPath, resultPath, taskPath := filepath.Join(dir, "schema.json"), filepath.Join(dir, "result.json"), filepath.Join(dir, "task.txt")
 	workDir := filepath.Join(root, "input", "head") // The harness's cwd (spec.Dir below).
 	shownDir := workDir                             // As the harness's own pwd prints it.
 	if real, err := filepath.EvalSymlinks(workDir); err == nil {
@@ -271,9 +305,12 @@ func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, ro
 		return nil, err
 	}
 	round := execution.Attempt.Round
+	checkPolicy := reviewCheckPolicyFor(execution, time.Now())
 	kind := "PR review"
 	var task string
-	if execution.isQuestion() {
+	if pass.bounded() {
+		task = pass.task(execution, root, shownDir, brief.Digest, checkPolicy, mcp.Task, resultPath, schemaPath, schema)
+	} else if execution.isQuestion() {
 		kind = "PR question"
 		task = execution.Prompt + fmt.Sprintf(`
 
@@ -288,7 +325,7 @@ Local question task:
 
 Schema:
 %s
-`, shownDir, round.HeadSHA, round.BaseSHA, brief.Digest, reviewCheckPolicy, mcp.Task, resultPath, schemaPath, schema)
+`, shownDir, round.HeadSHA, round.BaseSHA, brief.Digest, checkPolicy, mcp.Task, resultPath, schemaPath, schema)
 	} else {
 		task = execution.Prompt + fmt.Sprintf(`
 
@@ -305,7 +342,7 @@ Local review task:
 
 Schema:
 %s
-`, shownDir, round.HeadSHA, round.BaseSHA, brief.Digest, reviewPullRequestContext(execution), reviewRepositoryContext(root), reviewVoice, reviewValidation, reviewCheckPolicy, mcp.Task, resultPath, schemaPath, schema)
+`, shownDir, round.HeadSHA, round.BaseSHA, brief.Digest, reviewPullRequestContext(execution), reviewRepositoryContext(root, true)+pass.integrationContext(), reviewVoice, reviewValidation, checkPolicy, mcp.Task, resultPath, schemaPath, schema)
 	}
 	if err = os.WriteFile(taskPath, []byte(task), 0600); err != nil {
 		return nil, err
@@ -323,6 +360,9 @@ Schema:
 	}
 	args = append(append([]string{}, mcp.Args...), args...)
 	spec := &reviewChildSpec{Binary: binary, Args: args, Dir: workDir, InputFile: os.DevNull, DeadlineAt: round.DeadlineAt, MCPArgs: mcp.Args}
+	if pass.bounded() {
+		spec.DeadlineAt = pass.Deadline.UnixMilli()
+	}
 	if stdin {
 		spec.InputFile = taskPath
 	}
@@ -355,6 +395,45 @@ const reviewVoice = "Write each finding for the pull request's author. Its title
 // every pull request and reports on it, so Vera reads code. The reviewer
 // decides by risk when a small targeted check is required (issue #6301).
 const reviewCheckPolicy = "Do not build the project, install dependencies or run test suites; CI does that and reports on the pull request. Read the \"ci\" object in ../brief.json when present: cite a failing check by name instead of reproducing it, and never treat a state of pending, none or unavailable as passing. Decide by risk whether a check is required: when CI for the changed area is missing, failed to run or is unavailable, or a blocker cannot be shown from the code alone, you may run the smallest targeted test or check for the changed package only; never the full suite, never an install or dependency download, and every command you run together must finish within 5 minutes. Record exactly what ran and its output in verification. Otherwise state the defect from the code with file and line evidence, and say it is uncertain when the reasoning is not conclusive. Never claim a build or test result you did not observe."
+
+// reviewCheckPolicyRefused is the policy when the server refused execution:
+// the repository turned it off, or the pull request comes from a fork or an
+// author the provider does not vouch for. Running its code would run an
+// untrusted author's code on this machine (axiomcloud #4504).
+const reviewCheckPolicyRefused = "Do not build the project, install dependencies, run tests or run any program or script from this pull request: this review's execution policy does not permit running its code (the repository setting is off, or the pull request comes from a fork or from an author the provider does not vouch for). Read-only inspection, such as reading files, searching and git commands, is fine. Read the \"ci\" object in ../brief.json when present: cite a failing check by name instead of reproducing it, and never treat a state of pending, none or unavailable as passing. State each defect from the code with file and line evidence, and say it is uncertain when the reasoning is not conclusive; in Limits, say that nothing was executed because the execution policy does not permit it. Never claim a build or test result you did not observe."
+
+// reviewCheckPolicyAllowed is the policy when the server allowed execution:
+// CI first, then a build or a targeted test only when it settles a specific
+// suspicion, inside the attempt's remaining budget (%d minutes).
+const reviewCheckPolicyAllowed = "Read the \"ci\" object in ../brief.json first: cite a failing check by name instead of reproducing it, and never treat a state of pending, none or unavailable as passing. You may build the project and run targeted tests or commands inside this worktree when that would confirm or refute a specific suspected defect; run nothing without such a suspicion, and prefer the narrowest test that settles it over a full suite. This attempt has about %d minutes left: every command must finish well before then, leaving time to write the result, so give up on a check that would not. Never install global packages or tools, never write outside this worktree other than the result file and the build tools' own caches, and use the network only for the dependency fetches the build itself needs. In verification, and under Checks run in the summary, record each command you ran, its exit status and the key output. Never claim a build or test result you did not observe."
+
+// reviewCheckPolicyFor picks the check policy from the claim's execution
+// decision. A claim without one comes from an older server and keeps the
+// earlier policy, reviewCheckPolicy.
+func reviewCheckPolicyFor(execution *reviewExecution, now time.Time) string {
+	switch {
+	case execution.AllowExecution == nil:
+		return reviewCheckPolicy
+	case *execution.AllowExecution:
+		return fmt.Sprintf(reviewCheckPolicyAllowed, int(reviewExecutionBudget(execution, now).Round(time.Minute)/time.Minute))
+	default:
+		return reviewCheckPolicyRefused
+	}
+}
+
+// reviewExecutionBudget is the time left before the attempt's effective
+// deadline: the watcher's, which a local --timeout can shorten, or else the
+// server's.
+func reviewExecutionBudget(execution *reviewExecution, now time.Time) time.Duration {
+	deadline := execution.budgetDeadline
+	if deadline.IsZero() {
+		deadline = time.UnixMilli(execution.Attempt.Round.DeadlineAt)
+	}
+	if left := deadline.Sub(now); left > 0 {
+		return left
+	}
+	return 0
+}
 
 // reviewProviderEnv is the user's own environment plus the provider's
 // configured variables, which win.
