@@ -237,6 +237,11 @@ The VibeFlow API token is never placed on the harness command line.
 Provider-hosted tools, remote MCP, and saved provider conversations are rejected by the relay.
 Relay restrictions have real HTTP coverage, but an actual model call through the configured VibeFlow gateway remains unverified because the available credential returned HTTP 403 from its model catalog.
 
+Beside each review's worktree, `manifest.json` lists every changed file from the merge base to the head (a rename as its new path, a deletion with status `D`) and marks the files Vera may leave unread by rule: deleted, binary, vendored (`vendor/`, `node_modules/`, `third_party/`), lockfile, or generated (`*.pb.go`, `*_generated.*`, or a `Code generated ... DO NOT EDIT` line in the first five lines).
+Vera lists each manifest file in the result's `coverage` as reviewed, or skipped with its class.
+Before submitting, the runner checks that list against the manifest: any file not reviewed or skipped by class is unreviewed, a clean verdict is sent as `incomplete` (a **Partial review**, which never passes the gate), and the runner prints the files it lists; it never upgrades a verdict.
+The runner sends coverage only to a server that advertises `coverage_v1`; an older server gets the result without it.
+
 Every review runs in its own disposable git worktree, never in the developer checkout.
 The worktree is detached at the exact head commit and is created from a private object store under `<root>/review-runners/<ID>/work/<request>/`, so the developer repository never gains a worktree entry or branch.
 The private object store reads the selected checkout's Git objects through Git alternates, read-only, instead of copying its history.

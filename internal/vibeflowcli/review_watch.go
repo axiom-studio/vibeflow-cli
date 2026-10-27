@@ -76,6 +76,7 @@ type reviewWatch struct {
 	repositoryRequests bool // Registered with repository_review_v1 for this run.
 	questions          bool // Registered with question_v1, with the server's consent.
 	categories         bool // The server accepts a finding category (finding_category_v1).
+	coverage           bool // The server accepts coverage and the incomplete outcome (coverage_v1).
 	client             *Client
 	cfg                *Config
 	options            reviewWatchOptions
@@ -489,6 +490,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	// which a server offers only once it routes question claims (issue #5737).
 	w.questions = slices.Contains(discovery.SupportedRunnerCapabilities, reviewQuestionCapability) || slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability)
 	w.categories = slices.Contains(discovery.SupportedRunnerCapabilities, reviewFindingCategoryCapability)
+	w.coverage = slices.Contains(discovery.SupportedRunnerCapabilities, reviewCoverageCapability)
 	capabilities := []string{}
 	if repositoryRequests {
 		capabilities = append(capabilities, "repository_review_v1")
@@ -1412,6 +1414,11 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if !w.categories {
 		result = stripReviewFindingCategories(result)
 	}
+	if !p.Execution.isQuestion() {
+		if result, err = w.checkReviewCoverage(result, filepath.Join(root, "input", "manifest.json")); err != nil {
+			return nil, err
+		}
+	}
 	markProgress(2)
 	return result, nil
 }
@@ -1488,7 +1495,7 @@ func stripReviewFindingCategories(result json.RawMessage) json.RawMessage {
 // no error: result is set for a result matching the claimed revision and
 // brief, and reported marks an explicit failure_reason instead.
 func readReviewResult(path string, p *reviewReceipt, digest string) (result json.RawMessage, reported bool, err error) {
-	output, err := reviewReadBounded(path, 256<<10)
+	output, err := reviewReadBounded(path, 1<<20) // Coverage can name 3000 files.
 	if err != nil {
 		return nil, false, fmt.Errorf("review harness wrote no bounded result file")
 	}
