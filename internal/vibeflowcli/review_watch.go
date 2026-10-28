@@ -496,6 +496,10 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	if w.questions {
 		capabilities = append(capabilities, reviewQuestionCapability)
 	}
+	// The server offers reviews only to a runner that reports coverage.
+	if w.coverage {
+		capabilities = append(capabilities, reviewCoverageCapability)
+	}
 	registration["capabilities"] = capabilities
 	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), registration, &registered); err != nil {
 		return reviewServerUpgradeHint(err)
