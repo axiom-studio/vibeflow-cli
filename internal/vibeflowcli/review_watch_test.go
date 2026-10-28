@@ -264,8 +264,6 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 	}
 	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, v.token
-	personal := false // A saved choice: the pane would otherwise ask the one-time setup question.
-	cfg.ReviewIsolated = &personal
 	cfg.Providers["claude"] = Provider{Name: "Claude", Binary: harness, LaunchTemplate: "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}"}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
 		t.Fatal(err)
@@ -844,10 +842,11 @@ func TestReviewWatchAdoptsResultWrittenBesideTheInputs(t *testing.T) {
 	}
 }
 
-// On a terminal with no saved choice, review-watch asks once, saves the
-// answer in the config file (without the environment's token) and names
-// the setup when it goes online (issue #6195).
-func TestReviewWatchAsksOnceForIsolation(t *testing.T) {
+// On a terminal with no saved choice, review-watch never waits for an
+// answer before it registers: a question in a hidden Vera pane kept the
+// runner off the server. It goes online in the default personal setup,
+// says how to choose, and leaves config.yaml as written.
+func TestReviewWatchRegistersWithoutIsolationChoice(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux unavailable")
 	}
@@ -860,34 +859,31 @@ func TestReviewWatchAsksOnceForIsolation(t *testing.T) {
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
 		t.Fatal(err)
 	}
+	before, err := os.ReadFile(ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
 	tm := NewTmuxManager(fmt.Sprintf("vftest-isolation-%d", os.Getpid()))
 	t.Cleanup(func() { _, _ = tm.run("kill-server") })
 	command := shellJoin([]string{builtVibeflow(t), "--root", RootDir(), "--config", ConfigPath(), "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "ask"})
-	if _, err := tm.run("new-session", "-d", "-s", "ask", "-x", "160", "-y", "40", "-e", "VIBEFLOW_TOKEN=", "exec "+command); err != nil {
+	if _, err := tm.run("new-session", "-d", "-s", "ask", "-x", "200", "-y", "40", "-e", "VIBEFLOW_TOKEN=", "exec "+command); err != nil {
 		t.Fatal(err)
 	}
-	waitPane := func(want string) string {
-		t.Helper()
-		var pane string
-		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
-			pane, _ = tm.run("capture-pane", "-p", "-J", "-t", "ask")
-			if strings.Contains(pane, want) {
-				return pane
-			}
+	var pane string
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		pane, _ = tm.run("capture-pane", "-p", "-J", "-t", "ask")
+		if strings.Contains(pane, "is online (local, claude, personal setup).") {
+			break
 		}
-		t.Fatalf("pane never showed %q:\n%s", want, pane)
-		return ""
 	}
-	waitPane("[p]ersonal / [i]solated:")
-	if _, err := tm.run("send-keys", "-t", "ask", "i", "Enter"); err != nil {
-		t.Fatal(err)
+	// "online" prints only after the server accepted the registration.
+	if !strings.Contains(pane, "is online (local, claude, personal setup).") {
+		t.Fatalf("runner never registered without an answer:\n%s", pane)
 	}
-	waitPane("is online (local, claude, isolated).")
-	saved, err := LoadConfig(ConfigPath())
-	if err != nil || !reviewIsolated(saved) {
-		t.Fatalf("choice not saved: %v %v", err, saved.ReviewIsolated)
+	if strings.Contains(pane, "[p]ersonal / [i]solated") || !strings.Contains(pane, "review_isolated: true") || !strings.Contains(pane, "--isolated") {
+		t.Fatalf("startup did not name the default and how to change it:\n%s", pane)
 	}
-	if data, _ := os.ReadFile(ConfigPath()); !strings.Contains(string(data), "api_token: file-token") {
-		t.Fatalf("saving the choice changed the token:\n%s", data)
+	if after, _ := os.ReadFile(ConfigPath()); string(after) != string(before) {
+		t.Fatalf("the default was saved as a choice:\n%s", after)
 	}
 }

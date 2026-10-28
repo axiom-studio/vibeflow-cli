@@ -207,8 +207,6 @@ func newVeraFixture(t *testing.T) (cfg *Config, repo string, registrations, poll
 	cfg.ServerURL, cfg.APIToken = server.URL, "vera-api-canary"
 	cfg.Providers["claude"] = Provider{Name: "Claude", Binary: provider}
 	cfg.Providers["codex"] = Provider{Name: "Codex", Binary: provider}
-	personal := false // Vera in a pane would otherwise ask the one-time setup question.
-	cfg.ReviewIsolated = &personal
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {
 		t.Fatal(err)
 	}
