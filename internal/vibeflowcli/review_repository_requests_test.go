@@ -23,6 +23,9 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 		{"reviews_only", `"repository_review_v1"`, "github", true, true, false},
 		// A server routing claim kinds already routes question claims.
 		{"claim_kinds", `"repository_review_v1","claim_kind_v1"`, "github", true, true, true},
+		// A runner that reports coverage says so; only such a runner claims reviews.
+		{"coverage", `"repository_review_v1","question_v1","coverage_v1"`, "github", true, true, true},
+		{"bitbucket_coverage", `"coverage_v1"`, "bitbucket", false, true, false},
 		{"old_server", "", "github", false, true, false},
 		{"unknown_capability", `"future_review_v2"`, "github", false, true, false},
 		// Bitbucket still reads discovery, to check the checkout against its link.
@@ -80,6 +83,9 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 			}
 			if tc.questions {
 				caps = append(caps, "question_v1")
+			}
+			if strings.Contains(tc.advertisement, `"coverage_v1"`) {
+				caps = append(caps, "coverage_v1")
 			}
 			want := fmt.Sprint(caps)
 			if value := fmt.Sprint(registration["capabilities"]); value != want {

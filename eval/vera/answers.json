@@ -1,0 +1,79 @@
+{
+  "defects": [
+    {
+      "id": "a-list-leaks-webhook-secret",
+      "description": "ListLinkedRepos, in unchanged sibling code, still JSON-encodes each repository's settings with the new webhook secret, while GetLinkedRepo and UpdateLinkedRepo were fixed to redact it.",
+      "required": true,
+      "locations": [
+        {"path": "repos/list.go", "start_line": 9, "end_line": 12, "anchor": "h.Store.List()"}
+      ]
+    },
+    {
+      "id": "b-untrusted-description-in-privileged-prompt",
+      "description": "AnswerPrompt adds the pull request description, which any author can write, to the privileged project-context prompt, while untrusted comments are filtered out.",
+      "locations": [
+        {"path": "prompt/answer.go", "start_line": 41, "end_line": 44, "anchor": "pr.Body"}
+      ]
+    },
+    {
+      "id": "c-starter-gate-refuses-same-status",
+      "description": "The Starter plan gate refuses an update to the current status (implementing to implementing), which agents send when they resume, because it runs before the no-op check and uses <=.",
+      "locations": [
+        {"path": "plan/gate.go", "start_line": 10, "end_line": 14, "anchor": "rank(to) <= rank(from)"},
+        {"path": "plan/status.go", "start_line": 25, "end_line": 29, "anchor": "starterGate(item.Status, to)"}
+      ]
+    },
+    {
+      "id": "d-signing-secret-check-then-act-race",
+      "description": "EnsureSigningSecret reads the repository, sends a new secret to the provider, then writes the whole record back, so overlapping calls leave the provider and the store with different secrets and can overwrite concurrent settings changes.",
+      "locations": [
+        {"path": "webhooks/secret.go", "start_line": 20, "end_line": 37, "anchor": "store.Put(repo)"}
+      ]
+    },
+    {
+      "id": "e-legacy-flag-before-base-branch-rule",
+      "description": "CheckName returns the legacy check name from a repository-wide flag before reading the base branch's own protection rule, so a branch that requires the plain name is blocked forever.",
+      "locations": [
+        {"path": "gates/name.go", "start_line": 33, "end_line": 37, "anchor": "repo.LegacyGateNames"}
+      ]
+    },
+    {
+      "id": "f-retention-purge-deletes-dismissals",
+      "description": "Purging an expired session now cascades to the fingerprint-keyed dismissals that Suppress reads across every review, so purged history makes dismissed findings come back.",
+      "locations": [
+        {"path": "findings/store.go", "start_line": 61, "end_line": 69, "anchor": "delete(s.dismissals, f.Fingerprint)"},
+        {"path": "retention/purge.go", "start_line": 12, "end_line": 18, "anchor": "store.DeleteSession(sess.ID)"}
+      ]
+    },
+    {
+      "id": "g-diff-parser-trusts-header-lines-in-hunks",
+      "description": "Parse treats a line inside a hunk that looks like a file header (an added line whose text starts with \"++ \") as a new file header, so a crafted diff moves later added lines to another path.",
+      "locations": [
+        {"path": "diffparse/parse.go", "start_line": 23, "end_line": 41, "anchor": "case strings.HasPrefix(text, \"+++ \"):"}
+      ]
+    }
+  ],
+  "decoys": [
+    {
+      "id": "decoy-redacted-copies-the-record",
+      "description": "redacted clears the secret on a value copy; the stored record keeps it.",
+      "locations": [
+        {"path": "repos/handlers.go", "start_line": 18, "end_line": 22, "anchor": "repo.Settings.WebhookSecret = \"\""}
+      ]
+    },
+    {
+      "id": "decoy-verify-constant-time-hmac",
+      "description": "Verify decodes the signature and compares HMAC-SHA256 values with hmac.Equal, rejecting an empty secret.",
+      "locations": [
+        {"path": "webhooks/verify.go", "start_line": 10, "end_line": 27, "anchor": "hmac.Equal(got, mac.Sum(nil))"}
+      ]
+    },
+    {
+      "id": "decoy-secret-field-never-renders-secret",
+      "description": "SecretField shows only whether a secret is set and a password input for a replacement.",
+      "locations": [
+        {"path": "web/SecretField.tsx", "start_line": 1, "end_line": 38, "anchor": "type=\"password\""}
+      ]
+    }
+  ]
+}
