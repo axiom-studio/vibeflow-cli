@@ -334,7 +334,7 @@ func TestReviewCrashRecoveryRemovesWorktree(t *testing.T) {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\n1\n7\ngithub\nlocal\nrecovery", server.URL)))
 	private := filepath.Join(RootDir(), "review-runners", hex.EncodeToString(digest[:16]))
 	work = filepath.Join(private, "work", receipt.RequestID)
-	if err := prepareReviewCheckout(context.Background(), source, work, execution); err != nil {
+	if err := prepareReviewCheckout(context.Background(), source, work, execution, false); err != nil {
 		t.Fatal(err)
 	}
 	// Build tools can leave read-only directories inside the worktree.

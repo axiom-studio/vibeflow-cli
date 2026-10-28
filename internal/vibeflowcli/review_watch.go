@@ -61,6 +61,7 @@ const reviewLegacyRoutingNotice = "Repository-request routing requires a server 
 
 type reviewWatch struct {
 	repositoryRequests bool // Registered with repository_review_v1 for this run.
+	coverageEnabled    bool // Registered with coverage_v1 for this run.
 	client             *Client
 	cfg                *Config
 	options            reviewWatchOptions
@@ -325,6 +326,35 @@ func (w *reviewWatch) workDir(p *reviewReceipt) string {
 	return filepath.Join(w.root, "work", p.RequestID)
 }
 
+func reviewProviderSupportsRepositoryRequests(provider string) bool {
+	switch provider {
+	case "github", "bitbucket", "azure_devops":
+		return true
+	default:
+		return false
+	}
+}
+
+func reviewRunnerCapabilities(provider string, supported []string) []string {
+	var capabilities []string
+	if reviewProviderSupportsRepositoryRequests(provider) && hasReviewCapability(supported, "repository_review_v1") {
+		capabilities = append(capabilities, "repository_review_v1")
+	}
+	if hasReviewCapability(supported, "coverage_v1") {
+		capabilities = append(capabilities, "coverage_v1")
+	}
+	return capabilities
+}
+
+func hasReviewCapability(capabilities []string, capability string) bool {
+	for _, supported := range capabilities {
+		if supported == capability {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *reviewWatch) run(ctx context.Context) error {
 	defer w.releaseCapacity()
 	identity := fmt.Sprintf("%s\n%d\n%d\n%s\n%s\n%s", w.client.baseURL, w.options.ProjectID, w.options.RepositoryLinkID, w.options.GitProvider, w.options.Kind, w.options.Name)
@@ -366,22 +396,18 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	}
 	registration := map[string]any{"id": w.state.ID, "kind": w.options.Kind, "name": w.options.Name, "provider": w.options.GitProvider, "repository_link_id": w.options.RepositoryLinkID}
 	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
-	if w.options.GitProvider == "github" {
-		var discovery reviewStartupRepositoriesResponse
-		if err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery); err != nil {
-			return err
-		}
-		supported := false
-		for _, capability := range discovery.SupportedRunnerCapabilities {
-			if capability == "repository_review_v1" {
-				supported = true
-			}
-		}
-		if supported {
-			registration["capabilities"] = []string{"repository_review_v1"}
-		} else {
-			idleStatus = reviewLegacyRoutingNotice
-		}
+	var discovery reviewStartupRepositoriesResponse
+	if err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery); err != nil {
+		return err
+	}
+	capabilities := reviewRunnerCapabilities(w.options.GitProvider, discovery.SupportedRunnerCapabilities)
+	w.repositoryRequests = hasReviewCapability(capabilities, "repository_review_v1")
+	w.coverageEnabled = hasReviewCapability(capabilities, "coverage_v1")
+	if len(capabilities) > 0 {
+		registration["capabilities"] = capabilities
+	}
+	if !w.repositoryRequests {
+		idleStatus = reviewLegacyRoutingNotice
 	}
 	if err = w.client.reviewRequest(ctx, "POST", fmt.Sprintf("/projects/%d/pr-review-runners", w.options.ProjectID), registration, &registered); err != nil {
 		return err
@@ -396,8 +422,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	if err = w.save(); err != nil {
 		return err
 	}
-	if _, ok := registration["capabilities"]; ok {
-		w.repositoryRequests = true
+	if w.repositoryRequests {
 		fmt.Fprintln(w.output, "Repository requests enabled: anyone who comments @vibeflow review on this linked repository can request a review from this runner.")
 	}
 	defer func() {
@@ -871,8 +896,24 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		// against the live attempt on every request.
 		proxy = append(proxy, reviewGitProxy{URL: strings.TrimRight(w.client.baseURL, "/") + "/rest/v1/vibeflow" + w.attemptPath(p) + "/git", Token: w.client.token})
 	}
-	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution, proxy...); err != nil {
+	if err := prepareReviewCheckout(ctx, w.options.Repository, root, p.Execution, w.coverageEnabled, proxy...); err != nil {
 		return nil, err
+	}
+	var coverageInput *reviewCoverageInput
+	var coverageManifest *reviewManifest
+	if w.coverageEnabled {
+		manifestPath := filepath.Join(root, "input", "manifest.json")
+		manifestBytes, err := os.ReadFile(manifestPath)
+		if err != nil {
+			return nil, fmt.Errorf("coverage manifest was not prepared")
+		}
+		var manifest reviewManifest
+		if err = json.Unmarshal(manifestBytes, &manifest); err != nil || len(manifest.Files) > reviewCoverageMaxFiles {
+			return nil, fmt.Errorf("coverage manifest is invalid")
+		}
+		digest := sha256.Sum256(manifestBytes)
+		coverageManifest = &manifest
+		coverageInput = &reviewCoverageInput{ManifestDigest: hex.EncodeToString(digest[:])}
 	}
 	fmt.Fprintf(w.output, "Review worktree ready: %s\n", filepath.Join(root, "input", "head"))
 	markProgress(1)
@@ -922,7 +963,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		defer closeRelay()
 	}
-	spec, err := prepareReviewProvider(ctx, w.cfg, w.options.Provider, w.options.Model, root, p.Execution, &brief, relayURL, relayToken)
+	spec, err := prepareReviewProvider(ctx, w.cfg, w.options.Provider, w.options.Model, root, p.Execution, &brief, relayURL, relayToken, coverageInput)
 	if err != nil {
 		return nil, err
 	}
@@ -991,9 +1032,13 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		return nil, fmt.Errorf("review child guard failed")
 	}
 	resultPath := filepath.Join(root, "result.json")
+	resultLimit := int64(256 << 10)
+	if w.coverageEnabled {
+		resultLimit = 2 << 20
+	}
 	var written <-chan struct{} // An interactive harness stays open after writing its result.
 	if interactive {
-		written = watchReviewResult(ctx, resultPath, p, brief.Digest)
+		written = watchReviewResult(ctx, resultPath, p, brief.Digest, resultLimit)
 	}
 	harnessStarted := time.Now()
 	done := make(chan error, 1)
@@ -1024,7 +1069,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	if interactive {
 		// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
 		w.tty.reclaim(diagnostic.Signal == int(syscall.SIGTERM) || diagnostic.Signal == int(syscall.SIGKILL))
-		if _, _, resultErr := readReviewResult(resultPath, p, brief.Digest); !finished && ctx.Err() == nil && resultErr != nil {
+		if _, _, resultErr := readReviewResult(resultPath, p, brief.Digest, resultLimit); !finished && ctx.Err() == nil && resultErr != nil {
 			// Only the user closes an interactive harness early, unless it
 			// could not start its review at all.
 			if ran < reviewQuickExit && diagnostic.Signal != int(syscall.SIGINT) {
@@ -1052,7 +1097,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	diagnostic.Category = "invalid_result"
 	// Every harness writes its result to the same file; a missing file after
 	// exit is an invalid result.
-	result, reported, err := readReviewResult(resultPath, p, brief.Digest)
+	result, reported, err := readReviewResult(resultPath, p, brief.Digest, resultLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -1062,15 +1107,113 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		return nil, diagnostic.failure()
 	}
+	if coverageManifest != nil {
+		result, err = normalizeReviewCoverage(result, *coverageManifest, coverageInput.ManifestDigest)
+		if err != nil {
+			return nil, err
+		}
+	}
 	markProgress(2)
 	return result, nil
+}
+
+func normalizeReviewCoverage(result json.RawMessage, manifest reviewManifest, manifestDigest string) (json.RawMessage, error) {
+	if len(manifest.Files) > reviewCoverageMaxFiles || len(manifestDigest) != sha256.Size*2 {
+		return nil, fmt.Errorf("review coverage manifest is invalid")
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(result, &payload); err != nil || payload == nil {
+		return nil, fmt.Errorf("review result is invalid")
+	}
+	var outcome string
+	if err := json.Unmarshal(payload["outcome"], &outcome); err != nil || (outcome != "clean" && outcome != "changes_requested" && outcome != "incomplete") {
+		return nil, fmt.Errorf("review result has an invalid coverage outcome")
+	}
+	var reportedDigest string
+	if err := json.Unmarshal(payload["manifest_digest"], &reportedDigest); err != nil || reportedDigest != manifestDigest {
+		return nil, fmt.Errorf("review coverage manifest digest does not match")
+	}
+	var reported []reviewCoverageFile
+	if raw := payload["coverage"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &reported); err != nil {
+			return nil, fmt.Errorf("review coverage is invalid")
+		}
+	}
+	manifestByPath := make(map[string]reviewCoverageFile, len(manifest.Files))
+	for _, item := range manifest.Files {
+		if !validReviewCoveragePath(item.Path) || (item.Status != "unreviewed" && item.Status != "skipped") || (item.Status == "skipped" && !validReviewCoverageReason(item.Reason)) {
+			return nil, fmt.Errorf("review coverage manifest is invalid")
+		}
+		if _, exists := manifestByPath[item.Path]; exists {
+			return nil, fmt.Errorf("review coverage manifest has duplicate paths")
+		}
+		manifestByPath[item.Path] = item
+	}
+	reportedByPath := make(map[string]reviewCoverageFile, len(reported))
+	for _, item := range reported {
+		if !validReviewCoveragePath(item.Path) || len(item.Reason) > 200 || (item.Status != "reviewed" && item.Status != "unreviewed" && item.Status != "skipped") {
+			return nil, fmt.Errorf("review coverage contains an invalid entry")
+		}
+		if _, exists := manifestByPath[item.Path]; !exists {
+			return nil, fmt.Errorf("review coverage contains a path outside the manifest")
+		}
+		if _, exists := reportedByPath[item.Path]; exists {
+			return nil, fmt.Errorf("review coverage contains duplicate paths")
+		}
+		if item.Status == "skipped" && !validReviewCoverageReason(item.Reason) {
+			return nil, fmt.Errorf("review coverage skipped entry has no valid reason")
+		}
+		if item.Status != "skipped" && item.Reason != "" {
+			return nil, fmt.Errorf("review coverage non-skipped entry has a reason")
+		}
+		reportedByPath[item.Path] = item
+	}
+	coverage := make([]reviewCoverageFile, 0, len(manifest.Files))
+	unreviewed := false
+	for _, item := range manifest.Files {
+		if item.Status == "skipped" {
+			coverage = append(coverage, item)
+			continue
+		}
+		covered, ok := reportedByPath[item.Path]
+		if !ok {
+			covered = reviewCoverageFile{Path: item.Path, Status: "unreviewed", Reason: "not reported by the reviewer"}
+		}
+		if covered.Status == "unreviewed" {
+			unreviewed = true
+			if covered.Reason == "" {
+				covered.Reason = "not fully inspected by the reviewer"
+			}
+		}
+		coverage = append(coverage, covered)
+	}
+	if outcome == "clean" && unreviewed {
+		outcome = "incomplete"
+	}
+	payload["coverage"], _ = json.Marshal(coverage)
+	payload["manifest_digest"], _ = json.Marshal(manifestDigest)
+	payload["outcome"], _ = json.Marshal(outcome)
+	encoded, err := json.Marshal(payload)
+	if err != nil || len(encoded) > 2<<20 {
+		return nil, fmt.Errorf("normalized review result exceeds the coverage result limit")
+	}
+	return encoded, nil
+}
+
+func validReviewCoverageReason(reason string) bool {
+	switch reason {
+	case "deleted", "binary", "vendored", "lockfile", "generated":
+		return true
+	default:
+		return false
+	}
 }
 
 // readReviewResult reads a harness's result.json. A complete envelope returns
 // no error: result is set for a result matching the claimed revision and
 // brief, and reported marks an explicit failure_reason instead.
-func readReviewResult(path string, p *reviewReceipt, digest string) (result json.RawMessage, reported bool, err error) {
-	output, err := reviewReadBounded(path, 256<<10)
+func readReviewResult(path string, p *reviewReceipt, digest string, maxBytes int64) (result json.RawMessage, reported bool, err error) {
+	output, err := reviewReadBounded(path, maxBytes)
 	if err != nil {
 		return nil, false, fmt.Errorf("review harness wrote no bounded result file")
 	}
@@ -1098,7 +1241,7 @@ func readReviewResult(path string, p *reviewReceipt, digest string) (result json
 
 // watchReviewResult closes its channel once result.json holds a complete
 // envelope for this attempt; a partly written file is read again later.
-func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, digest string) <-chan struct{} {
+func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, digest string, maxBytes int64) <-chan struct{} {
 	written := make(chan struct{})
 	go func() {
 		for {
@@ -1107,7 +1250,7 @@ func watchReviewResult(ctx context.Context, path string, p *reviewReceipt, diges
 				return
 			case <-time.After(250 * time.Millisecond):
 			}
-			if _, _, err := readReviewResult(path, p, digest); err == nil {
+			if _, _, err := readReviewResult(path, p, digest, maxBytes); err == nil {
 				close(written)
 				return
 			}

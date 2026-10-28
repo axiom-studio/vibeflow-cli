@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,12 +18,15 @@ import (
 func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 	for _, tc := range []struct {
 		name, advertisement, provider string
-		capability, discovery         bool
+		capabilities                  []string
 	}{
-		{"supported", `"repository_review_v1"`, "github", true, true},
-		{"old_server", "", "github", false, true},
-		{"unknown_capability", `"future_review_v2"`, "github", false, true},
-		{"bitbucket_unchanged", `"repository_review_v1"`, "bitbucket", false, false},
+		{"github", `"repository_review_v1","coverage_v1"`, "github", []string{"repository_review_v1", "coverage_v1"}},
+		{"azure_repos", `"repository_review_v1","coverage_v1"`, "azure_devops", []string{"repository_review_v1", "coverage_v1"}},
+		{"bitbucket", `"repository_review_v1","coverage_v1"`, "bitbucket", []string{"repository_review_v1", "coverage_v1"}},
+		{"repository_only_server", `"repository_review_v1"`, "azure_devops", []string{"repository_review_v1"}},
+		{"coverage_only_server", `"coverage_v1"`, "azure_devops", []string{"coverage_v1"}},
+		{"old_server", "", "github", nil},
+		{"unknown_capability", `"future_review_v2"`, "github", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withTempRoot(t)
@@ -69,19 +73,24 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 				t.Fatal(err)
 			}
 			value, sent := registration["capabilities"]
-			if sent != tc.capability {
-				t.Fatalf("capabilities sent=%v want=%v, registration=%v", sent, tc.capability, registration)
+			if sent != (len(tc.capabilities) > 0) {
+				t.Fatalf("capabilities sent=%v want=%v, registration=%v", sent, tc.capabilities, registration)
 			}
-			if sent && fmt.Sprint(value) != "[repository_review_v1]" {
-				t.Fatalf("unexpected capability: %v", value)
+			if sent && fmt.Sprint(value) != fmt.Sprint(tc.capabilities) {
+				t.Fatalf("capabilities=%v want=%v", value, tc.capabilities)
 			}
-			if disclosed := strings.Contains(output.String(), "anyone who comments"); disclosed != sent {
-				t.Fatalf("repository-request scope disclosed=%v with capability=%v", disclosed, sent)
+			wantRepositoryRequests := slices.Contains(tc.capabilities, "repository_review_v1")
+			wantCoverage := slices.Contains(tc.capabilities, "coverage_v1")
+			if watch.repositoryRequests != wantRepositoryRequests || watch.coverageEnabled != wantCoverage {
+				t.Fatalf("registered state repository=%v coverage=%v, want %v/%v", watch.repositoryRequests, watch.coverageEnabled, wantRepositoryRequests, wantCoverage)
 			}
-			if (discoveries == 1) != tc.discovery {
-				t.Fatalf("discovery calls=%d want enabled=%v", discoveries, tc.discovery)
+			if discoveries != 1 {
+				t.Fatalf("discovery calls=%d want 1", discoveries)
 			}
-			downgraded := tc.discovery && !tc.capability
+			if disclosed := strings.Contains(output.String(), "anyone who comments"); disclosed != wantRepositoryRequests {
+				t.Fatalf("repository-request scope disclosed=%v with capability=%v", disclosed, wantRepositoryRequests)
+			}
+			downgraded := !wantRepositoryRequests
 			if downgraded && !strings.Contains(output.String(), "server upgrade") {
 				t.Fatal("legacy downgrade lacks upgrade guidance")
 			}

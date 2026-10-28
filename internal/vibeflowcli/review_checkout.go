@@ -10,13 +10,27 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const reviewGitObjectBudget int64 = 2 << 30
+const reviewCoverageMaxFiles = 3000
+
+type reviewCoverageFile struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type reviewManifest struct {
+	Files []reviewCoverageFile `json:"files"`
+}
 
 func reviewSHA(s string) bool {
 	_, err := hex.DecodeString(s)
@@ -254,7 +268,7 @@ type reviewGitProxy struct {
 	Token string
 }
 
-func prepareReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution, proxy ...reviewGitProxy) error {
+func prepareReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution, coverageEnabled bool, proxy ...reviewGitProxy) error {
 	round := execution.Attempt.Round
 	if !reviewSHA(round.BaseSHA) || !reviewSHA(round.HeadSHA) {
 		return fmt.Errorf("review requires exact commit SHAs")
@@ -264,7 +278,7 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 		return err
 	}
 	if execution.Review.Provider == "azure_devops" {
-		return prepareAzureReviewCheckout(ctx, source, root, execution, strings.TrimSpace(string(remote)), proxy)
+		return prepareAzureReviewCheckout(ctx, source, root, execution, strings.TrimSpace(string(remote)), proxy, coverageEnabled)
 	}
 	host, name, err := reviewRemoteIdentity(strings.TrimSpace(string(remote)))
 	if err != nil || host != execution.Review.ProviderHost || name != strings.ToLower(round.Details.BaseRepositoryName) {
@@ -301,14 +315,14 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 			return err
 		}
 	}
-	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA)
+	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA, coverageEnabled)
 }
 
 // prepareAzureReviewCheckout uses the selected checkout when it already has
 // the exact commits and otherwise fetches them through the server proxy. The
 // runner token reaches Git only through GIT_CONFIG_* for that one fetch; no
 // Azure credential exists on the runner and nothing is written to Git config.
-func prepareAzureReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution, remote string, proxy []reviewGitProxy) error {
+func prepareAzureReviewCheckout(ctx context.Context, source, root string, execution *reviewExecution, remote string, proxy []reviewGitProxy, coverageEnabled bool) error {
 	round := execution.Attempt.Round
 	host, name, err := reviewAzureRemoteIdentity(remote)
 	if err != nil || host != strings.ToLower(execution.Review.ProviderHost) || name != strings.ToLower(round.Details.BaseRepositoryName) ||
@@ -346,7 +360,7 @@ func prepareAzureReviewCheckout(ctx context.Context, source, root string, execut
 			return err
 		}
 	}
-	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA)
+	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA, coverageEnabled)
 }
 
 func reviewProxyURL(raw string) bool {
@@ -403,7 +417,7 @@ func reviewAzureRemoteIdentity(raw string) (string, string, error) {
 	return strings.ToLower(u.Hostname()), strings.ToLower(project + "/" + repo), nil
 }
 
-func finishReviewCheckout(ctx context.Context, root, objects, baseSHA, headSHA string) error {
+func finishReviewCheckout(ctx context.Context, root, objects, baseSHA, headSHA string, coverageEnabled bool) error {
 	round := struct{ BaseSHA, HeadSHA string }{baseSHA, headSHA}
 	bases, err := reviewGit(ctx, objects, "merge-base", "--all", round.BaseSHA, round.HeadSHA)
 	if err != nil {
@@ -434,11 +448,134 @@ func finishReviewCheckout(ctx context.Context, root, objects, baseSHA, headSHA s
 	if err = saveReviewJSON(filepath.Join(input, "revisions.json"), map[string]string{"target_base_sha": round.BaseSHA, "head_sha": round.HeadSHA, "merge_base_sha": mergeBase, "merge_base_directory": baselineDirectory, "diff": "merge_base_sha..head_sha; base/ is target integration context"}); err != nil {
 		return err
 	}
+	if coverageEnabled {
+		if err = writeReviewManifest(ctx, objects, mergeBase, round.HeadSHA, filepath.Join(input, "head"), filepath.Join(input, "manifest.json")); err != nil {
+			return err
+		}
+	}
 	diff, err := reviewGit(ctx, objects, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", mergeBase, round.HeadSHA, "--")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(input, "review.diff"), diff, 0600)
+}
+
+func writeReviewManifest(ctx context.Context, objects, mergeBase, headSHA, headDir, manifestPath string) error {
+	diff, err := reviewGit(ctx, objects, "diff", "--no-ext-diff", "--no-textconv", "--find-renames", "--name-status", "-z", mergeBase, headSHA, "--")
+	if err != nil {
+		return err
+	}
+	var files []reviewCoverageFile
+	seen := make(map[string]bool)
+	records := bytes.Split(bytes.TrimSuffix(diff, []byte{0}), []byte{0})
+	if len(diff) == 0 {
+		records = nil
+	}
+	for i := 0; i < len(records); {
+		status := string(records[i])
+		i++
+		if status == "" {
+			return fmt.Errorf("invalid review file manifest")
+		}
+		code := status[0]
+		if (code == 'R' || code == 'C') && i+1 >= len(records) {
+			return fmt.Errorf("incomplete review rename record")
+		}
+		if i >= len(records) {
+			return fmt.Errorf("incomplete review file record")
+		}
+		filePath := string(records[i])
+		i++
+		if code == 'R' || code == 'C' {
+			filePath = string(records[i])
+			i++
+		}
+		if !validReviewCoveragePath(filePath) || seen[filePath] {
+			return fmt.Errorf("review file manifest contains an invalid or duplicate path")
+		}
+		seen[filePath] = true
+		entry := reviewCoverageFile{Path: filePath, Status: "unreviewed"}
+		if reason := reviewCoverageSkipReason(filePath, code, headDir); reason != "" {
+			entry.Status, entry.Reason = "skipped", reason
+		}
+		files = append(files, entry)
+		if len(files) > reviewCoverageMaxFiles {
+			return fmt.Errorf("review change exceeds the %d-file coverage limit", reviewCoverageMaxFiles)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return saveReviewJSON(manifestPath, reviewManifest{Files: files})
+}
+
+func validReviewCoveragePath(filePath string) bool {
+	return filePath != "" && utf8.ValidString(filePath) && len(filePath) <= 512 && !path.IsAbs(filePath) &&
+		path.Clean(filePath) == filePath && filePath != "." && filePath != ".." && !strings.HasPrefix(filePath, "../") &&
+		!strings.ContainsAny(filePath, "\\\x00\r\n\t") && !(len(filePath) >= 2 && filePath[1] == ':')
+}
+
+func reviewCoverageSkipReason(filePath string, status byte, headDir string) string {
+	if status == 'D' {
+		return "deleted"
+	}
+	lower := strings.ToLower(filePath)
+	for _, segment := range strings.Split(lower, "/") {
+		switch segment {
+		case "vendor", "third_party", "node_modules", "bower_components", "pods", "checkouts":
+			return "vendored"
+		}
+	}
+	base := path.Base(lower)
+	switch base {
+	case "go.sum", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
+		"cargo.lock", "composer.lock", "gemfile.lock", "pipfile.lock", "poetry.lock", "uv.lock", "mix.lock", "pubspec.lock",
+		"flake.lock", "packages.lock.json", "gradle.lockfile":
+		return "lockfile"
+	}
+	if strings.HasSuffix(base, ".lock") || strings.HasSuffix(base, ".lockb") {
+		return "lockfile"
+	}
+	if strings.HasSuffix(base, ".pb.go") || strings.HasSuffix(base, ".pb.gw.go") || strings.HasSuffix(base, ".generated.go") ||
+		strings.HasSuffix(base, ".gen.go") || strings.HasSuffix(base, ".generated.ts") || strings.HasSuffix(base, ".generated.js") ||
+		strings.HasSuffix(base, ".g.dart") || strings.HasSuffix(base, ".freezed.dart") || strings.HasSuffix(base, ".graphql.go") {
+		return "generated"
+	}
+	prefix := reviewCoverageFilePrefix(headDir, filePath)
+	if bytes.IndexByte(prefix, 0) >= 0 {
+		return "binary"
+	}
+	trimmed := strings.TrimSpace(string(prefix))
+	for _, marker := range []string{"// Code generated", "# Code generated", "/* Code generated", "// Generated by", "# Generated by", "/* Generated by"} {
+		if strings.HasPrefix(trimmed, marker) {
+			return "generated"
+		}
+	}
+	return ""
+}
+
+func reviewCoverageFilePrefix(root, filePath string) []byte {
+	current := root
+	parts := strings.Split(filePath, "/")
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return nil
+		}
+		if i == len(parts)-1 && !info.Mode().IsRegular() {
+			return nil
+		}
+	}
+	f, err := os.Open(current)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	buffer := make([]byte, 8192)
+	n, _ := f.Read(buffer)
+	return buffer[:n]
 }
 
 type limitedReviewBuffer struct {

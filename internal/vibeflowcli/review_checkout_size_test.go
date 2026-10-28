@@ -66,7 +66,7 @@ func TestReviewCheckoutRepositoryAcceptance(t *testing.T) {
 		}
 	}()
 	started := time.Now()
-	if err := prepareReviewCheckout(ctx, source, root, e); err != nil {
+	if err := prepareReviewCheckout(ctx, source, root, e, false); err != nil {
 		t.Fatalf("exact repository preparation after %s: %v", time.Since(started), err)
 	}
 	t.Logf("prepared full repository in %s", time.Since(started))

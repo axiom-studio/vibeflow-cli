@@ -168,14 +168,14 @@ func TestReviewCheckoutFetchesMissingCommitsUsingOriginSSH(t *testing.T) {
 			t.Setenv("GIT_CONFIG_COUNT", "1")
 			t.Setenv("GIT_CONFIG_KEY_0", "protocol.https.allow")
 			t.Setenv("GIT_CONFIG_VALUE_0", "never")
-			if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), execution); err != nil {
+			if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), execution, false); err != nil {
 				t.Fatalf("SSH-only runner cannot fetch the new PR head: %v", err)
 			}
 			if err := exec.Command("git", "-C", source, "cat-file", "-e", execution.Review.HeadSHA+"^{commit}").Run(); err == nil {
 				t.Fatal("fetch wrote into the developer checkout")
 			}
 			execution.Attempt.Round.Details.HeadCloneURL = "https://foreign.invalid/acme/fork.git"
-			if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), execution); err == nil {
+			if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), execution, false); err == nil {
 				t.Fatal("foreign clone host was accepted")
 			}
 			execution.Attempt.Round.Details.HeadRepositoryName = "acme/repo"

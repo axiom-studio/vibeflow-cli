@@ -233,7 +233,7 @@ func startReviewBackground(ctx context.Context, cfg *Config, configPath string, 
 		fmt.Fprintf(out, "Managed review runner %s is already active.\n", filepath.Base(dir))
 		var status reviewBackgroundStatus
 		data, _ := os.ReadFile(filepath.Join(dir, "background-status.json"))
-		if json.Unmarshal(data, &status) == nil && status.Phase == "running" && binding.Options.GitProvider == "github" && !status.RepositoryRequests {
+		if json.Unmarshal(data, &status) == nil && status.Phase == "running" && !status.RepositoryRequests {
 			if status.Message != "" {
 				fmt.Fprintln(out, status.Message)
 				return nil

@@ -57,14 +57,14 @@ func azureReviewTestRepo(t *testing.T) (string, *reviewExecution) {
 func TestReviewAzureCheckoutUsesLocalCommits(t *testing.T) {
 	source, e := azureReviewTestRepo(t)
 	root := t.TempDir()
-	if err := prepareReviewCheckout(context.Background(), source, root, e); err != nil {
+	if err := prepareReviewCheckout(context.Background(), source, root, e, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "input", "head", "main.go")); err != nil {
 		t.Fatal(err)
 	}
 	e.Attempt.Round.Details.BaseRepositoryName = "Other/Repo"
-	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e); err == nil {
+	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e, false); err == nil {
 		t.Fatal("checkout for another Azure repository was accepted")
 	}
 }
@@ -115,7 +115,7 @@ func TestReviewAzureCheckoutFetchesMissingCommitsThroughProxy(t *testing.T) {
 	source := t.TempDir()
 	reviewTestGit(t, source, "init")
 	reviewTestGit(t, source, "remote", "add", "origin", "https://dev.azure.com/org/My%20Project/_git/Repo")
-	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e); err == nil {
+	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e, false); err == nil {
 		t.Fatal("missing Azure commits were fetched without the VibeFlow proxy")
 	}
 	// A user's global extra header must not be sent alongside the proxy token.
@@ -126,7 +126,7 @@ func TestReviewAzureCheckoutFetchesMissingCommitsThroughProxy(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
 	root := t.TempDir()
 	proxy := reviewGitProxy{URL: server.URL + prefix, Token: token}
-	if err := prepareReviewCheckout(context.Background(), source, root, e, proxy); err != nil {
+	if err := prepareReviewCheckout(context.Background(), source, root, e, false, proxy); err != nil {
 		t.Fatalf("fetch through proxy: %v", err)
 	}
 	if data, err := os.ReadFile(filepath.Join(root, "input", "head", "main.go")); err != nil || !strings.Contains(string(data), "return 2") {
@@ -145,10 +145,10 @@ func TestReviewAzureCheckoutFetchesMissingCommitsThroughProxy(t *testing.T) {
 	if config, err := os.ReadFile(filepath.Join(root, "objects.git", "config")); err != nil || strings.Contains(string(config), token) {
 		t.Fatalf("runner token persisted in Git config: %v", err)
 	}
-	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e, reviewGitProxy{URL: server.URL + prefix, Token: "wrong"}); err == nil {
+	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e, false, reviewGitProxy{URL: server.URL + prefix, Token: "wrong"}); err == nil {
 		t.Fatal("rejected proxy authorization still produced a checkout")
 	}
-	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e, reviewGitProxy{URL: "http://example.com" + prefix, Token: token}); err == nil {
+	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e, false, reviewGitProxy{URL: "http://example.com" + prefix, Token: token}); err == nil {
 		t.Fatal("non-loopback HTTP proxy URL was accepted")
 	}
 }

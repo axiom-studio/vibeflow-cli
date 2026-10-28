@@ -30,7 +30,11 @@ type reviewChildSpec struct {
 	TerminalFD  int  `json:"terminal_fd,omitempty"`
 }
 
-func reviewResultSchema() []byte {
+type reviewCoverageInput struct {
+	ManifestDigest string
+}
+
+func reviewResultSchema(coverageEnabled bool) []byte {
 	text := func(max int) any { return map[string]any{"type": "string", "maxLength": max} }
 	object := func(properties map[string]any) any {
 		required := make([]string, 0, len(properties))
@@ -43,7 +47,16 @@ func reviewResultSchema() []byte {
 	}
 	finding := object(map[string]any{"key": text(100), "title": text(200), "severity": map[string]any{"enum": []string{"blocker", "advisory"}, "type": "string"}, "path": text(512), "line": map[string]any{"type": "integer", "minimum": 1}, "symbol": text(256), "trigger": text(2000), "impact": text(2000), "evidence": text(8192), "verification": text(8192)})
 	reconciliation := object(map[string]any{"finding_id": text(36), "state": map[string]any{"type": "string", "enum": []string{"present", "fixed", "uncertain", "dismissed"}}, "path": text(512), "line": map[string]any{"type": "integer", "minimum": 0}, "symbol": text(256), "evidence": text(8192), "verification": text(8192)})
-	result := object(map[string]any{"schema_version": map[string]any{"type": "integer", "enum": []int{1}}, "brief_digest": text(64), "head_sha": text(64), "base_sha": text(64), "outcome": map[string]any{"type": "string", "enum": []string{"clean", "changes_requested"}}, "summary": text(16000), "new_findings": map[string]any{"type": "array", "items": finding, "maxItems": 50}, "reconciliations": map[string]any{"type": "array", "items": reconciliation, "maxItems": 100}})
+	outcomes := []string{"clean", "changes_requested"}
+	properties := map[string]any{"schema_version": map[string]any{"type": "integer", "enum": []int{1}}, "brief_digest": text(64), "head_sha": text(64), "base_sha": text(64), "outcome": map[string]any{"type": "string", "enum": outcomes}, "summary": text(16000), "new_findings": map[string]any{"type": "array", "items": finding, "maxItems": 50}, "reconciliations": map[string]any{"type": "array", "items": reconciliation, "maxItems": 100}}
+	if coverageEnabled {
+		outcomes = append(outcomes, "incomplete")
+		properties["outcome"] = map[string]any{"type": "string", "enum": outcomes}
+		coverageFile := object(map[string]any{"path": text(512), "status": map[string]any{"type": "string", "enum": []string{"reviewed", "unreviewed", "skipped"}}, "reason": text(200)})
+		properties["coverage"] = map[string]any{"type": "array", "items": coverageFile, "maxItems": reviewCoverageMaxFiles}
+		properties["manifest_digest"] = map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$", "minLength": 64, "maxLength": 64}
+	}
+	result := object(properties)
 	out, _ := json.Marshal(object(map[string]any{"result": map[string]any{"anyOf": []any{result, map[string]any{"type": "null"}}}, "failure_reason": map[string]any{"anyOf": []any{text(2000), map[string]any{"type": "null"}}}}))
 	return out
 }
@@ -105,7 +118,7 @@ func reviewHarnessChoices(cfg *Config) []reviewStartupChoice {
 // Vera runs like any other persona: the user's own environment, login and
 // harness configuration, with full permissions. Its only boundary is the
 // disposable worktree it starts in, which cleanup always removes.
-func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, root string, execution *reviewExecution, brief *reviewBrief, relayURL, relayToken string) (*reviewChildSpec, error) {
+func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, root string, execution *reviewExecution, brief *reviewBrief, relayURL, relayToken string, coverage *reviewCoverageInput) (*reviewChildSpec, error) {
 	p, ok := cfg.Providers[provider]
 	if !ok {
 		return nil, fmt.Errorf("review harness %q is not configured", provider)
@@ -129,7 +142,7 @@ func prepareReviewProvider(ctx context.Context, cfg *Config, provider, model, ro
 		env["ANTHROPIC_API_KEY"] = relayToken
 		env["ANTHROPIC_BASE_URL"] = relayURL
 	}
-	schema := reviewResultSchema()
+	schema := reviewResultSchema(coverage != nil)
 	schemaPath, resultPath, taskPath := filepath.Join(root, "schema.json"), filepath.Join(root, "result.json"), filepath.Join(root, "task.txt")
 	if err = os.WriteFile(schemaPath, schema, 0600); err != nil {
 		return nil, err
@@ -148,6 +161,15 @@ Local review task:
 Schema:
 %s
 `, round.HeadSHA, round.BaseSHA, brief.Digest, resultPath, schemaPath, schema)
+	if coverage != nil {
+		task += fmt.Sprintf(`
+
+Coverage contract:
+- Read ../manifest.json. It is the runner-generated merge-base-to-head file list; renamed files use the new path and deleted files are already marked skipped/deleted.
+- Return one coverage entry for every manifest path. Preserve runner-marked skips, mark files reviewed only after inspecting them, and mark any file you could not inspect as unreviewed. Use skipped only for generated, vendored, lockfile, binary, or deleted files when the manifest makes that classification clear.
+- Set manifest_digest to exactly %s. A clean result requires every listed path to be reviewed or skipped; use incomplete if any path is unreviewed.
+`, coverage.ManifestDigest)
+	}
 	if err = os.WriteFile(taskPath, []byte(task), 0600); err != nil {
 		return nil, err
 	}

@@ -95,7 +95,7 @@ func TestReviewCheckoutExportsExactObjectsWithoutTouchingSource(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(source, "local-only.txt"), []byte("developer's unsaved work"), 0600)
 	status := reviewTestGit(t, source, "status", "--porcelain")
-	if err := prepareReviewCheckout(context.Background(), source, root, e); err != nil {
+	if err := prepareReviewCheckout(context.Background(), source, root, e, false); err != nil {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{"base/main.go": "return 1", "head/main.go": "return 2", "head/hidden.txt": "export-ignore must not hide", "review.diff": "return 2"} {
@@ -132,7 +132,7 @@ func TestReviewCheckoutExportsExactObjectsWithoutTouchingSource(t *testing.T) {
 		t.Fatalf("developer repository gained a branch: %s", branches)
 	}
 	e.Attempt.Round.Details.BaseRepositoryName = "another/repository"
-	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e); err == nil {
+	if err := prepareReviewCheckout(context.Background(), source, t.TempDir(), e, false); err == nil {
 		t.Fatal("foreign repository was accepted")
 	}
 }
@@ -242,7 +242,7 @@ func TestReviewInstalledProviderAcceptance(t *testing.T) {
 	}
 	source, execution := reviewTestRepo(t)
 	root := t.TempDir()
-	if err := prepareReviewCheckout(context.Background(), source, root, execution); err != nil {
+	if err := prepareReviewCheckout(context.Background(), source, root, execution, false); err != nil {
 		t.Fatal(err)
 	}
 	digest := strings.Repeat("a", 64)
@@ -255,7 +255,7 @@ func TestReviewInstalledProviderAcceptance(t *testing.T) {
 	if err := preflightReviewProvider(context.Background(), cfg, provider, model); err != nil {
 		t.Fatal(err)
 	}
-	spec, err := prepareReviewProvider(context.Background(), cfg, provider, model, root, execution, &reviewBrief{Digest: digest}, "", "")
+	spec, err := prepareReviewProvider(context.Background(), cfg, provider, model, root, execution, &reviewBrief{Digest: digest}, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestReviewCheckoutDiffExcludesTargetOnlyCommits(t *testing.T) {
 	execution.Review.BaseSHA = target
 	execution.Attempt.Round.BaseSHA = target
 	root := t.TempDir()
-	if err := prepareReviewCheckout(context.Background(), source, root, execution); err != nil {
+	if err := prepareReviewCheckout(context.Background(), source, root, execution, false); err != nil {
 		t.Fatal(err)
 	}
 	diff, err := os.ReadFile(filepath.Join(root, "input", "review.diff"))

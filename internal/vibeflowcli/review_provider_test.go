@@ -69,7 +69,7 @@ func TestReviewProviderUsesNormalModeForEveryHarness(t *testing.T) {
 			p.Env = map[string]string{"HARNESS_SETTING": "$AMBIENT_USER_SETTING-configured", "OPENAI_API_KEY": "selected-model-key"}
 			cfg.Providers[key] = p
 			root := t.TempDir()
-			spec, err := prepareReviewProvider(context.Background(), cfg, key, "some-model", root, execution, &reviewBrief{Digest: strings.Repeat("a", 64)}, "", "")
+			spec, err := prepareReviewProvider(context.Background(), cfg, key, "some-model", root, execution, &reviewBrief{Digest: strings.Repeat("a", 64)}, "", "", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
