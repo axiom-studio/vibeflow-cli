@@ -23,6 +23,7 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 		{"github", `"repository_review_v1","coverage_v1"`, "github", []string{"repository_review_v1", "coverage_v1"}},
 		{"azure_repos", `"repository_review_v1","coverage_v1"`, "azure_devops", []string{"repository_review_v1", "coverage_v1"}},
 		{"bitbucket", `"repository_review_v1","coverage_v1"`, "bitbucket", []string{"repository_review_v1", "coverage_v1"}},
+		{"gitlab", `"repository_review_v1","coverage_v1"`, "gitlab", []string{"repository_review_v1", "coverage_v1"}},
 		{"repository_only_server", `"repository_review_v1"`, "azure_devops", []string{"repository_review_v1"}},
 		{"coverage_only_server", `"coverage_v1"`, "azure_devops", []string{"coverage_v1"}},
 		{"old_server", "", "github", nil},

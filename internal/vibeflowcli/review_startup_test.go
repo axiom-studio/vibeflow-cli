@@ -88,6 +88,7 @@ func TestReviewStartupResolvesConfiguredProjectAndLocalRepository(t *testing.T) 
 		{"https://github.com/acme/repo.git", "github", "github.com", "acme/repo", 7},
 		{"git@company.ghe.com:ACME/Repo.git", "github", "company.ghe.com", "acme/repo", 8},
 		{"git@bitbucket.org:workspace/repo.git", "bitbucket", "bitbucket.org", "workspace/repo", 7},
+		{"git@gitlab.com:Acme/Platform/Repo.git", "gitlab", "gitlab.com", "acme/platform/repo", 9},
 	} {
 		t.Run(tc.host, func(t *testing.T) {
 			reviewTestGit(t, repo, "remote", "set-url", "origin", tc.remote)
@@ -101,7 +102,7 @@ func TestReviewStartupResolvesConfiguredProjectAndLocalRepository(t *testing.T) 
 				case "/rest/v1/vibeflow/projects":
 					fmt.Fprint(w, `[{"id":66,"name":"Axiom","description":"","status":"active","created_at":"2026-09-15T00:00:00Z"}]`)
 				case "/rest/v1/vibeflow/projects/66/pr-review-repositories":
-					fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"},{"provider":"github","provider_host":"company.ghe.com","repository_link_id":8,"repository_name":"acme/repo"},{"provider":"bitbucket","provider_host":"bitbucket.org","repository_link_id":7,"repository_name":"workspace/repo"}]}`)
+					fmt.Fprint(w, `{"repositories":[{"provider":"github","provider_host":"github.com","repository_link_id":7,"repository_name":"acme/repo"},{"provider":"github","provider_host":"company.ghe.com","repository_link_id":8,"repository_name":"acme/repo"},{"provider":"bitbucket","provider_host":"bitbucket.org","repository_link_id":7,"repository_name":"workspace/repo"},{"provider":"gitlab","provider_host":"gitlab.com","repository_link_id":9,"repository_name":"acme/platform/repo"}]}`)
 				default:
 					t.Errorf("unexpected path %s", r.URL.Path)
 					http.NotFound(w, r)
