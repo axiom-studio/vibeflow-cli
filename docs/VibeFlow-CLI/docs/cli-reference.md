@@ -271,10 +271,9 @@ Configuration identical to the target branch's is the repository's own and is al
 It loads no user settings and none of the review checkout's own project settings, while keeping your normal Claude login.
 Isolation applies to the `claude` harness only; `--isolated` with another harness is refused.
 
-The choice is saved as `review_isolated: true|false` in `config.yaml`.
-When `review-watch` starts in a terminal and nothing is saved, it asks once and saves the answer.
+The saved choice is `review_isolated: true|false` in `config.yaml`; set it there to make isolation the default for every run.
+`review-watch` never asks at startup, so nothing holds a runner back from registering: with nothing saved, Vera uses your own setup and prints one line naming that default, `--isolated` and `review_isolated`; `review_isolated: false` keeps the default and hides the line.
 `--isolated` applies to one foreground run without changing the saved choice; it is refused with `--background`, because the background runner is a separate process that reads `config.yaml`, so set `review_isolated: true` there instead.
-Without a terminal and without a saved choice, Vera keeps your own setup.
 The startup line names the mode, for example `online (local, claude, isolated)`.
 For an `@vibeflow ask` question the checkout is read-only: before the harness starts, the head worktree's files and the base and merge-base snapshots lose write permission (Git's own metadata stays writable so read commands work), and Claude starts without its Edit, MultiEdit and NotebookEdit tools.
 Your configured MCP servers stay available to answers.

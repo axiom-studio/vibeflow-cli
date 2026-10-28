@@ -609,23 +609,24 @@ func TestChooseReviewIsolation(t *testing.T) {
 	if err := SaveConfig(cfg, path); err != nil {
 		t.Fatal(err)
 	}
-	if err := chooseReviewIsolation(cfg, path, "claude", true, true, os.Stdin, io.Discard); err != nil || !reviewIsolated(cfg) {
+	if err := chooseReviewIsolation(cfg, path, "claude", true, io.Discard); err != nil || !reviewIsolated(cfg) {
 		t.Fatalf("--isolated: err=%v isolated=%v", err, reviewIsolated(cfg))
 	}
 	if saved, _ := os.ReadFile(path); strings.Contains(string(saved), "review_isolated") {
 		t.Fatal("--isolated was saved; it applies to one run")
 	}
-	if err := chooseReviewIsolation(DefaultConfig(), path, "codex", true, true, os.Stdin, io.Discard); err == nil {
+	if err := chooseReviewIsolation(DefaultConfig(), path, "codex", true, io.Discard); err == nil {
 		t.Fatal("--isolated accepted for codex")
 	}
-	notTerminal, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer notTerminal.Close()
 	fresh := DefaultConfig()
-	if err := chooseReviewIsolation(fresh, path, "claude", false, true, notTerminal, io.Discard); err != nil || fresh.ReviewIsolated != nil {
-		t.Fatalf("asked without a terminal: err=%v choice=%v", err, fresh.ReviewIsolated)
+	var hint strings.Builder
+	if err := chooseReviewIsolation(fresh, path, "claude", false, &hint); err != nil || fresh.ReviewIsolated != nil || !strings.Contains(hint.String(), "review_isolated: true in "+path) {
+		t.Fatalf("default not named: err=%v choice=%v hint=%q", err, fresh.ReviewIsolated, hint.String())
+	}
+	off := false
+	hint.Reset()
+	if err := chooseReviewIsolation(&Config{ReviewIsolated: &off}, path, "claude", false, &hint); err != nil || hint.Len() != 0 {
+		t.Fatalf("a saved choice still printed the hint: err=%v hint=%q", err, hint.String())
 	}
 }
 

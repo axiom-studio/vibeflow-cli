@@ -1,7 +1,6 @@
 package vibeflowcli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -26,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
 
@@ -279,7 +277,7 @@ func reviewWatchCmd() *cobra.Command {
 			// one-run flag would be silently dropped there (issue #6311).
 			return fmt.Errorf("--isolated applies to a foreground run only; for a background runner set review_isolated: true in %s and start it again", path)
 		}
-		if err := chooseReviewIsolation(cfg, path, o.Provider, isolated, !background && !o.Once, os.Stdin, cmd.OutOrStdout()); err != nil {
+		if err := chooseReviewIsolation(cfg, path, o.Provider, isolated, cmd.OutOrStdout()); err != nil {
 			return err
 		}
 		if !background && os.Getenv("VIBEFLOW_TOKEN") != "" {
@@ -627,10 +625,12 @@ func (w *reviewWatch) run(ctx context.Context) error {
 }
 
 // chooseReviewIsolation settles whether Vera runs isolated: --isolated wins
-// for this run; otherwise the saved review_isolated; otherwise, on a terminal,
-// it asks once and saves the answer (issue #6195). Without a terminal and
-// without a choice, Vera keeps the developer's own setup, as before.
-func chooseReviewIsolation(cfg *Config, path, provider string, flag, ask bool, in *os.File, out io.Writer) error {
+// for this run; otherwise the saved review_isolated; otherwise the personal
+// setup, the documented default (issue #6195). It never reads stdin: an
+// unanswered question before registration kept a Vera pane's runner off the
+// server, invisible in the UI. With nothing saved it says how to choose and
+// saves nothing, so config.yaml holds only choices the developer made.
+func chooseReviewIsolation(cfg *Config, path, provider string, flag bool, out io.Writer) error {
 	if flag {
 		if provider != "claude" {
 			return fmt.Errorf("--isolated is supported for the claude harness only")
@@ -639,31 +639,9 @@ func chooseReviewIsolation(cfg *Config, path, provider string, flag, ask bool, i
 		cfg.ReviewIsolated = &on
 		return nil
 	}
-	if cfg.ReviewIsolated != nil || provider != "claude" || !ask || !term.IsTerminal(in.Fd()) {
-		return nil
+	if cfg.ReviewIsolated == nil && provider == "claude" {
+		fmt.Fprintf(out, "Vera uses your personal Claude Code setup (hooks, plugins, output style) by default. To run isolated, pass --isolated or set review_isolated: true in %s; review_isolated: false keeps the default and hides this line.\n", path)
 	}
-	fmt.Fprint(out, "Run Vera with your personal Claude Code setup (hooks, MCP servers, plugins, output style) or isolated?\nPersonal MCP servers are reachable from a session that reads untrusted pull request text. [p]ersonal / [i]solated: ")
-	line, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("no answer to the Vera setup question; start again or pass --isolated")
-	}
-	choice := strings.ToLower(strings.TrimSpace(line))
-	if choice != "p" && choice != "personal" && choice != "i" && choice != "isolated" {
-		return fmt.Errorf("answer p or i; start Vera again to choose")
-	}
-	on := choice == "i" || choice == "isolated"
-	cfg.ReviewIsolated = &on
-	// Save into the file as written, not the loaded config: an environment
-	// token or server override must never reach config.yaml.
-	saved, err := loadReviewBackgroundConfig(path)
-	if err != nil {
-		return err
-	}
-	saved.ReviewIsolated = &on
-	if err := SaveConfig(saved, path); err != nil {
-		return fmt.Errorf("could not save review_isolated in %s: %w", path, err)
-	}
-	fmt.Fprintf(out, "Saved review_isolated: %v in %s.\n", on, path)
 	return nil
 }
 

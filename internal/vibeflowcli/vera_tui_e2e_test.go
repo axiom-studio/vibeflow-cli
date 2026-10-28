@@ -186,8 +186,6 @@ func TestVeraTUIBinaryPickerLifecycle(t *testing.T) {
 	cfg.DefaultWorkDir, cfg.TmuxSocket = "", socket
 	cfg.DirectoryHistory = []string{repo, repo2}
 	cfg.Providers["claude"] = Provider{Name: "Claude Code", Binary: provider}
-	personal := false // Vera in a pane would otherwise ask the one-time setup question.
-	cfg.ReviewIsolated = &personal
 	if err := SaveConfig(cfg, filepath.Join(root, "config.yaml")); err != nil {
 		t.Fatal(err)
 	}
