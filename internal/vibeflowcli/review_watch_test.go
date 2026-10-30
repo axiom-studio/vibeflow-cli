@@ -876,10 +876,23 @@ func TestReviewWatchRegistersWithoutIsolationChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	tm := NewTmuxManager(fmt.Sprintf("vftest-isolation-%d", os.Getpid()))
-	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	runner := 0
+	t.Cleanup(func() {
+		_, _ = tm.run("kill-server")
+		// The runner outlives the pane and may still be writing a claimed
+		// job's work directory; TempDir cleanup must wait until it exits.
+		for deadline := time.Now().Add(15 * time.Second); runner > 0 && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			if p, err := os.FindProcess(runner); err != nil || p.Signal(syscall.Signal(0)) != nil {
+				return
+			}
+		}
+	})
 	command := shellJoin([]string{builtVibeflow(t), "--root", RootDir(), "--config", ConfigPath(), "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "ask"})
 	if _, err := tm.run("new-session", "-d", "-s", "ask", "-x", "200", "-y", "40", "-e", "VIBEFLOW_TOKEN=", "exec "+command); err != nil {
 		t.Fatal(err)
+	}
+	if out, err := tm.run("display-message", "-p", "-t", "ask", "#{pane_pid}"); err == nil {
+		runner, _ = strconv.Atoi(strings.TrimSpace(out))
 	}
 	var pane string
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
