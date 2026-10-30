@@ -260,8 +260,8 @@ func reviewWatchCmd() *cobra.Command {
 		if o.PollInterval < time.Second || o.PollInterval > time.Minute {
 			return fmt.Errorf("interval must be between 1s and 60s; the server treats a runner as offline after 2 minutes")
 		}
-		if o.GitProvider != "github" && o.GitProvider != "bitbucket" && o.GitProvider != "azure_devops" {
-			return fmt.Errorf("review repository integration must be github, bitbucket or azure_devops")
+		if !reviewProviderSupportsRepositoryRequests(o.GitProvider) {
+			return fmt.Errorf("review repository integration must be github, bitbucket, azure_devops or gitlab")
 		}
 		if strings.TrimSpace(o.Name) == "" || strings.ContainsAny(o.Name+o.Model, "\x00\r\n\t") || len(o.Name) > 100 || len(o.Model) > 200 {
 			return fmt.Errorf("invalid runner name or model; runner names must be 1 to 100 bytes")
@@ -371,7 +371,7 @@ func reviewWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Project, "project", "", "VibeFlow project name or ID")
 	cmd.Flags().StringVar(&o.Repository, "repo", "", "Local checkout for the linked repository (default: current directory)")
 	cmd.Flags().Int64Var(&o.RepositoryLinkID, "repository-link", 0, "VibeFlow repository link ID")
-	cmd.Flags().StringVar(&o.GitProvider, "git-provider", "github", "Repository integration: github, bitbucket or azure_devops")
+	cmd.Flags().StringVar(&o.GitProvider, "git-provider", "github", "Repository integration: github, bitbucket, azure_devops or gitlab")
 	cmd.Flags().StringVar(&o.Provider, "provider", "", "Coding harness for Vera: "+strings.Join(reviewHarnessKeys, ", ")+" (default: configured provider); it runs with your normal login and full permissions in a disposable worktree")
 	cmd.Flags().StringVar(&o.Model, "model", "", "Model selection; required for gateway reviews")
 	cmd.Flags().StringVar(&o.Kind, "runner-kind", "local", "local or explicitly authorized shared runner")
@@ -413,6 +413,15 @@ func (w *reviewWatch) save() error {
 }
 func (w *reviewWatch) workDir(p *reviewReceipt) string {
 	return filepath.Join(w.root, "work", p.RequestID)
+}
+
+func reviewProviderSupportsRepositoryRequests(provider string) bool {
+	switch provider {
+	case "github", "bitbucket", "azure_devops", "gitlab":
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *reviewWatch) run(ctx context.Context) error {
@@ -459,7 +468,7 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	idleStatus := "" // Shown while healthy, so owned and detached runners surface it too.
 	var discovery reviewStartupRepositoriesResponse
 	err = w.client.reviewRequest(ctx, "GET", fmt.Sprintf("/projects/%d/pr-review-repositories", w.options.ProjectID), nil, &discovery)
-	if err != nil && (w.options.GitProvider == "github" || w.options.SlotKind != "") {
+	if err != nil && (reviewProviderSupportsRepositoryRequests(w.options.GitProvider) || w.options.SlotKind != "") {
 		return reviewServerUpgradeHint(err)
 	}
 	// Without this, a runner started from the wrong clone goes online and
@@ -470,18 +479,10 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	if w.options.SlotKind != "" && !slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability) {
 		return fmt.Errorf("this VibeFlow server cannot route work to separate answer and review slots; upgrade the server or run without slots")
 	}
-	if w.options.GitProvider == "github" {
-		supported := false
-		for _, capability := range discovery.SupportedRunnerCapabilities {
-			if capability == "repository_review_v1" {
-				supported = true
-			}
-		}
-		if supported {
-			repositoryRequests = true
-		} else {
-			idleStatus = reviewLegacyRoutingNotice
-		}
+	if reviewProviderSupportsRepositoryRequests(w.options.GitProvider) && slices.Contains(discovery.SupportedRunnerCapabilities, "repository_review_v1") {
+		repositoryRequests = true
+	} else {
+		idleStatus = reviewLegacyRoutingNotice
 	}
 	// Commenter-written question text reaches the harness, so questions are
 	// taken only with the server's consent: question_v1, or claim_kind_v1,
