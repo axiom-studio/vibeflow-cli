@@ -676,9 +676,10 @@ type workbenchSource struct {
 // WorkbenchComposition is a live pane-join workbench. Restore returns every
 // joined pane to its own session (by name) and tears down the holder.
 type WorkbenchComposition struct {
-	tm      *TmuxManager
-	holder  string
-	sources []workbenchSource
+	tm           *TmuxManager
+	holder       string
+	sources      []workbenchSource
+	trackOrigins bool // VS Code can still identify panes while their source sessions are consumed.
 }
 
 // HolderName returns the tmux session to attach to for the composed view.
@@ -868,6 +869,11 @@ func (tm *TmuxManager) composeInto(target string, sessions []string, titles map[
 			return err
 		}
 		status := tm.captureSessionStatus(full)
+		if comp.trackOrigins {
+			if _, err := tm.run("set-option", "-p", "-t", pid, "@vibeflow_session", full); err != nil {
+				return fmt.Errorf("record workbench origin for %q: %w", full, err)
+			}
+		}
 		if out, err := tm.run(joinPaneArgs(pid, target)...); err != nil {
 			return fmt.Errorf("join %q into workbench: %w: %s", full, err, strings.TrimSpace(out))
 		}
@@ -995,23 +1001,34 @@ func (tm *TmuxManager) windowID(target string) (string, error) {
 // two sessions total are required. On any failure the panes already composed
 // are restored before the error is returned.
 func (tm *TmuxManager) ComposeProjectWorkbench(projects []WorkbenchProject, selectLabel string, titles map[string]string) (*WorkbenchComposition, error) {
+	return tm.composeProjectWorkbench(projects, selectLabel, titles, false)
+}
+
+func (tm *TmuxManager) composeProjectWorkbench(projects []WorkbenchProject, selectLabel string, titles map[string]string, vscodeClient bool) (*WorkbenchComposition, error) {
 	total := 0
 	for _, p := range projects {
 		total += len(p.Sessions)
 	}
-	if total < 2 {
-		return nil, fmt.Errorf("workbench needs at least 2 sessions, got %d", total)
+	minimum := 2
+	if vscodeClient {
+		minimum = 1
+	}
+	if total < minimum {
+		return nil, fmt.Errorf("workbench needs at least %d sessions, got %d", minimum, total)
 	}
 
 	holder := workbenchHolderName
 	if tm.HasSession(holder) {
+		if vscodeClient {
+			return nil, fmt.Errorf("existing workbench %q still contains sessions; detach and restore it before opening another view", holder)
+		}
 		_, _ = tm.run("kill-session", "-t", holder)
 	}
 	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
 		return nil, fmt.Errorf("create workbench holder: %w", err)
 	}
 
-	comp := &WorkbenchComposition{tm: tm, holder: holder}
+	comp := &WorkbenchComposition{tm: tm, holder: holder, trackOrigins: vscodeClient}
 	selectTarget := ""
 	first := true
 	for _, p := range projects {
@@ -1071,6 +1088,14 @@ func (c *WorkbenchComposition) Restore() error {
 	tm := c.tm
 	var firstErr error
 	for _, s := range c.sources {
+		if c.trackOrigins {
+			owner, err := tm.run("display-message", "-p", "-t", s.paneID, "#{session_name}")
+			// A stopped pane must not be replaced with an empty shell. A pane
+			// already restored on an earlier partial attempt needs no move.
+			if err != nil || strings.TrimSpace(owner) == "" || strings.TrimSpace(owner) == s.name {
+				continue
+			}
+		}
 		// A session with other panes (Vera's review history) survived the
 		// join; put the agent pane back on its left.
 		if s.kept && tm.HasSession(s.name) {

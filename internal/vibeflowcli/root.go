@@ -27,12 +27,14 @@ import (
 )
 
 var (
-	flagRootDir     string
-	flagConfigPath  string
-	flagServerURL   string
-	flagProject     string
-	flagMCPToolName string
-	flagTmuxSocket  string
+	flagRootDir       string
+	flagConfigPath    string
+	flagServerURL     string
+	flagProject       string
+	flagMCPToolName   string
+	flagTmuxSocket    string
+	flagClient        string
+	flagControlSocket string
 
 	buildVersion = "dev"
 	buildCommit  = "none"
@@ -105,6 +107,11 @@ func init() {
 	rootCmd.Flags().StringVar(&flagServerURL, "server-url", "", "VibeFlow server URL (overrides config)")
 	rootCmd.Flags().StringVar(&flagProject, "project", "", "Default project name")
 
+	rootCmd.Flags().StringVar(&flagClient, "client", "", "Enable client integration (vscode)")
+	rootCmd.Flags().StringVar(&flagControlSocket, "control-socket", "", "Private local socket for the VS Code client")
+	rootCmd.AddCommand(&cobra.Command{Use: "integration-capabilities", Short: "Print supported local client protocols", Run: func(cmd *cobra.Command, args []string) {
+		fmt.Fprintln(cmd.OutOrStdout(), `{"vscode_navigation":1}`)
+	}})
 	rootCmd.AddCommand(versionCmd)
 
 	// Register headless subcommands.
@@ -117,6 +124,12 @@ func Execute() error {
 }
 
 func runTUI(cmd *cobra.Command, args []string) error {
+	if flagClient != "" && flagClient != "vscode" {
+		return fmt.Errorf("unsupported client %q (supported: vscode)", flagClient)
+	}
+	if (flagClient == "vscode") != (flagControlSocket != "") {
+		return fmt.Errorf("--client=vscode and --control-socket must be supplied together")
+	}
 	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 	// Enforce singleton — only one TUI instance at a time.
@@ -211,6 +224,20 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	model := NewModel(cfg, client, tmux, worktrees, store, cache, registry, projectID)
 	model.serverWarning = serverWarning
 
+	if flagClient == "vscode" {
+		navigation, err := startVSCodeNavigation(ctx, flagControlSocket, tmux, store)
+		if err != nil {
+			model.logger.Close()
+			return err
+		}
+		model.vscode = navigation
+		defer func() {
+			if err := navigation.close(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
+		}()
+	}
+
 	// Detect dead sessions from cache and show restart popup if any.
 	if sessions, err := tmux.ListSessions(); err == nil {
 		var tmuxNames []string
@@ -232,6 +259,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	// Alt-screen, focus reporting, and mouse mode are set on the View in
 	// Bubble Tea v2 (see Model.View) rather than as program options here.
 	p := tea.NewProgram(model, tea.WithContext(ctx), tea.WithoutSignalHandler())
+	if model.vscode != nil {
+		model.vscode.send = p.Send
+		go model.vscode.serve()
+	}
 	if _, err := p.Run(); err != nil {
 		model.logger.Error("TUI fatal: %v", err)
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
