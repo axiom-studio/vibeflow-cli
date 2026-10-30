@@ -287,6 +287,31 @@ func TestReviewWatchSpecialistTimeoutLeavesItsFilesUnreviewed(t *testing.T) {
 	}
 }
 
+// Issue #6593: specialists that wait for a slot (one at a time, as on a
+// terminal) each get a share of the window. A first pass that never finishes
+// is stopped at its share, so the passes queued behind it still run and only
+// its own file stays unreviewed.
+func TestReviewWatchQueuedSpecialistsShareTheWindow(t *testing.T) {
+	const budget = 20 * time.Second
+	result, marks, out := runPassReview(t, func(cfg *Config) {
+		cfg.ReviewSinglePassMaxFiles = 1
+		cfg.ReviewSpecialistParallelism = 1
+	}, "security", budget)
+	t.Logf("output:\n%s", out)
+	if got := passesRun(t, marks); !reflect.DeepEqual(got, []string{"data", "general", "general-2", "integration", "plan", "security"}) {
+		t.Fatalf("passes = %v", got)
+	}
+	outcome, coverage, _ := coverageOf(t, mustJSON(t, result))
+	if outcome != "incomplete" {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	for _, c := range coverage {
+		if (c.Path == "main.go") != (c.Status == "unreviewed") {
+			t.Fatalf("queued passes lost their time: coverage %+v", coverage)
+		}
+	}
+}
+
 func mustJSON(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(v)

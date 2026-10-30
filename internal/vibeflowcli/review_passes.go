@@ -98,6 +98,7 @@ type reviewPass struct {
 	Area     string // A specialist's area
 	Files    []string
 	Deadline time.Time // Plan and specialists end here; integration follows the attempt.
+	Start    time.Time // A queued specialist's planned start: the end of the wave before it.
 	Dir      string    // Its task, schema and result; the attempt root for integration
 }
 
@@ -134,7 +135,11 @@ func (p *reviewPass) schema() []byte {
 // task is the whole task of a plan or specialist pass.
 func (p *reviewPass) task(execution *reviewExecution, root, shownDir, digest, checkPolicy, mcpTask, resultPath, schemaPath string, schema []byte) string {
 	round := execution.Attempt.Round
-	ends := fmt.Sprintf("This pass ends at %s (about %d minutes from now); the runner stops it then.", p.Deadline.UTC().Format("15:04:05 UTC"), int(time.Until(p.Deadline).Round(time.Minute)/time.Minute))
+	from := time.Now()
+	if p.Start.After(from) {
+		from = p.Start // Written before it waits for a slot; it has its own share.
+	}
+	ends := fmt.Sprintf("This pass ends at %s (about %d minutes once it starts); the runner stops it then.", p.Deadline.UTC().Format("15:04:05 UTC"), int(p.Deadline.Sub(from).Round(time.Minute)/time.Minute))
 	write := fmt.Sprintf("write exactly one JSON object to the absolute path %s (never a relative path), matching the JSON Schema in %s (reproduced below), then stop. Always include both keys: {\"result\":{...},\"failure_reason\":null} on success (JSON null, not a quoted string), or {\"result\":null,\"failure_reason\":\"why\"} when you cannot do this pass.\n\nSchema:\n%s\n", resultPath, schemaPath, schema)
 	if p.Name == reviewPlanPass {
 		var areas strings.Builder
@@ -373,8 +378,22 @@ func (w *reviewWatch) reviewInPasses(ctx context.Context, root string, manifest 
 	passes := reviewSpecialistGroups(areas, reviewable, limits.Files)
 	specs := make([]*reviewChildSpec, len(passes))
 	names := make([]string, len(passes))
+	parallel := limits.Parallel
+	if w.tty != nil {
+		parallel = 1 // One terminal shows one harness at a time.
+	}
+	// Passes run in waves of parallel, in order, and each wave gets an equal
+	// share of the window, so a queued pass is never told, or allowed, to use
+	// the time of the passes behind it. One that finishes early only lets the
+	// next start sooner.
+	parallel = max(parallel, 1)
+	waves := max((len(passes)+parallel-1)/parallel, 1)
+	windowStart := time.Now()
+	window := specialistsEnd.Sub(windowStart)
 	for i, pass := range passes {
-		pass.Deadline = specialistsEnd
+		wave := time.Duration(i / parallel)
+		pass.Start = windowStart.Add(window * wave / time.Duration(waves))
+		pass.Deadline = windowStart.Add(window * (wave + 1) / time.Duration(waves))
 		if pass.Dir, err = passDir(pass.Name); err != nil {
 			return nil, err
 		}
@@ -383,67 +402,67 @@ func (w *reviewWatch) reviewInPasses(ctx context.Context, root string, manifest 
 		}
 		names[i] = fmt.Sprintf("%s (%d)", pass.Name, len(pass.Files))
 	}
-	parallel := limits.Parallel
-	if w.tty != nil {
-		parallel = 1 // One terminal shows one harness at a time.
-	}
 	fmt.Fprintf(w.output, "Specialist passes (files each): %s; up to %d at a time until %s.\n", strings.Join(names, ", "), parallel, specialistsEnd.Format("15:04:05"))
 
 	specialistsCtx, cancel := context.WithDeadline(ctx, specialistsEnd)
 	defer cancel()
 	candidates := make([]reviewPassCandidates, len(passes))
-	slots := make(chan struct{}, parallel)
+	queue := make(chan int, len(passes)) // In pass order, so the waves keep theirs.
+	for i, pass := range passes {
+		candidates[i] = reviewPassCandidates{Pass: pass.Name, Area: pass.Area, Files: pass.Files, State: "not_started", Findings: []json.RawMessage{}, Coverage: []reviewCoverageFile{}}
+		queue <- i
+	}
+	close(queue)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var stop error
-	for i, pass := range passes {
-		candidates[i] = reviewPassCandidates{Pass: pass.Name, Area: pass.Area, Files: pass.Files, State: "not_started", Findings: []json.RawMessage{}, Coverage: []reviewCoverageFile{}}
+	runPass := func(i int) {
+		pass := passes[i]
+		err := runner.run(specialistsCtx, specs[i], pass)
+		c := &candidates[i]
+		c.State = "completed"
+		if err != nil {
+			mu.Lock()
+			if stop == nil {
+				stop = err
+				cancel() // The review stops; so do the other passes.
+			}
+			mu.Unlock()
+			c.State = "failed"
+		} else if specialistsCtx.Err() != nil || !time.Now().Before(pass.Deadline) {
+			c.State = "stopped"
+		}
+		var result struct {
+			Findings []json.RawMessage    `json:"findings"`
+			Coverage []reviewCoverageFile `json:"coverage"`
+			Notes    string               `json:"notes"`
+		}
+		if !readReviewPassResult(filepath.Join(pass.Dir, "result.json"), &result) {
+			if c.State == "completed" {
+				c.State = "failed"
+			}
+			return
+		}
+		if result.Findings != nil {
+			c.Findings = result.Findings
+		}
+		c.Notes = result.Notes
+		for _, cov := range result.Coverage {
+			// Only its own files: another pass answers for the rest.
+			if cov.Status == "reviewed" && slices.Contains(pass.Files, cov.Path) {
+				c.Coverage = append(c.Coverage, reviewCoverageFile{Path: cov.Path, Status: "reviewed"})
+			}
+		}
+	}
+	for range min(parallel, len(passes)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			select {
-			case slots <- struct{}{}:
-				defer func() { <-slots }()
-			case <-specialistsCtx.Done():
-				return
-			}
-			if specialistsCtx.Err() != nil {
-				return
-			}
-			err := runner.run(specialistsCtx, specs[i], pass)
-			c := &candidates[i]
-			c.State = "completed"
-			if err != nil {
-				mu.Lock()
-				if stop == nil {
-					stop = err
-					cancel() // The review stops; so do the other passes.
+			for i := range queue {
+				if specialistsCtx.Err() != nil {
+					return
 				}
-				mu.Unlock()
-				c.State = "failed"
-			} else if specialistsCtx.Err() != nil {
-				c.State = "stopped"
-			}
-			var result struct {
-				Findings []json.RawMessage    `json:"findings"`
-				Coverage []reviewCoverageFile `json:"coverage"`
-				Notes    string               `json:"notes"`
-			}
-			if !readReviewPassResult(filepath.Join(pass.Dir, "result.json"), &result) {
-				if c.State == "completed" {
-					c.State = "failed"
-				}
-				return
-			}
-			if result.Findings != nil {
-				c.Findings = result.Findings
-			}
-			c.Notes = result.Notes
-			for _, cov := range result.Coverage {
-				// Only its own files: another pass answers for the rest.
-				if cov.Status == "reviewed" && slices.Contains(pass.Files, cov.Path) {
-					c.Coverage = append(c.Coverage, reviewCoverageFile{Path: cov.Path, Status: "reviewed"})
-				}
+				runPass(i)
 			}
 		}()
 	}
