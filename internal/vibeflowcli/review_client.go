@@ -57,6 +57,29 @@ type reviewQuestion struct {
 	DiscussionUnavailable bool            `json:"discussion_unavailable,omitempty"`
 }
 
+// reviewConversationFile is input/conversation.json: the server's earlier
+// questions and answers on the pull request, in order, and Vera's latest
+// completed verdict. Conversation is an empty list and Review null when the
+// server sent none.
+type reviewConversationFile struct {
+	Conversation json.RawMessage `json:"conversation"`
+	Review       json.RawMessage `json:"review"`
+}
+
+func reviewQuestionConversation(q *reviewQuestion) reviewConversationFile {
+	out := reviewConversationFile{Conversation: json.RawMessage(`[]`), Review: json.RawMessage(`null`)}
+	if q == nil {
+		return out
+	}
+	if c := bytes.TrimSpace(q.Conversation); len(c) > 0 && !bytes.Equal(c, []byte("null")) {
+		out.Conversation = q.Conversation
+	}
+	if r := bytes.TrimSpace(q.Review); len(r) > 0 {
+		out.Review = q.Review
+	}
+	return out
+}
+
 const reviewQuestionCapability = "question_v1"
 
 type reviewExecution struct {

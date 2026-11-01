@@ -559,7 +559,7 @@ func reviewWatchQuestionExecution(e *reviewExecution) *reviewExecution {
 	e.Prompt = "You are in question mode: answer the developer's question and stop."
 	e.Question = &reviewQuestion{ID: reviewUUID(), Question: "Why does value() return 2 now?", AskedBy: "reviewer", CommentID: "901", RoundNumber: 1, HeadSHA: e.Attempt.Round.HeadSHA, BaseSHA: e.Attempt.Round.BaseSHA,
 		Discussion:   json.RawMessage(`[{"author":"author","created_at":"2026-10-12T10:00:00Z","kind":"review_comment","path":"main.go","line":2,"body":"Why return 2?"}]`),
-		Conversation: json.RawMessage(`[{"comment_id":"900","asked_by":"reviewer","question":"What changed?","answer":"The constant moved to value().","head_sha":"` + e.Attempt.Round.HeadSHA + `","answered_at":1}]`),
+		Conversation: json.RawMessage(`[{"comment_id":"899","asked_by":"author","question":"Is value() covered?","answer":"Yes, by TestValue.","head_sha":"` + e.Attempt.Round.HeadSHA + `","answered_at":1},{"comment_id":"900","asked_by":"reviewer","question":"What changed?","answer":"The constant moved to value().","head_sha":"` + e.Attempt.Round.HeadSHA + `","answered_at":2}]`),
 		Review:       json.RawMessage(`{"round_number":1,"head_sha":"` + e.Attempt.Round.HeadSHA + `","outcome":"clean","summary":"verified fixture"}`)}
 	return e
 }
@@ -587,7 +587,8 @@ func TestReviewWatchQuestionLifecycle(t *testing.T) {
 	reviewWatchQuestionExecution(e)
 	server, claims, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
 	provider := filepath.Join(t.TempDir(), "claude")
-	script := "#!/bin/sh\ngrep -q 'Why does value() return 2 now' ../question.json || exit 7\ngrep -q 'Why return 2?' ../question.json || exit 3\n[ -w main.go ] && exit 4\n[ -w ../base/main.go ] && exit 4\ngrep -q 'The constant moved to value()' ../question.json || exit 6\ngrep -q 'verified fixture' ../question.json || exit 5\ngrep -q 'Local question task' ../../task.txt || exit 8\ngrep -q new_findings ../../schema.json && exit 9\ncat " + shellQuote(reviewWatchQuestionResult(t, e)) + " > ../../result.json\n"
+	seen := t.TempDir()
+	script := "#!/bin/sh\ngrep -q 'Why does value() return 2 now' ../question.json || exit 7\ngrep -q 'Why return 2?' ../question.json || exit 3\n[ -w main.go ] && exit 4\n[ -w ../base/main.go ] && exit 4\ngrep -q 'The constant moved to value()' ../question.json || exit 6\ngrep -q 'verified fixture' ../question.json || exit 5\ngrep -q 'Local question task' ../../task.txt || exit 8\ngrep -q 'conversation.json' ../../task.txt || exit 10\ngrep -q new_findings ../../schema.json && exit 9\ncp ../question.json ../conversation.json " + shellQuote(seen) + "/ || exit 11\ncat " + shellQuote(reviewWatchQuestionResult(t, e)) + " > ../../result.json\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -615,6 +616,47 @@ func TestReviewWatchQuestionLifecycle(t *testing.T) {
 	}
 	if claims[7].Load() != 1 || results.Load() != 1 {
 		t.Fatalf("claims=%d results=%d", claims[7].Load(), results.Load())
+	}
+	// #6459: the harness saw input/conversation.json holding exactly the
+	// question's two-exchange conversation and review, which question.json
+	// still carries too.
+	var question, conversation map[string]json.RawMessage
+	for path, into := range map[string]*map[string]json.RawMessage{"question.json": &question, "conversation.json": &conversation} {
+		data, err := os.ReadFile(filepath.Join(seen, path))
+		if err != nil || json.Unmarshal(data, into) != nil {
+			t.Fatalf("harness copy of %s: %v %s", path, err, data)
+		}
+	}
+	var exchanges []json.RawMessage
+	if len(conversation) != 2 || json.Unmarshal(conversation["conversation"], &exchanges) != nil || len(exchanges) != 2 ||
+		!jsonEqual(t, conversation["conversation"], question["conversation"]) || !jsonEqual(t, conversation["review"], question["review"]) {
+		t.Fatalf("conversation.json = %v; question.json conversation=%s review=%s", conversation, question["conversation"], question["review"])
+	}
+}
+
+func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
+	t.Helper()
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	ja, _ := json.Marshal(x)
+	jb, _ := json.Marshal(y)
+	return bytes.Equal(ja, jb)
+}
+
+// Without earlier exchanges or a verdict, conversation.json still exists,
+// holding an empty list and null.
+func TestReviewQuestionConversationFileDefaults(t *testing.T) {
+	for name, q := range map[string]*reviewQuestion{
+		"absent":        {Question: "Why?"},
+		"explicit null": {Question: "Why?", Conversation: json.RawMessage(`null`), Review: json.RawMessage(`null`)},
+		"no question":   nil,
+	} {
+		data, err := json.Marshal(reviewQuestionConversation(q))
+		if err != nil || string(data) != `{"conversation":[],"review":null}` {
+			t.Errorf("%s: conversation.json = %s, %v", name, data, err)
+		}
 	}
 }
 

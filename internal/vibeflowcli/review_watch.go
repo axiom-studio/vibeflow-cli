@@ -1152,6 +1152,11 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		if err := saveReviewJSON(filepath.Join(root, "input", "question.json"), p.Execution.Question); err != nil {
 			return nil, err
 		}
+		// The pull request's memory gets its own file, read first (#4043).
+		// question.json keeps the same fields for older prompts.
+		if err := saveReviewJSON(filepath.Join(root, "input", "conversation.json"), reviewQuestionConversation(p.Execution.Question)); err != nil {
+			return nil, err
+		}
 	} else if reviewPullRequestPresent(p.Execution.PullRequest) {
 		// Like the question, the pull request's own text stays out of the prompt.
 		if err := os.WriteFile(filepath.Join(root, "input", "pr.json"), p.Execution.PullRequest, 0600); err != nil {
