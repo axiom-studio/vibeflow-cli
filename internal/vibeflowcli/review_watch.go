@@ -184,6 +184,13 @@ func reviewWatchCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "review-watch", Short: "Run fresh PR reviews in disposable worktrees while this runner is online", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		// Flags parsed; runtime failures print their message, not the usage text.
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true // main prints the error once.
+		// -1 is only the "not set" default. An explicit value must be in range,
+		// so a typo such as --answer-slots -3 fails instead of silently using
+		// the configured count.
+		if (cmd.Flags().Changed("answer-slots") && (answerSlots < 0 || answerSlots > maxReviewSlots)) ||
+			(cmd.Flags().Changed("review-slots") && (reviewSlots < 0 || reviewSlots > maxReviewSlots)) {
+			return fmt.Errorf("--answer-slots and --review-slots must be 0 to %d", maxReviewSlots)
+		}
 		if managed != "" {
 			return runReviewBackground(cmd.Context(), managed)
 		}

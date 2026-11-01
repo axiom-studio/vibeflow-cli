@@ -364,3 +364,44 @@ func TestReviewSlotsRecoverSharedReceipt(t *testing.T) {
 		t.Fatalf("shared receipt left pending: %+v\n%s", p, text())
 	}
 }
+
+// An explicit slot flag outside 0..maxReviewSlots is refused before anything
+// starts. A negative value used to fall back silently to the configured count.
+func TestReviewWatchRefusesOutOfRangeSlotFlags(t *testing.T) {
+	withTempRoot(t)
+	var hits int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		http.Error(w, "unexpected", http.StatusTeapot)
+	}))
+	t.Cleanup(server.Close)
+	cfg := singleSlotConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "slot-token"
+	cfg.Providers["claude"] = Provider{Binary: "/bin/true"}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	repo := t.TempDir()
+	for _, flags := range [][]string{
+		{"--answer-slots", "-3"},
+		{"--review-slots", "-3"},
+		{"--answer-slots", "-1"},
+		{"--answer-slots", "9"},
+		{"--answer-slots", "1", "--review-slots", "-2"},
+	} {
+		var out bytes.Buffer
+		args := append([]string{"--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac"}, flags...)
+		err := runReviewWatch(context.Background(), &out, args...)
+		if err == nil || !strings.Contains(err.Error(), "--answer-slots and --review-slots must be 0 to 8") {
+			t.Errorf("%v: err = %v, want the 0 to 8 range error\n%s", flags, err, out.String())
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Fatalf("refused flags still reached the server %d times", hits)
+	}
+}
