@@ -17,6 +17,7 @@
 package vibeflowcli
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -128,15 +129,16 @@ type Model struct {
 	wizard           WizardModel
 	conflictModal    ConflictModal
 	worktreeList     WorktreeListModel
-	orphanWorktrees  int                // worktrees no session uses; hinted in the help bar
-	pendingWizard    *WizardResult      // wizard result waiting for conflict resolution
-	switchMeta       *SessionMeta       // non-nil during quick branch switch flow
-	groupEditRunning []SessionMeta      // non-nil during group edit flow: the running group being reshaped
-	captureOutput    string             // last captured pane output for selected session
-	captureName      string             // tmux session name for current capture
-	confirmDelete    bool               // showing delete confirmation
-	confirmQuit      bool               // showing quit confirmation
-	confirmDetach    bool               // showing detach confirmation
+	orphanWorktrees  int           // worktrees no session uses; hinted in the help bar
+	pendingWizard    *WizardResult // wizard result waiting for conflict resolution
+	switchMeta       *SessionMeta  // non-nil during quick branch switch flow
+	groupEditRunning []SessionMeta // non-nil during group edit flow: the running group being reshaped
+	captureOutput    string        // last captured pane output for selected session
+	captureName      string        // tmux session name for current capture
+	confirmDelete    bool          // showing delete confirmation
+	confirmQuit      bool          // showing quit confirmation
+	confirmDetach    bool          // showing detach confirmation
+	vscode           *vscodeNavigation
 	workbenchActive  bool               // true while a pane-join workbench is composing/attached/restoring (pauses store prune)
 	serverWarning    string             // non-empty if server unreachable at startup
 	healthMonitor    *HealthMonitor     // session error detection and auto-recovery
@@ -371,6 +373,9 @@ func (m Model) refreshSessions() tea.Msg {
 	if m.store != nil && !m.workbenchActive {
 		discovered := m.store.Discover(tmuxNames)
 		for _, tmuxName := range discovered {
+			if isWorkbenchHolder(tmuxName) {
+				continue
+			}
 			provider := ParseSessionProvider(tmuxName)
 			workDir := m.tmux.GetPaneWorkDir(tmuxName)
 			branch := GetGitBranch(workDir)
@@ -818,6 +823,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// session refreshes continue while sub-views (wizard, conflict modal,
 	// worktree list) are active.
 	switch msg := msg.(type) {
+	case vscodeNavigateMsg:
+		if err := msg.ctx.Err(); err != nil {
+			msg.reply <- err
+			return m, nil
+		}
+		if m.activeView != ViewSessions || m.confirmDelete || m.confirmQuit || m.confirmDetach {
+			msg.reply <- fmt.Errorf("finish or cancel the current CLI dialog before navigating")
+			return m, nil
+		}
+		m.workbenchActive = true
+		return m, m.vscodeOpenCmd(msg.request, msg.reply)
+	case vscodeReadyMsg:
+		if msg.reply != nil {
+			msg.reply <- msg.err
+		}
+		if msg.err != nil {
+			m.workbenchActive = false
+			m.err = msg.err
+			return m, m.refreshSessions
+		}
+		m.workbenchActive = true
+		return m, tea.ExecProcess(m.vscode.attachCommand(), func(err error) tea.Msg {
+			// Restore before resuming the TUI, under the same lock as socket focus.
+			return vscodeExitMsg{err: errors.Join(err, m.vscode.restore())}
+		})
+	case vscodeExitMsg:
+		m.workbenchActive = false
+		m.err = msg.err
+		return m, m.refreshSessions
 	case veraLaunchRequestedMsg:
 		return m.beginVeraLaunch(msg.result)
 	case veraLaunchInputMsg:
@@ -958,11 +992,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.workbenchActive = false
 		return m, m.refreshSessions
 	case autoAttachMsg:
-		// Auto-attach to a newly created session.
-		cmd := m.tmux.AttachSessionCmd(msg.name)
-		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			return attachExitMsg{err: err}
-		})
+		return m, m.attachSessionCmd(msg.name)
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1171,6 +1201,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.refreshSessions
 		case "m":
+			if m.vscode != nil {
+				return m, m.vscodeProjectCmd()
+			}
 			// Project workbench: compose the selected session's project (its
 			// repo-root group) into one natively interactive tmux view. One
 			// session → attach it directly; none → no-op.
@@ -1188,6 +1221,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.composeWorkbenchCmd(names, m.workbenchMetas(names), m.workbenchTitles())
 			}
 		case "M":
+			if m.vscode != nil {
+				return m, m.vscodeProjectCmd()
+			}
 			// All-projects workbench: one tmux window per project, cycled with
 			// Ctrl-b n/p. Worth composing only with ≥2 sessions total.
 			projects := m.projectGroups()
@@ -2005,6 +2041,9 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 // switches to) the named session. Shared by the Enter key and mouse clicks so
 // both activate a session identically.
 func (m Model) attachSessionCmd(name string) tea.Cmd {
+	if m.vscode != nil {
+		return m.vscodeOpenCmd(vscodeNavigationRequest{Version: 1, View: "session", Session: m.tmux.ensurePrefix(name)}, nil)
+	}
 	cmd := m.tmux.AttachSessionCmd(name)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return attachExitMsg{err: err}
