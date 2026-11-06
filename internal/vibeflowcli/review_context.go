@@ -150,13 +150,14 @@ func writeReviewCallers(ctx context.Context, input string) error {
 }
 
 // reviewRepositoryContext is the task lines for the files above, each only
-// when the runner wrote it.
-func reviewRepositoryContext(root string) string {
+// when the runner wrote it; coverage adds the manifest's coverage rule, which
+// a specialist pass replaces with its own file set.
+func reviewRepositoryContext(root string, coverage bool) string {
 	var s string
 	if reviewFileExists(filepath.Join(root, "input", "callers.txt")) {
 		s += "- ../callers.txt lists where the head revision names each function or type the diff adds, changes or removes (one hop, a capped whole-word text match: it misses dynamic calls and can include unrelated uses of the same name). Start the caller and callee trace from it, up to two hops where the change's behavior flows, and read the worktree for anything it does not show.\n"
 	}
-	if reviewFileExists(filepath.Join(root, "input", "manifest.json")) {
+	if coverage && reviewFileExists(filepath.Join(root, "input", "manifest.json")) {
 		s += reviewCoverageTask
 	}
 	if reviewFileExists(filepath.Join(root, "input", "review-rules.md")) {

@@ -111,35 +111,39 @@ func reviewCapacityReceipts(root string) ([]reviewReceipt, error) {
 			if !attempt.IsDir() || len(attempt.Name()) != 36 || strings.ContainsAny(attempt.Name(), "/\\.\r\n\t") {
 				continue
 			}
-			marker := filepath.Join(work, attempt.Name(), "provider-cleanup-pending.json")
-			info, err := os.Lstat(marker)
-			if os.IsNotExist(err) {
-				continue
+			// One marker per child guard: the attempt's own, and each pass's.
+			for _, child := range reviewChildDirs(filepath.Join(work, attempt.Name())) {
+				marker := filepath.Join(child, "provider-cleanup-pending.json")
+				info, err := os.Lstat(marker)
+				if os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				if !info.Mode().IsRegular() || info.Size() > 64<<10 {
+					return nil, fmt.Errorf("invalid provider cleanup marker: %s", marker)
+				}
+				data, err := os.ReadFile(marker)
+				if os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				var cleanup reviewProviderCleanup
+				if json.Unmarshal(data, &cleanup) != nil || cleanup.RequestID != attempt.Name() || cleanup.JobID == "" || cleanup.AttemptID == "" {
+					return nil, fmt.Errorf("invalid provider cleanup marker: %s", marker)
+				}
+				if err := cleanup.Reservation.validate(root); err != nil {
+					return nil, fmt.Errorf("invalid provider cleanup marker %s: %w", marker, err)
+				}
+				if state.Pending != nil && state.Pending.RequestID == cleanup.RequestID && state.Pending.Capacity != nil && *state.Pending.Capacity != cleanup.Reservation {
+					return nil, fmt.Errorf("provider cleanup reservation changed: %s", marker)
+				}
+				receipts = append(receipts, reviewReceipt{RequestID: cleanup.RequestID, JobID: cleanup.JobID, Capacity: &cleanup.Reservation})
+				break // One receipt per attempt: its passes share the reservation.
 			}
-			if err != nil {
-				return nil, err
-			}
-			if !info.Mode().IsRegular() || info.Size() > 64<<10 {
-				return nil, fmt.Errorf("invalid provider cleanup marker: %s", marker)
-			}
-			data, err := os.ReadFile(marker)
-			if os.IsNotExist(err) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			var cleanup reviewProviderCleanup
-			if json.Unmarshal(data, &cleanup) != nil || cleanup.RequestID != attempt.Name() || cleanup.JobID == "" || cleanup.AttemptID == "" {
-				return nil, fmt.Errorf("invalid provider cleanup marker: %s", marker)
-			}
-			if err := cleanup.Reservation.validate(root); err != nil {
-				return nil, fmt.Errorf("invalid provider cleanup marker %s: %w", marker, err)
-			}
-			if state.Pending != nil && state.Pending.RequestID == cleanup.RequestID && state.Pending.Capacity != nil && *state.Pending.Capacity != cleanup.Reservation {
-				return nil, fmt.Errorf("provider cleanup reservation changed: %s", marker)
-			}
-			receipts = append(receipts, reviewReceipt{RequestID: cleanup.RequestID, JobID: cleanup.JobID, Capacity: &cleanup.Reservation})
 		}
 	}
 	return receipts, nil
@@ -449,13 +453,15 @@ func (w *reviewWatch) providerCleanupPending(p *reviewReceipt) error {
 		if !attempt.IsDir() || len(attempt.Name()) != 36 || strings.ContainsAny(attempt.Name(), "/\\.\r\n\t") {
 			continue
 		}
-		path := filepath.Join(work, attempt.Name(), "provider-cleanup-pending.json")
-		if _, err := os.Lstat(path); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return err
+		for _, child := range reviewChildDirs(filepath.Join(work, attempt.Name())) {
+			path := filepath.Join(child, "provider-cleanup-pending.json")
+			if _, err := os.Lstat(path); os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: %s", errReviewCleanupUnverified, path)
 		}
-		return fmt.Errorf("%w: %s", errReviewCleanupUnverified, path)
 	}
 	return nil
 }
