@@ -14,6 +14,28 @@ import (
 	"time"
 )
 
+func TestReviewProviderSupport(t *testing.T) {
+	for _, tc := range []struct {
+		provider                 string
+		valid, repositoryRequest bool
+	}{
+		{"github", true, true},
+		{"bitbucket", true, false},
+		{"azure_devops", true, true},
+		{"gitlab", true, true},
+		{"unknown", false, false},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			if got := validReviewGitProvider(tc.provider); got != tc.valid {
+				t.Errorf("validReviewGitProvider(%q)=%v, want %v", tc.provider, got, tc.valid)
+			}
+			if got := reviewProviderSupportsRepositoryRequests(tc.provider); got != tc.repositoryRequest {
+				t.Errorf("reviewProviderSupportsRepositoryRequests(%q)=%v, want %v", tc.provider, got, tc.repositoryRequest)
+			}
+		})
+	}
+}
+
 func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 	for _, tc := range []struct {
 		name, advertisement, provider    string

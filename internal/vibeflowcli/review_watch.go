@@ -260,7 +260,7 @@ func reviewWatchCmd() *cobra.Command {
 		if o.PollInterval < time.Second || o.PollInterval > time.Minute {
 			return fmt.Errorf("interval must be between 1s and 60s; the server treats a runner as offline after 2 minutes")
 		}
-		if !reviewProviderSupportsRepositoryRequests(o.GitProvider) {
+		if !validReviewGitProvider(o.GitProvider) {
 			return fmt.Errorf("review repository integration must be github, bitbucket, azure_devops or gitlab")
 		}
 		if strings.TrimSpace(o.Name) == "" || strings.ContainsAny(o.Name+o.Model, "\x00\r\n\t") || len(o.Name) > 100 || len(o.Model) > 200 {
@@ -415,9 +415,18 @@ func (w *reviewWatch) workDir(p *reviewReceipt) string {
 	return filepath.Join(w.root, "work", p.RequestID)
 }
 
-func reviewProviderSupportsRepositoryRequests(provider string) bool {
+func validReviewGitProvider(provider string) bool {
 	switch provider {
 	case "github", "bitbucket", "azure_devops", "gitlab":
+		return true
+	default:
+		return false
+	}
+}
+
+func reviewProviderSupportsRepositoryRequests(provider string) bool {
+	switch provider {
+	case "github", "azure_devops", "gitlab":
 		return true
 	default:
 		return false
@@ -479,10 +488,12 @@ func (w *reviewWatch) run(ctx context.Context) error {
 	if w.options.SlotKind != "" && !slices.Contains(discovery.SupportedRunnerCapabilities, reviewClaimKindCapability) {
 		return fmt.Errorf("this VibeFlow server cannot route work to separate answer and review slots; upgrade the server or run without slots")
 	}
-	if reviewProviderSupportsRepositoryRequests(w.options.GitProvider) && slices.Contains(discovery.SupportedRunnerCapabilities, "repository_review_v1") {
-		repositoryRequests = true
-	} else {
-		idleStatus = reviewLegacyRoutingNotice
+	if reviewProviderSupportsRepositoryRequests(w.options.GitProvider) {
+		if slices.Contains(discovery.SupportedRunnerCapabilities, "repository_review_v1") {
+			repositoryRequests = true
+		} else {
+			idleStatus = reviewLegacyRoutingNotice
+		}
 	}
 	// Commenter-written question text reaches the harness, so questions are
 	// taken only with the server's consent: question_v1, or claim_kind_v1,
