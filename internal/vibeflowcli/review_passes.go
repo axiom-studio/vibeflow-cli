@@ -249,9 +249,10 @@ func readReviewPassResult(path string, out any) bool {
 		return false
 	}
 	var envelope struct {
-		Result json.RawMessage `json:"result"`
+		Result  json.RawMessage `json:"result"`
+		Failure string          `json:"failure_reason"`
 	}
-	if json.Unmarshal(data, &envelope) != nil || len(envelope.Result) == 0 || bytes.Equal(envelope.Result, []byte("null")) {
+	if json.Unmarshal(data, &envelope) != nil || envelope.Failure != "" || len(envelope.Result) == 0 || bytes.Equal(envelope.Result, []byte("null")) {
 		return false
 	}
 	return json.Unmarshal(envelope.Result, out) == nil
@@ -418,7 +419,9 @@ func (w *reviewWatch) reviewInPasses(ctx context.Context, root string, manifest 
 	var stop error
 	runPass := func(i int) {
 		pass := passes[i]
-		err := runner.run(specialistsCtx, specs[i], pass)
+		passCtx, cancelPass := context.WithDeadline(specialistsCtx, pass.Deadline)
+		err := runner.run(passCtx, specs[i], pass)
+		cancelPass()
 		c := &candidates[i]
 		c.State = "completed"
 		if err != nil {

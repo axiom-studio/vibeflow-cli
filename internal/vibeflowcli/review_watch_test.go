@@ -247,13 +247,18 @@ type veraPane struct {
 // CLI; loggedIn false makes it report the opposite.
 func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, mark func(string) string) string) *veraPane {
 	t.Helper()
+	return startVeraPaneWithConfig(t, loggedIn, script, singleSlotConfig(), []string{"repository_review_v1", "question_v1"})
+}
+
+func startVeraPaneWithConfig(t *testing.T, loggedIn bool, script func(e *reviewExecution, mark func(string) string) string, cfg *Config, capabilities []string) *veraPane {
+	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
 	withTempRoot(t)
 	repo, e := reviewTestRepo(t)
 	e.Review.Number = 9
-	server, claims, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	server, claims, results := reviewWatchServerWith(t, map[int64]*reviewExecution{7: e}, capabilities, nil)
 	v := &veraPane{t: t, e: e, claims: claims, results: results, marks: t.TempDir(), token: "interactive-canary"}
 	// The listener pre-trusts worktrees in Claude's config: keep it private.
 	claudeDir := t.TempDir()
@@ -274,7 +279,6 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 	if err := os.WriteFile(harness, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := singleSlotConfig()
 	cfg.ServerURL, cfg.APIToken = server.URL, v.token
 	cfg.Providers["claude"] = Provider{Name: "Claude", Binary: harness, LaunchTemplate: "{{.Binary}}{{ if .SkipPermissions }} --dangerously-skip-permissions{{ end }}"}
 	if err := SaveConfig(cfg, ConfigPath()); err != nil {

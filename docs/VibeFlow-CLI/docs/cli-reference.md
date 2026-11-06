@@ -250,6 +250,8 @@ A review is large when more than `review_single_pass_max_files` (default 15) of 
 3. Integration pass: the attempt's own session, with the ordinary review task plus `candidates.json` (each pass's area, files, state, candidates, coverage and notes, and the files no specialist reviewed). It verifies each candidate (keeps it, publishes it as an advisory, or drops it and says why in the summary), merges duplicates, searches unchanged code for siblings of the changed behavior (other encoders, callers and implementations, starting from `callers.txt`), reviews unreviewed files as time allows, and writes the one result.
 
 The runner adds every file a specialist reviewed to that result's coverage and then applies the coverage check above, so a file no pass reviewed makes a clean verdict a **Partial review**, never a false clean.
+A specialist that reports a nonempty `failure_reason` contributes no findings or coverage, even if its envelope also contains a partial result.
+A specialist deadline stops only that pass, including in an interactive pane; queued specialists and the integration pass continue within their time windows.
 Time comes from the attempt deadline (the server's, or a shorter `--timeout`) when the passes start: the plan pass gets the first 15%, the specialists run until 30% is left, and the integration pass has the rest.
 Each pass's check policy states its own minutes left.
 Every pass launches exactly like the single pass: the same harness arguments, isolation, workspace-configuration refusal, VibeFlow MCP credential and execution policy, in the same review worktree, each under its own child guard in `passes/<name>/` (its task, schema, result, lock and cleanup marker).

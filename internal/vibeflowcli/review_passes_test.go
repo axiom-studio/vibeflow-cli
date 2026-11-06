@@ -125,7 +125,7 @@ esac
 // runPassReview runs one review of the test repository (four changed,
 // reviewable files) with passHarness on a server that accepts coverage, and
 // returns the submitted result, the marks directory and the output.
-func runPassReview(t *testing.T, configure func(*Config), slow string, budget time.Duration) (map[string]json.RawMessage, string, string) {
+func runPassReview(t *testing.T, configure func(*Config), slow string, budget time.Duration, alterHarness ...func(string) string) (map[string]json.RawMessage, string, string) {
 	t.Helper()
 	withTempRoot(t)
 	t.Setenv("HOME", t.TempDir()) // Never the developer's own harness settings.
@@ -146,6 +146,9 @@ func runPassReview(t *testing.T, configure func(*Config), slow string, budget ti
 	}
 	marks := t.TempDir()
 	script := strings.NewReplacer("MARKS", shellQuote(marks), "FINAL", shellQuote(final), "SLOW", slow).Replace(passHarness)
+	for _, alter := range alterHarness {
+		script = alter(script)
+	}
 	provider := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
@@ -309,6 +312,92 @@ func TestReviewWatchQueuedSpecialistsShareTheWindow(t *testing.T) {
 		if (c.Path == "main.go") != (c.Status == "unreviewed") {
 			t.Fatalf("queued passes lost their time: coverage %+v", coverage)
 		}
+	}
+}
+
+// A pass's explicit failure takes precedence over partial findings and
+// coverage, just as it does for the final result.
+func TestReviewWatchFailedSpecialistsLeaveFilesUnreviewed(t *testing.T) {
+	result, marks, _ := runPassReview(t, func(cfg *Config) {
+		cfg.ReviewSinglePassMaxFiles = 1
+	}, "none", time.Minute, func(script string) string {
+		return strings.Replace(script, `"failure_reason":null}' "$pass"`, `"failure_reason":"could not finish"}' "$pass"`, 1)
+	})
+	outcome, coverage, _ := coverageOf(t, mustJSON(t, result))
+	if outcome != "incomplete" || len(coverage) != 4 {
+		t.Fatalf("failed specialists produced outcome %s, coverage %+v", outcome, coverage)
+	}
+	for _, c := range coverage {
+		if c.Status != "unreviewed" {
+			t.Fatalf("failed specialist coverage was accepted: %+v", coverage)
+		}
+	}
+	var candidates struct {
+		Passes []reviewPassCandidates `json:"passes"`
+	}
+	data, err := os.ReadFile(filepath.Join(marks, "candidates.json"))
+	if err != nil || json.Unmarshal(data, &candidates) != nil || len(candidates.Passes) != 4 {
+		t.Fatalf("candidates: %v %s", err, data)
+	}
+	for _, c := range candidates.Passes {
+		if c.State != "failed" || len(c.Coverage) != 0 || len(c.Findings) != 0 {
+			t.Fatalf("failed specialist contributed candidates: %+v", c)
+		}
+	}
+}
+
+func startInteractivePassReview(t *testing.T) *veraPane {
+	t.Helper()
+	cfg := singleSlotConfig()
+	cfg.ReviewSinglePassMaxFiles = 1
+	return startVeraPaneWithConfig(t, true, func(e *reviewExecution, mark func(string) string) string {
+		e.Attempt.Round.DeadlineAt = time.Now().Add(30 * time.Second).UnixMilli()
+		script := strings.Replace(passHarness, "task=$(cat)", `taskfile=$(printf '%s\n' "$*" | sed -n 's/.*Your complete PR review task is in the file \([^ ]*\)\. Read.*/\1/p')
+task=$(cat "$taskfile")`, 1)
+		return strings.NewReplacer("MARKS", shellQuote(filepath.Dir(mark("passes"))), "FINAL", shellQuote(reviewWatchResult(t, e, 0)), "SLOW", "security").Replace(script)
+	}, cfg, []string{"repository_review_v1", "question_v1", reviewCoverageCapability})
+}
+
+func TestReviewWatchInteractiveSpecialistTimeoutContinues(t *testing.T) {
+	v := startInteractivePassReview(t)
+	v.waitFor("a result after the first specialist timed out", func() bool { return v.results.Load() == 1 })
+	if got := passesRun(t, v.marks); !reflect.DeepEqual(got, []string{"data", "general", "general-2", "integration", "plan", "security"}) {
+		t.Fatalf("passes = %v", got)
+	}
+	text := v.capture()
+	if !strings.Contains(text, "Pass security stopped at its time limit") || !strings.Contains(text, "Result: partial review") || strings.Contains(text, "Review interrupted") {
+		t.Fatalf("specialist deadline interrupted the review:\n%s", text)
+	}
+	v.waitFor("the saved result receipt", v.shows("Result sent to VibeFlow"))
+	outcome, coverage, _ := coverageOf(t, v.lastReceipt().Result)
+	if outcome != "incomplete" || len(coverage) != 4 {
+		t.Fatalf("outcome %s, coverage %+v", outcome, coverage)
+	}
+	for _, c := range coverage {
+		if (c.Path == "main.go") != (c.Status == "unreviewed") {
+			t.Fatalf("queued interactive passes lost their time: %+v", coverage)
+		}
+	}
+}
+
+func TestReviewWatchInteractiveSpecialistInterruptOffersStop(t *testing.T) {
+	v := startInteractivePassReview(t)
+	v.waitFor("the security specialist", func() bool {
+		data, _ := os.ReadFile(v.mark("passes"))
+		return strings.Contains(string(data), "security\n")
+	})
+	v.keys("C-c")
+	v.waitFor("the interrupt prompt", v.shows("Review interrupted. Press Ctrl-C again within 5 s to stop Vera, or wait to resume listening."))
+	v.keys("C-c")
+	v.waitFor("Vera stopped", v.dead)
+	if v.results.Load() != 0 {
+		t.Fatal("a user interruption submitted a review result")
+	}
+	if p := v.lastReceipt(); !strings.Contains(p.Failure, "(cancelled") {
+		t.Fatalf("specialist interruption recorded as %q", p.Failure)
+	}
+	if got := passesRun(t, v.marks); !reflect.DeepEqual(got, []string{"plan", "security"}) {
+		t.Fatalf("passes continued after the user interrupted: %v", got)
 	}
 }
 
