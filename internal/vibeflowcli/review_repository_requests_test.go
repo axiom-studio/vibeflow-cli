@@ -48,6 +48,10 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 		// A runner that reports coverage says so; only such a runner claims reviews.
 		{"coverage", `"repository_review_v1","question_v1","coverage_v1"`, "github", true, true, true},
 		{"bitbucket_coverage", `"coverage_v1"`, "bitbucket", false, true, false},
+		{"azure_supported", `"repository_review_v1","question_v1","coverage_v1"`, "azure_devops", true, true, true},
+		{"azure_old_server", "", "azure_devops", false, true, false},
+		{"gitlab_supported", `"repository_review_v1","question_v1","coverage_v1"`, "gitlab", true, true, true},
+		{"gitlab_old_server", "", "gitlab", false, true, false},
 		{"old_server", "", "github", false, true, false},
 		{"unknown_capability", `"future_review_v2"`, "github", false, true, false},
 		// Bitbucket still reads discovery, to check the checkout against its link.
@@ -125,7 +129,7 @@ func TestReviewRepositoryRequestNegotiation(t *testing.T) {
 			if (discoveries == 1) != tc.discovery {
 				t.Fatalf("discovery calls=%d want enabled=%v", discoveries, tc.discovery)
 			}
-			downgraded := tc.provider == "github" && !tc.capability
+			downgraded := reviewProviderSupportsRepositoryRequests(tc.provider) && !tc.capability
 			if downgraded && !strings.Contains(output.String(), "server upgrade") {
 				t.Fatal("legacy downgrade lacks upgrade guidance")
 			}
