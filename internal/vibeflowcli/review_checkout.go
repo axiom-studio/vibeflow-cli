@@ -10,10 +10,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const reviewGitObjectBudget int64 = 2 << 30
@@ -59,6 +61,89 @@ func reviewRemoteIdentity(raw string) (string, string, error) {
 	}
 	name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
 	return strings.ToLower(u.Hostname()), strings.ToLower(name), nil
+}
+
+func reviewGitLabRemoteURL(raw string) (*url.URL, error) {
+	if !strings.Contains(raw, "://") {
+		host, remotePath, ok := strings.Cut(raw, ":")
+		if !ok {
+			return nil, fmt.Errorf("invalid GitLab remote")
+		}
+		raw = "ssh://" + host + "/" + remotePath
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" ||
+		strings.ContainsAny(raw, "%\\\x00\r\n\t ") || (u.Scheme != "https" && u.Scheme != "ssh") || !strings.EqualFold(u.Hostname(), "gitlab.com") {
+		return nil, fmt.Errorf("GitLab remote must use gitlab.com and HTTPS or SSH")
+	}
+	if u.User != nil {
+		user := u.User.Username()
+		_, password := u.User.Password()
+		if u.Scheme != "ssh" || password || user != "git" {
+			return nil, fmt.Errorf("GitLab SSH username must be git and must not include a password")
+		}
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
+	if !validReviewGitLabProjectPath(name) {
+		return nil, fmt.Errorf("invalid GitLab project path")
+	}
+	return u, nil
+}
+
+func reviewGitLabRemoteIdentity(raw string) (string, string, error) {
+	u, err := reviewGitLabRemoteURL(raw)
+	if err != nil {
+		return "", "", err
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
+	return strings.ToLower(u.Hostname()), strings.ToLower(name), nil
+}
+
+func validReviewGitLabProjectPath(name string) bool {
+	if name == "" || len(name) > 512 || !utf8.ValidString(name) || path.IsAbs(name) || path.Clean(name) != name {
+		return false
+	}
+	parts := strings.Split(name, "/")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, "\\?#@%\r\n\t ") {
+			return false
+		}
+	}
+	return true
+}
+
+func reviewCheckoutRemoteURL(provider, raw string) (*url.URL, error) {
+	if provider == "gitlab" {
+		return reviewGitLabRemoteURL(raw)
+	}
+	return reviewRemoteURL(raw)
+}
+
+func reviewCheckoutRemoteIdentity(provider, raw string) (string, string, error) {
+	if provider == "gitlab" {
+		return reviewGitLabRemoteIdentity(raw)
+	}
+	return reviewRemoteIdentity(raw)
+}
+
+func reviewFetchRemote(provider string, origin *url.URL, remote, expectedHost, expectedName string) (string, error) {
+	host, name, err := reviewCheckoutRemoteIdentity(provider, remote)
+	if err != nil || host != expectedHost || name != strings.ToLower(expectedName) {
+		return "", fmt.Errorf("review clone identity is invalid")
+	}
+	clone, err := reviewCheckoutRemoteURL(provider, remote)
+	if err != nil {
+		return "", fmt.Errorf("review clone URL is invalid")
+	}
+	// Keep the operator's Git authentication transport, including for forks
+	// on the same verified provider host. Never copy backend credentials.
+	if origin.Scheme == "ssh" {
+		clone.Scheme, clone.User = origin.Scheme, origin.User
+	}
+	return clone.String(), nil
 }
 
 func reviewGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
@@ -299,14 +384,30 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 	if execution.Review.Provider == "azure_devops" {
 		return prepareAzureReviewCheckout(ctx, source, root, execution, strings.TrimSpace(string(remote)), proxy)
 	}
-	host, name, err := reviewRemoteIdentity(strings.TrimSpace(string(remote)))
+	provider := execution.Review.Provider
+	remoteURL := strings.TrimSpace(string(remote))
+	host, name, err := reviewCheckoutRemoteIdentity(provider, remoteURL)
 	if err != nil {
 		return reviewReportable("this checkout's origin is not a supported repository remote")
 	}
 	if host != execution.Review.ProviderHost || name != strings.ToLower(round.Details.BaseRepositoryName) {
 		return reviewReportable("this checkout is %s/%s, but the review is for %s/%s", host, name, execution.Review.ProviderHost, round.Details.BaseRepositoryName)
 	}
-	origin, _ := reviewRemoteURL(strings.TrimSpace(string(remote)))
+	origin, err := reviewCheckoutRemoteURL(provider, remoteURL)
+	if err != nil {
+		return reviewReportable("this checkout's origin is not a supported repository remote")
+	}
+	var gitLabBaseRemote, gitLabHeadRemote string
+	if provider == "gitlab" {
+		gitLabBaseRemote, err = reviewFetchRemote(provider, origin, round.Details.BaseCloneURL, host, round.Details.BaseRepositoryName)
+		if err != nil {
+			return reviewReportable("review clone identity is invalid")
+		}
+		gitLabHeadRemote, err = reviewFetchRemote(provider, origin, round.Details.HeadCloneURL, host, round.Details.HeadRepositoryName)
+		if err != nil {
+			return reviewReportable("review clone identity is invalid")
+		}
+	}
 	objects := filepath.Join(root, "objects.git")
 	if err = os.MkdirAll(objects, 0700); err != nil {
 		return err
@@ -315,23 +416,25 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 		return err
 	}
 	shared := shareReviewObjects(ctx, source, objects)
-	for _, item := range []struct{ sha, remote, name string }{{round.BaseSHA, round.Details.BaseCloneURL, round.Details.BaseRepositoryName}, {round.HeadSHA, round.Details.HeadCloneURL, round.Details.HeadRepositoryName}} {
+	items := []struct{ sha, remote, name string }{
+		{round.BaseSHA, round.Details.BaseCloneURL, round.Details.BaseRepositoryName},
+		{round.HeadSHA, round.Details.HeadCloneURL, round.Details.HeadRepositoryName},
+	}
+	for i, item := range items {
+		if provider == "gitlab" && i == 1 {
+			if err := fetchGitLabMergeRequestHead(ctx, objects, source, gitLabBaseRemote, gitLabHeadRemote, execution); err != nil {
+				return err
+			}
+			continue
+		}
 		if shared && reviewObjectPresent(ctx, objects, item.sha) {
 			continue // Read through the alternate; nothing is copied.
 		}
 		fetch := source
 		if _, err := reviewGit(ctx, source, "cat-file", "-e", item.sha+"^{commit}"); err != nil {
-			fetch = item.remote
-			h, n, err := reviewRemoteIdentity(fetch)
-			if err != nil || h != host || n != strings.ToLower(item.name) {
+			fetch, err = reviewFetchRemote(provider, origin, item.remote, host, item.name)
+			if err != nil {
 				return reviewReportable("review clone identity is invalid")
-			}
-			// Keep the operator's Git authentication transport, including for forks
-			// on the same verified provider host. Never copy backend credentials.
-			if origin.Scheme == "ssh" {
-				clone, _ := reviewRemoteURL(fetch)
-				clone.Scheme, clone.User = origin.Scheme, origin.User
-				fetch = clone.String()
 			}
 		}
 		if err = fetchReviewObjects(ctx, objects, fetch, item.sha, reviewGitObjectBudget); err != nil {
@@ -343,6 +446,46 @@ func prepareReviewCheckout(ctx context.Context, source, root string, execution *
 		}
 	}
 	return finishReviewCheckout(ctx, root, objects, round.BaseSHA, round.HeadSHA)
+}
+
+func fetchGitLabMergeRequestHead(ctx context.Context, objects, source, baseRemote, headRemote string, execution *reviewExecution) error {
+	if execution.Review.Number <= 0 {
+		return reviewReportable("GitLab review is missing a valid merge request IID")
+	}
+	round := execution.Attempt.Round
+	if _, err := reviewGit(ctx, source, "cat-file", "-e", round.HeadSHA+"^{commit}"); err == nil {
+		if err = fetchReviewObjects(ctx, objects, source, round.HeadSHA, reviewGitObjectBudget); err == nil {
+			if _, err = reviewGit(ctx, objects, "cat-file", "-e", round.HeadSHA+"^{commit}"); err == nil {
+				return nil
+			}
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	ref := fmt.Sprintf("refs/merge-requests/%d/head", execution.Review.Number)
+	if err := fetchReviewObjects(ctx, objects, baseRemote, ref, reviewGitObjectBudget); err == nil {
+		if _, err = reviewGit(ctx, objects, "cat-file", "-e", round.HeadSHA+"^{commit}"); err == nil {
+			return nil
+		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// The target's MR ref is preferred for forks and shared pipelines. A push
+	// racing the claim can move that ref; fall back only to the server-claimed
+	// exact SHA from the validated source project, never to a newer branch tip.
+	if headRemote != "" {
+		if err := fetchReviewObjects(ctx, objects, headRemote, round.HeadSHA, reviewGitObjectBudget); err == nil {
+			if _, err = reviewGit(ctx, objects, "cat-file", "-e", round.HeadSHA+"^{commit}"); err == nil {
+				return nil
+			}
+		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return reviewReportable("GitLab merge request %d head could not be fetched at the claimed revision", execution.Review.Number)
 }
 
 // prepareAzureReviewCheckout uses the selected checkout when it already has
