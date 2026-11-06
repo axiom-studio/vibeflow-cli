@@ -64,9 +64,10 @@ func (b *reviewBase) blob(file string) ([]byte, bool) {
 }
 
 // vendored reports whether a file's vendored package already existed at the
-// base: for Go vendor/ with a modules.txt, a module that file lists; otherwise
-// the vendored directory's first-level entry (or the directory itself, for a
-// file directly in it). A dependency the pull request introduces is reviewed.
+// base: for Go vendor/ with a modules.txt, a module that file lists; for scoped
+// npm packages, the full @scope/package entry; otherwise the vendored directory's
+// first-level entry (or the directory itself, for a file directly in it).
+// A dependency the pull request introduces is reviewed.
 func (b *reviewBase) vendored(file string) bool {
 	dirs := strings.Split(path.Dir(file), "/")
 	at := slices.IndexFunc(dirs, func(d string) bool { return d == "vendor" || d == "node_modules" || d == "third_party" })
@@ -88,7 +89,15 @@ func (b *reviewBase) vendored(file string) bool {
 			}
 		}
 	} else if len(rest) > 0 {
-		trusted = b.tree(root + "/" + rest[0])
+		pkg := rest[0]
+		if dirs[at] == "node_modules" && strings.HasPrefix(pkg, "@") {
+			if len(rest) < 2 {
+				b.vendoredByDir[key] = false
+				return false
+			}
+			pkg += "/" + rest[1]
+		}
+		trusted = b.tree(root + "/" + pkg)
 	} else {
 		trusted = b.tree(root)
 	}

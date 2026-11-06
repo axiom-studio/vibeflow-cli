@@ -239,7 +239,7 @@ Relay restrictions have real HTTP coverage, but an actual model call through the
 
 Beside each review's worktree, `manifest.json` lists every changed file from the merge base to the head (a rename as its new path, a deletion with status `D`) and marks the files Vera may leave unread by rule: deleted, binary, vendored, lockfile, or generated.
 The pull request author controls the head, so vendored and generated are decided against the merge base, and a base the runner cannot read marks nothing.
-A file is vendored only when its package already existed at the merge base: under `vendor/`, `node_modules/` or `third_party/`, the first-level entry (for Go `vendor/` with a `modules.txt`, a module that base file lists).
+A file is vendored only when its package already existed at the merge base: under `vendor/`, `node_modules/` or `third_party/`, the first-level entry (for Go `vendor/` with a `modules.txt`, a module that base file lists; for scoped npm packages, the full `@scope/package` entry).
 A file is generated only when it is modified in place and already had, at the merge base, a `*.pb.go` or `*_generated.*` name, or the same `Code generated ... DO NOT EDIT` line in its first five lines.
 A new, renamed or copied file, a header the pull request adds or edits, and a dependency the pull request introduces are all reviewed.
 Vera lists each manifest file in the result's `coverage` as reviewed, or skipped with its class.

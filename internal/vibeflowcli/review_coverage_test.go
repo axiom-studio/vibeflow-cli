@@ -40,6 +40,7 @@ func TestReviewManifestClassifiesChangedFiles(t *testing.T) {
 	write("vendor/modules.txt", "# example.com/lib v1.0.0\n## explicit\nexample.com/lib\n")
 	write("vendor/example.com/lib/lib.go", "package lib\n")
 	write("web/node_modules/x/index.js", "x\n")
+	write("web/node_modules/@trusted/existing/index.js", "x\n")
 	write("third_party/y/y.c", "y\n")
 	reviewTestGit(t, dir, "add", ".")
 	reviewTestGit(t, dir, "commit", "-m", "base")
@@ -59,12 +60,16 @@ func TestReviewManifestClassifiesChangedFiles(t *testing.T) {
 	write("third_party/z/z.c", "z\n")
 	write("vendor/example.com/evil/evil.go", "package evil\n")
 	write("web/node_modules/new/index.js", "n\n")
+	write("web/node_modules/@trusted/new/index.js", "n\n")
+	write("web/node_modules/@trusted/loose.js", "n\n")
 	// Files the base already marked generated or vendored stay skippable.
 	write("api/api.pb.go", "package api\n\nvar X = 1\n")
 	write("mock/mock.go", mockgen+"package mock\n\nvar X = 1\n")
 	write("vendor/example.com/lib/lib.go", "package lib\n\nvar X = 1\n")
 	write("vendor/example.com/lib/extra/extra.go", "package extra\n")
 	write("web/node_modules/x/index.js", "x2\n")
+	write("web/node_modules/@trusted/existing/index.js", "x2\n")
+	write("web/node_modules/@trusted/existing/extra.js", "x\n")
 	write("third_party/y/y.c", "y2\n")
 	write("go.sum", "sum\n")
 	write("web/yarn.lock", "lock\n")
@@ -83,36 +88,40 @@ func TestReviewManifestClassifiesChangedFiles(t *testing.T) {
 		got[f.Path] = f
 	}
 	for path, want := range map[string]reviewManifestFile{
-		"main.go":                               {Status: "M"},
-		"gone.go":                               {Status: "D", Skip: "deleted"},
-		"moved/new.go":                          {Status: "R"},
-		"auth/session.go":                       {Status: "M"},
-		"db/models_generated.go":                {Status: "A"},
-		"api/new.pb.go":                         {Status: "A"},
-		"gen/new.go":                            {Status: "A"},
-		"mock/retagged.go":                      {Status: "M"},
-		"mock/renamed.go":                       {Status: "R"},
-		"internal/third_party/x/x.go":           {Status: "A"},
-		"third_party/z/z.c":                     {Status: "A"},
-		"vendor/example.com/evil/evil.go":       {Status: "A"},
-		"web/node_modules/new/index.js":         {Status: "A"},
-		"api/api.pb.go":                         {Status: "M", Skip: "generated"},
-		"mock/mock.go":                          {Status: "M", Skip: "generated"},
-		"vendor/example.com/lib/lib.go":         {Status: "M", Skip: "vendored"},
-		"vendor/example.com/lib/extra/extra.go": {Status: "A", Skip: "vendored"},
-		"web/node_modules/x/index.js":           {Status: "M", Skip: "vendored"},
-		"third_party/y/y.c":                     {Status: "M", Skip: "vendored"},
-		"go.sum":                                {Status: "A", Skip: "lockfile"},
-		"web/yarn.lock":                         {Status: "A", Skip: "lockfile"},
-		"logo.png":                              {Status: "A", Skip: "binary"},
-		"later.go":                              {Status: "A"},
+		"main.go":                                     {Status: "M"},
+		"gone.go":                                     {Status: "D", Skip: "deleted"},
+		"moved/new.go":                                {Status: "R"},
+		"auth/session.go":                             {Status: "M"},
+		"db/models_generated.go":                      {Status: "A"},
+		"api/new.pb.go":                               {Status: "A"},
+		"gen/new.go":                                  {Status: "A"},
+		"mock/retagged.go":                            {Status: "M"},
+		"mock/renamed.go":                             {Status: "R"},
+		"internal/third_party/x/x.go":                 {Status: "A"},
+		"third_party/z/z.c":                           {Status: "A"},
+		"vendor/example.com/evil/evil.go":             {Status: "A"},
+		"web/node_modules/new/index.js":               {Status: "A"},
+		"web/node_modules/@trusted/new/index.js":      {Status: "A"},
+		"web/node_modules/@trusted/loose.js":          {Status: "A"},
+		"api/api.pb.go":                               {Status: "M", Skip: "generated"},
+		"mock/mock.go":                                {Status: "M", Skip: "generated"},
+		"vendor/example.com/lib/lib.go":               {Status: "M", Skip: "vendored"},
+		"vendor/example.com/lib/extra/extra.go":       {Status: "A", Skip: "vendored"},
+		"web/node_modules/x/index.js":                 {Status: "M", Skip: "vendored"},
+		"web/node_modules/@trusted/existing/index.js": {Status: "M", Skip: "vendored"},
+		"web/node_modules/@trusted/existing/extra.js": {Status: "A", Skip: "vendored"},
+		"third_party/y/y.c":                           {Status: "M", Skip: "vendored"},
+		"go.sum":                                      {Status: "A", Skip: "lockfile"},
+		"web/yarn.lock":                               {Status: "A", Skip: "lockfile"},
+		"logo.png":                                    {Status: "A", Skip: "binary"},
+		"later.go":                                    {Status: "A"},
 	} {
 		want.Path = path
 		if got[path] != want {
 			t.Errorf("%s = %+v, want %+v", path, got[path], want)
 		}
 	}
-	if len(m.Files) != 23 || m.Unnameable != 1 {
+	if len(m.Files) != 27 || m.Unnameable != 1 {
 		t.Fatalf("manifest = %+v", m.Files)
 	}
 	if _, ok := got["moved/old.go"]; ok {
@@ -120,6 +129,13 @@ func TestReviewManifestClassifiesChangedFiles(t *testing.T) {
 	}
 	if len(m.Digest) != 64 {
 		t.Fatalf("digest = %q", m.Digest)
+	}
+	result, missing, err := applyReviewCoverage(json.RawMessage(`{"outcome":"clean","coverage":[]}`), m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome, _, _ := coverageOf(t, result); outcome != "incomplete" || !strings.Contains(strings.Join(missing, "\n"), "web/node_modules/@trusted/new/index.js") {
+		t.Fatalf("new scoped package omitted without review: result=%s missing=%v", result, missing)
 	}
 	// The digest Vera's manifest file yields is the one the result carries.
 	path := filepath.Join(t.TempDir(), "manifest.json")
