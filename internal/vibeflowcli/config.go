@@ -144,6 +144,14 @@ type Config struct {
 	LLMGatewayEnabled bool                `yaml:"llm_gateway_enabled,omitempty"`
 	MCPToolName       string              `yaml:"mcp_tool_name,omitempty"`
 	OpenAICompat      OpenAICompatConfig  `yaml:"openai_compatible,omitempty"`
+
+	// A review with more files to read than ReviewSinglePassMaxFiles, or a
+	// diff larger than ReviewSinglePassMaxDiffKB, runs as plan, specialist and
+	// integration passes, with up to ReviewSpecialistParallelism specialists
+	// at once. 0 means the default: 15 files, 60 KB, 3 at once.
+	ReviewSinglePassMaxFiles    int `yaml:"review_single_pass_max_files,omitempty"`
+	ReviewSinglePassMaxDiffKB   int `yaml:"review_single_pass_max_diff_kb,omitempty"`
+	ReviewSpecialistParallelism int `yaml:"review_specialist_parallelism,omitempty"`
 }
 
 // OpenAICompatConfig remembers compatible endpoints entered in the wizard so
@@ -454,6 +462,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.ReviewAnswerSlots < 0 || cfg.ReviewAnswerSlots > maxReviewSlots || cfg.ReviewReviewSlots < 0 || cfg.ReviewReviewSlots > maxReviewSlots {
 		return nil, fmt.Errorf("review_answer_slots and review_review_slots must be 0 to %d", maxReviewSlots)
+	}
+	if cfg.ReviewSinglePassMaxFiles < 0 || cfg.ReviewSinglePassMaxDiffKB < 0 || cfg.ReviewSpecialistParallelism < 0 {
+		return nil, fmt.Errorf("review_single_pass_max_files, review_single_pass_max_diff_kb and review_specialist_parallelism must not be negative")
 	}
 
 	// Migrate built-in provider configs to current defaults.

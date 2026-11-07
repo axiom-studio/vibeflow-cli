@@ -45,6 +45,9 @@ poll_interval_seconds: 5
 review_concurrency: 2  # positive integer; reviews running at once across this root's Vera sessions
 review_answer_slots: 1  # 0-8; slots that only answer @vibeflow ask questions (0 with review_review_slots 0 keeps one shared slot)
 review_review_slots: 1  # 0-8; slots that run reviews and borrow questions when idle
+review_single_pass_max_files: 15  # optional; a review with more reviewable files runs plan, specialist and integration passes
+review_single_pass_max_diff_kb: 60  # optional; so does a review whose diff is larger than this
+review_specialist_parallelism: 3  # optional; specialist sessions running at once within one review
 view_mode: flat   # flat or grouped
 
 llm_gateway_enabled: false  # optional: route LLM traffic via server gateway when supported
@@ -96,6 +99,8 @@ A slot whose window exited shows as stopped in the dashboard and the session row
 The session row and restarts follow the slot layout a running session was started with, not the current config: a session still running the single listener, for example from before the 1/1 default, keeps reporting as that listener, and restarting it replaces it with a whole console.
 When a listener switches from the single shared slot to slots, it first finishes the job the shared slot still held: it replays a saved result, fails an interrupted attempt, or runs a claimed job that never started.
 Zero, negative, null, and noninteger values are configuration errors.
+`review_single_pass_max_files`, `review_single_pass_max_diff_kb` and `review_specialist_parallelism` decide when one review runs as several harness sessions and how many specialists run at once (see `review-watch` in the [CLI reference](cli-reference.md)); omitted or `0` means the default (15 files, 60 KB, 3), and a negative value is a configuration error.
+Specialist sessions run inside one review, so they do not count against `review_concurrency`.
 All foreground `review-watch` listeners in one root, including every Vera session, share this limit: at most that many reviews run at once, and a listener at the limit keeps listening without claiming work.
 The limit covers each attempt through provider shutdown and result acknowledgement, including saved results awaiting restored authorization.
 Detached `--background` runners are independent of it.
