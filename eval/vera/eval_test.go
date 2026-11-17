@@ -73,7 +73,7 @@ func TestFixtureMatchesAnswers(t *testing.T) {
 		changed[p] = true
 	}
 	defects, decoys := loadAnswers(t)
-	if len(defects) != 7 || len(decoys) < 2 {
+	if len(defects) != 8 || len(decoys) < 2 {
 		t.Fatalf("%d defects and %d decoys", len(defects), len(decoys))
 	}
 	for _, a := range append(defects, decoys...) {
@@ -143,7 +143,7 @@ sed -e "s/HEAD_SHA/$(sha head_sha)/" -e "s/BASE_SHA/$(sha target_base_sha)/" '` 
 	cmd.Env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + home, "TMPDIR=" + tmp, "VERA_EVAL_WORK=" + work, "GOTOOLCHAIN=local", "GOFLAGS=", "GOCACHE=" + goEnv["GOCACHE"], "GOMODCACHE=" + goEnv["GOMODCACHE"], "GOPATH=" + goEnv["GOPATH"]}
 	out, err := cmd.CombinedOutput()
 	t.Logf("run.sh output:\n%s", out)
-	if err != nil || !strings.Contains(string(out), "Recall 7/7") || !strings.Contains(string(out), "PASS") {
+	if err != nil || !strings.Contains(string(out), "Recall 8/8") || !strings.Contains(string(out), "PASS") {
 		log, _ := os.ReadFile(filepath.Join(work, "fakeserver.log"))
 		t.Fatalf("run.sh: %v\n%s\nfake server:\n%s", err, out, log)
 	}

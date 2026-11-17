@@ -17,8 +17,8 @@ mkdir -p "$dest"
 g init -q
 cp -R "$here/testdata/base/." "$dest/"
 g add -A
-GIT_AUTHOR_DATE=2026-01-01T00:00:00Z GIT_COMMITTER_DATE=2026-01-01T00:00:00Z g commit -q -m "Linked repositories, plans, status check names and review findings"
+GIT_AUTHOR_DATE=2026-01-01T00:00:00Z GIT_COMMITTER_DATE=2026-01-01T00:00:00Z g commit -q -m "Linked repositories, plans, status check names, review findings and memory tags"
 cp -R "$here/testdata/head/." "$dest/"
 g add -A
-GIT_AUTHOR_DATE=2026-01-02T00:00:00Z GIT_COMMITTER_DATE=2026-01-02T00:00:00Z g commit -q -m "Webhook secrets, Starter plan gate, legacy check names, retention purge and diff anchors"
+GIT_AUTHOR_DATE=2026-01-02T00:00:00Z GIT_COMMITTER_DATE=2026-01-02T00:00:00Z g commit -q -m "Webhook secrets, Starter plan gate, legacy check names, retention purge, diff anchors, tag and label projections"
 g remote add origin https://github.com/acme/review-fixture.git

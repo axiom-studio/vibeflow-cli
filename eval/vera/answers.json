@@ -51,9 +51,26 @@
       "locations": [
         {"path": "diffparse/parse.go", "start_line": 23, "end_line": 41, "anchor": "case strings.HasPrefix(text, \"+++ \"):"}
       ]
+    },
+    {
+      "id": "h-tag-projection-stale-snapshot",
+      "description": "UpsertTag (and DeleteTag) rewrite memories.tags_json from a subquery over tags without first locking the memory row. Two concurrent writers of different keys: transaction 1 inserts its tag and updates the memory row; transaction 2 inserts its tag, starts the aggregate UPDATE with a snapshot that cannot see transaction 1's uncommitted tag, waits for the row lock, and after transaction 1 commits writes that stale aggregate. Both tag rows stay, but tags_json holds only transaction 2's tag, so GetMemory returns stale tags and Matches rejects the memory on the committed first tag.",
+      "kind": "incomplete_fix",
+      "source": "axiom-studio/memora PR #7 (base e2c7c02f51dd87e9b0ff68e31e9d3b63f7f91ae7, head 0a8300e1e94275000e681de04d27d0706697e04e), internal/store/postgres/metadata_postgres.go UpsertTag/syncTagsJSON; Vera called the head clean",
+      "locations": [
+        {"path": "tags/store.go", "start_line": 42, "end_line": 44, "anchor": "jsonb_object_agg(key, value) FROM tags"},
+        {"path": "tags/store.go", "start_line": 51, "end_line": 89, "anchor": "tx.ExecContext(ctx, syncTagsSQL, memoryID)"}
+      ]
     }
   ],
   "decoys": [
+    {
+      "id": "decoy-label-projection-locks-note-row",
+      "description": "Every label writer takes the note's row lock (SELECT ... FOR UPDATE) before changing labels, so writers on one note are serialized and each labels_json rewrite reads every committed label.",
+      "locations": [
+        {"path": "notes/labels.go", "start_line": 30, "end_line": 82, "anchor": "tx.QueryRowContext(ctx, lockNoteSQL, noteID, projectID)"}
+      ]
+    },
     {
       "id": "decoy-redacted-copies-the-record",
       "description": "redacted clears the secret on a value copy; the stored record keeps it.",

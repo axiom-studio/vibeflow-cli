@@ -1,13 +1,13 @@
 # Vera seeded-defect evaluation
 
 A release gate for changes to Vera, the PR reviewer that `vibeflow review-watch` runs.
-It measures whether Vera catches real defects: the seven found on PR #197 after Vera had called it clean, rebuilt in miniature in a small fixture project, plus correct decoy changes that measure false positives.
+It measures whether Vera catches real defects: the seven found on PR #197 after Vera had called it clean, and the PostgreSQL projection race Vera missed on memora PR #7, rebuilt in miniature in a small fixture project, plus correct decoy changes that measure false positives.
 
 ## Shipping bar
 
 A Vera change (prompt, runner policy, specialist passes, harness settings) ships only when a live run on this fixture:
 
-1. catches at least 6 of the 7 seeded defects (`-min-caught 6`),
+1. catches at least 7 of the 8 seeded defects (`-min-caught 7`),
 2. always catches `a-list-leaks-webhook-secret`, the leak in unchanged sibling code (marked `"required": true`), and
 3. raises no blocker on a decoy (`-max-decoy-blockers 0`).
 
@@ -38,6 +38,8 @@ go run ./eval/vera/score -answers eval/vera/answers.json -result <work>/result.j
 
 Exit status: 0 meets the bar, 1 below it, 2 no result (the review failed; `<work>/result.json` or `<work>/fakeserver.log` says why).
 
+The report starts with the reviewed base and head SHAs from the result, marks a defect whose `kind` is `incomplete_fix` (the base already had it; the change fixed it for some cases only), and ends with what was checked and the limits: a first review only, so incremental-round coverage is not measured, and a catch is a finding at the defect's location, not a check of its reasoning.
+
 ## Offline checks
 
 `go test ./eval/...` runs without a model or network:
@@ -45,6 +47,7 @@ Exit status: 0 meets the bar, 1 below it, 2 no result (the review failed; `<work
 - `score` unit tests: matching by path and line range with a tolerance (default 3 lines), duplicates, decoys, thresholds, result envelopes.
 - `TestFixtureMatchesAnswers`: the fixture builds reproducibly, compiles and vets, every answer's line range still contains its anchor text, and only the required defect lives in unchanged code.
 - `TestRunScoresTheSubmittedResult`: `run.sh` end to end with a fake `claude` that reports every defect, under a temporary HOME.
+- `TestTagProjectionRaceReproduces`: runs the fixture's own SQL for defect `h` in a two-transaction schedule against a throwaway PostgreSQL cluster (loopback TCP, trust auth, only `PATH` and `LC_ALL` in the environment), confirms the second transaction waited on the row lock, and checks that both tag rows stay, `tags_json` keeps only the second tag, and the fixture's `tags.Matches` rejects the memory on the first. The same schedule on the row-locking decoy keeps both labels. Needs `initdb`, `pg_ctl` and `psql` on `PATH`; skipped without them or with `-short`.
 
 ## Layout
 
@@ -70,8 +73,9 @@ Exit status: 0 meets the bar, 1 below it, 2 no result (the review failed; `<work
 | `e-legacy-flag-before-base-branch-rule` | `gates/name.go` | Repository-wide legacy flag wins over the base branch's required check |
 | `f-retention-purge-deletes-dismissals` | `findings/store.go`, `retention/purge.go` | Purge cascades to dismissals other reviews read |
 | `g-diff-parser-trusts-header-lines-in-hunks` | `diffparse/parse.go` | An added `++ ` line is taken as a `+++` file header |
+| `h-tag-projection-stale-snapshot` | `tags/store.go` | From memora PR #7: the tags_json rewrite runs without the memory's row lock, so a concurrent writer commits a stale projection (an incomplete fix; the base never refreshed it) |
 
-Decoys: `redacted` in `repos/handlers.go`, `Verify` in `webhooks/verify.go`, and `web/SecretField.tsx`.
+Decoys: `redacted` in `repos/handlers.go`, `Verify` in `webhooks/verify.go`, `web/SecretField.tsx`, and the label projection in `notes/labels.go`, whose writers take the note's row lock first (the negative control for `h`).
 
 ## Maintaining it
 

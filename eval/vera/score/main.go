@@ -26,7 +26,18 @@ type answer struct {
 	ID          string     `json:"id"`
 	Description string     `json:"description"`
 	Required    bool       `json:"required"` // the bar fails when this defect is missed
+	Kind        string     `json:"kind"`     // "incomplete_fix": the base already had it and the PR's fix missed a case; empty: introduced by the change
+	Source      string     `json:"source"`   // the real review this defect was rebuilt from
 	Locations   []location `json:"locations"`
+}
+
+// kindLabel marks a defect the base already had, so a catch or miss of it is
+// not read as a regression the change introduced.
+func (a answer) kindLabel() string {
+	if a.Kind == "incomplete_fix" {
+		return " [incomplete fix: the base already had it]"
+	}
+	return ""
 }
 
 type answers struct {
@@ -53,6 +64,9 @@ type decoyHit struct {
 }
 
 type report struct {
+	BaseSHA   string // the result's reviewed identity
+	HeadSHA   string
+	Tolerance int
 	Defects   int
 	Caught    map[string]finding // defect ID -> its first matching finding
 	Missed    []answer
@@ -74,7 +88,7 @@ func (a answer) matches(f finding, tolerance int) bool {
 }
 
 func score(a answers, findings []finding, tolerance int) report {
-	r := report{Defects: len(a.Defects), Caught: map[string]finding{}, Findings: len(findings)}
+	r := report{Defects: len(a.Defects), Caught: map[string]finding{}, Findings: len(findings), Tolerance: tolerance}
 next:
 	for _, f := range findings {
 		for _, d := range a.Defects {
@@ -146,11 +160,12 @@ func (r report) print(w io.Writer, a answers) {
 	if r.Findings > 0 {
 		precision = fmt.Sprintf("%d/%d (%.0f%%)", r.Hits, r.Findings, 100*r.precision())
 	}
+	fmt.Fprintf(w, "Reviewed base %s, head %s\n", orUnknown(r.BaseSHA), orUnknown(r.HeadSHA))
 	fmt.Fprintf(w, "Recall %d/%d (%.0f%%), precision %s\n", len(r.Caught), r.Defects, 100*float64(len(r.Caught))/float64(max(r.Defects, 1)), precision)
 	fmt.Fprintln(w, "Caught:")
 	for _, d := range a.Defects {
 		if f, ok := r.Caught[d.ID]; ok {
-			fmt.Fprintf(w, "  %s: %s\n", d.ID, f)
+			fmt.Fprintf(w, "  %s%s: %s\n", d.ID, d.kindLabel(), f)
 		}
 	}
 	if len(r.Caught) == 0 {
@@ -162,7 +177,7 @@ func (r report) print(w io.Writer, a answers) {
 	}
 	for _, d := range r.Missed {
 		l := d.Locations[0]
-		fmt.Fprintf(w, "  %s at %s:%d-%d: %s\n", d.ID, l.Path, l.StartLine, l.EndLine, d.Description)
+		fmt.Fprintf(w, "  %s%s at %s:%d-%d: %s\n", d.ID, d.kindLabel(), l.Path, l.StartLine, l.EndLine, d.Description)
 	}
 	fmt.Fprintln(w, "False positives:")
 	if len(r.DecoyHits)+len(r.Unmatched) == 0 {
@@ -174,31 +189,51 @@ func (r report) print(w io.Writer, a answers) {
 	for _, f := range r.Unmatched {
 		fmt.Fprintf(w, "  %s\n", f)
 	}
+	fmt.Fprintf(w, "Checks: %d new finding(s) matched by path and line (tolerance %d) against %d seeded defects and %d decoys.\n", r.Findings, r.Tolerance, r.Defects, len(a.Decoys))
+	fmt.Fprintln(w, "Limits:")
+	fmt.Fprintln(w, "  First review only: the fake server sends no earlier rounds or findings, so incremental-round coverage is not measured.")
+	fmt.Fprintln(w, "  A catch is a finding at the defect's location; whether its reasoning and impact are right is not checked.")
+	fmt.Fprintln(w, "  The defects are miniatures of the originals in a small fixture, not the original repositories.")
+}
+
+func orUnknown(sha string) string {
+	if sha == "" {
+		return "(not in the result)"
+	}
+	return sha
 }
 
 // readFindings reads the new findings from a result.json: the harness's
 // {"result":...,"failure_reason":...} envelope or the bare result object the
 // runner submits. A failed review is an error.
 func readFindings(data []byte) ([]finding, error) {
+	findings, _, _, err := readResult(data)
+	return findings, err
+}
+
+// readResult also returns the reviewed base and head SHAs the result names.
+func readResult(data []byte) (findings []finding, baseSHA, headSHA string, err error) {
 	var doc struct {
 		Result        json.RawMessage  `json:"result"`
 		FailureReason *string          `json:"failure_reason"`
 		NewFindings   *json.RawMessage `json:"new_findings"`
+		BaseSHA       string           `json:"base_sha"`
+		HeadSHA       string           `json:"head_sha"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, err
+		return nil, "", "", err
 	}
 	if doc.NewFindings == nil && len(doc.Result) > 0 && string(doc.Result) != "null" {
-		return readFindings(doc.Result)
+		return readResult(doc.Result)
 	}
 	if doc.NewFindings == nil {
 		if doc.FailureReason != nil {
-			return nil, fmt.Errorf("the review failed: %s", *doc.FailureReason)
+			return nil, "", "", fmt.Errorf("the review failed: %s", *doc.FailureReason)
 		}
-		return nil, errors.New("result has no new_findings")
+		return nil, "", "", errors.New("result has no new_findings")
 	}
-	var findings []finding
-	return findings, json.Unmarshal(*doc.NewFindings, &findings)
+	err = json.Unmarshal(*doc.NewFindings, &findings)
+	return findings, doc.BaseSHA, doc.HeadSHA, err
 }
 
 func readAnswers(data []byte) (answers, error) {
@@ -228,7 +263,7 @@ func run(args []string, out io.Writer) int {
 	resultPath := flags.String("result", "result.json", "Vera's result: the harness envelope or the submitted result object")
 	tolerance := flags.Int("tolerance", 3, "lines a finding may sit outside a defect's range and still match")
 	var b bar
-	flags.IntVar(&b.MinCaught, "min-caught", 6, "defects that must be caught")
+	flags.IntVar(&b.MinCaught, "min-caught", 7, "defects that must be caught")
 	flags.IntVar(&b.MaxDecoyBlockers, "max-decoy-blockers", 0, "blockers allowed on correct decoy changes")
 	flags.Float64Var(&b.MinPrecision, "min-precision", 0, "minimum share of findings that hit a defect (0 disables)")
 	if err := flags.Parse(args); err != nil {
@@ -248,12 +283,13 @@ func run(args []string, out io.Writer) int {
 		fmt.Fprintln(out, err)
 		return 2
 	}
-	findings, err := readFindings(data)
+	findings, baseSHA, headSHA, err := readResult(data)
 	if err != nil {
 		fmt.Fprintln(out, "result:", err)
 		return 2
 	}
 	r := score(a, findings, *tolerance)
+	r.BaseSHA, r.HeadSHA = baseSHA, headSHA
 	r.print(out, a)
 	if failed := r.failures(b); len(failed) > 0 {
 		fmt.Fprintln(out, "FAIL: "+strings.Join(failed, "; "))

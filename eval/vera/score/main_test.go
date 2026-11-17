@@ -99,25 +99,58 @@ func TestRunAgainstShippedAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	write := func(skip string) string {
-		var list []finding
+	write := func(extra []finding, skip ...string) string {
+		list := append([]finding{}, extra...)
+	next:
 		for _, d := range a.Defects {
-			if d.ID != skip {
-				l := d.Locations[0]
-				list = append(list, finding{Key: d.ID, Title: d.ID, Severity: "blocker", Path: l.Path, Line: l.StartLine})
+			for _, s := range skip {
+				if d.ID == s {
+					continue next
+				}
 			}
+			l := d.Locations[0]
+			list = append(list, finding{Key: d.ID, Title: d.ID, Severity: "blocker", Path: l.Path, Line: l.StartLine})
 		}
-		data, _ := json.Marshal(map[string]any{"result": map[string]any{"new_findings": list}, "failure_reason": nil})
+		data, _ := json.Marshal(map[string]any{"result": map[string]any{"base_sha": "b1", "head_sha": "h1", "new_findings": list}, "failure_reason": nil})
 		p := filepath.Join(t.TempDir(), "result.json")
 		os.WriteFile(p, data, 0600)
 		return p
 	}
 	var out bytes.Buffer
-	if code := run([]string{"-answers", "../answers.json", "-result", write("")}, &out); code != 0 || !strings.Contains(out.String(), "Recall 7/7") || !strings.Contains(out.String(), "PASS") {
+	if code := run([]string{"-answers", "../answers.json", "-result", write(nil)}, &out); code != 0 || !strings.Contains(out.String(), "Recall 8/8") || !strings.Contains(out.String(), "PASS") {
 		t.Fatalf("exit %d\n%s", code, out.String())
 	}
+	// The report names the reviewed identity, the incomplete fix, what was
+	// checked and the limits.
+	for _, want := range []string{
+		"Reviewed base b1, head h1",
+		"h-tag-projection-stale-snapshot [incomplete fix: the base already had it]:",
+		"Checks: 8 new finding(s) matched by path and line (tolerance 3) against 8 seeded defects and 4 decoys.",
+		"First review only: the fake server sends no earlier rounds or findings, so incremental-round coverage is not measured.",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("report lacks %q:\n%s", want, out.String())
+		}
+	}
 	out.Reset()
-	if code := run([]string{"-answers", "../answers.json", "-result", write(a.Defects[0].ID)}, &out); code != 1 || !strings.Contains(out.String(), "missed required defect "+a.Defects[0].ID) {
+	if code := run([]string{"-answers", "../answers.json", "-result", write(nil, a.Defects[0].ID)}, &out); code != 1 || !strings.Contains(out.String(), "missed required defect "+a.Defects[0].ID) {
 		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	// One non-required miss meets the bar of 7; two do not.
+	out.Reset()
+	if code := run([]string{"-answers", "../answers.json", "-result", write(nil, "h-tag-projection-stale-snapshot")}, &out); code != 0 ||
+		!strings.Contains(out.String(), "h-tag-projection-stale-snapshot [incomplete fix: the base already had it] at tags/store.go:42-44") {
+		t.Fatalf("one miss: exit %d\n%s", code, out.String())
+	}
+	out.Reset()
+	if code := run([]string{"-answers", "../answers.json", "-result", write(nil, "h-tag-projection-stale-snapshot", "g-diff-parser-trusts-header-lines-in-hunks")}, &out); code != 1 || !strings.Contains(out.String(), "caught 6 of 8 defects, the bar is 7") {
+		t.Fatalf("two misses: exit %d\n%s", code, out.String())
+	}
+	// Reporting the row-locking label projection as the same race is a
+	// blocker on a decoy, which fails the bar.
+	out.Reset()
+	lockDecoy := finding{Title: "stale labels_json under concurrent writers", Severity: "blocker", Path: "notes/labels.go", Line: 62}
+	if code := run([]string{"-answers", "../answers.json", "-result", write([]finding{lockDecoy})}, &out); code != 1 || !strings.Contains(out.String(), "on decoy decoy-label-projection-locks-note-row") {
+		t.Fatalf("decoy: exit %d\n%s", code, out.String())
 	}
 }
