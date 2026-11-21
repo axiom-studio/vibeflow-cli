@@ -115,3 +115,52 @@ func TestReportBootstrapClone_OnlyInsideACheckoutWithAnOrigin(t *testing.T) {
 		t.Fatalf("reported outside a checkout with an origin: %v %q", srv.requests, out.String())
 	}
 }
+
+// AXIOMCLOUD-4849: linked repository keys and errors come from the server
+// (a project member can plant a remote), so escape sequences in them never
+// reach the terminal: no OSC 52 clipboard write, no line erase, no title.
+func TestReportBootstrapClone_NeverPrintsTerminalEscapes(t *testing.T) {
+	const osc52 = "\x1b]52;c;ZWNobyBwd25lZA==\x07"
+	for name, tc := range map[string]struct {
+		status int
+		reply  string
+	}{
+		"409 linked and error": {http.StatusConflict, `{"error":"bad\u001b[2K repo","linked_repositories":["github.com/acme/w\u001b]52;c;ZWNobyBwd25lZA==\u0007\u001b[2Kx"]}`},
+		"error only":           {http.StatusConflict, `{"error":"stop\u001b]0;pwn\u0007"}`},
+		"recorded repository":  {http.StatusOK, `{"status":"recorded","repository":"github.com/acme/w\u009b2Jx"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, url := newCloneReportServer(t, tc.status, tc.reply)
+			var out bytes.Buffer
+			reportBootstrapClone(&out, url, "vf-key", repoWithOrigin(t, "git@github.com:acme/gadgets.git"))
+			got := out.String()
+			if got == "" {
+				t.Fatal("no output")
+			}
+			for _, r := range got {
+				if r == 0x1b || r == 0x07 || (r >= 0x80 && r <= 0x9f) {
+					t.Fatalf("output carries control character %U: %q", r, got)
+				}
+			}
+			if strings.Contains(got, osc52) {
+				t.Fatalf("output carries the OSC 52 payload: %q", got)
+			}
+		})
+	}
+}
+
+func TestTerminalSafe(t *testing.T) {
+	for in, want := range map[string]string{
+		"github.com/acme/widgets": "github.com/acme/widgets",
+		"a\x1b[2Jb":               "a�[2Jb",
+		"a\x07b\x7fc":             "a�b�c",
+		"a\u009bb":                "a�b",
+		"a\x9bb":                  "a�b", // a raw 8-bit CSI byte (invalid UTF-8)
+		"tab\there":               "tab�here",
+		"résumé":                  "résumé",
+	} {
+		if got := terminalSafe(in); got != want {
+			t.Errorf("terminalSafe(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

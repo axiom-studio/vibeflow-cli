@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // AxiomCloud's mandatory onboarding (feature #1185) has a "repo cloned" step.
@@ -48,14 +50,14 @@ func reportBootstrapClone(out io.Writer, baseURL, apiKey, dir string) {
 	body, _ := json.Marshal(map[string]string{"git_remote_url": remote, "branch": branch, "cli_version": buildVersion})
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(strings.TrimSpace(baseURL), "/")+cloneReportPath, bytes.NewReader(body))
 	if err != nil {
-		fmt.Fprintf(out, "\nWarning: couldn't report this clone to VibeFlow onboarding: %v\n", err)
+		fmt.Fprintf(out, "\nWarning: couldn't report this clone to VibeFlow onboarding: %s\n", terminalSafe(err.Error()))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	resp, err := cloneReportHTTPClient.Do(req)
 	if err != nil {
-		fmt.Fprintf(out, "\nWarning: couldn't report this clone to VibeFlow onboarding: %v\n", err)
+		fmt.Fprintf(out, "\nWarning: couldn't report this clone to VibeFlow onboarding: %s\n", terminalSafe(err.Error()))
 		return
 	}
 	defer resp.Body.Close()
@@ -68,16 +70,34 @@ func reportBootstrapClone(out io.Writer, baseURL, apiKey, dir string) {
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&reply)
 	switch {
 	case resp.StatusCode == http.StatusOK && reply.Status == "recorded":
-		fmt.Fprintf(out, "\nReported your clone of %s to VibeFlow onboarding.\n", reply.Repository)
+		fmt.Fprintf(out, "\nReported your clone of %s to VibeFlow onboarding.\n", terminalSafe(reply.Repository))
 	case resp.StatusCode == http.StatusOK:
 		// Onboarding already complete: nothing to say.
 	case resp.StatusCode == http.StatusNotFound:
 		// A server without onboarding: nothing to say.
 	case reply.Error != "" && len(reply.Linked) > 0:
-		fmt.Fprintf(out, "\nVibeFlow onboarding: %s. Run bootstrap in a clone of %s.\n", reply.Error, strings.Join(reply.Linked, " or "))
+		fmt.Fprintf(out, "\nVibeFlow onboarding: %s. Run bootstrap in a clone of %s.\n", terminalSafe(reply.Error), terminalSafe(strings.Join(reply.Linked, " or ")))
 	case reply.Error != "":
-		fmt.Fprintf(out, "\nVibeFlow onboarding: %s.\n", strings.TrimSuffix(reply.Error, "."))
+		fmt.Fprintf(out, "\nVibeFlow onboarding: %s.\n", terminalSafe(strings.TrimSuffix(reply.Error, ".")))
 	default:
 		fmt.Fprintf(out, "\nWarning: couldn't report this clone to VibeFlow onboarding (HTTP %d).\n", resp.StatusCode)
 	}
+}
+
+// terminalSafe makes a server-provided string safe to print: control
+// characters (C0, DEL and C1, which carry ESC/CSI/OSC sequences such as an
+// OSC 52 clipboard write) and invalid UTF-8 bytes (a raw 8-bit CSI) become
+// U+FFFD, so the server can't drive the user's terminal (AXIOMCLOUD-4849).
+func terminalSafe(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || unicode.IsControl(r) {
+			r = utf8.RuneError
+		}
+		b.WriteRune(r)
+		i += size
+	}
+	return b.String()
 }
