@@ -941,6 +941,10 @@ is stored in the vibeflow-cli config.`, strings.Join(agentLabels(bootstrapAgents
 			}
 
 			printBootstrapChanges(out, "Bootstrap complete. Changes:", changes)
+			// 3. Onboarding: report this checkout when run inside one (best effort).
+			if dir, err := os.Getwd(); err == nil {
+				reportBootstrapClone(out, baseURL, apiKey, dir)
+			}
 			if haveClaudeCLI {
 				fmt.Fprintf(out, "\nNote: Claude CLI honors the MCP_TIMEOUT env var (not a per-server timeout).\n"+
 					"      If you configure long wait_for_work polls, export MCP_TIMEOUT=%d.\n", mcpClientTimeoutMS)

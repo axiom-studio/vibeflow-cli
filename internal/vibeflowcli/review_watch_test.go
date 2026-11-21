@@ -270,19 +270,7 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 	}
 	setVeraExecutable(t, builtVibeflow(t))
 	v.tm = NewTmuxManager(fmt.Sprintf("vftest-vera-ui-%d", os.Getpid()))
-	t.Cleanup(func() {
-		_, _ = v.tm.run("kill-server")
-		// The listener still writes its root while it shuts down.
-		locks, _ := filepath.Glob(filepath.Join(RootDir(), "review-runners", "*", "runner.lock"))
-		for _, path := range locks {
-			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-				if lock, err := lockReviewFile(path); err == nil {
-					lock.Close()
-					break
-				}
-			}
-		}
-	})
+	t.Cleanup(func() { killTmuxAndWaitForRunners(v.tm) })
 	meta := SessionMeta{Name: "vera-ui", Provider: "claude", Persona: "code_reviewer", WorkingDir: repo, Vera: &veraBinding{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", RunnerName: "interactive"}}
 	meta.TmuxSession = v.tm.FullSessionName(meta.Provider, meta.Name)
 	v.session = meta.TmuxSession
@@ -294,6 +282,23 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 		t.Fatal(err)
 	}
 	return v
+}
+
+// killTmuxAndWaitForRunners stops a test tmux server and waits for the
+// review listeners it ran to exit: kill-server returns at once, but a
+// listener traps SIGHUP and still writes its root while it shuts down,
+// racing t.TempDir's removal. A runner holds runner.lock until it exits.
+func killTmuxAndWaitForRunners(tm *TmuxManager) {
+	_, _ = tm.run("kill-server")
+	locks, _ := filepath.Glob(filepath.Join(RootDir(), "review-runners", "*", "runner.lock"))
+	for _, path := range locks {
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			if lock, err := lockReviewFile(path); err == nil {
+				lock.Close()
+				break
+			}
+		}
+	}
 }
 
 func (v *veraPane) mark(name string) string { return filepath.Join(v.marks, name) }
@@ -864,7 +869,7 @@ func TestReviewWatchRegistersWithoutIsolationChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	tm := NewTmuxManager(fmt.Sprintf("vftest-isolation-%d", os.Getpid()))
-	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	t.Cleanup(func() { killTmuxAndWaitForRunners(tm) })
 	command := shellJoin([]string{builtVibeflow(t), "--root", RootDir(), "--config", ConfigPath(), "review-watch", "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "ask"})
 	if _, err := tm.run("new-session", "-d", "-s", "ask", "-x", "200", "-y", "40", "-e", "VIBEFLOW_TOKEN=", "exec "+command); err != nil {
 		t.Fatal(err)
