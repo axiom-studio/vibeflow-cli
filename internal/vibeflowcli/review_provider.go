@@ -412,7 +412,29 @@ func reviewProviderEnv(cfg *Config, provider string) map[string]string {
 	for k, v := range cfg.Providers[provider].Env { // Explicit provider configuration wins.
 		env[k] = os.ExpandEnv(v)
 	}
+	if !cfg.LLMGatewayEnabled {
+		clearReviewGatewayEnv(env, cfg.ServerURL)
+	}
 	return env
+}
+
+// clearReviewGatewayEnv removes LLM gateway routing from a review harness's
+// environment when the gateway is off (#7704). Gateway values saved in
+// provider.env by an earlier gateway launch, or exported in the shell, would
+// otherwise send the review to the gateway, which refuses built-in models
+// ("available only through HelloSeal.ai"). Persona launches clear them the
+// same way (ClearLLMGatewayEnv). Only gateway values are removed: a base URL
+// that points at any other endpoint is the user's own choice and is kept.
+func clearReviewGatewayEnv(env map[string]string, serverURL string) {
+	gateway := strings.TrimRight(serverURL, "/") + "/rest/v1/llm-gateway"
+	for _, key := range []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL"} {
+		if v := strings.TrimRight(env[key], "/"); serverURL != "" && (v == gateway || strings.HasPrefix(v, gateway+"/")) {
+			env[key] = ""
+		}
+	}
+	if strings.Contains(strings.ToLower(env["ANTHROPIC_CUSTOM_HEADERS"]), "x-axiom-api-key") {
+		env["ANTHROPIC_CUSTOM_HEADERS"] = "" // the gateway's own credential header
+	}
 }
 
 func reviewEnvList(env map[string]string) []string {
