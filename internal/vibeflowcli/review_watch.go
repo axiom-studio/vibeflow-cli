@@ -87,9 +87,10 @@ type reviewWatch struct {
 	harnessFatal       error // Set when the harness cannot run on this machine until the user acts.
 	capacity           *reviewCapacity
 	slot               *os.File
-	tty                *reviewTerminal // Set when the harness runs interactively in this terminal.
-	interrupted        bool            // The user closed the interactive harness before its result.
-	stopBrowse         func()          // Ends the idle key handling of tty.
+	tty                *reviewTerminal        // Set when the harness runs interactively in this terminal.
+	interrupted        bool                   // The user closed the interactive harness before its result.
+	stopBrowse         func()                 // Ends the idle key handling of tty.
+	progress           *reviewAttemptProgress // The running attempt's progress, in a console slot (#5598).
 }
 
 // veraBrowseHint tells the user how to reach the history pane from the listener.
@@ -400,6 +401,20 @@ func reviewWatchCmd() *cobra.Command {
 	_ = cmd.Flags().MarkHidden("managed-runner")
 	cmd.MarkFlagsMutuallyExclusive("background", "status", "stop", "managed-runner")
 	return cmd
+}
+
+// newProgress reports a console slot's attempt progress; nil outside a slot,
+// where nothing reads it.
+func (w *reviewWatch) newProgress(p *reviewReceipt) *reviewAttemptProgress {
+	if w.options.SlotLabel == "" {
+		return nil
+	}
+	var run veraTmux
+	pane := os.Getenv("TMUX_PANE")
+	if pane != "" {
+		run = execVeraTmux
+	}
+	return newReviewAttemptProgress(run, pane, reviewProgressLogPath(w.client.baseURL, w.options), w.options.SlotLabel, veraJobWindowName(p), w.options.Provider, nil)
 }
 
 func (w *reviewWatch) prefix() string {
@@ -785,12 +800,16 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		}
 		fmt.Fprintf(w.output, "\n%s %s at %.12s; starting a fresh Vera with %s.\n", reviewClock(), claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
 		w.nameWindow(veraJobWindowName(p))
+		w.progress = w.newProgress(p)
+		w.progress.appendLog(reviewClock() + " " + w.options.SlotLabel + " · " + claimed)
 		result, err := w.execute(ctx, p)
 		if err != nil {
 			p.Failure = err.Error()
 		} else {
 			p.Result = result
 		}
+		w.progress.finish(strings.TrimPrefix(reviewOutcomeLine(p), "Result: "))
+		w.progress = nil
 		if err = w.save(); err != nil {
 			return err
 		}
@@ -965,6 +984,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	setStage := func(stage string) {
 		diagnostic.Stage = stage
 		stageStarted = time.Now()
+		w.progress.setStage(stage)
 	}
 	deadline, limit := time.UnixMilli(p.Execution.Attempt.Round.DeadlineAt), "server deadline"
 	var localCap time.Time
@@ -979,6 +999,10 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	}
 	deadlineCtx, attemptDeadline := newReviewDeadline(parent, deadline, localCap)
 	defer attemptDeadline.stop()
+	if w.progress != nil {
+		w.progress.deadline = attemptDeadline.time
+		w.progress.start()
+	}
 	ctx, cancel := context.WithCancelCause(deadlineCtx)
 	defer cancel(nil)
 	var progress atomic.Uint32
@@ -1066,6 +1090,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 				return
 			}
 			expiry = time.UnixMilli(renewed.Attempt.LeaseExpiresAt)
+			w.progress.leaseRenewed(time.Now())
 			// The server may lengthen the round once it knows the diff size.
 			attemptDeadline.extend(time.UnixMilli(renewed.Attempt.Round.DeadlineAt))
 		}

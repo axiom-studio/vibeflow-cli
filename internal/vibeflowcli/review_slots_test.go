@@ -364,3 +364,54 @@ func TestReviewSlotsRecoverSharedReceipt(t *testing.T) {
 		t.Fatalf("shared receipt left pending: %+v\n%s", p, text())
 	}
 }
+
+// TestReviewSlotsLogAttemptProgress drives a real console slot window's
+// listener (--slot-kind/--slot-label, as the Vera console starts it) through
+// one question (#5598). The console's progress log, which the history pane
+// shows, records the claim, the harness stage and the outcome, and never the
+// question text. In-process slots share one terminal and keep no log.
+func TestReviewSlotsLogAttemptProgress(t *testing.T) {
+	withTempRoot(t)
+	t.Setenv("TMUX_PANE", "") // the border needs tmux; the log does not
+	repo, review, question := slotExecutions(t)
+	server, _, results := slotServer(t, review, question, []string{"repository_review_v1", reviewClaimKindCapability})
+	provider := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\nif grep -q 'Local question task' ../../task.txt; then cat " + shellQuote(reviewWatchQuestionResult(t, question)) + " > ../../result.json; else cat " + shellQuote(reviewWatchResult(t, review, 0)) + " > ../../result.json; fi\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := singleSlotConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "slot-token"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() {
+		done <- runReviewWatch(ctx, &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac · answer 1", "--interval", "1s", "--slot-kind", "question", "--slot-label", "answer 1")
+	}()
+	for results() < 1 && ctx.Err() == nil {
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	logPath := reviewProgressLogPath(server.URL, reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "mac"})
+	log := strings.Join(readReviewProgressLog(logPath, 100), "\n")
+	for _, want := range []string{
+		"answer 1 · Claimed a question on ",
+		"answer 1 · answer ", // the fixture has no PR number, so its review ID labels it
+		"· checking out the PR ·",
+		"· claude working ·",
+		"· answered with 1 citations. after ",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("progress log lacks %q:\n%s\n--- runner output:\n%s", want, log, out.String())
+		}
+	}
+	if strings.Contains(log, question.Question.Question) {
+		t.Errorf("the question text reached the progress log:\n%s", log)
+	}
+}

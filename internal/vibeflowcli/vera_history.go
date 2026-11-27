@@ -21,15 +21,18 @@ import (
 const (
 	veraHistoryWidth   = "30%"
 	veraHistoryRefresh = 10 * time.Second
-	veraHistoryPages   = 4  // Up to 400 of the repository's newest review attempts...
-	veraHistoryReviews = 50 // ...naming at most this many reviews.
+	// veraHistoryProgressLines is how many progress log lines the pane reads.
+	veraHistoryProgressLines = 8
+	veraHistoryPages         = 4  // Up to 400 of the repository's newest review attempts...
+	veraHistoryReviews       = 50 // ...naming at most this many reviews.
 )
 
 type reviewHistoryMsg struct {
-	rows    []reviewSummary
-	current string // Job this Vera is reviewing now, from its local receipt.
-	err     error
-	at      time.Time
+	rows     []reviewSummary
+	current  string   // Job this Vera is reviewing now, from its local receipt.
+	progress []string // Newest lines of the console's progress log (#5598).
+	err      error
+	at       time.Time
 }
 type reviewHistoryTickMsg struct{}
 
@@ -44,6 +47,7 @@ type reviewHistory struct {
 	title          string
 	rows           []reviewSummary
 	current        string
+	progress       []string
 	status         string
 	failed, loaded bool
 	cursor, offset int
@@ -105,6 +109,12 @@ func newReviewHistoryLoader(client *Client, serverURL string, o reviewWatchOptio
 }
 
 func (l *reviewHistoryLoader) load() tea.Msg {
+	msg := l.loadReviews()
+	msg.progress = readReviewProgressLog(reviewProgressLogPath(l.serverURL, l.o), veraHistoryProgressLines)
+	return msg
+}
+
+func (l *reviewHistoryLoader) loadReviews() reviewHistoryMsg {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -213,6 +223,7 @@ func (h reviewHistory) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, h.load
 	case reviewHistoryMsg:
 		next := tea.Tick(veraHistoryRefresh, func(time.Time) tea.Msg { return reviewHistoryTickMsg{} })
+		h.progress = msg.progress // Local, so shown even while the API is down.
 		if msg.err != nil {
 			h.failed, h.status = true, "Review API unavailable; retrying: "+reviewDisplay(msg.err.Error())
 			return h, next
@@ -263,7 +274,16 @@ func (h reviewHistory) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // page is how many two-line entries fit between the header, status and
 // footer lines.
-func (h reviewHistory) page() int { return max(1, (h.height-3)/2) }
+func (h reviewHistory) page() int { return max(1, (h.height-3-h.progressHeight())/2) }
+
+// progressHeight is the lines the progress log takes below the list: its
+// header and lines, never more than a third of the pane.
+func (h reviewHistory) progressHeight() int {
+	if len(h.progress) == 0 {
+		return 0
+	}
+	return min(len(h.progress)+1, max(0, h.height/3))
+}
 
 func (h *reviewHistory) scroll(delta int) {
 	h.cursor = max(0, min(len(h.rows)-1, h.cursor+delta))
@@ -326,10 +346,18 @@ func (h reviewHistory) render() string {
 		}
 		lines = append(lines, title, meta)
 	}
-	for len(lines) < height-1 {
+	var progress []string
+	if n := h.progressHeight(); n > 1 {
+		progress = append(progress, lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render(fit("Progress")))
+		for _, line := range h.progress[len(h.progress)-(n-1):] {
+			progress = append(progress, dim.Render(fit(reviewDisplay(line))))
+		}
+	}
+	for len(lines) < height-1-len(progress) {
 		lines = append(lines, "")
 	}
-	return strings.Join(append(lines[:height-1], dim.Render(fit(veraHistoryHint(width)))), "\n")
+	lines = append(lines[:height-1-len(progress)], progress...)
+	return strings.Join(append(lines, dim.Render(fit(veraHistoryHint(width)))), "\n")
 }
 
 // veraHistoryHint is the longest key hint that fits the pane: about 30% of
