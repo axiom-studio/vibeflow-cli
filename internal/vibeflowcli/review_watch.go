@@ -1356,6 +1356,13 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		written = watchReviewResult(ctx, resultPath, p, brief.Digest)
 	}
 	harnessStarted := time.Now()
+	if interactive {
+		// A harness stuck on a login or access error fails the attempt with
+		// the real cause instead of holding it until the lease ends (#7691).
+		watchStuckHarness(ctx, execVeraTmux, os.Getenv("TMUX_PANE"), reviewStuckEvery, reviewStuckAfter, func(category string) {
+			cancel(&reviewHarnessStuckError{category: category})
+		})
+	}
 	done := make(chan error, 1)
 	go func() { done <- guard.Wait() }()
 	notice := time.Duration(0) // A headless harness has no screen to answer.
@@ -1407,6 +1414,12 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			}
 			return nil, diagnostic.failure()
 		}
+	}
+	var stuck *reviewHarnessStuckError
+	if errors.As(context.Cause(ctx), &stuck) && !reviewFileExists(resultPath) {
+		diagnostic.Category = stuck.category
+		w.harnessFatal = fmt.Errorf("Vera stopped: the %s harness %s on this machine (it sat on an error screen for %d s); %s, then start Vera again. The review stays queued", w.options.Provider, reviewHarnessProblem(stuck.category), int(reviewStuckAfter.Seconds()), reviewHarnessLoginHint(w.options.Provider))
+		return nil, diagnostic.failure()
 	}
 	if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(resultPath)) {
 		diagnostic.Category = category

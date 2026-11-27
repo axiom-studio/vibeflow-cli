@@ -51,7 +51,10 @@ type reviewExecutionDiagnostic struct {
 }
 
 func reviewCancellationCategory(ctx context.Context) string {
+	var stuck *reviewHarnessStuckError
 	switch {
+	case errors.As(context.Cause(ctx), &stuck):
+		return stuck.category
 	case errors.Is(context.Cause(ctx), errReviewLeaseExpired):
 		return "lease_expired"
 	case errors.Is(context.Cause(ctx), errReviewLeaseRejected):
