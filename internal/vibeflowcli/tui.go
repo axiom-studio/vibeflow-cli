@@ -1822,6 +1822,20 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 	return workDir, worktreePath, err
 }
 
+// launchRouting resolves how a TUI launch reaches its model. A gateway
+// preference inherited by a harness the gateway cannot wire (a team persona
+// overridden to Kiro or Cursor, a quick switch, a custom provider) falls back
+// to direct and reports gatewayIgnored. Otherwise the session would run direct
+// while being recorded and shown as gateway-routed (#4615). This mirrors
+// GatewayEnabledForProvider on the CLI path.
+func launchRouting(result WizardResult) (routing string, gatewayIgnored bool) {
+	routing = resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled)
+	if routing == RoutingGateway && !providerSupportsGateway(result.ProviderKey) {
+		return RoutingDirect, true
+	}
+	return routing, false
+}
+
 // executeLaunch performs the actual session creation after conflict resolution.
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	if result.Persona == "code_reviewer" {
@@ -1829,7 +1843,13 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 	// How the harness reaches its model. The gateway only applies to
 	// VibeFlow sessions, as before.
-	routing := resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled)
+	routing, gatewayIgnored := launchRouting(result)
+	if gatewayIgnored {
+		if m.logger != nil {
+			m.logger.Warn("gateway ignored for provider %q: it connects directly", result.ProviderKey)
+		}
+		result.LLMGatewayEnabled = false
+	}
 
 	// An endpoint launch without a usable endpoint (e.g. a quick switch or
 	// team override from a session with other routing) cannot start. Fail
@@ -2756,7 +2776,9 @@ func (m Model) renderDetailPanel(width, height int) string {
 	// rather than persisted — BuildLLMGatewayEnv is deterministic per provider.
 	// Secret-bearing values are masked with the same allowlist used for
 	// spawn-log redaction (isSecretEnvKey).
-	if s.LLMGatewayEnabled {
+	// Never claim "enabled" for a harness the gateway cannot wire, even for a
+	// session recorded before launchRouting guarded this (#4615).
+	if s.LLMGatewayEnabled && providerSupportsGateway(s.Provider) {
 		row("Gateway", "enabled")
 		env := BuildLLMGatewayEnv(s.Provider, m.config.ServerURL, m.config.APIToken)
 		keys := make([]string, 0, len(env))

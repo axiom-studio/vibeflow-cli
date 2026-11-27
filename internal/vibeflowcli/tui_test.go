@@ -398,3 +398,40 @@ func TestCaptureTick_WorkbenchActive_SkipsCapture(t *testing.T) {
 		t.Fatalf("workbench active: want only the re-armed capture tick, got %T", cmd())
 	}
 }
+
+// TestLaunchRouting_GatewayNeverReachesAHarnessItCannotWire covers #4615: a
+// team persona overridden to Kiro (or a quick switch) inherits the team's
+// gateway preference, which used to launch direct while being recorded and
+// shown as gateway-routed.
+func TestLaunchRouting_GatewayNeverReachesAHarnessItCannotWire(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, routing, sessionType string
+		gateway                              bool
+		want                                 string
+		ignored                              bool
+	}{
+		{"claude keeps the gateway", "claude", "", "vibeflow", true, RoutingGateway, false},
+		{"kiro inherited flag falls back", "kiro", "", "vibeflow", true, RoutingDirect, true},
+		{"kiro explicit gateway falls back", "kiro", RoutingGateway, "vibeflow", false, RoutingDirect, true},
+		{"cursor inherited flag falls back", "cursor", "", "vibeflow", true, RoutingDirect, true},
+		{"custom provider falls back", "my-custom", "", "vibeflow", true, RoutingDirect, true},
+		{"kiro without gateway is untouched", "kiro", "", "vibeflow", false, RoutingDirect, false},
+		{"vanilla session never uses the gateway", "claude", "", "vanilla", true, RoutingDirect, false},
+		{"explicit endpoint routing is kept", "kiro", RoutingEndpoint, "vibeflow", true, RoutingEndpoint, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ignored := launchRouting(WizardResult{ProviderKey: tc.provider, Routing: tc.routing, SessionType: tc.sessionType, LLMGatewayEnabled: tc.gateway})
+			if got != tc.want || ignored != tc.ignored {
+				t.Errorf("launchRouting = (%q, %v), want (%q, %v)", got, ignored, tc.want, tc.ignored)
+			}
+		})
+	}
+}
+
+func TestRenderDetailPanel_GatewayRowHiddenForHarnessItCannotWire(t *testing.T) {
+	cfg := &Config{ServerURL: "https://cloud.example.com", APIToken: "t"}
+	out := ansiRe.ReplaceAllString(detailPanelModel(SessionRow{Name: "s1", Provider: "kiro", LLMGatewayEnabled: true}, cfg).renderDetailPanel(120, 40), "")
+	if strings.Contains(out, "Gateway") {
+		t.Errorf("kiro session recorded with the gateway flag must not show Gateway enabled:\n%s", out)
+	}
+}
