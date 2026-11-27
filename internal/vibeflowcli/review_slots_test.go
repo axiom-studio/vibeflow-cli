@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -444,5 +447,68 @@ func TestReviewSlotsLogAttemptProgress(t *testing.T) {
 	}
 	if !ok || d.Provider != "claude" || d.Binary != provider || d.Finished.IsZero() || d.LeaseExpires.IsZero() || d.Renewed.IsZero() || d.ExitCode == nil || *d.ExitCode != 0 || d.Outcome != "answered with 1 citations." || !strings.Contains(strings.Join(stages, ","), "checkout") || !strings.Contains(strings.Join(stages, ","), "child_guard") {
 		t.Errorf("diagnostics = %+v", d)
+	}
+}
+
+// TestReviewSlotsLeaseRejectedKeepsClaimExpiry (#7698): when the server
+// rejects the first renewal, the claim's lease expiry is the only one the
+// diagnostics can hold, and it is what explains the lease_rejected failure.
+// A real proxy in front of the slot server answers every renew with 409.
+func TestReviewSlotsLeaseRejectedKeepsClaimExpiry(t *testing.T) {
+	withTempRoot(t)
+	t.Setenv("TMUX_PANE", "")
+	repo, review, question := slotExecutions(t)
+	upstream, _, _ := slotServer(t, review, question, []string{"repository_review_v1", reviewClaimKindCapability})
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward := httputil.NewSingleHostReverseProxy(target)
+	var rejected atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/renew") {
+			rejected.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		forward.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	provider := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\n[ \"$1\" = --version ] && { echo 'fake-claude 1.0'; exit 0; }\nexec sleep 60\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := singleSlotConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "slot-token"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() {
+		done <- runReviewWatch(ctx, &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac · answer 1", "--interval", "1s", "--slot-kind", "question", "--slot-label", "answer 1")
+	}()
+	logPath := reviewProgressLogPath(server.URL, reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "mac"})
+	var d reviewAttemptDiagnostics
+	for ctx.Err() == nil {
+		matches, _ := filepath.Glob(filepath.Join(filepath.Dir(logPath), reviewAttemptsDirName, "*", reviewDiagnosticsFile))
+		if len(matches) == 1 {
+			if got, ok := readReviewDiagnostics(filepath.Dir(matches[0])); ok && got.Failure != nil {
+				d = got
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if rejected.Load() == 0 || d.Failure == nil || d.Failure.Category != "lease_rejected" {
+		t.Fatalf("expected a lease_rejected attempt (renews rejected %d): %+v\n%s", rejected.Load(), d, out.String())
+	}
+	if want := time.UnixMilli(question.Attempt.LeaseExpiresAt); !d.LeaseExpires.Equal(want) || !d.Renewed.IsZero() {
+		t.Errorf("lease_expires = %v (renewed %v), want the claim's %v", d.LeaseExpires, d.Renewed, want)
 	}
 }
