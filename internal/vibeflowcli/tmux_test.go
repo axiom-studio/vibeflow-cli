@@ -1599,9 +1599,10 @@ func TestComposeWorkbench_StaleHolderAgentsAreRecoveredNotKilled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComposeWorkbench over a stale holder: %v", err)
 	}
+	live := livePanes(t, tm)
 	for _, fn := range full {
-		if owner, _ := tm.run("display-message", "-p", "-t", before[fn], "#{session_name}"); strings.TrimSpace(owner) != workbenchHolderName {
-			t.Errorf("agent pane %s of %s = in %q, want it alive in the new workbench", before[fn], fn, strings.TrimSpace(owner))
+		if live[before[fn]] != workbenchHolderName {
+			t.Errorf("agent pane %s of %s is in %q, want it alive in the new workbench", before[fn], fn, live[before[fn]])
 		}
 	}
 	if err := comp.Restore(); err != nil {
@@ -1655,5 +1656,69 @@ func TestComposeWorkbench_PlaceholderOnlyHolderIsReplaced(t *testing.T) {
 	}
 	if err := comp.Restore(); err != nil {
 		t.Fatalf("Restore: %v", err)
+	}
+}
+
+// livePanes maps every pane that exists on the server to its session. Use it
+// to prove a pane survived: `display-message -t %N` falls back to another
+// target and reports a killed pane as alive.
+func livePanes(t *testing.T, tm *TmuxManager) map[string]string {
+	t.Helper()
+	out, err := tm.run("list-panes", "-a", "-F", "#{pane_id}\t#{session_name}")
+	if err != nil {
+		t.Fatalf("list-panes -a: %v", err)
+	}
+	panes := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if id, session, ok := strings.Cut(line, "\t"); ok {
+			panes[id] = session
+		}
+	}
+	return panes
+}
+
+// The #7681 QA rejection, case (a): an agent pane with no @vibeflow_session in a
+// dead-owner holder must not be killed when a new workbench is composed.
+func TestComposeWorkbench_UnstampedAgentInStaleHolderIsRefusedAndKept(t *testing.T) {
+	tm, full, before := orphanedWorkbenchFixture(t, "a", "b", "c")
+	if _, err := tm.run("set-option", "-p", "-u", "-t", before[full[0]], "@vibeflow_session"); err != nil {
+		t.Fatalf("clear origin: %v", err)
+	}
+
+	_, err := tm.ComposeWorkbench(full[1:], nil)
+	if err == nil || !strings.Contains(err.Error(), "attach -t "+workbenchHolderName) {
+		t.Fatalf("err = %v, want a refusal naming the recovery command", err)
+	}
+	if live := livePanes(t, tm); live[before[full[0]]] != workbenchHolderName {
+		t.Errorf("unstamped agent pane %s = in %q, want it alive in the kept holder", before[full[0]], live[before[full[0]]])
+	}
+}
+
+// The #7681 QA rejection, case 2: a shell the user split inside the workbench
+// survives Restore (#3277). The next compose in the same TUI (the owner is
+// alive, so nothing is recovered) must refuse rather than kill it.
+func TestComposeWorkbench_UserPaneKeptByRestoreSurvivesNextCompose(t *testing.T) {
+	tm, full, _ := orphanedWorkbenchFixture(t, "a", "b")
+	if _, err := tm.RecoverOrphanedWorkbench(workbenchHolderName); err != nil {
+		t.Fatalf("recover fixture: %v", err)
+	}
+	comp, err := tm.ComposeWorkbench(full, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+	out, err := tm.run("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", workbenchHolderName, "sleep 300")
+	if err != nil {
+		t.Fatalf("split user pane: %v", err)
+	}
+	userPane := strings.TrimSpace(out)
+	if err := comp.Restore(); err == nil {
+		t.Fatal("Restore must report the user pane it left in the holder")
+	}
+
+	if _, err := tm.ComposeWorkbench(full, nil); err == nil {
+		t.Fatal("compose over a holder with a live user pane must refuse")
+	}
+	if live := livePanes(t, tm); live[userPane] != workbenchHolderName {
+		t.Errorf("user pane %s = in %q, want it alive in the kept holder", userPane, live[userPane])
 	}
 }
