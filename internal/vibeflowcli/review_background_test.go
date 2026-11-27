@@ -26,6 +26,12 @@ import (
 // This catches a background process tied to its launcher, lost configured
 // credentials, duplicate registrations, stale PID status, and ambient rerouting.
 func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
+	for _, provider := range []string{"github", "azure_devops", "gitlab"} {
+		t.Run(provider, func(t *testing.T) { testReviewBackgroundBinaryLifecycle(t, provider) })
+	}
+}
+
+func testReviewBackgroundBinaryLifecycle(t *testing.T, gitProvider string) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("review isolation requires macOS or Linux")
 	}
@@ -65,7 +71,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 			if fmt.Sprint(body["capabilities"]) != "[repository_review_v1 question_v1]" {
 				t.Error("explicit background launch lost repository consent")
 			}
-			json.NewEncoder(w).Encode(map[string]any{"id": body["id"], "user_id": 42, "provider": "github", "repository_link_id": 7})
+			json.NewEncoder(w).Encode(map[string]any{"id": body["id"], "user_id": 42, "provider": gitProvider, "repository_link_id": 7})
 		case strings.HasSuffix(r.URL.Path, "/heartbeat"):
 			heartbeats.Add(1)
 			fmt.Fprint(w, `{}`)
@@ -101,7 +107,7 @@ func TestReviewBackgroundBinaryLifecycle(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
-	start := []string{"--background", "--project", "23", "--repository-link", "7", "--repo", root, "--provider", "claude", "--name", "test-runner", "--interval", "1s"}
+	start := []string{"--background", "--git-provider", gitProvider, "--project", "23", "--repository-link", "7", "--repo", root, "--provider", "claude", "--name", "test-runner", "--interval", "1s"}
 	if out, err := run(nil, "--background", "--project", "23", "--repository-link", "7"); err == nil || !strings.Contains(out, "explicit") {
 		t.Fatalf("implicit repository was accepted: %v %s", err, out)
 	}

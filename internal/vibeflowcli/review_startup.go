@@ -45,6 +45,11 @@ func validReviewStartupRepository(repo reviewStartupRepository) bool {
 		return repo.ID > 0 && reviewStartupText(repo.Host, 253) && reviewStartupText(repo.Name, 512) && ok && project != "" && repository != "" &&
 			!strings.ContainsAny(repo.Host, "/@: ") && !strings.ContainsAny(repository, "/\\?#") && project != ".." && repository != ".."
 	}
+	if repo.Provider == "gitlab" {
+		host, name, err := reviewGitLabRemoteIdentity("https://" + repo.Host + "/" + repo.Name)
+		return repo.ID > 0 && reviewStartupText(repo.Host, 253) && reviewStartupText(repo.Name, 512) && err == nil &&
+			host == strings.ToLower(repo.Host) && host == "gitlab.com" && name == strings.ToLower(repo.Name) && validReviewGitLabProjectPath(repo.Name)
+	}
 	host, name, err := reviewRemoteIdentity("https://" + repo.Host + "/" + repo.Name)
 	owner, repository, _ := strings.Cut(repo.Name, "/")
 	return repo.ID > 0 && reviewStartupText(repo.Host, 253) && reviewStartupText(repo.Name, 512) && err == nil && owner != "." && repository != "." && host == strings.ToLower(repo.Host) && name == strings.ToLower(repo.Name) && (repo.Provider == "github" || repo.Provider == "bitbucket") && (repo.Provider != "bitbucket" || host == "bitbucket.org") && (repo.Provider != "github" || host != "bitbucket.org")
@@ -194,7 +199,7 @@ func resolveReviewStartup(ctx context.Context, cfg *Config, o reviewWatchOptions
 	}
 	projectLabel := fmt.Sprintf("%s (%d)", matches[0].Name, o.ProjectID)
 	if len(linked.Repositories) == 0 {
-		return o, nil, fmt.Errorf("%s has no linked repositories; link a GitHub, Bitbucket or Azure Repos repository in VibeFlow project settings before starting a review runner", projectLabel)
+		return o, nil, fmt.Errorf("%s has no linked repositories; link a GitHub, Bitbucket, Azure Repos or GitLab repository in VibeFlow project settings before starting a review runner", projectLabel)
 	}
 	var expected []string
 	for _, repo := range linked.Repositories {
@@ -299,6 +304,9 @@ func reviewCheckoutMatchesLink(ctx context.Context, path string, linkID int64, r
 			if err != nil {
 				host, name, err = reviewAzureRemoteIdentity(strings.TrimSpace(string(remote)))
 			}
+			if err != nil {
+				host, name, err = reviewGitLabRemoteIdentity(strings.TrimSpace(string(remote)))
+			}
 			if err == nil {
 				have = "is " + host + "/" + name
 			}
@@ -328,6 +336,9 @@ func findReviewStartupCheckout(ctx context.Context, path string, repositories []
 	host, name, err := reviewRemoteIdentity(strings.TrimSpace(string(remote)))
 	if err != nil {
 		host, name, err = reviewAzureRemoteIdentity(strings.TrimSpace(string(remote)))
+	}
+	if err != nil {
+		host, name, err = reviewGitLabRemoteIdentity(strings.TrimSpace(string(remote)))
 	}
 	if err != nil {
 		return nil
