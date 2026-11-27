@@ -414,7 +414,8 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 		args = []string{"respawn-pane", "-t", opts.PaneID, "-c", opts.WorkDir}
 	}
 
-	// Set environment variables via tmux -e flags. For the claude provider this
+	// Set environment variables via tmux -e flags (sent over stdin by
+	// runPrivate below, never argv). For the claude provider this
 	// also injects the claude hardening defaults (issue #3493).
 	for k, v := range withClaudeHardeningEnv(opts.Provider, opts.Env) {
 		// Expand ${VAR} references in values against the current environment.
@@ -439,7 +440,8 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 		tm.logger.Info("spawn session %q provider=%s workdir=%s command=%q", fullName, opts.Provider, opts.WorkDir, redactCommandSecrets(opts.Command))
 	}
 
-	_, err := tm.run(args...)
+	// The env values include secrets (MCP_TOKEN), so keep them off argv.
+	_, err := tm.runPrivate(args...)
 	if err != nil {
 		return fmt.Errorf("create session %q: %w", fullName, err)
 	}
@@ -1688,6 +1690,38 @@ func (tm *TmuxManager) ListSessionNames() ([]string, error) {
 		names[i] = s.Name
 	}
 	return names, nil
+}
+
+// runPrivate runs one tmux command whose arguments may carry secrets (session
+// env such as MCP_TOKEN). The command is sent on stdin to `source-file -`, so
+// the tmux client's argv, which any local user can read from the process table,
+// holds no secret (#4603). The server parses it exactly as it would argv.
+func (tm *TmuxManager) runPrivate(args ...string) (string, error) {
+	out, err := tm.privateCommand(args...).CombinedOutput()
+	if msg := strings.TrimSpace(string(out)); err != nil && msg != "" {
+		err = fmt.Errorf("%w: %s", err, msg)
+	}
+	return string(out), err
+}
+
+// privateCommand builds the `source-file -` invocation runPrivate executes.
+func (tm *TmuxManager) privateCommand(args ...string) *exec.Cmd {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = tmuxQuote(a)
+	}
+	// start-server first: unlike new-session, source-file needs a running
+	// server, and the first launch may be on an empty socket.
+	cmd := exec.Command("tmux", "-L", tm.socketName, "start-server", ";", "source-file", "-")
+	cmd.Stdin = strings.NewReader(strings.Join(quoted, " ") + "\n")
+	return cmd
+}
+
+// tmuxQuote double-quotes s for tmux's command parser, escaping the characters
+// it interprets inside double quotes ($ expands variables) and line breaks,
+// which would otherwise end the command.
+func tmuxQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "\n", `\n`, "\r", `\r`).Replace(s) + `"`
 }
 
 func (tm *TmuxManager) run(args ...string) (string, error) {

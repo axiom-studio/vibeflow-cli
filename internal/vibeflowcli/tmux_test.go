@@ -18,8 +18,10 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -1517,5 +1519,72 @@ func TestRecoverOrphanedWorkbenchRow_AttachedHolderIsLeftAlone(t *testing.T) {
 	}
 	if n := tm.sessionPaneCount(workbenchHolderName); n != 2 {
 		t.Errorf("holder panes = %d, want 2 (untouched)", n)
+	}
+}
+
+// TestPrivateCommand_KeepsSecretsOffArgv proves the spawn's tmux client argv
+// carries no env value (#4603): argv is readable by every local user via the
+// process table, so MCP_TOKEN must travel only on stdin.
+func TestPrivateCommand_KeepsSecretsOffArgv(t *testing.T) {
+	const secret = "eyJhbGciOiJSUzI1NiJ9.secret-token"
+	tm := NewTmuxManager("vftest-private")
+	cmd := tm.privateCommand("new-session", "-d", "-s", "x", "-e", "MCP_TOKEN="+secret, "claude")
+	if got, want := strings.Join(cmd.Args[1:], " "), "-L vftest-private start-server ; source-file -"; got != want {
+		t.Fatalf("argv = %q, want %q", got, want)
+	}
+	for _, a := range cmd.Args {
+		if strings.Contains(a, secret) {
+			t.Fatalf("secret leaked into argv: %q", cmd.Args)
+		}
+	}
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil || !strings.Contains(string(stdin), secret) {
+		t.Fatalf("stdin = %q (%v), want it to carry the command", stdin, err)
+	}
+}
+
+// TestCreateSessionWithOpts_EnvSurvivesStdinTransport proves values that tmux's
+// parser would otherwise interpret ($, quotes, backslashes, ;, newlines) reach
+// the session and the agent process byte for byte, and that spawn errors still
+// surface.
+func TestCreateSessionWithOpts_EnvSurvivesStdinTransport(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-private-" + itoa(os.Getpid()))
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	dir := t.TempDir()
+	// Values are os.Expand-ed before tmux sees them; "$ " and a trailing "$"
+	// survive that, so they check tmux leaves a literal $ alone.
+	tricky := "a\"b'c$ \\d; e #f {g}\nline2\ttab ~h$"
+	out := filepath.Join(dir, "env.out")
+	if err := tm.CreateSessionWithOpts(SessionOpts{
+		Name: "s", Provider: "claude", WorkDir: dir,
+		Env:     map[string]string{"MCP_TOKEN": "eyJ.tok-en_1", "VF_TRICKY": tricky},
+		Command: `printf '%s' "$VF_TRICKY" > ` + shellQuote(out) + `; sleep 30`,
+	}); err != nil {
+		t.Fatalf("CreateSessionWithOpts: %v", err)
+	}
+	full := tm.FullSessionName("claude", "s")
+	got, err := tm.run("show-environment", "-t", full, "MCP_TOKEN")
+	if err != nil || strings.TrimSpace(got) != "MCP_TOKEN=eyJ.tok-en_1" {
+		t.Errorf("session MCP_TOKEN = %q (%v)", strings.TrimSpace(got), err)
+	}
+	var seen []byte
+	for i := 0; i < 50; i++ {
+		if seen, err = os.ReadFile(out); err == nil && len(seen) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if string(seen) != tricky {
+		t.Errorf("agent saw VF_TRICKY = %q, want %q", seen, tricky)
+	}
+	if err := tm.CreateSessionWithOpts(SessionOpts{Name: "s", Provider: "claude", WorkDir: dir, Command: "true"}); err == nil {
+		t.Error("duplicate session must still fail")
 	}
 }
