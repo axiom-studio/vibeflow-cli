@@ -31,6 +31,9 @@ type reviewJob struct {
 	HeadSHA          string `json:"head_sha"`
 	BaseSHA          string `json:"base_sha"`
 	State            string `json:"state"`
+	// Draft is the provider's draft flag for the pull request (axiomcloud's
+	// PRReviewInput.Draft). A draft is not reviewed: the attempt stops at once.
+	Draft bool `json:"draft,omitempty"`
 	// PendingQuestions counts queued `@vibeflow ask` questions on the job.
 	PendingQuestions int `json:"pending_questions,omitempty"`
 }

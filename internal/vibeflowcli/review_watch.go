@@ -1164,6 +1164,12 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		failureErr = diagnostic.failure()
 	}()
+	// A draft pull request is not ready for review: stop before any checkout
+	// or harness instead of spending the attempt (#5603).
+	if p.Execution.Review.Draft {
+		diagnostic.Category = "pull_request_draft"
+		return nil, reviewReportable("the pull request is a draft; mark it ready for review, then request the review again")
+	}
 	root := w.workDir(p)
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
