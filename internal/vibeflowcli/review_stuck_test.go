@@ -19,6 +19,11 @@ package vibeflowcli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,5 +223,80 @@ func TestHarnessOutputProblem_StopsOnlyWhenConfirmedOrRepeatedAcrossReviews(t *t
 	w.harnessOutputProblem(ctx, "job-1", "authentication_required", "")
 	if w.harnessFatal != nil {
 		t.Fatalf("an unconfirmable harness stopped on one review: %v", w.harnessFatal)
+	}
+}
+
+// "In a row" (#7700): a review that succeeds clears the suspicion, so three
+// suspect reviews separated by a working one never stop the runner — a PR
+// author cannot stop a runner by spreading injected errors across PRs.
+func TestHarnessOutputProblem_SuccessfulReviewResetsTheCount(t *testing.T) {
+	source, execution := reviewTestRepo(t)
+	content := json.RawMessage(`{"findings":[]}`)
+	digest := sha256.Sum256(content)
+	brief := reviewBrief{RoundID: execution.Attempt.Round.ID, Digest: hex.EncodeToString(digest[:]), Content: content}
+	response := reviewResultEnvelope(t, map[string]any{
+		"schema_version": 1, "brief_digest": brief.Digest,
+		"head_sha": execution.Review.HeadSHA, "base_sha": execution.Review.BaseSHA,
+		"outcome": "clean", "summary": "fixture", "new_findings": []any{}, "reconciliations": []any{},
+	})
+	root := t.TempDir()
+	provider := filepath.Join(root, "provider")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\n"+reviewWriteResult(response)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var submissions atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/brief"):
+			json.NewEncoder(w).Encode(brief)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/result"):
+			submissions.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/renew"):
+			json.NewEncoder(w).Encode(execution)
+		case r.Method == "POST":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cfg := DefaultConfig()
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	cfg.Providers["gemini"] = Provider{Binary: provider} // no status command: only the repeat rule can stop it
+	var out bytes.Buffer
+	receipt := &reviewReceipt{JobID: execution.Review.ID, RequestID: reviewUUID(), Execution: execution}
+	w := &reviewWatch{
+		client: NewClient(server.URL, "token"), cfg: cfg, root: root, output: &out,
+		state:   reviewRunnerState{ID: execution.Attempt.RunnerID, Pending: receipt},
+		options: reviewWatchOptions{ProjectID: 1, Repository: source, Provider: "claude", Timeout: 30 * time.Second},
+	}
+	ctx := context.Background()
+	w.options.Provider = "gemini"
+	w.harnessOutputProblem(ctx, "job-a", "authentication_required", "")
+	w.harnessOutputProblem(ctx, "job-b", "access_denied", "")
+	w.options.Provider = "claude"
+	if w.harnessFatal != nil {
+		t.Fatalf("stopped after 2 reviews: %v", w.harnessFatal)
+	}
+
+	if err := w.advance(ctx, true); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if submissions.Load() != 1 || len(receipt.Result) == 0 || receipt.Failure != "" {
+		t.Fatalf("the review did not succeed: submissions=%d failure=%q\n%s", submissions.Load(), receipt.Failure, out.String())
+	}
+
+	w.options.Provider = "gemini"
+	w.harnessOutputProblem(ctx, "job-c", "authentication_required", "")
+	if w.harnessFatal != nil {
+		t.Fatalf("suspect reviews split by a working one stopped the runner: %v", w.harnessFatal)
+	}
+	w.harnessOutputProblem(ctx, "job-d", "authentication_required", "")
+	w.harnessOutputProblem(ctx, "job-e", "authentication_required", "")
+	if w.harnessFatal == nil {
+		t.Fatal("three suspect reviews in a row after the reset did not stop the runner")
 	}
 }
