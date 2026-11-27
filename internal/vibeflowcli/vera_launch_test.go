@@ -902,3 +902,69 @@ func TestVeraConsoleSlotWindows(t *testing.T) {
 		t.Fatalf("recorded layout %d/%d, want 1/1", a, r)
 	}
 }
+
+// TestVeraDashboard_SlotsStayLiveWhileDashboardIsInAWorkbench is #7690: a
+// Vera dashboard pane joined into a workbench resolved its pane target to the
+// holder, which has no slot windows, so every live slot read "stopped: its
+// listener exited" and the dashboard advised a restart.
+func TestVeraDashboard_SlotsStayLiveWhileDashboardIsInAWorkbench(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-vera-wb-" + itoa(os.Getpid()))
+	_, _ = tm.run("kill-server")
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	dir := t.TempDir()
+	for _, n := range []string{"vera", "dev"} {
+		if err := tm.CreateSessionWithOpts(SessionOpts{Name: n, Provider: "claude", WorkDir: dir, Command: "sleep 300"}); err != nil {
+			t.Fatalf("create %s: %v", n, err)
+		}
+	}
+	vera, dev := tm.FullSessionName("claude", "vera"), tm.FullSessionName("claude", "dev")
+	for _, slot := range []string{"answer 1", "review 1"} {
+		id, err := tm.run("new-window", "-d", "-t", vera+":", "-n", slot, "-P", "-F", "#{window_id}", "sleep 300")
+		if err != nil {
+			t.Fatalf("slot window %s: %v", slot, err)
+		}
+		if _, err := tm.run("set-option", "-w", "-t", strings.TrimSpace(id), "@vibeflow_vera_slot", slot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dashboard, err := tm.agentPaneID(vera)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home := veraHomeSession(tm.run, dashboard); home != vera {
+		t.Fatalf("home session before compose = %q, want %q", home, vera)
+	}
+
+	comp, err := tm.ComposeWorkbench([]string{vera, dev}, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+	defer comp.Restore()
+	if bug := veraStoppedSlots(tm.run, dashboard, 1, 1); len(bug) != 2 {
+		t.Fatalf("precondition: a bare pane target should now resolve to the holder (stopped=%v)", bug)
+	}
+	if home := veraHomeSession(tm.run, dashboard); home != vera {
+		t.Fatalf("home session in a workbench = %q, want %q", home, vera)
+	}
+	if stopped := veraStoppedSlots(tm.run, veraHomeSession(tm.run, dashboard), 1, 1); len(stopped) != 0 {
+		t.Errorf("live slots reported stopped while the dashboard is in a workbench: %v", stopped)
+	}
+
+	// A pane with no recorded origin falls back to itself; outside tmux, nothing.
+	plain, err := tm.run("new-session", "-d", "-s", "plain", "-P", "-F", "#{pane_id}", "sleep 300")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pane := strings.TrimSpace(plain); veraHomeSession(tm.run, pane) != pane {
+		t.Errorf("no origin: got %q, want the pane %q", veraHomeSession(tm.run, pane), pane)
+	}
+	if got := veraHomeSession(tm.run, ""); got != "" {
+		t.Errorf("outside tmux: got %q, want empty", got)
+	}
+}
