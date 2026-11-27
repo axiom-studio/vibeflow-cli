@@ -1588,3 +1588,72 @@ func TestCreateSessionWithOpts_EnvSurvivesStdinTransport(t *testing.T) {
 		t.Error("duplicate session must still fail")
 	}
 }
+
+// TestComposeWorkbench_StaleHolderAgentsAreRecoveredNotKilled is the #7681
+// regression: composing over a crashed workbench used to kill-session the old
+// holder and every agent stranded inside it.
+func TestComposeWorkbench_StaleHolderAgentsAreRecoveredNotKilled(t *testing.T) {
+	tm, full, before := orphanedWorkbenchFixture(t, "a", "b")
+
+	comp, err := tm.ComposeWorkbench(full, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench over a stale holder: %v", err)
+	}
+	for _, fn := range full {
+		if owner, _ := tm.run("display-message", "-p", "-t", before[fn], "#{session_name}"); strings.TrimSpace(owner) != workbenchHolderName {
+			t.Errorf("agent pane %s of %s = in %q, want it alive in the new workbench", before[fn], fn, strings.TrimSpace(owner))
+		}
+	}
+	if err := comp.Restore(); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	for _, fn := range full {
+		if pid, err := tm.paneID(fn); err != nil || pid != before[fn] {
+			t.Errorf("%s pane = %q (%v), want original %s", fn, pid, err, before[fn])
+		}
+	}
+}
+
+func TestComposeWorkbench_LiveOwnedHolderIsRefusedAndKept(t *testing.T) {
+	for _, project := range []bool{false, true} {
+		tm, full, _ := orphanedWorkbenchFixture(t, "a", "b")
+		// Another running TUI on this socket owns a live workbench.
+		if _, err := tm.run("set-option", "-t", workbenchHolderName, workbenchOwnerOption, itoa(os.Getpid())); err != nil {
+			t.Fatalf("set live owner: %v", err)
+		}
+		var err error
+		if project {
+			_, err = tm.ComposeProjectWorkbench([]WorkbenchProject{{Label: "p", Sessions: full}}, "p", nil)
+		} else {
+			_, err = tm.ComposeWorkbench(full, nil)
+		}
+		if err == nil || !strings.Contains(err.Error(), "attach -t "+workbenchHolderName) {
+			t.Errorf("project=%v: err = %v, want a refusal naming the recovery command", project, err)
+		}
+		if n := tm.holderAgentPanes(workbenchHolderName); n != 2 {
+			t.Errorf("project=%v: holder agent panes = %d, want 2 (live workbench untouched)", project, n)
+		}
+	}
+}
+
+// A crash right after the holder was created, before any agent joined, leaves
+// only the placeholder shell; that must not block the next workbench.
+func TestComposeWorkbench_PlaceholderOnlyHolderIsReplaced(t *testing.T) {
+	tm, full, _ := orphanedWorkbenchFixture(t, "a", "b")
+	if _, err := tm.RecoverOrphanedWorkbench(workbenchHolderName); err != nil {
+		t.Fatalf("recover fixture: %v", err)
+	}
+	if err := tm.createWorkbenchHolder(workbenchHolderName); err != nil {
+		t.Fatalf("createWorkbenchHolder: %v", err)
+	}
+	if n := tm.holderAgentPanes(workbenchHolderName); n != 0 {
+		t.Fatalf("placeholder counted as %d agent pane(s)", n)
+	}
+	comp, err := tm.ComposeWorkbench(full, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench over a placeholder-only holder: %v", err)
+	}
+	if err := comp.Restore(); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+}

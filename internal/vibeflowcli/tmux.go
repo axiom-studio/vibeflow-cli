@@ -757,9 +757,8 @@ func (tm *TmuxManager) ComposeWorkbench(names []string, titles map[string]string
 	}
 
 	holder := workbenchHolderName
-	// A stale holder left by a previous crash would fail new-session; clear it.
-	if tm.HasSession(holder) {
-		_, _ = tm.run("kill-session", "-t", holder)
+	if err := tm.clearStaleHolder(holder); err != nil {
+		return nil, err
 	}
 	if err := tm.createWorkbenchHolder(holder); err != nil {
 		return nil, err
@@ -1020,7 +1019,9 @@ func (tm *TmuxManager) composeProjectWorkbench(projects []WorkbenchProject, sele
 		if vscodeClient {
 			return nil, fmt.Errorf("existing workbench %q still contains sessions; detach and restore it before opening another view", holder)
 		}
-		_, _ = tm.run("kill-session", "-t", holder)
+		if err := tm.clearStaleHolder(holder); err != nil {
+			return nil, err
+		}
 	}
 	if err := tm.createWorkbenchHolder(holder); err != nil {
 		return nil, err
@@ -1169,6 +1170,46 @@ func (tm *TmuxManager) workbenchOwnerAlive(holder string) bool {
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(out))
 	return err == nil && pid > 0 && (pid == os.Getpid() || processAlive(pid))
+}
+
+// clearStaleHolder makes way for a new workbench when a holder already exists
+// (a crash while composed, or a Restore that failed part-way). It must never
+// kill a live agent (#7681): stranded panes are first returned to their
+// sessions, and the holder is removed only once it is empty. A holder that
+// still holds agent panes, because it is attached or owned by a running
+// process, is left intact and reported.
+func (tm *TmuxManager) clearStaleHolder(holder string) error {
+	if !tm.HasSession(holder) {
+		return nil
+	}
+	out, _ := tm.run("display-message", "-p", "-t", holder, "#{session_attached}")
+	if strings.TrimSpace(out) == "0" {
+		if _, err := tm.RecoverOrphanedWorkbench(holder); err != nil && tm.logger != nil {
+			tm.logger.Warn("workbench recovery before compose: %v", err)
+		}
+	}
+	if n := tm.holderAgentPanes(holder); n > 0 {
+		return fmt.Errorf("workbench %q still holds %d agent pane(s) and was left intact; recover them with: tmux -L %s attach -t %s", holder, n, tm.socketName, holder)
+	}
+	// Only placeholder shells (or nothing) remain: safe to remove.
+	_, _ = tm.run("kill-session", "-t", holder)
+	return nil
+}
+
+// holderAgentPanes counts the holder's agent panes. Every agent pane carries
+// @vibeflow_session from launch (configurePaneRecovery); the holder's own
+// placeholder shells never do, so a holder left by a crash mid-compose, before
+// any agent joined, does not block the next workbench. A missing holder or an
+// unreadable pane list counts as zero only when the holder is gone.
+func (tm *TmuxManager) holderAgentPanes(holder string) int {
+	out, err := tm.run("list-panes", "-s", "-t", holder, "-F", "#{@vibeflow_session}")
+	if err != nil {
+		if tm.HasSession(holder) {
+			return 1 // cannot tell: assume an agent rather than risk killing one
+		}
+		return 0
+	}
+	return len(strings.Fields(out))
 }
 
 // RecoverOrphanedWorkbench returns the panes stranded in a workbench holder
