@@ -34,9 +34,11 @@ const (
 )
 
 type reviewLiveMsg struct {
-	running  bool     // a slot pane on this tmux server is running the review
-	output   []string // the harness's screen and scrollback, plain text
-	progress []string // this PR's lines from the console's progress log
+	running  bool      // a slot pane on this tmux server is running the review
+	output   []string  // the harness's screen and scrollback, plain text
+	progress []string  // this PR's lines from the console's progress log
+	saved    []string  // the last attempt's transcript, when not running (#5601)
+	savedAt  time.Time // when that transcript was saved
 }
 type reviewLiveTickMsg struct{}
 
@@ -53,12 +55,13 @@ func loadReviewLive(run veraTmux, logPath, jobID string, prNumber int) reviewLiv
 		}
 	}
 	pane := reviewLivePane(run, jobID)
-	if pane == "" {
-		return msg
+	out, err := "", error(nil)
+	if pane != "" {
+		out, err = run("capture-pane", "-p", "-J", "-t", pane, "-S", "-"+strconv.Itoa(veraLiveHistory))
 	}
-	out, err := run("capture-pane", "-p", "-J", "-t", pane, "-S", "-"+strconv.Itoa(veraLiveHistory))
-	if err != nil {
-		return msg // the review ended between the lookup and the capture
+	if pane == "" || err != nil { // not running here, or it just ended
+		msg.saved, msg.savedAt, _ = readReviewTranscript(reviewAttemptDir(logPath, jobID))
+		return msg
 	}
 	msg.running = true
 	// capture-pane without -e is plain text; reviewDetailText still drops any

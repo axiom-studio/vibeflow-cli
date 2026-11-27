@@ -1347,6 +1347,8 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		fmt.Fprintf(w.output, "\r\nVera is still waiting for %s; if it is showing a login or trust screen, answer it here or press Ctrl-C twice to stop Vera.\r\n", w.options.Provider)
 	})
 	ran := time.Since(harnessStarted)
+	// Before Vera clears the pane: keep what the harness showed (#5601).
+	w.progress.saveTranscript(string(stdout.tail) + "\n" + string(stderr.tail))
 	diagnostic.StdoutBytes, diagnostic.StderrBytes = stdout.n, stderr.n
 	if report, ok := readReviewProcessReport(filepath.Join(root, "child-diagnostic.json")); ok {
 		diagnostic.Stage = "provider"

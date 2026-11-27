@@ -376,7 +376,7 @@ func TestReviewSlotsLogAttemptProgress(t *testing.T) {
 	repo, review, question := slotExecutions(t)
 	server, _, results := slotServer(t, review, question, []string{"repository_review_v1", reviewClaimKindCapability})
 	provider := filepath.Join(t.TempDir(), "claude")
-	script := "#!/bin/sh\nif grep -q 'Local question task' ../../task.txt; then cat " + shellQuote(reviewWatchQuestionResult(t, question)) + " > ../../result.json; else cat " + shellQuote(reviewWatchResult(t, review, 0)) + " > ../../result.json; fi\n"
+	script := "#!/bin/sh\necho 'harness answered the question'\nif grep -q 'Local question task' ../../task.txt; then cat " + shellQuote(reviewWatchQuestionResult(t, question)) + " > ../../result.json; else cat " + shellQuote(reviewWatchResult(t, review, 0)) + " > ../../result.json; fi\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -413,5 +413,13 @@ func TestReviewSlotsLogAttemptProgress(t *testing.T) {
 	}
 	if strings.Contains(log, question.Question.Question) {
 		t.Errorf("the question text reached the progress log:\n%s", log)
+	}
+	// The headless harness's output is kept as the attempt's transcript (#5601).
+	transcripts, _ := filepath.Glob(filepath.Join(filepath.Dir(logPath), reviewAttemptsDirName, "*", reviewTranscriptFile))
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts = %v, want one", transcripts)
+	}
+	if data, _ := os.ReadFile(transcripts[0]); !strings.Contains(string(data), "harness answered the question") {
+		t.Errorf("transcript lacks the harness output:\n%s", data)
 	}
 }

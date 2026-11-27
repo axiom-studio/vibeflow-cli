@@ -85,12 +85,13 @@ type reviewAttemptProgress struct {
 	started  time.Time
 	deadline func() time.Time
 
-	mu      sync.Mutex
-	stage   string
-	renewed time.Time
-	logged  time.Time
-	stop    chan struct{}
-	done    chan struct{}
+	mu       sync.Mutex
+	snapshot string // the pane as last seen while the attempt ran
+	stage    string
+	renewed  time.Time
+	logged   time.Time
+	stop     chan struct{}
+	done     chan struct{}
 }
 
 func newReviewAttemptProgress(run veraTmux, pane, logPath, slot, job, provider string, deadline func() time.Time) *reviewAttemptProgress {
@@ -153,6 +154,39 @@ func (r *reviewAttemptProgress) leaseRenewed(at time.Time) {
 	r.mu.Unlock()
 }
 
+// capturePane reads the slot pane's screen and scrollback as plain text.
+func (r *reviewAttemptProgress) capturePane() string {
+	if r == nil || r.run == nil || r.pane == "" {
+		return ""
+	}
+	out, err := r.run("capture-pane", "-p", "-J", "-t", r.pane, "-S", fmt.Sprintf("-%d", reviewTranscriptLines))
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
+// saveTranscript keeps the attempt's harness output once the harness has
+// exited (#5601): the slot pane's screen and scrollback, or the longer copy
+// seen while it ran (a harness on the alternate screen leaves nothing behind
+// when it exits), or, without a pane, fallback (a headless harness's output
+// tail). Best effort, like the log.
+func (r *reviewAttemptProgress) saveTranscript(fallback string) {
+	if r == nil {
+		return
+	}
+	text := r.capturePane()
+	r.mu.Lock()
+	if len(r.snapshot) > len(text) {
+		text = r.snapshot
+	}
+	r.mu.Unlock()
+	if strings.TrimSpace(text) == "" {
+		text = fallback
+	}
+	_ = saveReviewTranscript(reviewAttemptDir(r.logPath, r.jobID), text)
+}
+
 // finish logs the outcome and removes the border line.
 func (r *reviewAttemptProgress) finish(outcome string) {
 	if r == nil {
@@ -194,6 +228,11 @@ func (r *reviewAttemptProgress) line(now time.Time) string {
 func (r *reviewAttemptProgress) refresh(logNow bool) {
 	now := time.Now()
 	line := r.line(now)
+	if snap := r.capturePane(); snap != "" {
+		r.mu.Lock()
+		r.snapshot = snap
+		r.mu.Unlock()
+	}
 	if r.run != nil && r.pane != "" {
 		// The border inserts the option's value literally: tmux does not
 		// re-expand it as a format.
