@@ -52,8 +52,15 @@ type reviewAttemptDiagnostics struct {
 	Stages   []reviewStageTime `json:"stages"`
 	Deadline time.Time         `json:"deadline,omitzero"`
 	Renewed  time.Time         `json:"lease_renewed,omitzero"`
-	Finished time.Time         `json:"finished,omitzero"`
-	Outcome  string            `json:"outcome,omitempty"`
+	// LeaseExpires is the lease's current expiry: set at claim, moved by
+	// every renewal. Compared with Renewed and Deadline it explains a
+	// lease_expired or lease_rejected failure.
+	LeaseExpires time.Time `json:"lease_expires,omitzero"`
+	// ExitCode and Signal are the harness's exit status, on every outcome.
+	ExitCode *int      `json:"harness_exit_code,omitempty"`
+	Signal   int       `json:"harness_signal,omitempty"`
+	Finished time.Time `json:"finished,omitzero"`
+	Outcome  string    `json:"outcome,omitempty"`
 	// Failure is the runner's execution diagnostic when the attempt failed.
 	Failure *reviewExecutionDiagnostic `json:"failure,omitempty"`
 }
@@ -72,7 +79,8 @@ func reviewHarnessVersion(binary string) string {
 	}
 	defer os.RemoveAll(dir)
 	cmd := exec.CommandContext(ctx, binary, "--version")
-	cmd.Dir = dir // never the runner's or a checkout's directory
+	cmd.Dir = dir               // never the runner's or a checkout's directory
+	cmd.WaitDelay = time.Second // a child that keeps stdout open cannot hold the probe
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
 	out, err := cmd.Output()
 	if err != nil {
@@ -146,6 +154,16 @@ func reviewDiagnosticsLines(d reviewAttemptDiagnostics, now time.Time) []string 
 		lines = append(lines, "Stages: "+strings.Join(parts, " · "))
 	}
 	var lease []string
+	if !d.LeaseExpires.IsZero() {
+		left := "expired"
+		if l := d.LeaseExpires.Sub(now); l > 0 {
+			left = roundElapsed(l) + " left"
+		}
+		lease = append(lease, fmt.Sprintf("expires %s (%s)", d.LeaseExpires.Local().Format("15:04:05"), left))
+	}
+	if !d.Renewed.IsZero() {
+		lease = append(lease, "renewed "+d.Renewed.Local().Format("15:04:05"))
+	}
 	if !d.Deadline.IsZero() {
 		left := "past"
 		if l := d.Deadline.Sub(now); l > 0 {
@@ -153,11 +171,18 @@ func reviewDiagnosticsLines(d reviewAttemptDiagnostics, now time.Time) []string 
 		}
 		lease = append(lease, fmt.Sprintf("deadline %s (%s)", d.Deadline.Local().Format("15:04"), left))
 	}
-	if !d.Renewed.IsZero() {
-		lease = append(lease, "lease renewed "+d.Renewed.Local().Format("15:04:05"))
-	}
 	if len(lease) > 0 {
 		lines = append(lines, "Lease: "+strings.Join(lease, " · "))
+	}
+	if d.ExitCode != nil || d.Signal != 0 {
+		exit := "Harness exit:"
+		if d.ExitCode != nil {
+			exit += fmt.Sprintf(" code %d", *d.ExitCode)
+		}
+		if d.Signal != 0 {
+			exit += fmt.Sprintf(" signal %d", d.Signal)
+		}
+		lines = append(lines, exit)
 	}
 	if f := d.Failure; f != nil {
 		failure := fmt.Sprintf("Failure: %s at %s", text(f.Category), text(f.Stage))

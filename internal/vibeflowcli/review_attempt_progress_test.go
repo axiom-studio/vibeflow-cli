@@ -63,7 +63,7 @@ func TestReviewAttemptProgress_BorderAndLogFollowTheAttempt(t *testing.T) {
 
 	r.start()
 	r.setStage("child_guard")
-	r.leaseRenewed(time.Date(2026, 11, 27, 8, 1, 0, 0, time.Local))
+	r.leaseRenewed(time.Date(2026, 11, 27, 8, 1, 0, 0, time.Local), time.Date(2026, 11, 27, 8, 2, 0, 0, time.Local))
 	r.refresh(false)
 	border, _ := tm.run("display-message", "-p", "-t", pane, "#{pane-border-status}|#{"+reviewProgressOption+"}")
 	if !strings.HasPrefix(border, "top|Vera · review #49 · claude working · 0s elapsed · 2") ||
@@ -96,7 +96,9 @@ func TestReviewAttemptProgress_WithoutTmuxOnlyLogs(t *testing.T) {
 	var none *reviewAttemptProgress // A runner outside a console slot has no reporter.
 	none.start()
 	none.setStage("checkout")
-	none.leaseRenewed(time.Now())
+	none.leaseRenewed(time.Now(), time.Now())
+	none.leaseExpires(time.Now())
+	none.harnessExit(nil, 0)
 	none.appendLog("ignored")
 	none.finish("x")
 }

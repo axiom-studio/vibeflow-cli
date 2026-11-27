@@ -94,6 +94,9 @@ type reviewAttemptProgress struct {
 	failure  *reviewExecutionDiagnostic
 	finished time.Time
 	outcome  string
+	leaseExp time.Time // the lease's current expiry
+	exitCode *int      // the harness's exit status, once it has exited
+	signal   int
 	stage    string
 	renewed  time.Time
 	logged   time.Time
@@ -245,19 +248,40 @@ func (r *reviewAttemptProgress) writeDiagnostics() {
 	d := reviewAttemptDiagnostics{
 		Attempt: r.attempt, Provider: r.provider, Binary: r.binary, Version: r.version,
 		Started: r.started, Stages: append([]reviewStageTime(nil), r.stages...), Deadline: deadline,
-		Renewed: r.renewed, Finished: r.finished, Outcome: r.outcome, Failure: r.failure,
+		Renewed: r.renewed, LeaseExpires: r.leaseExp, ExitCode: r.exitCode, Signal: r.signal,
+		Finished: r.finished, Outcome: r.outcome, Failure: r.failure,
 	}
 	saveReviewDiagnostics(dir, d)
 	r.mu.Unlock() // held across the write so snapshots land in order
 }
 
-// leaseRenewed records a successful lease renewal.
-func (r *reviewAttemptProgress) leaseRenewed(at time.Time) {
+// leaseRenewed records a successful lease renewal and the expiry it set.
+func (r *reviewAttemptProgress) leaseRenewed(at, expires time.Time) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	r.renewed = at
+	r.renewed, r.leaseExp = at, expires
+	r.mu.Unlock()
+}
+
+// leaseExpires records the lease expiry the claim granted.
+func (r *reviewAttemptProgress) leaseExpires(expires time.Time) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.leaseExp = expires
+	r.mu.Unlock()
+}
+
+// harnessExit records the harness's exit status.
+func (r *reviewAttemptProgress) harnessExit(code *int, signal int) {
+	if r == nil || (code == nil && signal == 0) {
+		return
+	}
+	r.mu.Lock()
+	r.exitCode, r.signal = code, signal
 	r.mu.Unlock()
 }
 

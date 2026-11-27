@@ -1051,6 +1051,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	go func() {
 		defer close(renewDone)
 		expiry := time.UnixMilli(p.Execution.Attempt.LeaseExpiresAt)
+		w.progress.leaseExpires(expiry)
 		sendChangedLines := true // Cleared for this attempt once the server rejects the field.
 		for {
 			// Renew every 10 seconds, and halfway through a shorter lease:
@@ -1110,7 +1111,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 				return
 			}
 			expiry = time.UnixMilli(renewed.Attempt.LeaseExpiresAt)
-			w.progress.leaseRenewed(time.Now())
+			w.progress.leaseRenewed(time.Now(), expiry)
 			// The server may lengthen the round once it knows the diff size.
 			attemptDeadline.extend(time.UnixMilli(renewed.Attempt.Round.DeadlineAt))
 		}
@@ -1390,6 +1391,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.Signal = reviewProcessSignal(guard.ProcessState)
 		diagnostic.Category = "child_guard_failed"
 	}
+	w.progress.harnessExit(diagnostic.ExitCode, diagnostic.Signal)
 	if interactive {
 		// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
 		w.tty.reclaim(diagnostic.Signal == int(syscall.SIGTERM) || diagnostic.Signal == int(syscall.SIGKILL))

@@ -438,7 +438,7 @@ func TestReviewSlotsLogAttemptProgress(t *testing.T) {
 	for _, s := range d.Stages {
 		stages = append(stages, s.Name)
 	}
-	if !ok || d.Provider != "claude" || d.Binary != provider || d.Finished.IsZero() || d.Outcome != "answered with 1 citations." || !strings.Contains(strings.Join(stages, ","), "checkout") || !strings.Contains(strings.Join(stages, ","), "child_guard") {
+	if !ok || d.Provider != "claude" || d.Binary != provider || d.Finished.IsZero() || d.LeaseExpires.IsZero() || d.Renewed.IsZero() || d.ExitCode == nil || *d.ExitCode != 0 || d.Outcome != "answered with 1 citations." || !strings.Contains(strings.Join(stages, ","), "checkout") || !strings.Contains(strings.Join(stages, ","), "child_guard") {
 		t.Errorf("diagnostics = %+v", d)
 	}
 }

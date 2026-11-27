@@ -250,7 +250,7 @@ func TestReviewDiagnosticsLines_RunningAndFailed(t *testing.T) {
 			{Name: "checkout", Label: "checking out the PR", Start: start.Add(2 * time.Second)},
 			{Name: "child_guard", Label: "claude working", Start: start.Add(10 * time.Second)},
 		},
-		Deadline: start.Add(30 * time.Minute), Renewed: start.Add(90 * time.Second),
+		Deadline: start.Add(30 * time.Minute), Renewed: start.Add(90 * time.Second), LeaseExpires: start.Add(195 * time.Second),
 	}
 	running := strings.Join(reviewDiagnosticsLines(d, start.Add(3*time.Minute)), "\n")
 	for _, want := range []string{
@@ -258,13 +258,14 @@ func TestReviewDiagnosticsLines_RunningAndFailed(t *testing.T) {
 		"Attempt: att-2 · started 10:48:00 · 3m elapsed",
 		"Stage: claude working for 2m",
 		"Stages: preparing the brief 2s · checking out the PR 8s · claude working 2m",
-		"Lease: deadline 11:18 (27m left) · lease renewed 10:49:30",
+		"Lease: expires 10:51:15 (15s left) · renewed 10:49:30 · deadline 11:18 (27m left)",
 	} {
 		if !strings.Contains(running, want) {
 			t.Errorf("running diagnostics lack %q:\n%s", want, running)
 		}
 	}
 	exit := 0
+	d.ExitCode = &exit
 	d.Finished, d.Outcome = start.Add(13*time.Minute), "failed - review failed at provider"
 	d.Failure = &reviewExecutionDiagnostic{Category: "lease_rejected", Stage: "provider", ExitCode: &exit, StdoutBytes: 1200}
 	failed := strings.Join(reviewDiagnosticsLines(d, start.Add(20*time.Minute)), "\n")
@@ -272,6 +273,8 @@ func TestReviewDiagnosticsLines_RunningAndFailed(t *testing.T) {
 		"finished after 13m: failed - review failed at provider",
 		"claude working 12m",
 		"Failure: lease_rejected at provider · exit 0 · harness output 1200 B stdout, 0 B stderr",
+		"Lease: expires 10:51:15 (expired) · renewed 10:49:30 · deadline 11:18 (10m left)",
+		"Harness exit: code 0",
 	} {
 		if !strings.Contains(failed, want) {
 			t.Errorf("failed diagnostics lack %q:\n%s", want, failed)
@@ -293,9 +296,16 @@ func TestReviewAttemptProgress_WritesDiagnostics(t *testing.T) {
 	deadline := time.Now().Add(29 * time.Minute)
 	r := newReviewAttemptProgress(nil, "", logPath, "review 1", "review #4", "fakeharness", func() time.Time { return deadline })
 	r.jobID, r.attempt, r.binary = "job-4", "att-2", bin
+	firstExpiry := time.Now().Add(time.Minute).Truncate(time.Second)
+	renewedExpiry := firstExpiry.Add(time.Minute)
+	r.leaseExpires(firstExpiry)
 	r.start()
+	if d, _ := readReviewDiagnostics(reviewAttemptDir(logPath, "job-4")); !d.LeaseExpires.Equal(firstExpiry) {
+		t.Errorf("claim lease expiry = %v, want %v", d.LeaseExpires, firstExpiry)
+	}
 	r.setStage("checkout")
-	r.leaseRenewed(time.Now())
+	r.leaseRenewed(time.Now(), renewedExpiry)
+	r.harnessExit(func() *int { c := 3; return &c }(), 0)
 	exit := 3
 	r.setFailure(reviewExecutionDiagnostic{Category: "provider_failed", Stage: "provider", ExitCode: &exit})
 	dir := reviewAttemptDir(logPath, "job-4")
@@ -309,6 +319,7 @@ func TestReviewAttemptProgress_WritesDiagnostics(t *testing.T) {
 	d, ok := readReviewDiagnostics(dir)
 	if !ok || d.Attempt != "att-2" || d.Version != "9.9.9 (Fake Harness)" || d.Binary != bin || len(d.Stages) != 2 ||
 		d.Stages[1].Name != "checkout" || d.Renewed.IsZero() || d.Finished.IsZero() || d.Failure == nil || *d.Failure.ExitCode != 3 ||
+		!d.LeaseExpires.Equal(renewedExpiry) || d.ExitCode == nil || *d.ExitCode != 3 ||
 		!d.Deadline.Equal(deadline.Round(0)) && d.Deadline.Sub(deadline).Abs() > time.Second {
 		t.Fatalf("diagnostics = %+v (ok %v)", d, ok)
 	}
