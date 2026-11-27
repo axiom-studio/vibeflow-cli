@@ -17,9 +17,11 @@
 package vibeflowcli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -99,35 +101,122 @@ func TestWatchStuckHarness_FiresOnlyForAStillErrorScreen(t *testing.T) {
 	}
 }
 
-// End to end in a real pane: an interactive harness stuck on PR #49's login
-// error fails its attempt as authentication_required within about a minute,
-// instead of holding the review until the lease ends, and Vera stops with
-// the login hint. Takes ~50 s (the real threshold), so -short skips it.
-func TestReviewWatchInteractiveStuckOnLoginErrorFailsEarly(t *testing.T) {
-	if testing.Short() {
-		t.Skip("waits for the real stuck threshold")
+// stuckLoginScreen is a harness script that shows PR #49's error and idles;
+// with logOut it also logs the harness out first, so its status check agrees.
+func stuckLoginScreen(logOut bool) func(*reviewExecution, func(string) string) string {
+	return func(_ *reviewExecution, mark func(string) string) string {
+		pre := ""
+		if logOut {
+			pre = "touch " + shellQuote(mark("logged-out")) + "\n"
+		}
+		return pre + "printf '⏺ Please run /login · API Error: 403 Built-in models are available only\\n  through HelloSeal.ai\\n❯ Once fixed, resend your message\\n'\nexec sleep 300\n"
 	}
-	v := startVeraPane(t, true, func(*reviewExecution, func(string) string) string {
-		return "printf '⏺ Please run /login · API Error: 403 Built-in models are available only\\n  through HelloSeal.ai\\n❯ Once fixed, resend your message\\n'\nexec sleep 300\n"
-	})
-	v.waitFor("harness error screen", v.shows("Please run /login"))
+}
+
+// waitPane waits longer than veraPane.waitFor: these tests sit out the real
+// stuck threshold inside the built binary.
+func waitPane(t *testing.T, v *veraPane, what string, ok func() bool) {
+	t.Helper()
 	deadline := time.Now().Add(reviewStuckAfter + 30*time.Second)
-	for !v.dead() {
+	for !ok() {
 		if time.Now().After(deadline) {
-			t.Fatalf("Vera still waiting on a stuck harness after %s:\n%s", reviewStuckAfter+30*time.Second, v.capture())
+			t.Fatalf("missing %s after %s:\n%s", what, reviewStuckAfter+30*time.Second, v.capture())
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	text := v.capture()
-	for _, want := range []string{"Vera stopped: the claude harness is not logged in on this machine (it sat on an error screen for 45 s)", "run claude and use /login", "The review stays queued"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("pane missing %q:\n%s", want, text)
-		}
+}
+
+// End to end in a real pane (#7691 + #7697): the harness shows PR #49's login
+// error but its own status check says it is logged in, so the text may be
+// prompt-injected review output. The attempt fails with the real category
+// and Vera keeps listening instead of stopping. Takes ~50 s; -short skips.
+func TestReviewWatchInteractiveStuckScreenUnconfirmedKeepsListening(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for the real stuck threshold")
+	}
+	v := startVeraPane(t, true, stuckLoginScreen(false))
+	v.waitFor("harness error screen", v.shows("Please run /login"))
+	waitPane(t, v, "the unconfirmed-error notice", v.shows("its status check does not confirm it; this attempt failed and Vera keeps listening"))
+	if v.dead() || strings.Contains(v.capture(), "Vera stopped") {
+		t.Fatalf("an unconfirmed error screen stopped the runner:\n%s", v.capture())
 	}
 	if p := v.lastReceipt(); !strings.Contains(p.Failure, "authentication_required") || strings.Contains(p.Failure, "lease_rejected") {
 		t.Fatalf("stuck attempt recorded as %q", p.Failure)
 	}
+}
+
+// End to end in a real pane: the harness really logged out, its status check
+// confirms it, and Vera stops with the login hint without re-claiming.
+// Takes ~50 s; -short skips.
+func TestReviewWatchInteractiveStuckScreenConfirmedLogoutStopsVera(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for the real stuck threshold")
+	}
+	v := startVeraPane(t, true, stuckLoginScreen(true))
+	v.waitFor("harness error screen", v.shows("Please run /login"))
+	waitPane(t, v, "Vera to stop", v.dead)
+	text := v.capture()
+	for _, want := range []string{"Vera stopped: the claude harness is not logged in on this machine (it sat on an error screen for 45 s), as its status check confirms", "run claude and use /login", "The review stays queued"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pane missing %q:\n%s", want, text)
+		}
+	}
+	if p := v.lastReceipt(); !strings.Contains(p.Failure, "authentication_required") {
+		t.Fatalf("stuck attempt recorded as %q", p.Failure)
+	}
 	if v.claims[7].Load() != 1 {
-		t.Fatalf("Vera re-claimed after a stuck harness (claims=%d)", v.claims[7].Load())
+		t.Fatalf("Vera re-claimed after a confirmed logout (claims=%d)", v.claims[7].Load())
+	}
+}
+
+// The runner stops on a harness-output error only when the harness's own
+// status check confirms the logout, or after the same failure on
+// reviewSuspectLimit different reviews; one review repeating it (a
+// prompt-injected PR re-claimed) never stops it (#7697).
+func TestHarnessOutputProblem_StopsOnlyWhenConfirmedOrRepeatedAcrossReviews(t *testing.T) {
+	statusFile := filepath.Join(t.TempDir(), "status")
+	harness := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\n[ \"$1 $2\" = 'auth status' ] || exit 0\nif [ -f " + shellQuote(statusFile) + " ]; then echo '{\"loggedIn\": false}'; exit 1; fi\necho '{\"loggedIn\": true}'\n"
+	if err := os.WriteFile(harness, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.Providers["claude"] = Provider{Binary: harness}
+	var out bytes.Buffer
+	w := &reviewWatch{cfg: cfg, options: reviewWatchOptions{Provider: "claude"}, output: &out}
+	ctx := context.Background()
+
+	// The same review repeating the error (re-claimed) never stops the runner.
+	for i := 0; i < 5; i++ {
+		w.harnessOutputProblem(ctx, "job-evil", "authentication_required", "")
+	}
+	if w.harnessFatal != nil || !strings.Contains(out.String(), "its status check does not confirm it") {
+		t.Fatalf("one review stopped the runner: %v\n%s", w.harnessFatal, out.String())
+	}
+	// Different reviews failing the same way stop it at the limit.
+	w.harnessOutputProblem(ctx, "job-2", "access_denied", "")
+	if w.harnessFatal != nil {
+		t.Fatalf("stopped after 2 reviews: %v", w.harnessFatal)
+	}
+	w.harnessOutputProblem(ctx, "job-3", "access_denied", "")
+	if w.harnessFatal == nil || !strings.Contains(w.harnessFatal.Error(), "on 3 different reviews in a row") {
+		t.Fatalf("not stopped after 3 different reviews: %v", w.harnessFatal)
+	}
+
+	// A logout confirmed by the status check stops the runner at once.
+	w.harnessFatal, w.suspectJobs = nil, nil
+	if err := os.WriteFile(statusFile, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	w.harnessOutputProblem(ctx, "job-4", "authentication_required", " (it sat on an error screen for 45 s)")
+	if w.harnessFatal == nil || !strings.Contains(w.harnessFatal.Error(), "is not logged in on this machine (it sat on an error screen for 45 s), as its status check confirms") {
+		t.Fatalf("confirmed logout did not stop the runner: %v", w.harnessFatal)
+	}
+
+	// A harness with no status command can only be stopped by the repeat rule.
+	w = &reviewWatch{cfg: cfg, options: reviewWatchOptions{Provider: "gemini"}, output: &out}
+	w.harnessOutputProblem(ctx, "job-1", "authentication_required", "")
+	if w.harnessFatal != nil {
+		t.Fatalf("an unconfirmable harness stopped on one review: %v", w.harnessFatal)
 	}
 }

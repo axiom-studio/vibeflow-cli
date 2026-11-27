@@ -93,6 +93,7 @@ type reviewWatch struct {
 	progress           *reviewAttemptProgress                // The running attempt's progress, in a console slot (#5598).
 	tracing            atomic.Pointer[reviewAttemptProgress] // Where traced server calls go (#5602).
 	lastClaim          atomic.Pointer[string]                // A claim traced before its attempt's reporter existed.
+	suspectJobs        map[string]bool                       // Reviews in a row whose harness output looked like a login or access failure the status check did not confirm (#7697).
 }
 
 // veraBrowseHint tells the user how to reach the history pane from the listener.
@@ -840,6 +841,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 			p.Failure = err.Error()
 		} else {
 			p.Result = result
+			w.suspectJobs = nil // a review that worked clears the suspicion
 		}
 		w.progress.finish(strings.TrimPrefix(reviewOutcomeLine(p), "Result: "))
 		w.progress = nil // tracing stays on until advance returns: the result post is logged too
@@ -1433,12 +1435,12 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	var stuck *reviewHarnessStuckError
 	if errors.As(context.Cause(ctx), &stuck) && !reviewFileExists(resultPath) {
 		diagnostic.Category = stuck.category
-		w.harnessFatal = fmt.Errorf("Vera stopped: the %s harness %s on this machine (it sat on an error screen for %d s); %s, then start Vera again. The review stays queued", w.options.Provider, reviewHarnessProblem(stuck.category), int(reviewStuckAfter.Seconds()), reviewHarnessLoginHint(w.options.Provider))
+		w.harnessOutputProblem(ctx, p.JobID, stuck.category, fmt.Sprintf(" (it sat on an error screen for %d s)", int(reviewStuckAfter.Seconds())))
 		return nil, diagnostic.failure()
 	}
 	if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(resultPath)) {
 		diagnostic.Category = category
-		w.harnessFatal = fmt.Errorf("Vera stopped: the %s harness %s on this machine; %s, then start Vera again", w.options.Provider, reviewHarnessProblem(category), reviewHarnessLoginHint(w.options.Provider))
+		w.harnessOutputProblem(ctx, p.JobID, category, "")
 		return nil, diagnostic.failure()
 	}
 	if err != nil || ctx.Err() != nil {

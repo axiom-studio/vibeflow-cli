@@ -256,8 +256,10 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 		status, code = `{"loggedIn": false}`, 1
 	}
 	harness := filepath.Join(t.TempDir(), "claude")
+	// A harness can log out mid-review: its status check reports logged out
+	// once the "logged-out" mark exists (#7697).
 	body := "#!/bin/sh\n" +
-		"if [ \"$1 $2\" = 'auth status' ]; then echo '" + status + "'; exit " + strconv.Itoa(code) + "; fi\n" +
+		"if [ \"$1 $2\" = 'auth status' ]; then [ -f " + shellQuote(v.mark("logged-out")) + " ] && { echo '{\"loggedIn\": false}'; exit 1; }; echo '" + status + "'; exit " + strconv.Itoa(code) + "; fi\n" +
 		script(e, v.mark)
 	if err := os.WriteFile(harness, []byte(body), 0700); err != nil {
 		t.Fatal(err)
