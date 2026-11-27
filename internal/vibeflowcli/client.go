@@ -22,7 +22,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Client wraps the VibeFlow REST API.
@@ -223,6 +227,38 @@ func (c *Client) DispatchNack(id int64, leaseOwner, reason string) error {
 	return nil
 }
 
+// Error responses are quoted into errors that reach the terminal (TUI error
+// line, cloud chat, CLI stderr), so only a bounded, display-safe excerpt is
+// kept (#4617).
+const (
+	httpErrorBodyMaxBytes = 4 << 10 // read at most this much of an error body
+	httpErrorTextMaxRunes = 512     // quote at most this much of it
+)
+
+// httpErrorText reads a bounded prefix of an error response body and returns
+// it safe to print: terminal escape sequences (CSI, OSC, ...) are removed, line
+// breaks become spaces, other control and format runes (including bidi
+// overrides) are dropped, and the result is capped at httpErrorTextMaxRunes.
+// The server is not trusted here: a hostile or MITM'd backend could otherwise
+// clear the screen, rewrite the title or clipboard, or forge UI text.
+func httpErrorText(body io.Reader) string {
+	raw, _ := io.ReadAll(io.LimitReader(body, httpErrorBodyMaxBytes)) // a partial body still explains the error
+	text := strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, ansi.Strip(string(raw)))
+	text = strings.TrimSpace(text)
+	if runes := []rune(text); len(runes) > httpErrorTextMaxRunes {
+		text = string(runes[:httpErrorTextMaxRunes]) + "…"
+	}
+	return text
+}
+
 func (c *Client) get(path string, result interface{}) error {
 	req, err := http.NewRequest("GET", c.baseURL+path, nil)
 	if err != nil {
@@ -240,8 +276,7 @@ func (c *Client) get(path string, result interface{}) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, httpErrorText(resp.Body))
 	}
 
 	return json.NewDecoder(resp.Body).Decode(result)
@@ -270,8 +305,7 @@ func (c *Client) post(path string, body interface{}, result interface{}) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, httpErrorText(resp.Body))
 	}
 
 	if result != nil {
