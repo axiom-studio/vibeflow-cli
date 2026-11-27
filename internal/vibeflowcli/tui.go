@@ -863,10 +863,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so the diff-based renderer doesn't skip lines it assumes are unchanged.
 		return m, tea.ClearScreen
 	case tickMsg:
-		return m, tea.Batch(
-			m.refreshSessions,
-			tickCmd(time.Duration(m.config.PollInterval)*time.Second),
-		)
+		next := tickCmd(time.Duration(m.config.PollInterval) * time.Second)
+		if m.workbenchActive {
+			// The TUI is hidden behind the workbench; polling would only add
+			// tmux server load while the user is in it (#7680). Restore
+			// triggers a fresh refresh when the workbench closes.
+			return m, next
+		}
+		return m, tea.Batch(m.refreshSessions, next)
 	case sessionsMsg:
 		// A successful refresh leaves an earlier error up until errClearMsg;
 		// clearing it here hid launch errors before they were drawn.
@@ -885,6 +889,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, nil
 	case captureTickMsg:
+		if m.workbenchActive {
+			return m, captureTickCmd() // see tickMsg: no polling behind the workbench
+		}
 		return m, tea.Batch(m.refreshCapture, captureTickCmd())
 	case captureMsg:
 		m.captureOutput = msg.output

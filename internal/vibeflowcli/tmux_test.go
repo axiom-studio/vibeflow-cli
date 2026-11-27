@@ -544,16 +544,19 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 	} else if !strings.Contains(got, "@vfheader") {
 		t.Errorf("pane-border-format = %q, want it to reference @vfheader", got)
 	}
-	// #2721 Option A: heavy borders + active-pane backdrop tint distinguish panes.
+	// #2721: heavy borders distinguish panes.
 	if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "-v", "pane-border-lines"); err != nil {
 		t.Errorf("read pane-border-lines: %v", err)
 	} else if strings.TrimSpace(got) != "heavy" {
 		t.Errorf("pane-border-lines = %q, want heavy", strings.TrimSpace(got))
 	}
-	if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "-v", "window-active-style"); err != nil {
-		t.Errorf("read window-active-style: %v", err)
-	} else if !strings.Contains(got, oceanHexShallow) {
-		t.Errorf("window-active-style = %q, want it to tint bg with %s", got, oceanHexShallow)
+	// #7680: no pane background — a non-default bg inflates terminal output ~75%.
+	for _, opt := range []string{"window-style", "window-active-style"} {
+		if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "-v", opt); err != nil {
+			t.Errorf("read %s: %v", opt, err)
+		} else if v := strings.TrimSpace(got); v != "" && v != "default" {
+			t.Errorf("%s = %q, want unset (no pane background)", opt, v)
+		}
 	}
 
 	// join-pane MOVES panes, so the source sessions are consumed by the compose.

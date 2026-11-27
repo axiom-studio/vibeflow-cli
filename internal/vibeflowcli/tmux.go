@@ -902,16 +902,14 @@ func (tm *TmuxManager) configureWorkbenchBorders(target string) {
 	for _, opt := range []struct{ key, val string }{
 		{"pane-border-status", "top"},
 		{"pane-border-format", " #{@vfheader} "},
-		// Heavy border lines + a lighter backdrop on the active pane give each
-		// session window a distinct box. tmux has no true pane gap/margin, so
-		// this is the closest achievable to "spacing between panes" (#2721,
-		// user-chosen Option A). window-style styles inactive panes;
-		// window-active-style the focused one.
+		// Heavy border lines, highlighted on the active pane, give each session
+		// window a distinct box (#2721). Pane backgrounds (window-style /
+		// window-active-style) are deliberately NOT set: any non-default pane
+		// background makes tmux emit ~75% more output to the terminal for the
+		// same agent output, which made the workbench sluggish (#7680).
 		{"pane-border-lines", "heavy"},
 		{"pane-border-style", "fg=" + oceanHexMuted},
 		{"pane-active-border-style", "fg=" + oceanHexPrimary},
-		{"window-style", "bg=" + oceanHexBackground},
-		{"window-active-style", "bg=" + oceanHexShallow},
 	} {
 		_, _ = tm.run("set-option", "-t", target, opt.key, opt.val)
 	}

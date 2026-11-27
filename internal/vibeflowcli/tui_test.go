@@ -364,3 +364,37 @@ func TestRenderDetailPanel_PreviewSkipsBlankRowsBeforeDeadBanner(t *testing.T) {
 		t.Fatalf("preview hides why the pane exited:\n%s", out)
 	}
 }
+
+// TestTick_WorkbenchActive_SkipsSessionRefresh proves the periodic session poll
+// issues no refresh while the TUI is hidden behind a workbench (#7680): the
+// returned command is only the re-armed tick, not a batch carrying
+// refreshSessions. PollInterval 0 makes the tick fire immediately.
+func TestTick_WorkbenchActive_SkipsSessionRefresh(t *testing.T) {
+	m := Model{config: &Config{PollInterval: 0}, workbenchActive: true}
+	_, cmd := m.Update(tickMsg{})
+	if _, ok := cmd().(tickMsg); !ok {
+		t.Fatalf("workbench active: want only the re-armed tick, got %T", cmd())
+	}
+
+	m.workbenchActive = false
+	_, cmd = m.Update(tickMsg{})
+	if _, ok := cmd().(tea.BatchMsg); !ok {
+		t.Fatalf("workbench inactive: want refresh+tick batch, got %T", cmd())
+	}
+}
+
+// TestCaptureTick_WorkbenchActive_SkipsCapture proves the capture-pane poll is
+// paused behind a workbench (#7680) and still runs otherwise.
+func TestCaptureTick_WorkbenchActive_SkipsCapture(t *testing.T) {
+	m := Model{workbenchActive: false}
+	_, cmd := m.Update(captureTickMsg{})
+	if _, ok := cmd().(tea.BatchMsg); !ok {
+		t.Fatalf("workbench inactive: want capture+tick batch, got %T", cmd())
+	}
+
+	m.workbenchActive = true
+	_, cmd = m.Update(captureTickMsg{})
+	if _, ok := cmd().(captureTickMsg); !ok { // fires after the 3s capture interval
+		t.Fatalf("workbench active: want only the re-armed capture tick, got %T", cmd())
+	}
+}
