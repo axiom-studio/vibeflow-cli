@@ -1342,3 +1342,180 @@ func TestKillSessionErrorCarriesTmuxMessage(t *testing.T) {
 		t.Fatalf("kill error lacks tmux's reason: %v", err)
 	}
 }
+
+var orphanFixtureSeq int // gives each fixture its own short socket name
+
+// orphanedWorkbenchFixture starts an isolated tmux server with the named claude
+// sessions, composes them into a workbench, and drops the composition — the
+// state a TUI crash while composed leaves behind (#3310). It returns the manager,
+// the full session names and each session's agent pane id before compose.
+func orphanedWorkbenchFixture(t *testing.T, names ...string) (*TmuxManager, []string, map[string]string) {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	orphanFixtureSeq++
+	tm := NewTmuxManager("vftest-orphan-wb-" + itoa(os.Getpid()) + "-" + itoa(orphanFixtureSeq))
+	_, _ = tm.run("kill-server")
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	dir := t.TempDir()
+	full := make([]string, len(names))
+	before := make(map[string]string, len(names))
+	for i, n := range names {
+		if err := tm.CreateSessionWithOpts(SessionOpts{Name: n, Provider: "claude", WorkDir: dir, Command: "sleep 300"}); err != nil {
+			t.Fatalf("create session %s: %v", n, err)
+		}
+		full[i] = tm.FullSessionName("claude", n)
+		pid, err := tm.paneID(full[i])
+		if err != nil {
+			t.Fatalf("paneID(%s): %v", full[i], err)
+		}
+		before[full[i]] = pid
+	}
+	if _, err := tm.ComposeWorkbench(full, nil); err != nil {
+		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+	// The composing process "crashed": hand ownership to a PID that has exited.
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatalf("run true: %v", err)
+	}
+	if _, err := tm.run("set-option", "-t", workbenchHolderName, workbenchOwnerOption, itoa(dead.Process.Pid)); err != nil {
+		t.Fatalf("set dead owner: %v", err)
+	}
+	return tm, full, before
+}
+
+func TestRecoverOrphanedWorkbench_ReturnsEveryStrandedPaneToItsSession(t *testing.T) {
+	tm, full, before := orphanedWorkbenchFixture(t, "a", "b", "c")
+
+	recovered, err := tm.RecoverOrphanedWorkbench(workbenchHolderName)
+	if err != nil {
+		t.Fatalf("RecoverOrphanedWorkbench: %v", err)
+	}
+	if len(recovered) != len(full) {
+		t.Fatalf("recovered %v, want all of %v", recovered, full)
+	}
+	for _, fn := range full {
+		pid, err := tm.paneID(fn)
+		if err != nil {
+			t.Fatalf("session %s not recovered: %v", fn, err)
+		}
+		if pid != before[fn] {
+			t.Errorf("%s pane = %s, want original %s (agent process must survive)", fn, pid, before[fn])
+		}
+	}
+	if tm.HasSession(workbenchHolderName) {
+		t.Error("empty holder must be destroyed after recovery")
+	}
+}
+
+func TestRecoverOrphanedWorkbench_PaneWithoutOriginStaysAndHolderSurvives(t *testing.T) {
+	tm, full, before := orphanedWorkbenchFixture(t, "a", "b")
+	// A pane with no recorded origin cannot be placed; it must not be killed.
+	if _, err := tm.run("set-option", "-p", "-u", "-t", before[full[1]], "@vibeflow_session"); err != nil {
+		t.Fatalf("clear origin: %v", err)
+	}
+
+	recovered, err := tm.RecoverOrphanedWorkbench(workbenchHolderName)
+	if err == nil {
+		t.Fatal("want an error reporting the pane left in the holder")
+	}
+	if len(recovered) != 1 || recovered[0] != full[0] {
+		t.Fatalf("recovered %v, want only %s", recovered, full[0])
+	}
+	if !tm.HasSession(workbenchHolderName) {
+		t.Fatal("holder still holding a live pane must not be killed")
+	}
+	if owner, _ := tm.run("display-message", "-p", "-t", before[full[1]], "#{session_name}"); strings.TrimSpace(owner) != workbenchHolderName {
+		t.Errorf("unplaceable pane moved to %q, want it left in the holder", strings.TrimSpace(owner))
+	}
+}
+
+func TestRecoverOrphanedWorkbench_LiveOwnerIsLeftAlone(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	// A refresh racing a compose in this process sees an unattached holder; the
+	// owner stamp must keep it from dismantling the workbench being opened.
+	if _, err := tm.run("set-option", "-t", workbenchHolderName, workbenchOwnerOption, itoa(os.Getpid())); err != nil {
+		t.Fatalf("set live owner: %v", err)
+	}
+	recovered, err := tm.RecoverOrphanedWorkbench(workbenchHolderName)
+	if err != nil || recovered != nil {
+		t.Fatalf("live workbench: recovered %v, err %v; want neither", recovered, err)
+	}
+	if n := tm.sessionPaneCount(workbenchHolderName); n != 2 {
+		t.Errorf("holder panes = %d, want 2 (untouched)", n)
+	}
+}
+
+func TestComposeWorkbench_StampsOwnerPID(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	_, _ = tm.run("kill-session", "-t", workbenchHolderName)
+	if err := tm.createWorkbenchHolder(workbenchHolderName); err != nil {
+		t.Fatalf("createWorkbenchHolder: %v", err)
+	}
+	out, err := tm.run("show-options", "-v", "-t", workbenchHolderName, workbenchOwnerOption)
+	if err != nil || strings.TrimSpace(out) != itoa(os.Getpid()) {
+		t.Fatalf("owner = %q (%v), want this process %d", strings.TrimSpace(out), err, os.Getpid())
+	}
+	if !tm.workbenchOwnerAlive(workbenchHolderName) {
+		t.Error("holder owned by this process must count as live")
+	}
+}
+
+func TestRecoverOrphanedWorkbench_MissingHolderReturnsError(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	if _, err := tm.RecoverOrphanedWorkbench("vibeflow_no-such-holder"); err == nil {
+		t.Fatal("want an error for a holder that does not exist")
+	}
+}
+
+func TestRefreshSessions_RecoversUnattachedOrphanedHolder(t *testing.T) {
+	tm, full, _ := orphanedWorkbenchFixture(t, "a", "b")
+	m := Model{tmux: tm, config: &Config{}}
+
+	msg := m.refreshSessions().(sessionsMsg)
+	if msg.err != nil {
+		t.Fatalf("refreshSessions: %v", msg.err)
+	}
+	got := map[string]bool{}
+	for _, r := range msg.sessions {
+		got[sessionPrefix+r.Name] = true
+	}
+	for _, fn := range full {
+		if !got[fn] {
+			t.Errorf("stranded session %s missing from the list after refresh (rows: %v)", fn, msg.sessions)
+		}
+	}
+}
+
+func TestRefreshSessions_WorkbenchActive_LeavesHolderAlone(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	m := Model{tmux: tm, config: &Config{}, workbenchActive: true}
+
+	msg := m.refreshSessions().(sessionsMsg)
+	if msg.err != nil {
+		t.Fatalf("refreshSessions: %v", msg.err)
+	}
+	if len(msg.sessions) != 0 {
+		t.Errorf("an in-flight workbench must not be dismantled; rows = %v", msg.sessions)
+	}
+	if n := tm.sessionPaneCount(workbenchHolderName); n != 2 {
+		t.Errorf("holder panes = %d, want 2 (untouched)", n)
+	}
+}
+
+func TestRecoverOrphanedWorkbenchRow_AttachedHolderIsLeftAlone(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	m := Model{tmux: tm, config: &Config{}}
+	// An attached holder is a live workbench (another TUI or a VS Code client).
+	if got := m.recoverOrphanedWorkbench([]TmuxSession{{Name: workbenchHolderName, Attached: true}}); got != nil {
+		t.Fatalf("recovered %v from an attached holder, want nothing", got)
+	}
+	if n := tm.sessionPaneCount(workbenchHolderName); n != 2 {
+		t.Errorf("holder panes = %d, want 2 (untouched)", n)
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -349,6 +350,13 @@ func (m Model) refreshSessions() tea.Msg {
 		return sessionsMsg{err: err}
 	}
 
+	recovered := m.recoverOrphanedWorkbench(tmuxSessions)
+	if len(recovered) > 0 {
+		if tmuxSessions, err = m.tmux.ListSessions(); err != nil {
+			return sessionsMsg{err: err}
+		}
+	}
+
 	// Re-bind vibeflow keys to ensure persistence across tmux reloads.
 	m.tmux.BindAllSessionKeys()
 
@@ -468,6 +476,47 @@ func (m Model) refreshSessions() tea.Msg {
 	}
 
 	return sessionsMsg{sessions: rows, orphans: m.countOrphanWorktrees()}
+}
+
+// recoverOrphanedWorkbench moves agent panes stranded in an unattached
+// workbench holder back to their own sessions (#3310). The holder is hidden
+// from the list (#3300), so without this a crash while composed, or a partial
+// Restore, made those agents vanish from the TUI. A holder that is attached,
+// or one this TUI is composing or restoring, is a live workbench and is left
+// alone. Recovered sessions get their vibeflow status bar back from the store,
+// since the status captured at compose time died with the old process.
+func (m Model) recoverOrphanedWorkbench(sessions []TmuxSession) []string {
+	if m.workbenchActive {
+		return nil
+	}
+	for _, ts := range sessions {
+		if !isWorkbenchHolder(ts.Name) || ts.Attached {
+			continue
+		}
+		recovered, err := m.tmux.RecoverOrphanedWorkbench(ts.Name)
+		if m.logger != nil {
+			if err != nil {
+				m.logger.Warn("workbench recovery: %v", err)
+			}
+			if len(recovered) > 0 {
+				m.logger.Info("workbench recovery: restored %s", strings.Join(recovered, ", "))
+			}
+		}
+		if m.store != nil && len(recovered) > 0 {
+			if metas, err := m.store.List(); err == nil {
+				for _, meta := range metas {
+					if slices.Contains(recovered, meta.TmuxSession) {
+						_ = m.tmux.ConfigureStatusBar(meta.TmuxSession, StatusBarOpts{
+							Provider: meta.Provider, Branch: meta.Branch, Project: meta.Project,
+							Persona: meta.Persona, WorktreePath: meta.WorktreePath,
+						})
+					}
+				}
+			}
+		}
+		return recovered
+	}
+	return nil
 }
 
 // countOrphanWorktrees returns how many managed worktrees no stored session

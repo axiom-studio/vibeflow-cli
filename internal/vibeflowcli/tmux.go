@@ -759,10 +759,8 @@ func (tm *TmuxManager) ComposeWorkbench(names []string, titles map[string]string
 	if tm.HasSession(holder) {
 		_, _ = tm.run("kill-session", "-t", holder)
 	}
-	// Size the holder generously so early joins have room to split; tmux
-	// resizes the window to the client on attach.
-	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
-		return nil, fmt.Errorf("create workbench holder: %w", err)
+	if err := tm.createWorkbenchHolder(holder); err != nil {
+		return nil, err
 	}
 	placeholder, err := tm.paneID(holder)
 	if err != nil {
@@ -1022,8 +1020,8 @@ func (tm *TmuxManager) composeProjectWorkbench(projects []WorkbenchProject, sele
 		}
 		_, _ = tm.run("kill-session", "-t", holder)
 	}
-	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
-		return nil, fmt.Errorf("create workbench holder: %w", err)
+	if err := tm.createWorkbenchHolder(holder); err != nil {
+		return nil, err
 	}
 
 	comp := &WorkbenchComposition{tm: tm, holder: holder, trackOrigins: vscodeClient}
@@ -1139,6 +1137,76 @@ func (c *WorkbenchComposition) Restore() error {
 		_, _ = tm.run("kill-session", "-t", c.holder)
 	}
 	return firstErr
+}
+
+// workbenchOwnerOption names the holder's session option recording the PID of
+// the process that composed it, so recovery can tell a live workbench (one
+// still being composed, attached, or restored) from one orphaned by a crash.
+const workbenchOwnerOption = "@vibeflow_owner_pid"
+
+// createWorkbenchHolder creates the holder session, sized generously so early
+// joins have room to split (tmux resizes the window to the client on attach),
+// and stamps it with this process as its owner.
+func (tm *TmuxManager) createWorkbenchHolder(holder string) error {
+	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
+		return fmt.Errorf("create workbench holder: %w", err)
+	}
+	if _, err := tm.run("set-option", "-t", holder, workbenchOwnerOption, strconv.Itoa(os.Getpid())); err != nil {
+		return fmt.Errorf("record workbench owner on %q: %w", holder, err)
+	}
+	return nil
+}
+
+// workbenchOwnerAlive reports whether the process that composed the holder is
+// still running. A holder without an owner predates the option and is treated
+// as orphaned.
+func (tm *TmuxManager) workbenchOwnerAlive(holder string) bool {
+	out, err := tm.run("show-options", "-v", "-t", holder, workbenchOwnerOption)
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(out))
+	return err == nil && pid > 0 && (pid == os.Getpid() || processAlive(pid))
+}
+
+// RecoverOrphanedWorkbench returns the panes stranded in a workbench holder
+// whose composing process is gone (a crash, or a Restore that failed part-way)
+// to their own sessions (#3310). Each pane's origin comes from its
+// @vibeflow_session option, which BindAllSessionKeys stamps on every agent
+// pane. The move-back reuses Restore, so a pane that cannot be moved, or has
+// no recorded origin, stays in the holder and the holder is not killed. It
+// returns the sessions recovered. A holder whose composing process is still
+// running is live and left alone, as is an attached one (checked by the
+// caller): a user may be looking at it.
+func (tm *TmuxManager) RecoverOrphanedWorkbench(holder string) ([]string, error) {
+	if tm.workbenchOwnerAlive(holder) {
+		return nil, nil
+	}
+	out, err := tm.run("list-panes", "-s", "-t", holder, "-F", "#{pane_id}\t#{@vibeflow_session}")
+	if err != nil {
+		return nil, fmt.Errorf("list panes of orphaned workbench %q: %w", holder, err)
+	}
+	comp := &WorkbenchComposition{tm: tm, holder: holder}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		id, origin, _ := strings.Cut(line, "\t")
+		if id == "" || origin == "" || isWorkbenchHolder(origin) {
+			continue
+		}
+		comp.sources = append(comp.sources, workbenchSource{name: origin, paneID: id, kept: tm.HasSession(origin)})
+	}
+	if len(comp.sources) == 0 {
+		// Nothing placeable: leave the holder for manual attach rather than
+		// re-reporting it on every refresh.
+		return nil, nil
+	}
+	err = comp.Restore()
+	var recovered []string
+	for _, s := range comp.sources {
+		if owner, err := tm.run("display-message", "-p", "-t", s.paneID, "#{session_name}"); err == nil && strings.TrimSpace(owner) == s.name {
+			recovered = append(recovered, s.name)
+		}
+	}
+	return recovered, err
 }
 
 // sessionPaneCount returns the total number of panes across all windows of a
