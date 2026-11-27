@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -347,5 +348,28 @@ func TestReviewPathTemplate(t *testing.T) {
 	}
 	if got := reviewRequestEventLine("POST", "/projects/1/pr-review-runners/r1/jobs/j1/claim?x=1", 409, 30*time.Millisecond, nil); got != "POST /projects/1/pr-review-runners/{runner}/jobs/{job}/claim → 409 in 30ms" {
 		t.Errorf("event line = %q", got)
+	}
+}
+
+// The transcript on DISK is already sanitized, not only what the popup reads
+// back (#7699): a `cat` or `less` of the file must not replay terminal
+// escapes (screen clear, OSC title, OSC 52 clipboard, C1 CSI, bidi).
+func TestReviewTranscript_FileOnDiskHoldsNoControlBytes(t *testing.T) {
+	dir := reviewAttemptDir(filepath.Join(t.TempDir(), "progress.log"), "job-4")
+	hostile := "\x1b[2J\x1b[Hcleared\x1b]0;pwned\x07 \x1b]52;c;ZXZpbA==\x07 \x9b31mc1\u202edlrow\x00end\nnext line\x1b[0m\n"
+	if err := saveReviewTranscript(dir, hostile); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, reviewTranscriptFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range string(raw) {
+		if (unicode.IsControl(r) && r != '\n') || unicode.Is(unicode.Cf, r) {
+			t.Fatalf("raw transcript file holds control/format rune %U: %q", r, raw)
+		}
+	}
+	if !strings.Contains(string(raw), "cleared") || !strings.Contains(string(raw), "next line") {
+		t.Errorf("readable text lost: %q", raw)
 	}
 }
