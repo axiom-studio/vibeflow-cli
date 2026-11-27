@@ -249,7 +249,7 @@ func reviewWatchCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer cancel()
 			if detail != "" {
-				return runReviewDetail(ctx, cfg, o.ProjectID, detail)
+				return runReviewDetail(ctx, cfg, o, detail)
 			}
 			return runReviewHistory(ctx, cfg, o)
 		}
@@ -414,7 +414,9 @@ func (w *reviewWatch) newProgress(p *reviewReceipt) *reviewAttemptProgress {
 	if pane != "" {
 		run = execVeraTmux
 	}
-	return newReviewAttemptProgress(run, pane, reviewProgressLogPath(w.client.baseURL, w.options), w.options.SlotLabel, veraJobWindowName(p), w.options.Provider, nil)
+	r := newReviewAttemptProgress(run, pane, reviewProgressLogPath(w.client.baseURL, w.options), w.options.SlotLabel, veraJobWindowName(p), w.options.Provider, nil)
+	r.jobID = p.JobID
+	return r
 }
 
 func (w *reviewWatch) prefix() string {

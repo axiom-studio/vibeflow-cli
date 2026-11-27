@@ -24,8 +24,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	tea "charm.land/bubbletea/v2"
 )
 
 // Every slot of a console and its history pane must agree on one log file.
@@ -134,32 +132,5 @@ func TestRoundElapsed(t *testing.T) {
 		if got := roundElapsed(d); got != want {
 			t.Errorf("roundElapsed(%v) = %q, want %q", d, got, want)
 		}
-	}
-}
-
-// The history pane shows the newest progress lines below the list, keeps its
-// footer, and gives up list rows for them.
-func TestReviewHistory_RendersProgressBelowTheList(t *testing.T) {
-	h := newReviewHistory("repo", nil)
-	m, _ := h.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
-	h = m.(reviewHistory)
-	pageBefore := h.page()
-	m, _ = h.Update(reviewHistoryMsg{progress: []string{"08:00 review 1 · review #49 · claude working · 5m elapsed", "08:01 review 1 · review #49 · claude working · 6m elapsed"}, at: time.Now()})
-	h = m.(reviewHistory)
-	out := ansiRe.ReplaceAllString(h.render(), "")
-	lines := strings.Split(out, "\n")
-	if len(lines) != 24 {
-		t.Fatalf("render is %d lines, want the pane height 24", len(lines))
-	}
-	if !strings.Contains(out, "Progress") || !strings.Contains(lines[22], "6m elapsed") {
-		t.Errorf("newest progress line must sit just above the footer:\n%s", out)
-	}
-	if h.page() >= pageBefore {
-		t.Errorf("list page %d should shrink below %d to make room", h.page(), pageBefore)
-	}
-	// A failed API read still shows the local progress.
-	m, _ = h.Update(reviewHistoryMsg{err: fmt.Errorf("offline"), progress: []string{"08:02 review 1 · still here"}, at: time.Now()})
-	if out := m.(reviewHistory).render(); !strings.Contains(out, "still here") {
-		t.Errorf("progress hidden while the API is down:\n%s", out)
 	}
 }

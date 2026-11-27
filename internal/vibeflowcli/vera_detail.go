@@ -105,9 +105,59 @@ type reviewDetail struct {
 	data          *reviewDetailMsg
 	offset        int
 	width, height int
+
+	// The live section (#5599): shown while the review runs on this machine.
+	live       func(prNumber int) tea.Msg // nil: no live view
+	liveData   *reviewLiveMsg
+	liveOffset int
+	liveFollow bool // keep the newest output in view until the user scrolls up
+	focus      int  // 0 the result, 1 the live section
 }
 
-func newReviewDetail(load func() tea.Msg) reviewDetail { return reviewDetail{load: load} }
+func newReviewDetail(load func() tea.Msg) reviewDetail {
+	return reviewDetail{load: load, liveFollow: true}
+}
+
+// withLive adds the live section's loader.
+func (d reviewDetail) withLive(live func(prNumber int) tea.Msg) reviewDetail {
+	d.live = live
+	return d
+}
+
+// start loads the review and, when there is one, its live view.
+func (d reviewDetail) start() tea.Cmd {
+	if d.live == nil {
+		return d.load
+	}
+	return tea.Batch(d.load, d.liveCmd())
+}
+
+func (d reviewDetail) liveCmd() tea.Cmd {
+	n := 0
+	if d.data != nil {
+		n = int(d.data.summary.Review.Number)
+	}
+	live := d.live
+	return func() tea.Msg { return live(n) }
+}
+
+// followUp is the command a message calls for: the live view refreshes itself
+// every veraLiveRefresh for as long as the detail is open.
+func (d reviewDetail) followUp(msg tea.Msg) tea.Cmd {
+	if d.live == nil {
+		return nil
+	}
+	switch msg.(type) {
+	case reviewLiveMsg:
+		return tea.Tick(veraLiveRefresh, func(time.Time) tea.Msg { return reviewLiveTickMsg{} })
+	case reviewLiveTickMsg:
+		return d.liveCmd()
+	}
+	return nil
+}
+
+// showLive reports whether the live section is on screen.
+func (d reviewDetail) showLive() bool { return d.liveData != nil && d.liveData.running }
 
 // update handles one message; closed reports q or Esc.
 func (d reviewDetail) update(msg tea.Msg) (_ reviewDetail, closed bool) {
@@ -116,32 +166,94 @@ func (d reviewDetail) update(msg tea.Msg) (_ reviewDetail, closed bool) {
 		d.width, d.height = msg.Width, msg.Height
 	case reviewDetailMsg:
 		d.data, d.offset = &msg, 0
+	case reviewLiveMsg:
+		d.liveData = &msg
+		if !d.showLive() {
+			d.focus = 0
+		}
+		if d.liveFollow {
+			d.liveOffset = d.liveMax()
+		}
+		d.liveOffset = min(d.liveOffset, d.liveMax())
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft && d.showLive() {
+			d.focus = d.sectionAt(msg.Y)
+		}
 	case tea.MouseWheelMsg:
+		section := d.sectionAt(msg.Y)
 		switch msg.Button {
 		case tea.MouseWheelUp:
-			d.scroll(-3)
+			d.scrollSection(section, -3)
 		case tea.MouseWheelDown:
-			d.scroll(3)
+			d.scrollSection(section, 3)
 		}
 	case tea.KeyPressMsg:
+		page := d.sectionPage(d.focus)
 		switch msg.String() {
 		case "q", "esc":
 			return d, true
+		case "tab", "shift+tab":
+			if d.showLive() {
+				d.focus = 1 - d.focus
+			}
 		case "up", "k":
-			d.scroll(-1)
+			d.scrollSection(d.focus, -1)
 		case "down", "j":
-			d.scroll(1)
+			d.scrollSection(d.focus, 1)
 		case "pgup":
-			d.scroll(-d.page())
+			d.scrollSection(d.focus, -page)
 		case "pgdown", "space":
-			d.scroll(d.page())
+			d.scrollSection(d.focus, page)
 		case "home", "g":
-			d.scroll(-len(d.lines()))
+			d.scrollSection(d.focus, -1<<20)
 		case "end", "G":
-			d.scroll(len(d.lines()))
+			d.scrollSection(d.focus, 1<<20)
 		}
 	}
 	return d, false
+}
+
+// resultPage is how many result lines show: the whole body without a live
+// section, otherwise the top two fifths (at least 3 lines).
+func (d reviewDetail) resultPage() int {
+	if !d.showLive() {
+		return d.page()
+	}
+	return max(3, d.page()*2/5)
+}
+
+// livePage is how many live lines show below the live section's header.
+func (d reviewDetail) livePage() int {
+	if !d.showLive() {
+		return 0
+	}
+	return max(1, d.page()-d.resultPage()-1)
+}
+
+func (d reviewDetail) sectionPage(section int) int {
+	if section == 1 {
+		return d.livePage()
+	}
+	return d.resultPage()
+}
+
+// sectionAt is the section under screen row y.
+func (d reviewDetail) sectionAt(y int) int {
+	if d.showLive() && y >= d.resultPage() {
+		return 1
+	}
+	return 0
+}
+
+func (d reviewDetail) liveMax() int { return max(0, len(d.liveLines())-d.livePage()) }
+
+func (d *reviewDetail) scrollSection(section, delta int) {
+	if section == 1 && d.showLive() {
+		d.liveOffset = max(0, min(d.liveOffset+delta, d.liveMax()))
+		d.liveFollow = d.liveOffset >= d.liveMax()
+		return
+	}
+	d.scroll(delta)
 }
 
 func (d reviewDetail) size() (int, int) {
@@ -155,7 +267,25 @@ func (d reviewDetail) size() (int, int) {
 func (d reviewDetail) page() int { _, h := d.size(); return h - 1 }
 
 func (d *reviewDetail) scroll(delta int) {
-	d.offset = max(0, min(d.offset+delta, len(d.lines())-d.page()))
+	d.offset = max(0, min(d.offset+delta, len(d.lines())-d.resultPage()))
+}
+
+// liveLines is the live section: this PR's progress, then the harness's
+// current screen.
+func (d reviewDetail) liveLines() []string {
+	if !d.showLive() {
+		return nil
+	}
+	dim := lipgloss.NewStyle().Foreground(dimColor)
+	var out []string
+	for _, line := range d.liveData.progress {
+		out = append(out, dim.Render(line))
+	}
+	if len(out) > 0 {
+		out = append(out, "")
+	}
+	out = append(out, lipgloss.NewStyle().Bold(true).Render("Harness output"))
+	return append(out, d.liveData.output...)
 }
 
 // reviewDetailText keeps a server string's lines, without terminal controls.
@@ -211,8 +341,10 @@ func (d reviewDetail) lines() []string {
 	if head != "" {
 		add("", "Last reviewed head: "+head[:min(7, len(head))])
 	}
-	for _, line := range strings.Split(ansi.Wrap("The live harness transcript of past reviews is not stored; this is the recorded result.", width, ""), "\n") {
-		out = append(out, dim.Render(line))
+	if !d.showLive() {
+		for _, line := range strings.Split(ansi.Wrap("The live harness transcript of past reviews is not stored; this is the recorded result.", width, ""), "\n") {
+			out = append(out, dim.Render(line))
+		}
 	}
 	if strings.TrimSpace(s.Summary) != "" {
 		out = append(out, "", "Summary")
@@ -236,23 +368,44 @@ func (d reviewDetail) lines() []string {
 
 func (d reviewDetail) render() string {
 	width, height := d.size()
-	lines := d.lines()
-	start := min(d.offset, max(0, len(lines)-d.page()))
-	body := lines[start:min(len(lines), start+d.page())]
-	for len(body) < d.page() {
+	window := func(lines []string, offset, n int) []string {
+		start := min(offset, max(0, len(lines)-n))
+		out := append([]string(nil), lines[start:min(len(lines), start+n)]...)
+		for len(out) < n {
+			out = append(out, "")
+		}
+		for i := range out {
+			out[i] = ansi.Truncate(out[i], width, "…")
+		}
+		return out
+	}
+	body := window(d.lines(), d.offset, d.resultPage())
+	hint := "↑↓ scroll · q/Esc close"
+	if d.showLive() {
+		state := "following"
+		if !d.liveFollow {
+			state = "paused · End follows"
+		}
+		header := ansi.Truncate(fmt.Sprintf(" Live · %s · refreshes every %ds ", state, int(veraLiveRefresh.Seconds())), width, "…")
+		style := lipgloss.NewStyle().Foreground(dimColor)
+		if d.focus == 1 {
+			style = lipgloss.NewStyle().Bold(true).Reverse(true)
+		}
+		body = append(body, style.Render(header))
+		body = append(body, window(d.liveLines(), d.liveOffset, d.livePage())...)
+		hint = "Tab or click: switch section · ↑↓ scroll · q/Esc close"
+	}
+	for len(body) < height-1 {
 		body = append(body, "")
 	}
-	for i := range body {
-		body[i] = ansi.Truncate(body[i], width, "…")
-	}
-	footer := lipgloss.NewStyle().Foreground(dimColor).Render(ansi.Truncate("↑↓ scroll · q/Esc close", width, "…"))
+	footer := lipgloss.NewStyle().Foreground(dimColor).Render(ansi.Truncate(hint, width, "…"))
 	return strings.Join(append(body[:height-1], footer), "\n")
 }
 
 // reviewDetailProgram runs a detail on its own, as the popup does.
 type reviewDetailProgram struct{ d reviewDetail }
 
-func (p reviewDetailProgram) Init() tea.Cmd { return p.d.load }
+func (p reviewDetailProgram) Init() tea.Cmd { return p.d.start() }
 func (p reviewDetailProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "ctrl+c" {
 		return p, tea.Quit
@@ -261,7 +414,7 @@ func (p reviewDetailProgram) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if closed {
 		return p, tea.Quit
 	}
-	return reviewDetailProgram{d}, nil
+	return reviewDetailProgram{d}, d.followUp(msg)
 }
 func (p reviewDetailProgram) View() tea.View {
 	v := tea.NewView(p.d.render())
@@ -270,13 +423,21 @@ func (p reviewDetailProgram) View() tea.View {
 	return v
 }
 
-// runReviewDetail shows one review until closed.
-func runReviewDetail(ctx context.Context, cfg *Config, projectID int64, jobID string) error {
+// runReviewDetail shows one review until closed; o is the Vera console's,
+// whose progress log and tmux server feed the live section.
+func runReviewDetail(ctx context.Context, cfg *Config, o reviewWatchOptions, jobID string) error {
 	client := NewClient(cfg.ServerURL, cfg.APIToken)
-	d := newReviewDetail(func() tea.Msg { return loadReviewDetail(ctx, client, projectID, jobID) })
+	d := newReviewDetail(func() tea.Msg { return loadReviewDetail(ctx, client, o.ProjectID, jobID) }).
+		withLive(veraLiveLoader(cfg.ServerURL, o, jobID))
 	_, err := tea.NewProgram(reviewDetailProgram{d}, tea.WithContext(ctx)).Run()
 	if ctx.Err() != nil {
 		return nil
 	}
 	return err
+}
+
+// veraLiveLoader reads a review's live view from Vera's tmux server.
+func veraLiveLoader(serverURL string, o reviewWatchOptions, jobID string) func(int) tea.Msg {
+	logPath := reviewProgressLogPath(serverURL, o)
+	return func(prNumber int) tea.Msg { return loadReviewLive(execVeraTmux, logPath, jobID, prNumber) }
 }

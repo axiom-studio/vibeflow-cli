@@ -37,6 +37,9 @@ const (
 	reviewProgressLogMax  = 64 << 10         // the log is trimmed past this size...
 	reviewProgressLogKeep = 200              // ...to its newest lines
 	reviewProgressOption  = "@vibeflow_vera_progress"
+	// reviewLiveJobOption names, on a slot pane, the review job running in it,
+	// so that review's popup can show the harness's live output (#5599).
+	reviewLiveJobOption = "@vibeflow_vera_job"
 )
 
 // reviewProgressLogPath is the console's progress log. Every slot of one Vera
@@ -77,6 +80,7 @@ type reviewAttemptProgress struct {
 	logPath  string
 	slot     string // "review 1"
 	job      string // "review #49"
+	jobID    string // the server's job ID; tags the pane for the review popup
 	provider string
 	started  time.Time
 	deadline func() time.Time
@@ -104,6 +108,9 @@ func (r *reviewAttemptProgress) start() {
 	if r.run != nil && r.pane != "" {
 		_, _ = r.run("set-option", "-w", "-t", r.pane, "pane-border-status", "top")
 		_, _ = r.run("set-option", "-w", "-t", r.pane, "pane-border-format", " #{"+reviewProgressOption+"} ")
+		if reviewPublicID(r.jobID) {
+			_, _ = r.run("set-option", "-p", "-t", r.pane, reviewLiveJobOption, r.jobID)
+		}
 	}
 	r.stop, r.done = make(chan struct{}), make(chan struct{})
 	r.refresh(true)
@@ -160,6 +167,7 @@ func (r *reviewAttemptProgress) finish(outcome string) {
 		_, _ = r.run("set-option", "-w", "-u", "-t", r.pane, "pane-border-status")
 		_, _ = r.run("set-option", "-w", "-u", "-t", r.pane, "pane-border-format")
 		_, _ = r.run("set-option", "-p", "-u", "-t", r.pane, reviewProgressOption)
+		_, _ = r.run("set-option", "-p", "-u", "-t", r.pane, reviewLiveJobOption)
 	}
 }
 
