@@ -81,6 +81,7 @@ type reviewAttemptProgress struct {
 	slot     string // "review 1"
 	job      string // "review #49"
 	jobID    string // the server's job ID; tags the pane for the review popup
+	attempt  string // the server's attempt ID, named in the event log
 	provider string
 	started  time.Time
 	deadline func() time.Time
@@ -113,6 +114,11 @@ func (r *reviewAttemptProgress) start() {
 			_, _ = r.run("set-option", "-p", "-t", r.pane, reviewLiveJobOption, r.jobID)
 		}
 	}
+	// Each attempt starts its review's event log afresh.
+	if dir := reviewAttemptDir(r.logPath, r.jobID); dir != "" && os.MkdirAll(dir, 0700) == nil {
+		_ = os.WriteFile(filepath.Join(dir, reviewEventsFile), nil, 0600)
+	}
+	r.event(fmt.Sprintf("attempt %s started with %s", reviewEventText(r.attempt), r.provider))
 	r.stop, r.done = make(chan struct{}), make(chan struct{})
 	r.refresh(true)
 	go func() {
@@ -140,8 +146,57 @@ func (r *reviewAttemptProgress) setStage(stage string) {
 	r.stage = stage
 	r.mu.Unlock()
 	if changed {
+		r.event("stage " + stage + ": " + reviewStageLabel(stage, r.provider))
 		r.refresh(true)
 	}
+}
+
+// event appends one timestamped line to the review's event log (#5602).
+func (r *reviewAttemptProgress) event(line string) {
+	if r == nil {
+		return
+	}
+	dir := reviewAttemptDir(r.logPath, r.jobID)
+	if dir == "" {
+		return
+	}
+	path := filepath.Join(dir, reviewEventsFile)
+	r.mu.Lock() // server calls arrive from several goroutines
+	defer r.mu.Unlock()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(time.Now().Format("15:04:05.000") + " " + line + "\n")
+	info, statErr := f.Stat()
+	f.Close()
+	if statErr == nil && info.Size() > reviewEventsMax {
+		trimLogLines(path, reviewEventsKeep)
+	}
+}
+
+// requestEvent logs one review API call: method, path without its query,
+// status (or why there was none) and latency.
+func (r *reviewAttemptProgress) requestEvent(method, path string, status int, took time.Duration, err error) {
+	if r == nil {
+		return
+	}
+	path, _, _ = strings.Cut(path, "?")
+	result := fmt.Sprintf("%d", status)
+	if status == 0 && err != nil {
+		result = "no response: " + reviewEventText(err.Error())
+	}
+	r.event(fmt.Sprintf("%s %s → %s in %dms", reviewEventText(method), reviewEventText(path), result, took.Milliseconds()))
+}
+
+// reviewEventText keeps an event field on one printable line of at most 300
+// runes; API paths are longer than a pane title, so no tighter clamp.
+func reviewEventText(s string) string {
+	s = strings.Join(reviewDetailText(s), " ")
+	if r := []rune(s); len(r) > 300 {
+		s = string(r[:300]) + "…"
+	}
+	return s
 }
 
 // leaseRenewed records a successful lease renewal.
@@ -197,6 +252,7 @@ func (r *reviewAttemptProgress) finish(outcome string) {
 		<-r.done
 	}
 	r.appendLog(fmt.Sprintf("%s %s · %s · %s after %s", time.Now().Format("15:04"), r.slot, r.job, outcome, roundElapsed(time.Since(r.started))))
+	r.event("finished: " + outcome)
 	if r.run != nil && r.pane != "" {
 		_, _ = r.run("set-option", "-w", "-u", "-t", r.pane, "pane-border-status")
 		_, _ = r.run("set-option", "-w", "-u", "-t", r.pane, "pane-border-format")
@@ -272,16 +328,19 @@ func (r *reviewAttemptProgress) appendLog(line string) {
 }
 
 // trimReviewProgressLog keeps the newest reviewProgressLogKeep lines.
-func trimReviewProgressLog(path string) {
+func trimReviewProgressLog(path string) { trimLogLines(path, reviewProgressLogKeep) }
+
+// trimLogLines keeps a log file's newest keep lines.
+func trimLogLines(path string, keep int) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(lines) <= reviewProgressLogKeep {
+	if len(lines) <= keep {
 		return
 	}
-	kept := strings.Join(lines[len(lines)-reviewProgressLogKeep:], "\n") + "\n"
+	kept := strings.Join(lines[len(lines)-keep:], "\n") + "\n"
 	tmp := path + ".tmp"
 	if os.WriteFile(tmp, []byte(kept), 0600) == nil {
 		_ = os.Rename(tmp, path)

@@ -34,6 +34,9 @@ type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+	// reviewTrace, when set, observes every review API call (#5602). Set it
+	// once, before the client is shared.
+	reviewTrace func(method, path string, status int, took time.Duration, err error)
 }
 
 // NewClient creates a new VibeFlow API client.

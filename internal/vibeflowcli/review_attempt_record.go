@@ -34,6 +34,9 @@ const (
 	reviewTranscriptMax    = 512 << 10 // a transcript keeps its newest bytes
 	reviewTranscriptLines  = 5000      // pane lines captured, scrollback included
 	reviewTranscriptFile   = "transcript.txt"
+	reviewEventsFile       = "events.log" // the runner's own steps and server calls (#5602)
+	reviewEventsMax        = 256 << 10    // the event log is trimmed past this size...
+	reviewEventsKeep       = 1000         // ...to its newest lines
 	reviewAttemptsDirName  = "attempts"
 	reviewTranscriptHeader = "Captured when the attempt ended; local to this machine.\n"
 )
@@ -122,4 +125,16 @@ func pruneReviewAttempts(attempts string) {
 	for _, r := range records[reviewAttemptKeep:] {
 		_ = os.RemoveAll(filepath.Join(attempts, r.name))
 	}
+}
+
+// readReviewEvents returns up to n of a review's newest runner events.
+func readReviewEvents(dir string, n int) []string {
+	if dir == "" {
+		return nil
+	}
+	var out []string
+	for _, line := range readReviewProgressLog(filepath.Join(dir, reviewEventsFile), n) {
+		out = append(out, strings.Join(reviewDetailText(line), " "))
+	}
+	return out
 }

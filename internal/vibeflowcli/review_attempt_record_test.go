@@ -19,6 +19,8 @@ package vibeflowcli
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,6 +147,9 @@ func TestReviewDetail_ShowsTheSavedTranscriptAfterTheReview(t *testing.T) {
 	if err := saveReviewTranscript(reviewAttemptDir(logPath, "job-4"), "Please run /login · API Error: 403\nResume this session with:"); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(reviewAttemptDir(logPath, "job-4"), reviewEventsFile), []byte("10:48:01.000 POST /x/renew → 409 in 12ms\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	tm, _, _ := liveFixture(t, "job-other") // a tmux server where job-4 is not running
 	client := NewClient(reviewDetailServer(t, false).URL, "token")
 	d := newReviewDetail(func() tea.Msg { return loadReviewDetail(context.Background(), client, 66, "job-4") }).
@@ -153,7 +158,7 @@ func TestReviewDetail_ShowsTheSavedTranscriptAfterTheReview(t *testing.T) {
 	d, _ = d.update(d.load())
 	d, _ = d.update(d.liveCmd()())
 	view := ansi.Strip(d.render())
-	for _, want := range []string{"Last attempt · saved ", "Harness output of the last attempt", "API Error: 403"} {
+	for _, want := range []string{"Last attempt · saved ", "Runner events", "POST /x/renew → 409 in 12ms", "Harness output of the last attempt", "API Error: 403"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("popup lacks %q:\n%s", want, view)
 		}
@@ -162,4 +167,74 @@ func TestReviewDetail_ShowsTheSavedTranscriptAfterTheReview(t *testing.T) {
 		t.Errorf("a saved transcript must replace the not-stored note and is not live:\n%s", view)
 	}
 	checkHistoryFits(t, d.render(), 90, 30)
+}
+
+// Every review API call is traced with its status and latency, including
+// failures; no tracing without a hook (#5602).
+func TestReviewRequest_TracesStatusAndLatency(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/renew") {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(server.Close)
+	c := NewClient(server.URL, "secret-token")
+	if err := c.reviewRequest(context.Background(), "GET", "/projects/1/pr-review-repositories", nil, &map[string]any{}); err != nil {
+		t.Fatalf("untraced call failed: %v", err)
+	}
+	type call struct {
+		method, path string
+		status       int
+		err          error
+	}
+	var calls []call
+	c.reviewTrace = func(method, path string, status int, took time.Duration, err error) {
+		if took < 0 {
+			t.Errorf("negative latency")
+		}
+		calls = append(calls, call{method, path, status, err})
+	}
+	_ = c.reviewRequest(context.Background(), "GET", "/projects/1/pr-review-repositories?limit=5", nil, &map[string]any{})
+	_ = c.reviewRequest(context.Background(), "POST", "/projects/1/pr-review-runners/r/jobs/j/attempts/a/renew", map[string]int{"x": 1}, nil)
+	if len(calls) != 2 || calls[0].status != 200 || calls[0].err != nil || calls[1].method != "POST" || calls[1].status != 409 || calls[1].err == nil {
+		t.Fatalf("traced calls = %+v", calls)
+	}
+}
+
+func TestReviewAttemptProgress_EventLogRecordsStepsAndCalls(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "progress.log")
+	dir := reviewAttemptDir(logPath, "job-4")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, reviewEventsFile), []byte("old attempt line\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := newReviewAttemptProgress(nil, "", logPath, "review 1", "review #4", "claude", nil)
+	r.jobID, r.attempt = "job-4", "att-2"
+	r.start()
+	r.setStage("checkout")
+	r.requestEvent("POST", "/projects/1/pr-review-runners/r/jobs/job-4/attempts/att-2/renew?x=secret", 200, 84*time.Millisecond, nil)
+	r.requestEvent("POST", "/projects/1/pr-review-runners/r/jobs/job-4/attempts/att-2/result", 0, 30*time.Second, errReviewConnection)
+	r.finish("failed - review failed at provider")
+	events := strings.Join(readReviewEvents(dir, 100), "\n")
+	for _, want := range []string{
+		"attempt att-2 started with claude",
+		"stage checkout: checking out the PR",
+		"POST /projects/1/pr-review-runners/r/jobs/job-4/attempts/att-2/renew → 200 in 84ms",
+		"/result → no response: ",
+		"finished: failed - review failed at provider",
+	} {
+		if !strings.Contains(events, want) {
+			t.Errorf("event log lacks %q:\n%s", want, events)
+		}
+	}
+	if strings.Contains(events, "old attempt line") || strings.Contains(events, "secret") {
+		t.Errorf("a new attempt must start a fresh log without query strings:\n%s", events)
+	}
+	if info, err := os.Stat(filepath.Join(dir, reviewEventsFile)); err != nil || info.Mode().Perm() != 0600 {
+		t.Errorf("event log mode: %v %v", info, err)
+	}
 }

@@ -422,4 +422,14 @@ func TestReviewSlotsLogAttemptProgress(t *testing.T) {
 	if data, _ := os.ReadFile(transcripts[0]); !strings.Contains(string(data), "harness answered the question") {
 		t.Errorf("transcript lacks the harness output:\n%s", data)
 	}
+	// The runner's steps and server calls, through the result post (#5602).
+	events := strings.Join(readReviewEvents(filepath.Dir(transcripts[0]), 500), "\n")
+	for _, want := range []string{"started with claude", "stage checkout:", "/renew → 200 in ", "/result → 2", "finished: answered with 1 citations."} {
+		if !strings.Contains(events, want) {
+			t.Errorf("event log lacks %q:\n%s", want, events)
+		}
+	}
+	if strings.Contains(events, "slot-token") {
+		t.Errorf("the API token reached the event log:\n%s", events)
+	}
 }

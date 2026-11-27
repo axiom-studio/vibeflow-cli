@@ -159,7 +159,7 @@ func (d reviewDetail) followUp(msg tea.Msg) tea.Cmd {
 // showLive reports whether the live section is on screen: the running
 // harness, or the last attempt's saved transcript.
 func (d reviewDetail) showLive() bool {
-	return d.liveData != nil && (d.liveData.running || len(d.liveData.saved) > 0)
+	return d.liveData != nil && (d.liveData.running || len(d.liveData.saved) > 0 || len(d.liveData.events) > 0)
 }
 
 // update handles one message; closed reports q or Esc.
@@ -287,8 +287,18 @@ func (d reviewDetail) liveLines() []string {
 	if len(out) > 0 {
 		out = append(out, "")
 	}
+	if len(d.liveData.events) > 0 {
+		out = append(out, lipgloss.NewStyle().Bold(true).Render("Runner events"))
+		for _, line := range d.liveData.events {
+			out = append(out, dim.Render(line))
+		}
+		out = append(out, "")
+	}
 	if !d.liveData.running {
 		out = append(out, lipgloss.NewStyle().Bold(true).Render("Harness output of the last attempt"))
+		if len(d.liveData.saved) == 0 {
+			return append(out, dim.Render("(none was captured)"))
+		}
 		return append(out, d.liveData.saved...)
 	}
 	out = append(out, lipgloss.NewStyle().Bold(true).Render("Harness output"))
@@ -395,7 +405,10 @@ func (d reviewDetail) render() string {
 		}
 		header := fmt.Sprintf(" Live · %s · refreshes every %ds ", state, int(veraLiveRefresh.Seconds()))
 		if !d.liveData.running {
-			header = fmt.Sprintf(" Last attempt · saved %s on this machine ", d.liveData.savedAt.Local().Format("Jan 2 15:04"))
+			header = " Last attempt · recorded on this machine "
+			if !d.liveData.savedAt.IsZero() {
+				header = fmt.Sprintf(" Last attempt · saved %s on this machine ", d.liveData.savedAt.Local().Format("Jan 2 15:04"))
+			}
 		}
 		header = ansi.Truncate(header, width, "…")
 		style := lipgloss.NewStyle().Foreground(dimColor)

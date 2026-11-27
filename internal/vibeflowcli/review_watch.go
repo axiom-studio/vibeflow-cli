@@ -87,10 +87,11 @@ type reviewWatch struct {
 	harnessFatal       error // Set when the harness cannot run on this machine until the user acts.
 	capacity           *reviewCapacity
 	slot               *os.File
-	tty                *reviewTerminal        // Set when the harness runs interactively in this terminal.
-	interrupted        bool                   // The user closed the interactive harness before its result.
-	stopBrowse         func()                 // Ends the idle key handling of tty.
-	progress           *reviewAttemptProgress // The running attempt's progress, in a console slot (#5598).
+	tty                *reviewTerminal                       // Set when the harness runs interactively in this terminal.
+	interrupted        bool                                  // The user closed the interactive harness before its result.
+	stopBrowse         func()                                // Ends the idle key handling of tty.
+	progress           *reviewAttemptProgress                // The running attempt's progress, in a console slot (#5598).
+	tracing            atomic.Pointer[reviewAttemptProgress] // Where traced server calls go (#5602).
 }
 
 // veraBrowseHint tells the user how to reach the history pane from the listener.
@@ -416,6 +417,9 @@ func (w *reviewWatch) newProgress(p *reviewReceipt) *reviewAttemptProgress {
 	}
 	r := newReviewAttemptProgress(run, pane, reviewProgressLogPath(w.client.baseURL, w.options), w.options.SlotLabel, veraJobWindowName(p), w.options.Provider, nil)
 	r.jobID = p.JobID
+	if p.Execution != nil {
+		r.attempt = p.Execution.Attempt.ID
+	}
 	return r
 }
 
@@ -434,6 +438,13 @@ func (w *reviewWatch) workDir(p *reviewReceipt) string {
 
 func (w *reviewWatch) run(ctx context.Context) error {
 	defer w.releaseCapacity()
+	if w.options.SlotLabel != "" {
+		// A console slot is the only runner in its process, so its client is
+		// its own: trace its server calls into the running attempt's log.
+		w.client.reviewTrace = func(method, path string, status int, took time.Duration, err error) {
+			w.tracing.Load().requestEvent(method, path, status, took, err)
+		}
+	}
 	identity := fmt.Sprintf("%s\n%d\n%d\n%s\n%s\n%s", w.client.baseURL, w.options.ProjectID, w.options.RepositoryLinkID, w.options.GitProvider, w.options.Kind, w.options.Name)
 	digest := sha256.Sum256([]byte(identity))
 	// The guard and provider both change cwd. Their private paths must keep
@@ -743,6 +754,7 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 }
 
 func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
+	defer w.tracing.Store(nil) // idle polls are not part of any attempt's event log
 	p := w.state.Pending
 	if p == nil {
 		return nil
@@ -803,6 +815,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		fmt.Fprintf(w.output, "\n%s %s at %.12s; starting a fresh Vera with %s.\n", reviewClock(), claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
 		w.nameWindow(veraJobWindowName(p))
 		w.progress = w.newProgress(p)
+		w.tracing.Store(w.progress)
 		w.progress.appendLog(reviewClock() + " " + w.options.SlotLabel + " · " + claimed)
 		result, err := w.execute(ctx, p)
 		if err != nil {
@@ -811,7 +824,7 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 			p.Result = result
 		}
 		w.progress.finish(strings.TrimPrefix(reviewOutcomeLine(p), "Result: "))
-		w.progress = nil
+		w.progress = nil // tracing stays on until advance returns: the result post is logged too
 		if err = w.save(); err != nil {
 			return err
 		}

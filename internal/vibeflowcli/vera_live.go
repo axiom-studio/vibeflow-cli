@@ -31,12 +31,14 @@ const (
 	veraLiveRefresh  = 2 * time.Second
 	veraLiveHistory  = 400 // pane lines captured, scrollback included
 	veraLiveProgress = 200 // progress log lines read before filtering to the PR
+	veraLiveEvents   = 200 // newest runner events shown
 )
 
 type reviewLiveMsg struct {
 	running  bool      // a slot pane on this tmux server is running the review
 	output   []string  // the harness's screen and scrollback, plain text
 	progress []string  // this PR's lines from the console's progress log
+	events   []string  // the newest attempt's runner events (#5602)
 	saved    []string  // the last attempt's transcript, when not running (#5601)
 	savedAt  time.Time // when that transcript was saved
 }
@@ -54,6 +56,7 @@ func loadReviewLive(run veraTmux, logPath, jobID string, prNumber int) reviewLiv
 			}
 		}
 	}
+	msg.events = readReviewEvents(reviewAttemptDir(logPath, jobID), veraLiveEvents)
 	pane := reviewLivePane(run, jobID)
 	out, err := "", error(nil)
 	if pane != "" {
