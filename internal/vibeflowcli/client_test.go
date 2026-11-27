@@ -21,8 +21,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -385,5 +387,43 @@ func TestClient_HTTPErrorBodyIsBounded(t *testing.T) {
 	}
 	if !strings.HasSuffix(quoted, "…") || strings.ContainsRune(quoted, utf8.RuneError) {
 		t.Errorf("truncation must end in an ellipsis on a rune boundary: %q", quoted[len(quoted)-12:])
+	}
+}
+
+// TestClient_HTTPErrorBodyReadIsBounded proves the client stops READING a
+// huge error body, not just quoting less of it (#7688, the CWE-770 half of
+// #4617): the server streams 64 MiB and counts what it could write before the
+// client hung up. Without the read bound the client drains all of it.
+func TestClient_HTTPErrorBodyReadIsBounded(t *testing.T) {
+	const body = 64 << 20
+	written := make(chan int, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(body))
+		w.WriteHeader(http.StatusInternalServerError)
+		chunk := []byte(strings.Repeat("x", 32<<10))
+		n := 0
+		for n < body {
+			m, err := w.Write(chunk)
+			n += m
+			if err != nil {
+				break
+			}
+		}
+		written <- n
+	}))
+	defer srv.Close()
+
+	if _, err := NewClient(srv.URL, "").ListProjects(); err == nil {
+		t.Fatal("expected an error for a 500 response")
+	}
+	select {
+	case n := <-written:
+		// Socket and transport buffers absorb some writes after the client
+		// stops; a client that read everything lets all 64 MiB through.
+		if n >= 16<<20 {
+			t.Errorf("server wrote %d of %d bytes before the client hung up; the client is reading the whole error body", n, body)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("server never finished writing: the client neither read nor closed the body")
 	}
 }
