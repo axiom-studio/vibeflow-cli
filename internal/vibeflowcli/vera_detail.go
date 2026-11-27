@@ -159,7 +159,7 @@ func (d reviewDetail) followUp(msg tea.Msg) tea.Cmd {
 // showLive reports whether the live section is on screen: the running
 // harness, or the last attempt's saved transcript.
 func (d reviewDetail) showLive() bool {
-	return d.liveData != nil && (d.liveData.running || len(d.liveData.saved) > 0 || len(d.liveData.events) > 0)
+	return d.liveData != nil && (d.liveData.running || len(d.liveData.saved) > 0 || len(d.liveData.events) > 0 || len(d.liveData.diag) > 0)
 }
 
 // update handles one message; closed reports q or Esc.
@@ -357,6 +357,13 @@ func (d reviewDetail) lines() []string {
 	}
 	if head != "" {
 		add("", "Last reviewed head: "+head[:min(7, len(head))])
+	}
+	// The newest attempt on this machine, at a glance above the findings (#5600).
+	if d.liveData != nil && len(d.liveData.diag) > 0 {
+		out = append(out, "", lipgloss.NewStyle().Bold(true).Render("Diagnostics · newest attempt on this machine"))
+		for _, line := range d.liveData.diag {
+			add("  ", line)
+		}
 	}
 	if !d.showLive() {
 		for _, line := range strings.Split(ansi.Wrap("The live harness transcript of past reviews is not stored; this is the recorded result.", width, ""), "\n") {

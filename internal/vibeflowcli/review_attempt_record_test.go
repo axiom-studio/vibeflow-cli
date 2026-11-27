@@ -150,6 +150,8 @@ func TestReviewDetail_ShowsTheSavedTranscriptAfterTheReview(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(reviewAttemptDir(logPath, "job-4"), reviewEventsFile), []byte("10:48:01.000 POST /x/renew → 409 in 12ms\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	saveReviewDiagnostics(reviewAttemptDir(logPath, "job-4"), reviewAttemptDiagnostics{Attempt: "att-9", Provider: "claude", Started: time.Now().Add(-14 * time.Minute),
+		Finished: time.Now().Add(-time.Minute), Outcome: "failed", Failure: &reviewExecutionDiagnostic{Category: "lease_rejected", Stage: "provider"}})
 	tm, _, _ := liveFixture(t, "job-other") // a tmux server where job-4 is not running
 	client := NewClient(reviewDetailServer(t, false).URL, "token")
 	d := newReviewDetail(func() tea.Msg { return loadReviewDetail(context.Background(), client, 66, "job-4") }).
@@ -158,7 +160,7 @@ func TestReviewDetail_ShowsTheSavedTranscriptAfterTheReview(t *testing.T) {
 	d, _ = d.update(d.load())
 	d, _ = d.update(d.liveCmd()())
 	view := ansi.Strip(d.render())
-	for _, want := range []string{"Last attempt · saved ", "Runner events", "POST /x/renew → 409 in 12ms", "Harness output of the last attempt", "API Error: 403"} {
+	for _, want := range []string{"Diagnostics · newest attempt on this machine", "Failure: lease_rejected at provider", "Last attempt · saved ", "Runner events", "POST /x/renew → 409 in 12ms", "Harness output of the last attempt", "API Error: 403"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("popup lacks %q:\n%s", want, view)
 		}
@@ -236,5 +238,84 @@ func TestReviewAttemptProgress_EventLogRecordsStepsAndCalls(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(dir, reviewEventsFile)); err != nil || info.Mode().Perm() != 0600 {
 		t.Errorf("event log mode: %v %v", info, err)
+	}
+}
+
+func TestReviewDiagnosticsLines_RunningAndFailed(t *testing.T) {
+	start := time.Date(2026, 11, 27, 10, 48, 0, 0, time.Local)
+	d := reviewAttemptDiagnostics{
+		Attempt: "att-2", Provider: "claude", Version: "2.1.330 (Claude Code)", Binary: "/usr/local/bin/claude", Started: start,
+		Stages: []reviewStageTime{
+			{Name: "brief", Label: "preparing the brief", Start: start},
+			{Name: "checkout", Label: "checking out the PR", Start: start.Add(2 * time.Second)},
+			{Name: "child_guard", Label: "claude working", Start: start.Add(10 * time.Second)},
+		},
+		Deadline: start.Add(30 * time.Minute), Renewed: start.Add(90 * time.Second),
+	}
+	running := strings.Join(reviewDiagnosticsLines(d, start.Add(3*time.Minute)), "\n")
+	for _, want := range []string{
+		"Harness: claude 2.1.330 (Claude Code) · /usr/local/bin/claude",
+		"Attempt: att-2 · started 10:48:00 · 3m elapsed",
+		"Stage: claude working for 2m",
+		"Stages: preparing the brief 2s · checking out the PR 8s · claude working 2m",
+		"Lease: deadline 11:18 (27m left) · lease renewed 10:49:30",
+	} {
+		if !strings.Contains(running, want) {
+			t.Errorf("running diagnostics lack %q:\n%s", want, running)
+		}
+	}
+	exit := 0
+	d.Finished, d.Outcome = start.Add(13*time.Minute), "failed - review failed at provider"
+	d.Failure = &reviewExecutionDiagnostic{Category: "lease_rejected", Stage: "provider", ExitCode: &exit, StdoutBytes: 1200}
+	failed := strings.Join(reviewDiagnosticsLines(d, start.Add(20*time.Minute)), "\n")
+	for _, want := range []string{
+		"finished after 13m: failed - review failed at provider",
+		"claude working 12m",
+		"Failure: lease_rejected at provider · exit 0 · harness output 1200 B stdout, 0 B stderr",
+	} {
+		if !strings.Contains(failed, want) {
+			t.Errorf("failed diagnostics lack %q:\n%s", want, failed)
+		}
+	}
+	if strings.Contains(failed, "Stage: ") {
+		t.Errorf("a finished attempt has no current stage:\n%s", failed)
+	}
+}
+
+// The reporter keeps diagnostics.json current through the attempt, probing
+// the harness version in a throwaway directory.
+func TestReviewAttemptProgress_WritesDiagnostics(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "fakeharness")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\npwd > marker-cwd\necho '9.9.9 (Fake Harness)'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "progress.log")
+	deadline := time.Now().Add(29 * time.Minute)
+	r := newReviewAttemptProgress(nil, "", logPath, "review 1", "review #4", "fakeharness", func() time.Time { return deadline })
+	r.jobID, r.attempt, r.binary = "job-4", "att-2", bin
+	r.start()
+	r.setStage("checkout")
+	r.leaseRenewed(time.Now())
+	exit := 3
+	r.setFailure(reviewExecutionDiagnostic{Category: "provider_failed", Stage: "provider", ExitCode: &exit})
+	dir := reviewAttemptDir(logPath, "job-4")
+	for i := 0; i < 50; i++ { // the version probe runs alongside the attempt
+		if d, _ := readReviewDiagnostics(dir); d.Version != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	r.finish("failed - review failed at provider")
+	d, ok := readReviewDiagnostics(dir)
+	if !ok || d.Attempt != "att-2" || d.Version != "9.9.9 (Fake Harness)" || d.Binary != bin || len(d.Stages) != 2 ||
+		d.Stages[1].Name != "checkout" || d.Renewed.IsZero() || d.Finished.IsZero() || d.Failure == nil || *d.Failure.ExitCode != 3 ||
+		!d.Deadline.Equal(deadline.Round(0)) && d.Deadline.Sub(deadline).Abs() > time.Second {
+		t.Fatalf("diagnostics = %+v (ok %v)", d, ok)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(logPath), "marker-cwd")); err == nil {
+		t.Error("the version probe ran in the runner's directory")
+	}
+	if info, err := os.Stat(filepath.Join(dir, reviewDiagnosticsFile)); err != nil || info.Mode().Perm() != 0600 {
+		t.Errorf("diagnostics mode: %v %v", info, err)
 	}
 }

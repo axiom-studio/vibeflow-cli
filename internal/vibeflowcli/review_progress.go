@@ -82,12 +82,18 @@ type reviewAttemptProgress struct {
 	job      string // "review #49"
 	jobID    string // the server's job ID; tags the pane for the review popup
 	attempt  string // the server's attempt ID, named in the event log
+	binary   string // the harness binary's resolved path, for diagnostics
 	provider string
 	started  time.Time
 	deadline func() time.Time
 
 	mu       sync.Mutex
 	snapshot string // the pane as last seen while the attempt ran
+	version  string // the harness's --version, probed once at start
+	stages   []reviewStageTime
+	failure  *reviewExecutionDiagnostic
+	finished time.Time
+	outcome  string
 	stage    string
 	renewed  time.Time
 	logged   time.Time
@@ -119,6 +125,18 @@ func (r *reviewAttemptProgress) start() {
 		_ = os.WriteFile(filepath.Join(dir, reviewEventsFile), nil, 0600)
 	}
 	r.event(fmt.Sprintf("attempt %s started with %s", reviewEventText(r.attempt), r.provider))
+	r.mu.Lock()
+	r.stages = []reviewStageTime{{Name: r.stage, Label: reviewStageLabel(r.stage, r.provider), Start: r.started}}
+	r.mu.Unlock()
+	if r.binary != "" {
+		go func() {
+			v := reviewHarnessVersion(r.binary)
+			r.mu.Lock()
+			r.version = v
+			r.mu.Unlock()
+			r.writeDiagnostics()
+		}()
+	}
 	r.stop, r.done = make(chan struct{}), make(chan struct{})
 	r.refresh(true)
 	go func() {
@@ -144,6 +162,9 @@ func (r *reviewAttemptProgress) setStage(stage string) {
 	r.mu.Lock()
 	changed := r.stage != stage
 	r.stage = stage
+	if changed {
+		r.stages = append(r.stages, reviewStageTime{Name: stage, Label: reviewStageLabel(stage, r.provider), Start: time.Now()})
+	}
 	r.mu.Unlock()
 	if changed {
 		r.event("stage " + stage + ": " + reviewStageLabel(stage, r.provider))
@@ -197,6 +218,37 @@ func reviewEventText(s string) string {
 		s = string(r[:300]) + "…"
 	}
 	return s
+}
+
+// setFailure records the runner's execution diagnostic for a failed attempt.
+func (r *reviewAttemptProgress) setFailure(d reviewExecutionDiagnostic) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.failure = &d
+	r.mu.Unlock()
+	r.writeDiagnostics()
+}
+
+// writeDiagnostics saves the attempt's current diagnostics (#5600).
+func (r *reviewAttemptProgress) writeDiagnostics() {
+	dir := reviewAttemptDir(r.logPath, r.jobID)
+	if dir == "" {
+		return
+	}
+	var deadline time.Time
+	if r.deadline != nil {
+		deadline = r.deadline()
+	}
+	r.mu.Lock()
+	d := reviewAttemptDiagnostics{
+		Attempt: r.attempt, Provider: r.provider, Binary: r.binary, Version: r.version,
+		Started: r.started, Stages: append([]reviewStageTime(nil), r.stages...), Deadline: deadline,
+		Renewed: r.renewed, Finished: r.finished, Outcome: r.outcome, Failure: r.failure,
+	}
+	saveReviewDiagnostics(dir, d)
+	r.mu.Unlock() // held across the write so snapshots land in order
 }
 
 // leaseRenewed records a successful lease renewal.
@@ -253,6 +305,10 @@ func (r *reviewAttemptProgress) finish(outcome string) {
 	}
 	r.appendLog(fmt.Sprintf("%s %s · %s · %s after %s", time.Now().Format("15:04"), r.slot, r.job, outcome, roundElapsed(time.Since(r.started))))
 	r.event("finished: " + outcome)
+	r.mu.Lock()
+	r.finished, r.outcome = time.Now(), outcome
+	r.mu.Unlock()
+	r.writeDiagnostics()
 	if r.run != nil && r.pane != "" {
 		_, _ = r.run("set-option", "-w", "-u", "-t", r.pane, "pane-border-status")
 		_, _ = r.run("set-option", "-w", "-u", "-t", r.pane, "pane-border-format")
@@ -294,6 +350,7 @@ func (r *reviewAttemptProgress) refresh(logNow bool) {
 		// re-expand it as a format.
 		_, _ = r.run("set-option", "-p", "-t", r.pane, reviewProgressOption, line)
 	}
+	r.writeDiagnostics()
 	r.mu.Lock()
 	due := logNow || now.Sub(r.logged) >= reviewProgressLogged
 	if due {

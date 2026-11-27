@@ -376,7 +376,7 @@ func TestReviewSlotsLogAttemptProgress(t *testing.T) {
 	repo, review, question := slotExecutions(t)
 	server, _, results := slotServer(t, review, question, []string{"repository_review_v1", reviewClaimKindCapability})
 	provider := filepath.Join(t.TempDir(), "claude")
-	script := "#!/bin/sh\necho 'harness answered the question'\nif grep -q 'Local question task' ../../task.txt; then cat " + shellQuote(reviewWatchQuestionResult(t, question)) + " > ../../result.json; else cat " + shellQuote(reviewWatchResult(t, review, 0)) + " > ../../result.json; fi\n"
+	script := "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'fake-claude 1.0'; exit 0; }\necho 'harness answered the question'\nif grep -q 'Local question task' ../../task.txt; then cat " + shellQuote(reviewWatchQuestionResult(t, question)) + " > ../../result.json; else cat " + shellQuote(reviewWatchResult(t, review, 0)) + " > ../../result.json; fi\n"
 	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -431,5 +431,14 @@ func TestReviewSlotsLogAttemptProgress(t *testing.T) {
 	}
 	if strings.Contains(events, "slot-token") {
 		t.Errorf("the API token reached the event log:\n%s", events)
+	}
+	// Diagnostics follow the attempt through its outcome (#5600).
+	d, ok := readReviewDiagnostics(filepath.Dir(transcripts[0]))
+	stages := []string{}
+	for _, s := range d.Stages {
+		stages = append(stages, s.Name)
+	}
+	if !ok || d.Provider != "claude" || d.Binary != provider || d.Finished.IsZero() || d.Outcome != "answered with 1 citations." || !strings.Contains(strings.Join(stages, ","), "checkout") || !strings.Contains(strings.Join(stages, ","), "child_guard") {
+		t.Errorf("diagnostics = %+v", d)
 	}
 }

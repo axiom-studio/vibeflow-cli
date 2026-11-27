@@ -39,6 +39,7 @@ type reviewLiveMsg struct {
 	output   []string  // the harness's screen and scrollback, plain text
 	progress []string  // this PR's lines from the console's progress log
 	events   []string  // the newest attempt's runner events (#5602)
+	diag     []string  // the newest attempt's diagnostics, rendered (#5600)
 	saved    []string  // the last attempt's transcript, when not running (#5601)
 	savedAt  time.Time // when that transcript was saved
 }
@@ -57,6 +58,9 @@ func loadReviewLive(run veraTmux, logPath, jobID string, prNumber int) reviewLiv
 		}
 	}
 	msg.events = readReviewEvents(reviewAttemptDir(logPath, jobID), veraLiveEvents)
+	if d, ok := readReviewDiagnostics(reviewAttemptDir(logPath, jobID)); ok {
+		msg.diag = reviewDiagnosticsLines(d, time.Now())
+	}
 	pane := reviewLivePane(run, jobID)
 	out, err := "", error(nil)
 	if pane != "" {

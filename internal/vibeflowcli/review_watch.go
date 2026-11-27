@@ -420,6 +420,11 @@ func (w *reviewWatch) newProgress(p *reviewReceipt) *reviewAttemptProgress {
 	if p.Execution != nil {
 		r.attempt = p.Execution.Attempt.ID
 	}
+	if w.cfg != nil {
+		if path, err := exec.LookPath(w.cfg.Providers[w.options.Provider].Binary); err == nil {
+			r.binary = path
+		}
+	}
 	return r
 }
 
@@ -1132,6 +1137,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.DurationMS = time.Since(started).Milliseconds()
 		diagnostic.StageDurationMS = time.Since(stageStarted).Milliseconds()
 		diagnostic.RecordedAt = time.Now().UnixMilli()
+		w.progress.setFailure(diagnostic)
 		path := filepath.Join(w.root, "last-provider-diagnostic.json")
 		if err := saveReviewJSON(path, diagnostic); err != nil {
 			failureErr = fmt.Errorf("review failed at %s (%s); private diagnostic could not be saved", diagnostic.Stage, diagnostic.Category)
