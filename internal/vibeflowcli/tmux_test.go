@@ -18,8 +18,10 @@ package vibeflowcli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -544,16 +546,19 @@ func TestComposeWorkbench_RoundTrip(t *testing.T) {
 	} else if !strings.Contains(got, "@vfheader") {
 		t.Errorf("pane-border-format = %q, want it to reference @vfheader", got)
 	}
-	// #2721 Option A: heavy borders + active-pane backdrop tint distinguish panes.
+	// #2721: heavy borders distinguish panes.
 	if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "-v", "pane-border-lines"); err != nil {
 		t.Errorf("read pane-border-lines: %v", err)
 	} else if strings.TrimSpace(got) != "heavy" {
 		t.Errorf("pane-border-lines = %q, want heavy", strings.TrimSpace(got))
 	}
-	if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "-v", "window-active-style"); err != nil {
-		t.Errorf("read window-active-style: %v", err)
-	} else if !strings.Contains(got, oceanHexShallow) {
-		t.Errorf("window-active-style = %q, want it to tint bg with %s", got, oceanHexShallow)
+	// #7680: no pane background — a non-default bg inflates terminal output ~75%.
+	for _, opt := range []string{"window-style", "window-active-style"} {
+		if got, err := tm.run("show-options", "-w", "-t", comp.HolderName(), "-v", opt); err != nil {
+			t.Errorf("read %s: %v", opt, err)
+		} else if v := strings.TrimSpace(got); v != "" && v != "default" {
+			t.Errorf("%s = %q, want unset (no pane background)", opt, v)
+		}
 	}
 
 	// join-pane MOVES panes, so the source sessions are consumed by the compose.
@@ -1337,5 +1342,383 @@ func TestKillSessionErrorCarriesTmuxMessage(t *testing.T) {
 	err := tm.KillSession("missing")
 	if err == nil || !strings.Contains(err.Error(), "can't find session") {
 		t.Fatalf("kill error lacks tmux's reason: %v", err)
+	}
+}
+
+var orphanFixtureSeq int // gives each fixture its own short socket name
+
+// orphanedWorkbenchFixture starts an isolated tmux server with the named claude
+// sessions, composes them into a workbench, and drops the composition — the
+// state a TUI crash while composed leaves behind (#3310). It returns the manager,
+// the full session names and each session's agent pane id before compose.
+func orphanedWorkbenchFixture(t *testing.T, names ...string) (*TmuxManager, []string, map[string]string) {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	orphanFixtureSeq++
+	tm := NewTmuxManager("vftest-orphan-wb-" + itoa(os.Getpid()) + "-" + itoa(orphanFixtureSeq))
+	_, _ = tm.run("kill-server")
+	t.Cleanup(func() { _, _ = tm.run("kill-server") })
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	dir := t.TempDir()
+	full := make([]string, len(names))
+	before := make(map[string]string, len(names))
+	for i, n := range names {
+		if err := tm.CreateSessionWithOpts(SessionOpts{Name: n, Provider: "claude", WorkDir: dir, Command: "sleep 300"}); err != nil {
+			t.Fatalf("create session %s: %v", n, err)
+		}
+		full[i] = tm.FullSessionName("claude", n)
+		pid, err := tm.paneID(full[i])
+		if err != nil {
+			t.Fatalf("paneID(%s): %v", full[i], err)
+		}
+		before[full[i]] = pid
+	}
+	if _, err := tm.ComposeWorkbench(full, nil); err != nil {
+		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+	// The composing process "crashed": hand ownership to a PID that has exited.
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatalf("run true: %v", err)
+	}
+	if _, err := tm.run("set-option", "-t", workbenchHolderName, workbenchOwnerOption, itoa(dead.Process.Pid)); err != nil {
+		t.Fatalf("set dead owner: %v", err)
+	}
+	return tm, full, before
+}
+
+func TestRecoverOrphanedWorkbench_ReturnsEveryStrandedPaneToItsSession(t *testing.T) {
+	tm, full, before := orphanedWorkbenchFixture(t, "a", "b", "c")
+
+	recovered, err := tm.RecoverOrphanedWorkbench(workbenchHolderName)
+	if err != nil {
+		t.Fatalf("RecoverOrphanedWorkbench: %v", err)
+	}
+	if len(recovered) != len(full) {
+		t.Fatalf("recovered %v, want all of %v", recovered, full)
+	}
+	for _, fn := range full {
+		pid, err := tm.paneID(fn)
+		if err != nil {
+			t.Fatalf("session %s not recovered: %v", fn, err)
+		}
+		if pid != before[fn] {
+			t.Errorf("%s pane = %s, want original %s (agent process must survive)", fn, pid, before[fn])
+		}
+	}
+	if tm.HasSession(workbenchHolderName) {
+		t.Error("empty holder must be destroyed after recovery")
+	}
+}
+
+func TestRecoverOrphanedWorkbench_PaneWithoutOriginStaysAndHolderSurvives(t *testing.T) {
+	tm, full, before := orphanedWorkbenchFixture(t, "a", "b")
+	// A pane with no recorded origin cannot be placed; it must not be killed.
+	if _, err := tm.run("set-option", "-p", "-u", "-t", before[full[1]], "@vibeflow_session"); err != nil {
+		t.Fatalf("clear origin: %v", err)
+	}
+
+	recovered, err := tm.RecoverOrphanedWorkbench(workbenchHolderName)
+	if err == nil {
+		t.Fatal("want an error reporting the pane left in the holder")
+	}
+	if len(recovered) != 1 || recovered[0] != full[0] {
+		t.Fatalf("recovered %v, want only %s", recovered, full[0])
+	}
+	if !tm.HasSession(workbenchHolderName) {
+		t.Fatal("holder still holding a live pane must not be killed")
+	}
+	if owner, _ := tm.run("display-message", "-p", "-t", before[full[1]], "#{session_name}"); strings.TrimSpace(owner) != workbenchHolderName {
+		t.Errorf("unplaceable pane moved to %q, want it left in the holder", strings.TrimSpace(owner))
+	}
+}
+
+func TestRecoverOrphanedWorkbench_LiveOwnerIsLeftAlone(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	// A refresh racing a compose in this process sees an unattached holder; the
+	// owner stamp must keep it from dismantling the workbench being opened.
+	if _, err := tm.run("set-option", "-t", workbenchHolderName, workbenchOwnerOption, itoa(os.Getpid())); err != nil {
+		t.Fatalf("set live owner: %v", err)
+	}
+	recovered, err := tm.RecoverOrphanedWorkbench(workbenchHolderName)
+	if err != nil || recovered != nil {
+		t.Fatalf("live workbench: recovered %v, err %v; want neither", recovered, err)
+	}
+	if n := tm.sessionPaneCount(workbenchHolderName); n != 2 {
+		t.Errorf("holder panes = %d, want 2 (untouched)", n)
+	}
+}
+
+func TestComposeWorkbench_StampsOwnerPID(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	_, _ = tm.run("kill-session", "-t", workbenchHolderName)
+	if err := tm.createWorkbenchHolder(workbenchHolderName); err != nil {
+		t.Fatalf("createWorkbenchHolder: %v", err)
+	}
+	out, err := tm.run("show-options", "-v", "-t", workbenchHolderName, workbenchOwnerOption)
+	if err != nil || strings.TrimSpace(out) != itoa(os.Getpid()) {
+		t.Fatalf("owner = %q (%v), want this process %d", strings.TrimSpace(out), err, os.Getpid())
+	}
+	if !tm.workbenchOwnerAlive(workbenchHolderName) {
+		t.Error("holder owned by this process must count as live")
+	}
+}
+
+func TestRecoverOrphanedWorkbench_MissingHolderReturnsError(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	if _, err := tm.RecoverOrphanedWorkbench("vibeflow_no-such-holder"); err == nil {
+		t.Fatal("want an error for a holder that does not exist")
+	}
+}
+
+func TestRefreshSessions_RecoversUnattachedOrphanedHolder(t *testing.T) {
+	tm, full, _ := orphanedWorkbenchFixture(t, "a", "b")
+	m := Model{tmux: tm, config: &Config{}}
+
+	msg := m.refreshSessions().(sessionsMsg)
+	if msg.err != nil {
+		t.Fatalf("refreshSessions: %v", msg.err)
+	}
+	got := map[string]bool{}
+	for _, r := range msg.sessions {
+		got[sessionPrefix+r.Name] = true
+	}
+	for _, fn := range full {
+		if !got[fn] {
+			t.Errorf("stranded session %s missing from the list after refresh (rows: %v)", fn, msg.sessions)
+		}
+	}
+}
+
+func TestRefreshSessions_WorkbenchActive_LeavesHolderAlone(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	m := Model{tmux: tm, config: &Config{}, workbenchActive: true}
+
+	msg := m.refreshSessions().(sessionsMsg)
+	if msg.err != nil {
+		t.Fatalf("refreshSessions: %v", msg.err)
+	}
+	if len(msg.sessions) != 0 {
+		t.Errorf("an in-flight workbench must not be dismantled; rows = %v", msg.sessions)
+	}
+	if n := tm.sessionPaneCount(workbenchHolderName); n != 2 {
+		t.Errorf("holder panes = %d, want 2 (untouched)", n)
+	}
+}
+
+func TestRecoverOrphanedWorkbenchRow_AttachedHolderIsLeftAlone(t *testing.T) {
+	tm, _, _ := orphanedWorkbenchFixture(t, "a", "b")
+	m := Model{tmux: tm, config: &Config{}}
+	// An attached holder is a live workbench (another TUI or a VS Code client).
+	if got := m.recoverOrphanedWorkbench([]TmuxSession{{Name: workbenchHolderName, Attached: true}}); got != nil {
+		t.Fatalf("recovered %v from an attached holder, want nothing", got)
+	}
+	if n := tm.sessionPaneCount(workbenchHolderName); n != 2 {
+		t.Errorf("holder panes = %d, want 2 (untouched)", n)
+	}
+}
+
+// TestPrivateCommand_KeepsSecretsOffArgv proves the spawn's tmux client argv
+// carries no env value (#4603): argv is readable by every local user via the
+// process table, so MCP_TOKEN must travel only on stdin.
+func TestPrivateCommand_KeepsSecretsOffArgv(t *testing.T) {
+	const secret = "eyJhbGciOiJSUzI1NiJ9.secret-token"
+	tm := NewTmuxManager("vftest-private")
+	cmd := tm.privateCommand("new-session", "-d", "-s", "x", "-e", "MCP_TOKEN="+secret, "claude")
+	if got, want := strings.Join(cmd.Args[1:], " "), "-L vftest-private start-server ; source-file -"; got != want {
+		t.Fatalf("argv = %q, want %q", got, want)
+	}
+	for _, a := range cmd.Args {
+		if strings.Contains(a, secret) {
+			t.Fatalf("secret leaked into argv: %q", cmd.Args)
+		}
+	}
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil || !strings.Contains(string(stdin), secret) {
+		t.Fatalf("stdin = %q (%v), want it to carry the command", stdin, err)
+	}
+}
+
+// TestCreateSessionWithOpts_EnvSurvivesStdinTransport proves values that tmux's
+// parser would otherwise interpret ($, quotes, backslashes, ;, newlines) reach
+// the session and the agent process byte for byte, and that spawn errors still
+// surface.
+func TestCreateSessionWithOpts_EnvSurvivesStdinTransport(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	tm := NewTmuxManager("vftest-private-" + itoa(os.Getpid()))
+	_, _ = tm.run("kill-server")
+	defer func() { _, _ = tm.run("kill-server") }()
+	if err := tm.EnsureServer(); err != nil {
+		t.Skipf("cannot start tmux server: %v", err)
+	}
+	dir := t.TempDir()
+	// Values are os.Expand-ed before tmux sees them; "$ " and a trailing "$"
+	// survive that, so they check tmux leaves a literal $ alone.
+	tricky := "a\"b'c$ \\d; e #f {g}\nline2\ttab ~h$"
+	out := filepath.Join(dir, "env.out")
+	if err := tm.CreateSessionWithOpts(SessionOpts{
+		Name: "s", Provider: "claude", WorkDir: dir,
+		Env:     map[string]string{"MCP_TOKEN": "eyJ.tok-en_1", "VF_TRICKY": tricky},
+		Command: `printf '%s' "$VF_TRICKY" > ` + shellQuote(out) + `; sleep 30`,
+	}); err != nil {
+		t.Fatalf("CreateSessionWithOpts: %v", err)
+	}
+	full := tm.FullSessionName("claude", "s")
+	got, err := tm.run("show-environment", "-t", full, "MCP_TOKEN")
+	if err != nil || strings.TrimSpace(got) != "MCP_TOKEN=eyJ.tok-en_1" {
+		t.Errorf("session MCP_TOKEN = %q (%v)", strings.TrimSpace(got), err)
+	}
+	var seen []byte
+	for i := 0; i < 50; i++ {
+		if seen, err = os.ReadFile(out); err == nil && len(seen) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if string(seen) != tricky {
+		t.Errorf("agent saw VF_TRICKY = %q, want %q", seen, tricky)
+	}
+	if err := tm.CreateSessionWithOpts(SessionOpts{Name: "s", Provider: "claude", WorkDir: dir, Command: "true"}); err == nil {
+		t.Error("duplicate session must still fail")
+	}
+}
+
+// TestComposeWorkbench_StaleHolderAgentsAreRecoveredNotKilled is the #7681
+// regression: composing over a crashed workbench used to kill-session the old
+// holder and every agent stranded inside it.
+func TestComposeWorkbench_StaleHolderAgentsAreRecoveredNotKilled(t *testing.T) {
+	tm, full, before := orphanedWorkbenchFixture(t, "a", "b")
+
+	comp, err := tm.ComposeWorkbench(full, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench over a stale holder: %v", err)
+	}
+	live := livePanes(t, tm)
+	for _, fn := range full {
+		if live[before[fn]] != workbenchHolderName {
+			t.Errorf("agent pane %s of %s is in %q, want it alive in the new workbench", before[fn], fn, live[before[fn]])
+		}
+	}
+	if err := comp.Restore(); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	for _, fn := range full {
+		if pid, err := tm.paneID(fn); err != nil || pid != before[fn] {
+			t.Errorf("%s pane = %q (%v), want original %s", fn, pid, err, before[fn])
+		}
+	}
+}
+
+func TestComposeWorkbench_LiveOwnedHolderIsRefusedAndKept(t *testing.T) {
+	for _, project := range []bool{false, true} {
+		tm, full, _ := orphanedWorkbenchFixture(t, "a", "b")
+		// Another running TUI on this socket owns a live workbench.
+		if _, err := tm.run("set-option", "-t", workbenchHolderName, workbenchOwnerOption, itoa(os.Getpid())); err != nil {
+			t.Fatalf("set live owner: %v", err)
+		}
+		var err error
+		if project {
+			_, err = tm.ComposeProjectWorkbench([]WorkbenchProject{{Label: "p", Sessions: full}}, "p", nil)
+		} else {
+			_, err = tm.ComposeWorkbench(full, nil)
+		}
+		if err == nil || !strings.Contains(err.Error(), "attach -t "+workbenchHolderName) {
+			t.Errorf("project=%v: err = %v, want a refusal naming the recovery command", project, err)
+		}
+		if n := tm.holderAgentPanes(workbenchHolderName); n != 2 {
+			t.Errorf("project=%v: holder agent panes = %d, want 2 (live workbench untouched)", project, n)
+		}
+	}
+}
+
+// A crash right after the holder was created, before any agent joined, leaves
+// only the placeholder shell; that must not block the next workbench.
+func TestComposeWorkbench_PlaceholderOnlyHolderIsReplaced(t *testing.T) {
+	tm, full, _ := orphanedWorkbenchFixture(t, "a", "b")
+	if _, err := tm.RecoverOrphanedWorkbench(workbenchHolderName); err != nil {
+		t.Fatalf("recover fixture: %v", err)
+	}
+	if err := tm.createWorkbenchHolder(workbenchHolderName); err != nil {
+		t.Fatalf("createWorkbenchHolder: %v", err)
+	}
+	if n := tm.holderAgentPanes(workbenchHolderName); n != 0 {
+		t.Fatalf("placeholder counted as %d agent pane(s)", n)
+	}
+	comp, err := tm.ComposeWorkbench(full, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench over a placeholder-only holder: %v", err)
+	}
+	if err := comp.Restore(); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+}
+
+// livePanes maps every pane that exists on the server to its session. Use it
+// to prove a pane survived: `display-message -t %N` falls back to another
+// target and reports a killed pane as alive.
+func livePanes(t *testing.T, tm *TmuxManager) map[string]string {
+	t.Helper()
+	out, err := tm.run("list-panes", "-a", "-F", "#{pane_id}\t#{session_name}")
+	if err != nil {
+		t.Fatalf("list-panes -a: %v", err)
+	}
+	panes := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if id, session, ok := strings.Cut(line, "\t"); ok {
+			panes[id] = session
+		}
+	}
+	return panes
+}
+
+// The #7681 QA rejection, case (a): an agent pane with no @vibeflow_session in a
+// dead-owner holder must not be killed when a new workbench is composed.
+func TestComposeWorkbench_UnstampedAgentInStaleHolderIsRefusedAndKept(t *testing.T) {
+	tm, full, before := orphanedWorkbenchFixture(t, "a", "b", "c")
+	if _, err := tm.run("set-option", "-p", "-u", "-t", before[full[0]], "@vibeflow_session"); err != nil {
+		t.Fatalf("clear origin: %v", err)
+	}
+
+	_, err := tm.ComposeWorkbench(full[1:], nil)
+	if err == nil || !strings.Contains(err.Error(), "attach -t "+workbenchHolderName) {
+		t.Fatalf("err = %v, want a refusal naming the recovery command", err)
+	}
+	if live := livePanes(t, tm); live[before[full[0]]] != workbenchHolderName {
+		t.Errorf("unstamped agent pane %s = in %q, want it alive in the kept holder", before[full[0]], live[before[full[0]]])
+	}
+}
+
+// The #7681 QA rejection, case 2: a shell the user split inside the workbench
+// survives Restore (#3277). The next compose in the same TUI (the owner is
+// alive, so nothing is recovered) must refuse rather than kill it.
+func TestComposeWorkbench_UserPaneKeptByRestoreSurvivesNextCompose(t *testing.T) {
+	tm, full, _ := orphanedWorkbenchFixture(t, "a", "b")
+	if _, err := tm.RecoverOrphanedWorkbench(workbenchHolderName); err != nil {
+		t.Fatalf("recover fixture: %v", err)
+	}
+	comp, err := tm.ComposeWorkbench(full, nil)
+	if err != nil {
+		t.Fatalf("ComposeWorkbench: %v", err)
+	}
+	out, err := tm.run("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", workbenchHolderName, "sleep 300")
+	if err != nil {
+		t.Fatalf("split user pane: %v", err)
+	}
+	userPane := strings.TrimSpace(out)
+	if err := comp.Restore(); err == nil {
+		t.Fatal("Restore must report the user pane it left in the holder")
+	}
+
+	if _, err := tm.ComposeWorkbench(full, nil); err == nil {
+		t.Fatal("compose over a holder with a live user pane must refuse")
+	}
+	if live := livePanes(t, tm); live[userPane] != workbenchHolderName {
+		t.Errorf("user pane %s = in %q, want it alive in the kept holder", userPane, live[userPane])
 	}
 }

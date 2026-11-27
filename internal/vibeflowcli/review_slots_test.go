@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -362,5 +365,150 @@ func TestReviewSlotsRecoverSharedReceipt(t *testing.T) {
 	<-done
 	if p := veraPendingReceipt(server.URL, shared); p != nil || !strings.Contains(text(), "Finishing the job this listener held") {
 		t.Fatalf("shared receipt left pending: %+v\n%s", p, text())
+	}
+}
+
+// TestReviewSlotsLogAttemptProgress drives a real console slot window's
+// listener (--slot-kind/--slot-label, as the Vera console starts it) through
+// one question (#5598). The console's progress log, which the history pane
+// shows, records the claim, the harness stage and the outcome, and never the
+// question text. In-process slots share one terminal and keep no log.
+func TestReviewSlotsLogAttemptProgress(t *testing.T) {
+	withTempRoot(t)
+	t.Setenv("TMUX_PANE", "") // the border needs tmux; the log does not
+	repo, review, question := slotExecutions(t)
+	server, _, results := slotServer(t, review, question, []string{"repository_review_v1", reviewClaimKindCapability})
+	provider := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'fake-claude 1.0'; exit 0; }\necho 'harness answered the question'\nif grep -q 'Local question task' ../../task.txt; then cat " + shellQuote(reviewWatchQuestionResult(t, question)) + " > ../../result.json; else cat " + shellQuote(reviewWatchResult(t, review, 0)) + " > ../../result.json; fi\n"
+	if err := os.WriteFile(provider, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := singleSlotConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "slot-token"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() {
+		done <- runReviewWatch(ctx, &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac · answer 1", "--interval", "1s", "--slot-kind", "question", "--slot-label", "answer 1")
+	}()
+	for results() < 1 && ctx.Err() == nil {
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	logPath := reviewProgressLogPath(server.URL, reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "mac"})
+	log := strings.Join(readReviewProgressLog(logPath, 100), "\n")
+	for _, want := range []string{
+		"answer 1 · Claimed a question on ",
+		"answer 1 · answer ", // the fixture has no PR number, so its review ID labels it
+		"· checking out the PR ·",
+		"· claude working ·",
+		"· answered with 1 citations. after ",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("progress log lacks %q:\n%s\n--- runner output:\n%s", want, log, out.String())
+		}
+	}
+	if strings.Contains(log, question.Question.Question) {
+		t.Errorf("the question text reached the progress log:\n%s", log)
+	}
+	// The headless harness's output is kept as the attempt's transcript (#5601).
+	transcripts, _ := filepath.Glob(filepath.Join(filepath.Dir(logPath), reviewAttemptsDirName, "*", reviewTranscriptFile))
+	if len(transcripts) != 1 {
+		t.Fatalf("transcripts = %v, want one", transcripts)
+	}
+	if data, _ := os.ReadFile(transcripts[0]); !strings.Contains(string(data), "harness answered the question") {
+		t.Errorf("transcript lacks the harness output:\n%s", data)
+	}
+	// The runner's steps and server calls, through the result post (#5602).
+	events := strings.Join(readReviewEvents(filepath.Dir(transcripts[0]), 500), "\n")
+	for _, want := range []string{"started with claude", "POST /projects/1/pr-review-runners/{runner}/jobs/{job}/claim → 2", "stage checkout:", "/attempts/{attempt}/renew → 200 in ", "/result → 2", "finished: answered with 1 citations."} {
+		if !strings.Contains(events, want) {
+			t.Errorf("event log lacks %q:\n%s", want, events)
+		}
+	}
+	// The claim, traced before the attempt's reporter existed, leads the log.
+	if claim, brief := strings.Index(events, "/claim → "), strings.Index(events, "/brief → "); claim < 0 || brief < 0 || claim > brief {
+		t.Errorf("claim (%d) must be logged before the brief (%d):\n%s", claim, brief, events)
+	}
+	if strings.Contains(events, "slot-token") {
+		t.Errorf("the API token reached the event log:\n%s", events)
+	}
+	// Diagnostics follow the attempt through its outcome (#5600).
+	d, ok := readReviewDiagnostics(filepath.Dir(transcripts[0]))
+	stages := []string{}
+	for _, s := range d.Stages {
+		stages = append(stages, s.Name)
+	}
+	if !ok || d.Provider != "claude" || d.Binary != provider || d.Finished.IsZero() || d.LeaseExpires.IsZero() || d.Renewed.IsZero() || d.ExitCode == nil || *d.ExitCode != 0 || d.Outcome != "answered with 1 citations." || !strings.Contains(strings.Join(stages, ","), "checkout") || !strings.Contains(strings.Join(stages, ","), "child_guard") {
+		t.Errorf("diagnostics = %+v", d)
+	}
+}
+
+// TestReviewSlotsLeaseRejectedKeepsClaimExpiry (#7698): when the server
+// rejects the first renewal, the claim's lease expiry is the only one the
+// diagnostics can hold, and it is what explains the lease_rejected failure.
+// A real proxy in front of the slot server answers every renew with 409.
+func TestReviewSlotsLeaseRejectedKeepsClaimExpiry(t *testing.T) {
+	withTempRoot(t)
+	t.Setenv("TMUX_PANE", "")
+	repo, review, question := slotExecutions(t)
+	upstream, _, _ := slotServer(t, review, question, []string{"repository_review_v1", reviewClaimKindCapability})
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward := httputil.NewSingleHostReverseProxy(target)
+	var rejected atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/renew") {
+			rejected.Add(1)
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		forward.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	provider := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\n[ \"$1\" = --version ] && { echo 'fake-claude 1.0'; exit 0; }\nexec sleep 60\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := singleSlotConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "slot-token"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() {
+		done <- runReviewWatch(ctx, &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "mac · answer 1", "--interval", "1s", "--slot-kind", "question", "--slot-label", "answer 1")
+	}()
+	logPath := reviewProgressLogPath(server.URL, reviewWatchOptions{ProjectID: 1, RepositoryLinkID: 7, GitProvider: "github", Kind: "local", Name: "mac"})
+	var d reviewAttemptDiagnostics
+	for ctx.Err() == nil {
+		matches, _ := filepath.Glob(filepath.Join(filepath.Dir(logPath), reviewAttemptsDirName, "*", reviewDiagnosticsFile))
+		if len(matches) == 1 {
+			if got, ok := readReviewDiagnostics(filepath.Dir(matches[0])); ok && got.Failure != nil {
+				d = got
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if rejected.Load() == 0 || d.Failure == nil || d.Failure.Category != "lease_rejected" {
+		t.Fatalf("expected a lease_rejected attempt (renews rejected %d): %+v\n%s", rejected.Load(), d, out.String())
+	}
+	if want := time.UnixMilli(question.Attempt.LeaseExpiresAt); !d.LeaseExpires.Equal(want) || !d.Renewed.IsZero() {
+		t.Errorf("lease_expires = %v (renewed %v), want the claim's %v", d.LeaseExpires, d.Renewed, want)
 	}
 }

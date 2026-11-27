@@ -48,9 +48,10 @@ type reviewHistory struct {
 	failed, loaded bool
 	cursor, offset int
 	width, height  int
-	popup          func(job string) error   // Shows one review over the session.
-	loadDetail     func(job string) tea.Msg // Reads one review for the in-pane fallback.
-	detail         *reviewDetail            // The in-pane review, when popups are unavailable.
+	popup          func(job string) error             // Shows one review over the session.
+	loadDetail     func(job string) tea.Msg           // Reads one review for the in-pane fallback.
+	liveDetail     func(job string) func(int) tea.Msg // Its live section, when available.
+	detail         *reviewDetail                      // The in-pane review, when popups are unavailable.
 }
 
 func newReviewHistory(title string, load func() tea.Msg) reviewHistory {
@@ -180,13 +181,16 @@ func (h reviewHistory) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if popup, ok := msg.(reviewPopupMsg); ok && popup.err != nil && h.loadDetail != nil {
 		// No popup (tmux before 3.2, or no attached client): show it here.
 		d := newReviewDetail(func() tea.Msg { return h.loadDetail(popup.job) })
+		if h.liveDetail != nil {
+			d = d.withLive(h.liveDetail(popup.job))
+		}
 		d, _ = d.update(tea.WindowSizeMsg{Width: h.width, Height: h.height})
 		h.detail = &d
-		return h, d.load
+		return h, d.start()
 	}
 	if h.detail != nil {
 		switch msg.(type) {
-		case tea.KeyPressMsg, tea.MouseWheelMsg, tea.WindowSizeMsg, reviewDetailMsg:
+		case tea.KeyPressMsg, tea.MouseWheelMsg, tea.MouseClickMsg, tea.WindowSizeMsg, reviewDetailMsg, reviewLiveMsg, reviewLiveTickMsg:
 			if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "ctrl+c" {
 				return h, tea.Quit
 			}
@@ -194,8 +198,9 @@ func (h reviewHistory) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.detail = &d
 			if closed {
 				h.detail = nil
+				return h, nil
 			}
-			return h, nil
+			return h, d.followUp(msg)
 		}
 	}
 	switch msg := msg.(type) {
@@ -389,6 +394,7 @@ func runReviewHistory(ctx context.Context, cfg *Config, o reviewWatchOptions) er
 		return exec.Command("tmux", veraPopupArgs("exec "+shellJoin(args))...).Run()
 	}
 	model.loadDetail = func(job string) tea.Msg { return loadReviewDetail(ctx, client, o.ProjectID, job) }
+	model.liveDetail = func(job string) func(int) tea.Msg { return veraLiveLoader(cfg.ServerURL, o, job) }
 	_, err := tea.NewProgram(model, tea.WithContext(ctx)).Run()
 	if ctx.Err() != nil {
 		return nil

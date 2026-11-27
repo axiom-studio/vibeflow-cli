@@ -51,7 +51,10 @@ type reviewExecutionDiagnostic struct {
 }
 
 func reviewCancellationCategory(ctx context.Context) string {
+	var stuck *reviewHarnessStuckError
 	switch {
+	case errors.As(context.Cause(ctx), &stuck):
+		return stuck.category
 	case errors.Is(context.Cause(ctx), errReviewLeaseExpired):
 		return "lease_expired"
 	case errors.Is(context.Cause(ctx), errReviewLeaseRejected):
@@ -147,7 +150,8 @@ func readReviewExecutionDiagnostic(path string) (reviewExecutionDiagnostic, bool
 	case "provider_start_failed", "provider_exit", "provider_signal", "cancelled", "deadline_exceeded",
 		"lease_expired", "lease_rejected", "lease_identity_changed", "execution_failed", "review_api_error",
 		"review_api_unavailable", "child_guard_failed", "provider_error", "invalid_request", "authentication_required",
-		"access_denied", "rate_limited", "provider_unavailable", "invalid_result", "provider_reported_failure", "untrusted_workspace":
+		"access_denied", "rate_limited", "provider_unavailable", "invalid_result", "provider_reported_failure", "untrusted_workspace",
+		"pull_request_draft":
 		return d, true
 	default:
 		return reviewExecutionDiagnostic{}, false

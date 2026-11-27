@@ -87,9 +87,13 @@ type reviewWatch struct {
 	harnessFatal       error // Set when the harness cannot run on this machine until the user acts.
 	capacity           *reviewCapacity
 	slot               *os.File
-	tty                *reviewTerminal // Set when the harness runs interactively in this terminal.
-	interrupted        bool            // The user closed the interactive harness before its result.
-	stopBrowse         func()          // Ends the idle key handling of tty.
+	tty                *reviewTerminal                       // Set when the harness runs interactively in this terminal.
+	interrupted        bool                                  // The user closed the interactive harness before its result.
+	stopBrowse         func()                                // Ends the idle key handling of tty.
+	progress           *reviewAttemptProgress                // The running attempt's progress, in a console slot (#5598).
+	tracing            atomic.Pointer[reviewAttemptProgress] // Where traced server calls go (#5602).
+	lastClaim          atomic.Pointer[string]                // A claim traced before its attempt's reporter existed.
+	suspectJobs        map[string]bool                       // Reviews in a row whose harness output looked like a login or access failure the status check did not confirm (#7697).
 }
 
 // veraBrowseHint tells the user how to reach the history pane from the listener.
@@ -248,7 +252,7 @@ func reviewWatchCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer cancel()
 			if detail != "" {
-				return runReviewDetail(ctx, cfg, o.ProjectID, detail)
+				return runReviewDetail(ctx, cfg, o, detail)
 			}
 			return runReviewHistory(ctx, cfg, o)
 		}
@@ -402,6 +406,30 @@ func reviewWatchCmd() *cobra.Command {
 	return cmd
 }
 
+// newProgress reports a console slot's attempt progress; nil outside a slot,
+// where nothing reads it.
+func (w *reviewWatch) newProgress(p *reviewReceipt) *reviewAttemptProgress {
+	if w.options.SlotLabel == "" {
+		return nil
+	}
+	var run veraTmux
+	pane := os.Getenv("TMUX_PANE")
+	if pane != "" {
+		run = execVeraTmux
+	}
+	r := newReviewAttemptProgress(run, pane, reviewProgressLogPath(w.client.baseURL, w.options), w.options.SlotLabel, veraJobWindowName(p), w.options.Provider, nil)
+	r.jobID = p.JobID
+	if p.Execution != nil {
+		r.attempt = p.Execution.Attempt.ID
+	}
+	if w.cfg != nil {
+		if path, err := exec.LookPath(w.cfg.Providers[w.options.Provider].Binary); err == nil {
+			r.binary = path
+		}
+	}
+	return r
+}
+
 func (w *reviewWatch) prefix() string {
 	return fmt.Sprintf("/projects/%d/pr-review-runners/%s", w.options.ProjectID, w.state.ID)
 }
@@ -417,6 +445,22 @@ func (w *reviewWatch) workDir(p *reviewReceipt) string {
 
 func (w *reviewWatch) run(ctx context.Context) error {
 	defer w.releaseCapacity()
+	if w.options.SlotLabel != "" {
+		// A console slot is the only runner in its process, so its client is
+		// its own: trace its server calls into the running attempt's log.
+		w.client.reviewTrace = func(method, path string, status int, took time.Duration, err error) {
+			if p := w.tracing.Load(); p != nil {
+				p.requestEvent(method, path, status, took, err)
+				return
+			}
+			// The claim precedes the attempt it creates: keep it for that
+			// attempt's log. Other calls without an attempt are idle polls.
+			if bare, _, _ := strings.Cut(path, "?"); strings.HasSuffix(bare, "/claim") {
+				line := reviewRequestEventLine(method, path, status, took, err) + " (claim at " + time.Now().Add(-took).Format("15:04:05.000") + ")"
+				w.lastClaim.Store(&line)
+			}
+		}
+	}
 	identity := fmt.Sprintf("%s\n%d\n%d\n%s\n%s\n%s", w.client.baseURL, w.options.ProjectID, w.options.RepositoryLinkID, w.options.GitProvider, w.options.Kind, w.options.Name)
 	digest := sha256.Sum256([]byte(identity))
 	// The guard and provider both change cwd. Their private paths must keep
@@ -726,6 +770,7 @@ func (w *reviewWatch) poll(ctx context.Context) error {
 }
 
 func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
+	defer w.tracing.Store(nil) // idle polls are not part of any attempt's event log
 	p := w.state.Pending
 	if p == nil {
 		return nil
@@ -785,12 +830,21 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		}
 		fmt.Fprintf(w.output, "\n%s %s at %.12s; starting a fresh Vera with %s.\n", reviewClock(), claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
 		w.nameWindow(veraJobWindowName(p))
+		w.progress = w.newProgress(p)
+		if claim := w.lastClaim.Swap(nil); claim != nil && w.progress != nil {
+			w.progress.claim = *claim
+		}
+		w.tracing.Store(w.progress)
+		w.progress.appendLog(reviewClock() + " " + w.options.SlotLabel + " · " + claimed)
 		result, err := w.execute(ctx, p)
 		if err != nil {
 			p.Failure = err.Error()
 		} else {
 			p.Result = result
+			w.suspectJobs = nil // a review that worked clears the suspicion
 		}
+		w.progress.finish(strings.TrimPrefix(reviewOutcomeLine(p), "Result: "))
+		w.progress = nil // tracing stays on until advance returns: the result post is logged too
 		if err = w.save(); err != nil {
 			return err
 		}
@@ -965,6 +1019,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	setStage := func(stage string) {
 		diagnostic.Stage = stage
 		stageStarted = time.Now()
+		w.progress.setStage(stage)
 	}
 	deadline, limit := time.UnixMilli(p.Execution.Attempt.Round.DeadlineAt), "server deadline"
 	var localCap time.Time
@@ -979,6 +1034,10 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	}
 	deadlineCtx, attemptDeadline := newReviewDeadline(parent, deadline, localCap)
 	defer attemptDeadline.stop()
+	if w.progress != nil {
+		w.progress.deadline = attemptDeadline.time
+		w.progress.start()
+	}
 	ctx, cancel := context.WithCancelCause(deadlineCtx)
 	defer cancel(nil)
 	var progress atomic.Uint32
@@ -1007,6 +1066,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 	go func() {
 		defer close(renewDone)
 		expiry := time.UnixMilli(p.Execution.Attempt.LeaseExpiresAt)
+		w.progress.leaseExpires(expiry)
 		sendChangedLines := true // Cleared for this attempt once the server rejects the field.
 		for {
 			// Renew every 10 seconds, and halfway through a shorter lease:
@@ -1066,6 +1126,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 				return
 			}
 			expiry = time.UnixMilli(renewed.Attempt.LeaseExpiresAt)
+			w.progress.leaseRenewed(time.Now(), expiry)
 			// The server may lengthen the round once it knows the diff size.
 			attemptDeadline.extend(time.UnixMilli(renewed.Attempt.Round.DeadlineAt))
 		}
@@ -1092,6 +1153,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.DurationMS = time.Since(started).Milliseconds()
 		diagnostic.StageDurationMS = time.Since(stageStarted).Milliseconds()
 		diagnostic.RecordedAt = time.Now().UnixMilli()
+		w.progress.setFailure(diagnostic)
 		path := filepath.Join(w.root, "last-provider-diagnostic.json")
 		if err := saveReviewJSON(path, diagnostic); err != nil {
 			failureErr = fmt.Errorf("review failed at %s (%s); private diagnostic could not be saved", diagnostic.Stage, diagnostic.Category)
@@ -1102,6 +1164,12 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		}
 		failureErr = diagnostic.failure()
 	}()
+	// A draft pull request is not ready for review: stop before any checkout
+	// or harness instead of spending the attempt (#5603).
+	if p.Execution.Review.Draft {
+		diagnostic.Category = "pull_request_draft"
+		return nil, reviewReportable("the pull request is a draft; mark it ready for review, then request the review again")
+	}
 	root := w.workDir(p)
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
@@ -1310,6 +1378,13 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		written = watchReviewResult(ctx, resultPath, p, brief.Digest)
 	}
 	harnessStarted := time.Now()
+	if interactive {
+		// A harness stuck on a login or access error fails the attempt with
+		// the real cause instead of holding it until the lease ends (#7691).
+		watchStuckHarness(ctx, execVeraTmux, os.Getenv("TMUX_PANE"), reviewStuckEvery, reviewStuckAfter, func(category string) {
+			cancel(&reviewHarnessStuckError{category: category})
+		})
+	}
 	done := make(chan error, 1)
 	go func() { done <- guard.Wait() }()
 	notice := time.Duration(0) // A headless harness has no screen to answer.
@@ -1320,6 +1395,8 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		fmt.Fprintf(w.output, "\r\nVera is still waiting for %s; if it is showing a login or trust screen, answer it here or press Ctrl-C twice to stop Vera.\r\n", w.options.Provider)
 	})
 	ran := time.Since(harnessStarted)
+	// Before Vera clears the pane: keep what the harness showed (#5601).
+	w.progress.saveTranscript(string(stdout.tail) + "\n" + string(stderr.tail))
 	diagnostic.StdoutBytes, diagnostic.StderrBytes = stdout.n, stderr.n
 	if report, ok := readReviewProcessReport(filepath.Join(root, "child-diagnostic.json")); ok {
 		diagnostic.Stage = "provider"
@@ -1335,6 +1412,7 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 		diagnostic.Signal = reviewProcessSignal(guard.ProcessState)
 		diagnostic.Category = "child_guard_failed"
 	}
+	w.progress.harnessExit(diagnostic.ExitCode, diagnostic.Signal)
 	if interactive {
 		// The guard stops the harness with SIGINT, then SIGTERM and SIGKILL.
 		w.tty.reclaim(diagnostic.Signal == int(syscall.SIGTERM) || diagnostic.Signal == int(syscall.SIGKILL))
@@ -1360,9 +1438,15 @@ func (w *reviewWatch) execute(parent context.Context, p *reviewReceipt) (_ json.
 			return nil, diagnostic.failure()
 		}
 	}
+	var stuck *reviewHarnessStuckError
+	if errors.As(context.Cause(ctx), &stuck) && !reviewFileExists(resultPath) {
+		diagnostic.Category = stuck.category
+		w.harnessOutputProblem(ctx, p.JobID, stuck.category, fmt.Sprintf(" (it sat on an error screen for %d s)", int(reviewStuckAfter.Seconds())))
+		return nil, diagnostic.failure()
+	}
 	if category := classifyReviewHarnessOutput(string(stdout.tail) + "\n" + string(stderr.tail)); category != "" && ctx.Err() == nil && (err != nil || !reviewFileExists(resultPath)) {
 		diagnostic.Category = category
-		w.harnessFatal = fmt.Errorf("Vera stopped: the %s harness %s on this machine; %s, then start Vera again", w.options.Provider, reviewHarnessProblem(category), reviewHarnessLoginHint(w.options.Provider))
+		w.harnessOutputProblem(ctx, p.JobID, category, "")
 		return nil, diagnostic.failure()
 	}
 	if err != nil || ctx.Err() != nil {

@@ -31,6 +31,9 @@ type reviewJob struct {
 	HeadSHA          string `json:"head_sha"`
 	BaseSHA          string `json:"base_sha"`
 	State            string `json:"state"`
+	// Draft is the provider's draft flag for the pull request (axiomcloud's
+	// PRReviewInput.Draft). A draft is not reviewed: the attempt stops at once.
+	Draft bool `json:"draft,omitempty"`
 	// PendingQuestions counts queued `@vibeflow ask` questions on the job.
 	PendingQuestions int `json:"pending_questions,omitempty"`
 }
@@ -145,21 +148,35 @@ func (e *reviewHTTPError) Error() string { return fmt.Sprintf("review API return
 
 // Unlike the legacy convenience methods, every review call is cancellable,
 // bounded, redirect-safe, and never echoes a provider error body or URL token.
+// reviewRequest is the runner's one way to the review API. A console slot
+// sets reviewTrace to log each call's method, path, status and latency for
+// the review popup (#5602); tokens only ever travel in the header.
 func (c *Client) reviewRequest(ctx context.Context, method, path string, body, out any) error {
+	started := time.Now()
+	status, err := c.doReviewRequest(ctx, method, path, body, out)
+	if c.reviewTrace != nil {
+		c.reviewTrace(method, path, status, time.Since(started), err)
+	}
+	return err
+}
+
+// doReviewRequest performs one review API call and reports the HTTP status it
+// got, or 0 when no response arrived.
+func (c *Client) doReviewRequest(ctx context.Context, method, path string, body, out any) (int, error) {
 	base, err := url.Parse(c.baseURL)
 	if err != nil || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Scheme != "https" && !(base.Scheme == "http" && (base.Hostname() == "127.0.0.1" || base.Hostname() == "localhost" || base.Hostname() == "::1"))) {
-		return fmt.Errorf("review server must use HTTPS or loopback HTTP without embedded credentials")
+		return 0, fmt.Errorf("review server must use HTTPS or loopback HTTP without embedded credentials")
 	}
 	var data []byte
 	if body != nil {
 		data, err = json.Marshal(body)
 		if err != nil {
-			return err
+			return 0, err
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.baseURL, "/")+"/rest/v1/vibeflow"+path, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("invalid review API request")
+		return 0, fmt.Errorf("invalid review API request")
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
@@ -168,23 +185,24 @@ func (c *Client) reviewRequest(ctx context.Context, method, path string, body, o
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
-		return errReviewConnection
+		return 0, errReviewConnection
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &reviewHTTPError{resp.StatusCode}
+	status := resp.StatusCode
+	if status < 200 || status >= 300 {
+		return status, &reviewHTTPError{status}
 	}
-	if resp.StatusCode == http.StatusNoContent || out == nil {
-		return nil
+	if status == http.StatusNoContent || out == nil {
+		return status, nil
 	}
 	data, err = io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
 	if err != nil || len(data) > 2<<20 {
-		return fmt.Errorf("review API response is incomplete or too large")
+		return status, fmt.Errorf("review API response is incomplete or too large")
 	}
 	if err = json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("invalid review API response")
+		return status, fmt.Errorf("invalid review API response")
 	}
-	return nil
+	return status, nil
 }

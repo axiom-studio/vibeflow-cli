@@ -256,8 +256,10 @@ func startVeraPane(t *testing.T, loggedIn bool, script func(e *reviewExecution, 
 		status, code = `{"loggedIn": false}`, 1
 	}
 	harness := filepath.Join(t.TempDir(), "claude")
+	// A harness can log out mid-review: its status check reports logged out
+	// once the "logged-out" mark exists (#7697).
 	body := "#!/bin/sh\n" +
-		"if [ \"$1 $2\" = 'auth status' ]; then echo '" + status + "'; exit " + strconv.Itoa(code) + "; fi\n" +
+		"if [ \"$1 $2\" = 'auth status' ]; then [ -f " + shellQuote(v.mark("logged-out")) + " ] && { echo '{\"loggedIn\": false}'; exit 1; }; echo '" + status + "'; exit " + strconv.Itoa(code) + "; fi\n" +
 		script(e, v.mark)
 	if err := os.WriteFile(harness, []byte(body), 0700); err != nil {
 		t.Fatal(err)
@@ -890,5 +892,46 @@ func TestReviewWatchRegistersWithoutIsolationChoice(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(ConfigPath()); string(after) != string(before) {
 		t.Fatalf("the default was saved as a choice:\n%s", after)
+	}
+}
+
+// TestReviewWatchDraftPullRequestStopsAtOnce: a draft pull request's attempt
+// ends before any checkout or harness, with an explicit draft reason sent as
+// the failure, instead of running out the deadline (#5603).
+func TestReviewWatchDraftPullRequestStopsAtOnce(t *testing.T) {
+	withTempRoot(t)
+	repo, e := reviewTestRepo(t)
+	e.Review.Number, e.Review.Draft = 12, true
+	server, claims, results := reviewWatchServer(t, map[int64]*reviewExecution{7: e})
+	ran := filepath.Join(t.TempDir(), "harness-ran")
+	provider := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(provider, []byte("#!/bin/sh\ntouch "+shellQuote(ran)+"\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := singleSlotConfig()
+	cfg.ServerURL, cfg.APIToken = server.URL, "draft-token"
+	cfg.Providers["claude"] = Provider{Binary: provider}
+	if err := SaveConfig(cfg, ConfigPath()); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	started := time.Now()
+	if err := runReviewWatch(context.Background(), &out, "--project", "1", "--repo", repo, "--repository-link", "7", "--provider", "claude", "--name", "draft-test", "--once"); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	text := out.String()
+	for _, want := range []string{"Claimed PR #12", "Result: failed - review failed at brief (pull_request_draft): the pull request is a draft; mark it ready for review, then request the review again", "Failure reported to VibeFlow."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Review worktree ready") {
+		t.Errorf("a draft was checked out:\n%s", text)
+	}
+	if _, err := os.Stat(ran); err == nil {
+		t.Error("the harness ran for a draft pull request")
+	}
+	if claims[7].Load() != 1 || results.Load() != 0 || time.Since(started) > 30*time.Second {
+		t.Errorf("claims=%d results=%d took %s", claims[7].Load(), results.Load(), time.Since(started))
 	}
 }

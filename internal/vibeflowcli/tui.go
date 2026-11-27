@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -349,6 +350,13 @@ func (m Model) refreshSessions() tea.Msg {
 		return sessionsMsg{err: err}
 	}
 
+	recovered := m.recoverOrphanedWorkbench(tmuxSessions)
+	if len(recovered) > 0 {
+		if tmuxSessions, err = m.tmux.ListSessions(); err != nil {
+			return sessionsMsg{err: err}
+		}
+	}
+
 	// Re-bind vibeflow keys to ensure persistence across tmux reloads.
 	m.tmux.BindAllSessionKeys()
 
@@ -468,6 +476,47 @@ func (m Model) refreshSessions() tea.Msg {
 	}
 
 	return sessionsMsg{sessions: rows, orphans: m.countOrphanWorktrees()}
+}
+
+// recoverOrphanedWorkbench moves agent panes stranded in an unattached
+// workbench holder back to their own sessions (#3310). The holder is hidden
+// from the list (#3300), so without this a crash while composed, or a partial
+// Restore, made those agents vanish from the TUI. A holder that is attached,
+// or one this TUI is composing or restoring, is a live workbench and is left
+// alone. Recovered sessions get their vibeflow status bar back from the store,
+// since the status captured at compose time died with the old process.
+func (m Model) recoverOrphanedWorkbench(sessions []TmuxSession) []string {
+	if m.workbenchActive {
+		return nil
+	}
+	for _, ts := range sessions {
+		if !isWorkbenchHolder(ts.Name) || ts.Attached {
+			continue
+		}
+		recovered, err := m.tmux.RecoverOrphanedWorkbench(ts.Name)
+		if m.logger != nil {
+			if err != nil {
+				m.logger.Warn("workbench recovery: %v", err)
+			}
+			if len(recovered) > 0 {
+				m.logger.Info("workbench recovery: restored %s", strings.Join(recovered, ", "))
+			}
+		}
+		if m.store != nil && len(recovered) > 0 {
+			if metas, err := m.store.List(); err == nil {
+				for _, meta := range metas {
+					if slices.Contains(recovered, meta.TmuxSession) {
+						_ = m.tmux.ConfigureStatusBar(meta.TmuxSession, StatusBarOpts{
+							Provider: meta.Provider, Branch: meta.Branch, Project: meta.Project,
+							Persona: meta.Persona, WorktreePath: meta.WorktreePath,
+						})
+					}
+				}
+			}
+		}
+		return recovered
+	}
+	return nil
 }
 
 // countOrphanWorktrees returns how many managed worktrees no stored session
@@ -863,10 +912,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so the diff-based renderer doesn't skip lines it assumes are unchanged.
 		return m, tea.ClearScreen
 	case tickMsg:
-		return m, tea.Batch(
-			m.refreshSessions,
-			tickCmd(time.Duration(m.config.PollInterval)*time.Second),
-		)
+		next := tickCmd(time.Duration(m.config.PollInterval) * time.Second)
+		if m.workbenchActive {
+			// The TUI is hidden behind the workbench; polling would only add
+			// tmux server load while the user is in it (#7680). Restore
+			// triggers a fresh refresh when the workbench closes.
+			return m, next
+		}
+		return m, tea.Batch(m.refreshSessions, next)
 	case sessionsMsg:
 		// A successful refresh leaves an earlier error up until errClearMsg;
 		// clearing it here hid launch errors before they were drawn.
@@ -885,6 +938,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, nil
 	case captureTickMsg:
+		if m.workbenchActive {
+			return m, captureTickCmd() // see tickMsg: no polling behind the workbench
+		}
 		return m, tea.Batch(m.refreshCapture, captureTickCmd())
 	case captureMsg:
 		m.captureOutput = msg.output
@@ -1766,6 +1822,20 @@ func (m Model) resolveSessionWorkDir(result WizardResult) (workDir, worktreePath
 	return workDir, worktreePath, err
 }
 
+// launchRouting resolves how a TUI launch reaches its model. A gateway
+// preference inherited by a harness the gateway cannot wire (a team persona
+// overridden to Kiro or Cursor, a quick switch, a custom provider) falls back
+// to direct and reports gatewayIgnored. Otherwise the session would run direct
+// while being recorded and shown as gateway-routed (#4615). This mirrors
+// GatewayEnabledForProvider on the CLI path.
+func launchRouting(result WizardResult) (routing string, gatewayIgnored bool) {
+	routing = resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled)
+	if routing == RoutingGateway && !providerSupportsGateway(result.ProviderKey) {
+		return RoutingDirect, true
+	}
+	return routing, false
+}
+
 // executeLaunch performs the actual session creation after conflict resolution.
 func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	if result.Persona == "code_reviewer" {
@@ -1773,7 +1843,13 @@ func (m Model) executeLaunch(result WizardResult) tea.Msg {
 	}
 	// How the harness reaches its model. The gateway only applies to
 	// VibeFlow sessions, as before.
-	routing := resolveRouting(result.Routing, result.SessionType == "vibeflow" && result.LLMGatewayEnabled)
+	routing, gatewayIgnored := launchRouting(result)
+	if gatewayIgnored {
+		if m.logger != nil {
+			m.logger.Warn("gateway ignored for provider %q: it connects directly", result.ProviderKey)
+		}
+		result.LLMGatewayEnabled = false
+	}
 
 	// An endpoint launch without a usable endpoint (e.g. a quick switch or
 	// team override from a session with other routing) cannot start. Fail
@@ -2700,7 +2776,9 @@ func (m Model) renderDetailPanel(width, height int) string {
 	// rather than persisted — BuildLLMGatewayEnv is deterministic per provider.
 	// Secret-bearing values are masked with the same allowlist used for
 	// spawn-log redaction (isSecretEnvKey).
-	if s.LLMGatewayEnabled {
+	// Never claim "enabled" for a harness the gateway cannot wire, even for a
+	// session recorded before launchRouting guarded this (#4615).
+	if s.LLMGatewayEnabled && providerSupportsGateway(s.Provider) {
 		row("Gateway", "enabled")
 		env := BuildLLMGatewayEnv(s.Provider, m.config.ServerURL, m.config.APIToken)
 		keys := make([]string, 0, len(env))

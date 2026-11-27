@@ -182,6 +182,24 @@ func renderVeraDashboard(w io.Writer, o reviewWatchOptions, activities []veraSlo
 	fmt.Fprintln(w, "Ctrl-b w picks a window · Ctrl-b n / p moves between them · the history pane is on the right.")
 }
 
+// veraHomeSession resolves the Vera session whose slot windows the dashboard
+// in pane reports on. A pane target resolves to whichever session holds the
+// pane NOW, and while the dashboard is joined into a workbench that is the
+// holder, which has no slot windows, so every slot read as "stopped" (#7690).
+// The pane's @vibeflow_session origin (stamped on every agent pane) names the
+// session it belongs to; without one the pane itself is the best target.
+func veraHomeSession(run veraTmux, pane string) string {
+	if pane == "" {
+		return ""
+	}
+	if out, err := run("display-message", "-p", "-t", pane, "#{@vibeflow_session}"); err == nil {
+		if origin := strings.TrimSpace(out); origin != "" {
+			return origin
+		}
+	}
+	return pane
+}
+
 // runVeraDashboard redraws the dashboard every two seconds from the slots'
 // receipts. It never claims work; the slot windows do.
 func runVeraDashboard(ctx context.Context, cfg *Config, o reviewWatchOptions, answerSlots, reviewSlots int, out io.Writer) error {
@@ -191,7 +209,7 @@ func runVeraDashboard(ctx context.Context, cfg *Config, o reviewWatchOptions, an
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
-		stopped := veraStoppedSlots(execVeraTmux, os.Getenv("TMUX_PANE"), answerSlots, reviewSlots)
+		stopped := veraStoppedSlots(execVeraTmux, veraHomeSession(execVeraTmux, os.Getenv("TMUX_PANE")), answerSlots, reviewSlots)
 		renderVeraDashboard(out, o, veraSlotActivities(cfg.ServerURL, o, answerSlots, reviewSlots, stopped, time.Now()))
 		select {
 		case <-ctx.Done():

@@ -414,7 +414,8 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 		args = []string{"respawn-pane", "-t", opts.PaneID, "-c", opts.WorkDir}
 	}
 
-	// Set environment variables via tmux -e flags. For the claude provider this
+	// Set environment variables via tmux -e flags (sent over stdin by
+	// runPrivate below, never argv). For the claude provider this
 	// also injects the claude hardening defaults (issue #3493).
 	for k, v := range withClaudeHardeningEnv(opts.Provider, opts.Env) {
 		// Expand ${VAR} references in values against the current environment.
@@ -439,7 +440,8 @@ func (tm *TmuxManager) CreateSessionWithOpts(opts SessionOpts) error {
 		tm.logger.Info("spawn session %q provider=%s workdir=%s command=%q", fullName, opts.Provider, opts.WorkDir, redactCommandSecrets(opts.Command))
 	}
 
-	_, err := tm.run(args...)
+	// The env values include secrets (MCP_TOKEN), so keep them off argv.
+	_, err := tm.runPrivate(args...)
 	if err != nil {
 		return fmt.Errorf("create session %q: %w", fullName, err)
 	}
@@ -755,14 +757,11 @@ func (tm *TmuxManager) ComposeWorkbench(names []string, titles map[string]string
 	}
 
 	holder := workbenchHolderName
-	// A stale holder left by a previous crash would fail new-session; clear it.
-	if tm.HasSession(holder) {
-		_, _ = tm.run("kill-session", "-t", holder)
+	if err := tm.clearStaleHolder(holder); err != nil {
+		return nil, err
 	}
-	// Size the holder generously so early joins have room to split; tmux
-	// resizes the window to the client on attach.
-	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
-		return nil, fmt.Errorf("create workbench holder: %w", err)
+	if err := tm.createWorkbenchHolder(holder); err != nil {
+		return nil, err
 	}
 	placeholder, err := tm.paneID(holder)
 	if err != nil {
@@ -902,16 +901,14 @@ func (tm *TmuxManager) configureWorkbenchBorders(target string) {
 	for _, opt := range []struct{ key, val string }{
 		{"pane-border-status", "top"},
 		{"pane-border-format", " #{@vfheader} "},
-		// Heavy border lines + a lighter backdrop on the active pane give each
-		// session window a distinct box. tmux has no true pane gap/margin, so
-		// this is the closest achievable to "spacing between panes" (#2721,
-		// user-chosen Option A). window-style styles inactive panes;
-		// window-active-style the focused one.
+		// Heavy border lines, highlighted on the active pane, give each session
+		// window a distinct box (#2721). Pane backgrounds (window-style /
+		// window-active-style) are deliberately NOT set: any non-default pane
+		// background makes tmux emit ~75% more output to the terminal for the
+		// same agent output, which made the workbench sluggish (#7680).
 		{"pane-border-lines", "heavy"},
 		{"pane-border-style", "fg=" + oceanHexMuted},
 		{"pane-active-border-style", "fg=" + oceanHexPrimary},
-		{"window-style", "bg=" + oceanHexBackground},
-		{"window-active-style", "bg=" + oceanHexShallow},
 	} {
 		_, _ = tm.run("set-option", "-t", target, opt.key, opt.val)
 	}
@@ -1022,10 +1019,12 @@ func (tm *TmuxManager) composeProjectWorkbench(projects []WorkbenchProject, sele
 		if vscodeClient {
 			return nil, fmt.Errorf("existing workbench %q still contains sessions; detach and restore it before opening another view", holder)
 		}
-		_, _ = tm.run("kill-session", "-t", holder)
+		if err := tm.clearStaleHolder(holder); err != nil {
+			return nil, err
+		}
 	}
-	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
-		return nil, fmt.Errorf("create workbench holder: %w", err)
+	if err := tm.createWorkbenchHolder(holder); err != nil {
+		return nil, err
 	}
 
 	comp := &WorkbenchComposition{tm: tm, holder: holder, trackOrigins: vscodeClient}
@@ -1055,6 +1054,9 @@ func (tm *TmuxManager) composeProjectWorkbench(projects []WorkbenchProject, sele
 			win = strings.TrimSpace(out)
 		}
 		placeholder, err := tm.paneID(win)
+		if err == nil {
+			err = tm.markWorkbenchPlaceholder(placeholder)
+		}
 		if err != nil {
 			comp.Restore()
 			return nil, err
@@ -1141,6 +1143,141 @@ func (c *WorkbenchComposition) Restore() error {
 		_, _ = tm.run("kill-session", "-t", c.holder)
 	}
 	return firstErr
+}
+
+// workbenchOwnerOption names the holder's session option recording the PID of
+// the process that composed it, so recovery can tell a live workbench (one
+// still being composed, attached, or restored) from one orphaned by a crash.
+const workbenchOwnerOption = "@vibeflow_owner_pid"
+
+// createWorkbenchHolder creates the holder session, sized generously so early
+// joins have room to split (tmux resizes the window to the client on attach),
+// stamps it with this process as its owner, and marks its initial shell pane as
+// a disposable placeholder.
+func (tm *TmuxManager) createWorkbenchHolder(holder string) error {
+	if _, err := tm.run("new-session", "-d", "-s", holder, "-x", "250", "-y", "50"); err != nil {
+		return fmt.Errorf("create workbench holder: %w", err)
+	}
+	if _, err := tm.run("set-option", "-t", holder, workbenchOwnerOption, strconv.Itoa(os.Getpid())); err != nil {
+		return fmt.Errorf("record workbench owner on %q: %w", holder, err)
+	}
+	return tm.markWorkbenchPlaceholder(holder)
+}
+
+// workbenchOwnerAlive reports whether the process that composed the holder is
+// still running. A holder without an owner predates the option and is treated
+// as orphaned.
+func (tm *TmuxManager) workbenchOwnerAlive(holder string) bool {
+	out, err := tm.run("show-options", "-v", "-t", holder, workbenchOwnerOption)
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(out))
+	return err == nil && pid > 0 && (pid == os.Getpid() || processAlive(pid))
+}
+
+// clearStaleHolder makes way for a new workbench when a holder already exists
+// (a crash while composed, or a Restore that failed part-way). It must never
+// kill a live agent (#7681): stranded panes are first returned to their
+// sessions, and the holder is removed only once it is empty. A holder that
+// still holds agent panes, because it is attached or owned by a running
+// process, is left intact and reported.
+func (tm *TmuxManager) clearStaleHolder(holder string) error {
+	if !tm.HasSession(holder) {
+		return nil
+	}
+	out, _ := tm.run("display-message", "-p", "-t", holder, "#{session_attached}")
+	if strings.TrimSpace(out) == "0" {
+		if _, err := tm.RecoverOrphanedWorkbench(holder); err != nil && tm.logger != nil {
+			tm.logger.Warn("workbench recovery before compose: %v", err)
+		}
+	}
+	if n := tm.holderAgentPanes(holder); n > 0 {
+		return fmt.Errorf("workbench %q still holds %d agent pane(s) and was left intact; recover them with: tmux -L %s attach -t %s", holder, n, tm.socketName, holder)
+	}
+	// Only placeholder shells (or nothing) remain: safe to remove.
+	_, _ = tm.run("kill-session", "-t", holder)
+	return nil
+}
+
+// workbenchPlaceholderOption marks the throwaway shell panes the workbench
+// creates for itself (one per holder window). Only panes carrying it are
+// disposable; every other pane is protected (#7681).
+const workbenchPlaceholderOption = "@vibeflow_placeholder"
+
+// markWorkbenchPlaceholder tags a pane as one of the workbench's own throwaway
+// shells.
+func (tm *TmuxManager) markWorkbenchPlaceholder(target string) error {
+	if _, err := tm.run("set-option", "-p", "-t", target, workbenchPlaceholderOption, "1"); err != nil {
+		return fmt.Errorf("mark workbench placeholder %q: %w", target, err)
+	}
+	return nil
+}
+
+// holderAgentPanes counts the holder's panes that must not be killed: every
+// pane except the workbench's own marked placeholders. That covers agents
+// with or without @vibeflow_session, and shells the user split inside the
+// workbench, which Restore deliberately leaves in the holder (#3277). A holder
+// left by a crash before any agent joined holds only marked placeholders, so it
+// does not block the next workbench. An unreadable pane list counts as zero
+// only when the holder is gone.
+func (tm *TmuxManager) holderAgentPanes(holder string) int {
+	// Prefix each line with the pane id: an unmarked pane prints an empty value,
+	// and empty lines alone would collapse when the output is split.
+	out, err := tm.run("list-panes", "-s", "-t", holder, "-F", "#{pane_id}:#{"+workbenchPlaceholderOption+"}")
+	if err != nil {
+		if tm.HasSession(holder) {
+			return 1 // cannot tell: assume an agent rather than risk killing one
+		}
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Fields(out) {
+		if _, marker, _ := strings.Cut(line, ":"); marker != "1" {
+			n++
+		}
+	}
+	return n
+}
+
+// RecoverOrphanedWorkbench returns the panes stranded in a workbench holder
+// whose composing process is gone (a crash, or a Restore that failed part-way)
+// to their own sessions (#3310). Each pane's origin comes from its
+// @vibeflow_session option, which BindAllSessionKeys stamps on every agent
+// pane. The move-back reuses Restore, so a pane that cannot be moved, or has
+// no recorded origin, stays in the holder and the holder is not killed. It
+// returns the sessions recovered. A holder whose composing process is still
+// running is live and left alone, as is an attached one (checked by the
+// caller): a user may be looking at it.
+func (tm *TmuxManager) RecoverOrphanedWorkbench(holder string) ([]string, error) {
+	if tm.workbenchOwnerAlive(holder) {
+		return nil, nil
+	}
+	out, err := tm.run("list-panes", "-s", "-t", holder, "-F", "#{pane_id}\t#{@vibeflow_session}")
+	if err != nil {
+		return nil, fmt.Errorf("list panes of orphaned workbench %q: %w", holder, err)
+	}
+	comp := &WorkbenchComposition{tm: tm, holder: holder}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		id, origin, _ := strings.Cut(line, "\t")
+		if id == "" || origin == "" || isWorkbenchHolder(origin) {
+			continue
+		}
+		comp.sources = append(comp.sources, workbenchSource{name: origin, paneID: id, kept: tm.HasSession(origin)})
+	}
+	if len(comp.sources) == 0 {
+		// Nothing placeable: leave the holder for manual attach rather than
+		// re-reporting it on every refresh.
+		return nil, nil
+	}
+	err = comp.Restore()
+	var recovered []string
+	for _, s := range comp.sources {
+		if owner, err := tm.run("display-message", "-p", "-t", s.paneID, "#{session_name}"); err == nil && strings.TrimSpace(owner) == s.name {
+			recovered = append(recovered, s.name)
+		}
+	}
+	return recovered, err
 }
 
 // sessionPaneCount returns the total number of panes across all windows of a
@@ -1622,6 +1759,38 @@ func (tm *TmuxManager) ListSessionNames() ([]string, error) {
 		names[i] = s.Name
 	}
 	return names, nil
+}
+
+// runPrivate runs one tmux command whose arguments may carry secrets (session
+// env such as MCP_TOKEN). The command is sent on stdin to `source-file -`, so
+// the tmux client's argv, which any local user can read from the process table,
+// holds no secret (#4603). The server parses it exactly as it would argv.
+func (tm *TmuxManager) runPrivate(args ...string) (string, error) {
+	out, err := tm.privateCommand(args...).CombinedOutput()
+	if msg := strings.TrimSpace(string(out)); err != nil && msg != "" {
+		err = fmt.Errorf("%w: %s", err, msg)
+	}
+	return string(out), err
+}
+
+// privateCommand builds the `source-file -` invocation runPrivate executes.
+func (tm *TmuxManager) privateCommand(args ...string) *exec.Cmd {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = tmuxQuote(a)
+	}
+	// start-server first: unlike new-session, source-file needs a running
+	// server, and the first launch may be on an empty socket.
+	cmd := exec.Command("tmux", "-L", tm.socketName, "start-server", ";", "source-file", "-")
+	cmd.Stdin = strings.NewReader(strings.Join(quoted, " ") + "\n")
+	return cmd
+}
+
+// tmuxQuote double-quotes s for tmux's command parser, escaping the characters
+// it interprets inside double quotes ($ expands variables) and line breaks,
+// which would otherwise end the command.
+func tmuxQuote(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "\n", `\n`, "\r", `\r`).Replace(s) + `"`
 }
 
 func (tm *TmuxManager) run(args ...string) (string, error) {

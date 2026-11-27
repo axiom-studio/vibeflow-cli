@@ -364,3 +364,74 @@ func TestRenderDetailPanel_PreviewSkipsBlankRowsBeforeDeadBanner(t *testing.T) {
 		t.Fatalf("preview hides why the pane exited:\n%s", out)
 	}
 }
+
+// TestTick_WorkbenchActive_SkipsSessionRefresh proves the periodic session poll
+// issues no refresh while the TUI is hidden behind a workbench (#7680): the
+// returned command is only the re-armed tick, not a batch carrying
+// refreshSessions. PollInterval 0 makes the tick fire immediately.
+func TestTick_WorkbenchActive_SkipsSessionRefresh(t *testing.T) {
+	m := Model{config: &Config{PollInterval: 0}, workbenchActive: true}
+	_, cmd := m.Update(tickMsg{})
+	if _, ok := cmd().(tickMsg); !ok {
+		t.Fatalf("workbench active: want only the re-armed tick, got %T", cmd())
+	}
+
+	m.workbenchActive = false
+	_, cmd = m.Update(tickMsg{})
+	if _, ok := cmd().(tea.BatchMsg); !ok {
+		t.Fatalf("workbench inactive: want refresh+tick batch, got %T", cmd())
+	}
+}
+
+// TestCaptureTick_WorkbenchActive_SkipsCapture proves the capture-pane poll is
+// paused behind a workbench (#7680) and still runs otherwise.
+func TestCaptureTick_WorkbenchActive_SkipsCapture(t *testing.T) {
+	m := Model{workbenchActive: false}
+	_, cmd := m.Update(captureTickMsg{})
+	if _, ok := cmd().(tea.BatchMsg); !ok {
+		t.Fatalf("workbench inactive: want capture+tick batch, got %T", cmd())
+	}
+
+	m.workbenchActive = true
+	_, cmd = m.Update(captureTickMsg{})
+	if _, ok := cmd().(captureTickMsg); !ok { // fires after the 3s capture interval
+		t.Fatalf("workbench active: want only the re-armed capture tick, got %T", cmd())
+	}
+}
+
+// TestLaunchRouting_GatewayNeverReachesAHarnessItCannotWire covers #4615: a
+// team persona overridden to Kiro (or a quick switch) inherits the team's
+// gateway preference, which used to launch direct while being recorded and
+// shown as gateway-routed.
+func TestLaunchRouting_GatewayNeverReachesAHarnessItCannotWire(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, routing, sessionType string
+		gateway                              bool
+		want                                 string
+		ignored                              bool
+	}{
+		{"claude keeps the gateway", "claude", "", "vibeflow", true, RoutingGateway, false},
+		{"kiro inherited flag falls back", "kiro", "", "vibeflow", true, RoutingDirect, true},
+		{"kiro explicit gateway falls back", "kiro", RoutingGateway, "vibeflow", false, RoutingDirect, true},
+		{"cursor inherited flag falls back", "cursor", "", "vibeflow", true, RoutingDirect, true},
+		{"custom provider falls back", "my-custom", "", "vibeflow", true, RoutingDirect, true},
+		{"kiro without gateway is untouched", "kiro", "", "vibeflow", false, RoutingDirect, false},
+		{"vanilla session never uses the gateway", "claude", "", "vanilla", true, RoutingDirect, false},
+		{"explicit endpoint routing is kept", "kiro", RoutingEndpoint, "vibeflow", true, RoutingEndpoint, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ignored := launchRouting(WizardResult{ProviderKey: tc.provider, Routing: tc.routing, SessionType: tc.sessionType, LLMGatewayEnabled: tc.gateway})
+			if got != tc.want || ignored != tc.ignored {
+				t.Errorf("launchRouting = (%q, %v), want (%q, %v)", got, ignored, tc.want, tc.ignored)
+			}
+		})
+	}
+}
+
+func TestRenderDetailPanel_GatewayRowHiddenForHarnessItCannotWire(t *testing.T) {
+	cfg := &Config{ServerURL: "https://cloud.example.com", APIToken: "t"}
+	out := ansiRe.ReplaceAllString(detailPanelModel(SessionRow{Name: "s1", Provider: "kiro", LLMGatewayEnabled: true}, cfg).renderDetailPanel(120, 40), "")
+	if strings.Contains(out, "Gateway") {
+		t.Errorf("kiro session recorded with the gateway flag must not show Gateway enabled:\n%s", out)
+	}
+}

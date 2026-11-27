@@ -21,8 +21,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 func TestNewClient(t *testing.T) {
@@ -326,4 +330,100 @@ func TestClient_PostContentType(t *testing.T) {
 
 	c := NewClient(srv.URL, "tok")
 	c.CreateProject("test")
+}
+
+// TestClient_HTTPErrorBodyIsDisplaySafe covers #4617: error bodies are quoted
+// into errors that reach the terminal, so escape sequences from a hostile or
+// MITM'd server must not survive, on both the GET and POST paths.
+func TestClient_HTTPErrorBodyIsDisplaySafe(t *testing.T) {
+	const hostile = "\x1b[2J\x1b[3J\x1b[H forged \x1b]0;pwned\x07 clip\x1b]52;c;ZXZpbA==\x07 ‮dlrow\x9b31m\nline2\x00end"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(hostile))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "")
+
+	_, getErr := c.ListProjects()
+	_, postErr := c.CreateProject("p")
+	for name, err := range map[string]error{"get": getErr, "post": postErr} {
+		if err == nil {
+			t.Fatalf("%s: expected an error for a 500 response", name)
+		}
+		msg := err.Error()
+		for _, r := range msg {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				t.Errorf("%s: control/format rune %U survived in %q", name, r, msg)
+			}
+		}
+		if strings.Contains(msg, "pwned") || strings.Contains(msg, "ZXZpbA==") {
+			t.Errorf("%s: OSC payload survived: %q", name, msg)
+		}
+		if !strings.Contains(msg, "HTTP 500") || !strings.Contains(msg, "forged") || !strings.Contains(msg, "line2") {
+			t.Errorf("%s: readable text lost: %q", name, msg)
+		}
+	}
+}
+
+// TestClient_HTTPErrorBodyIsBounded proves a huge error body is neither fully
+// buffered into the error nor quoted beyond httpErrorTextMaxRunes.
+func TestClient_HTTPErrorBodyIsBounded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(strings.Repeat("é", 1<<20))) // 2 MiB of multibyte text
+	}))
+	defer srv.Close()
+
+	_, err := NewClient(srv.URL, "").ListProjects()
+	if err == nil {
+		t.Fatal("expected an error for a 502 response")
+	}
+	_, quoted, ok := strings.Cut(err.Error(), "HTTP 502: ")
+	if !ok {
+		t.Fatalf("error lacks the HTTP status: %v", err)
+	}
+	if got := len([]rune(quoted)); got != httpErrorTextMaxRunes+1 { // cap + ellipsis
+		t.Errorf("quoted %d runes, want %d", got, httpErrorTextMaxRunes+1)
+	}
+	if !strings.HasSuffix(quoted, "…") || strings.ContainsRune(quoted, utf8.RuneError) {
+		t.Errorf("truncation must end in an ellipsis on a rune boundary: %q", quoted[len(quoted)-12:])
+	}
+}
+
+// TestClient_HTTPErrorBodyReadIsBounded proves the client stops READING a
+// huge error body, not just quoting less of it (#7688, the CWE-770 half of
+// #4617): the server streams 64 MiB and counts what it could write before the
+// client hung up. Without the read bound the client drains all of it.
+func TestClient_HTTPErrorBodyReadIsBounded(t *testing.T) {
+	const body = 64 << 20
+	written := make(chan int, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(body))
+		w.WriteHeader(http.StatusInternalServerError)
+		chunk := []byte(strings.Repeat("x", 32<<10))
+		n := 0
+		for n < body {
+			m, err := w.Write(chunk)
+			n += m
+			if err != nil {
+				break
+			}
+		}
+		written <- n
+	}))
+	defer srv.Close()
+
+	if _, err := NewClient(srv.URL, "").ListProjects(); err == nil {
+		t.Fatal("expected an error for a 500 response")
+	}
+	select {
+	case n := <-written:
+		// Socket and transport buffers absorb some writes after the client
+		// stops; a client that read everything lets all 64 MiB through.
+		if n >= 16<<20 {
+			t.Errorf("server wrote %d of %d bytes before the client hung up; the client is reading the whole error body", n, body)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("server never finished writing: the client neither read nor closed the body")
+	}
 }

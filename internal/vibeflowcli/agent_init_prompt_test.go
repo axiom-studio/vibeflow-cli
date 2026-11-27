@@ -528,6 +528,11 @@ Pane is dead (status 143, Mon Sep  7 18:19:42 2026)`
 		{"claude", claudeHint + "\nnew conversation", ""},
 		{"claude", claudeHint + "\nPane is dead (status 0, Fri Sep 11 07:04:08 2026)", id},
 		{"claude", "chat mentioned claude --resume " + id, ""},
+		// The two-line anchor is what makes it Claude's own exit hint: a bare
+		// final `claude --resume <id>` (an agent echoing a command, or another
+		// conversation's hint) must not resume that conversation (#7682).
+		{"claude", "claude --resume " + id, ""},
+		{"claude", "some other line\nclaude --resume " + id, ""},
 		{"claude", "Resume this session with:\n" + id, ""},
 		{"codex", id, ""},
 		{"claude", claudeHint + "; touch /tmp/not-allowed", ""},
