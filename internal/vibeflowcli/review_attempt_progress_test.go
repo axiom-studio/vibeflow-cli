@@ -136,3 +136,30 @@ func TestRoundElapsed(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewAttemptProgress_LogCadenceIsBounded pins the log rate (#7696):
+// border refreshes every reviewProgressRefresh add NO log line until
+// reviewProgressLogged has passed; a stage change always logs.
+func TestReviewAttemptProgress_LogCadenceIsBounded(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "progress.log")
+	r := newReviewAttemptProgress(nil, "", logPath, "review 1", "review #4", "claude", nil)
+	r.refresh(true) // the attempt's first line
+	for i := 0; i < 6; i++ {
+		r.refresh(false) // a minute's worth of 10s refreshes, all inside the window
+	}
+	if n := len(readReviewProgressLog(logPath, 100)); n != 1 {
+		t.Fatalf("refreshes inside the log window wrote %d lines, want 1", n)
+	}
+	r.mu.Lock()
+	r.logged = time.Now().Add(-reviewProgressLogged - time.Second) // the window has passed
+	r.mu.Unlock()
+	r.refresh(false)
+	r.refresh(false)
+	if n := len(readReviewProgressLog(logPath, 100)); n != 2 {
+		t.Fatalf("after the window: %d lines, want exactly one more (2)", n)
+	}
+	r.setStage("checkout")
+	if n := len(readReviewProgressLog(logPath, 100)); n != 3 {
+		t.Fatalf("a stage change must log at once: %d lines, want 3", n)
+	}
+}
