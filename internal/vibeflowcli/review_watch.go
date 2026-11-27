@@ -92,6 +92,7 @@ type reviewWatch struct {
 	stopBrowse         func()                                // Ends the idle key handling of tty.
 	progress           *reviewAttemptProgress                // The running attempt's progress, in a console slot (#5598).
 	tracing            atomic.Pointer[reviewAttemptProgress] // Where traced server calls go (#5602).
+	lastClaim          atomic.Pointer[string]                // A claim traced before its attempt's reporter existed.
 }
 
 // veraBrowseHint tells the user how to reach the history pane from the listener.
@@ -447,7 +448,16 @@ func (w *reviewWatch) run(ctx context.Context) error {
 		// A console slot is the only runner in its process, so its client is
 		// its own: trace its server calls into the running attempt's log.
 		w.client.reviewTrace = func(method, path string, status int, took time.Duration, err error) {
-			w.tracing.Load().requestEvent(method, path, status, took, err)
+			if p := w.tracing.Load(); p != nil {
+				p.requestEvent(method, path, status, took, err)
+				return
+			}
+			// The claim precedes the attempt it creates: keep it for that
+			// attempt's log. Other calls without an attempt are idle polls.
+			if bare, _, _ := strings.Cut(path, "?"); strings.HasSuffix(bare, "/claim") {
+				line := reviewRequestEventLine(method, path, status, took, err) + " (claim at " + time.Now().Add(-took).Format("15:04:05.000") + ")"
+				w.lastClaim.Store(&line)
+			}
 		}
 	}
 	identity := fmt.Sprintf("%s\n%d\n%d\n%s\n%s\n%s", w.client.baseURL, w.options.ProjectID, w.options.RepositoryLinkID, w.options.GitProvider, w.options.Kind, w.options.Name)
@@ -820,6 +830,9 @@ func (w *reviewWatch) advance(ctx context.Context, fresh bool) error {
 		fmt.Fprintf(w.output, "\n%s %s at %.12s; starting a fresh Vera with %s.\n", reviewClock(), claimed, p.Execution.Attempt.Round.HeadSHA, w.options.Provider)
 		w.nameWindow(veraJobWindowName(p))
 		w.progress = w.newProgress(p)
+		if claim := w.lastClaim.Swap(nil); claim != nil && w.progress != nil {
+			w.progress.claim = *claim
+		}
 		w.tracing.Store(w.progress)
 		w.progress.appendLog(reviewClock() + " " + w.options.SlotLabel + " · " + claimed)
 		result, err := w.execute(ctx, p)

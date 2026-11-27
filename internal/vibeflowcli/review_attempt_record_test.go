@@ -216,6 +216,7 @@ func TestReviewAttemptProgress_EventLogRecordsStepsAndCalls(t *testing.T) {
 	}
 	r := newReviewAttemptProgress(nil, "", logPath, "review 1", "review #4", "claude", nil)
 	r.jobID, r.attempt = "job-4", "att-2"
+	r.claim = "POST /projects/1/pr-review-runners/{runner}/jobs/{job}/claim → 200 in 12ms (claim at 10:48:00.000)"
 	r.start()
 	r.setStage("checkout")
 	r.requestEvent("POST", "/projects/1/pr-review-runners/r/jobs/job-4/attempts/att-2/renew?x=secret", 200, 84*time.Millisecond, nil)
@@ -224,8 +225,9 @@ func TestReviewAttemptProgress_EventLogRecordsStepsAndCalls(t *testing.T) {
 	events := strings.Join(readReviewEvents(dir, 100), "\n")
 	for _, want := range []string{
 		"attempt att-2 started with claude",
+		"/jobs/{job}/claim → 200 in 12ms (claim at 10:48:00.000)",
 		"stage checkout: checking out the PR",
-		"POST /projects/1/pr-review-runners/r/jobs/job-4/attempts/att-2/renew → 200 in 84ms",
+		"POST /projects/1/pr-review-runners/{runner}/jobs/{job}/attempts/{attempt}/renew → 200 in 84ms",
 		"/result → no response: ",
 		"finished: failed - review failed at provider",
 	} {
@@ -328,5 +330,22 @@ func TestReviewAttemptProgress_WritesDiagnostics(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(dir, reviewDiagnosticsFile)); err != nil || info.Mode().Perm() != 0600 {
 		t.Errorf("diagnostics mode: %v %v", info, err)
+	}
+}
+
+func TestReviewPathTemplate(t *testing.T) {
+	for path, want := range map[string]string{
+		"/projects/1/pr-review-runners/2a2d-9/jobs/138c/attempts/question-7f/renew": "/projects/1/pr-review-runners/{runner}/jobs/{job}/attempts/{attempt}/renew",
+		"/projects/1/pr-review-runners/2a2d-9/jobs/138c/claim":                      "/projects/1/pr-review-runners/{runner}/jobs/{job}/claim",
+		"/projects/1/pr-review-runners/2a2d-9/heartbeat":                            "/projects/1/pr-review-runners/{runner}/heartbeat",
+		"/projects/1/pr-review-runners":                                             "/projects/1/pr-review-runners",
+		"/projects/1/pr-review-repositories":                                        "/projects/1/pr-review-repositories",
+	} {
+		if got := reviewPathTemplate(path); got != want {
+			t.Errorf("reviewPathTemplate(%q) = %q, want %q", path, got, want)
+		}
+	}
+	if got := reviewRequestEventLine("POST", "/projects/1/pr-review-runners/r1/jobs/j1/claim?x=1", 409, 30*time.Millisecond, nil); got != "POST /projects/1/pr-review-runners/{runner}/jobs/{job}/claim → 409 in 30ms" {
+		t.Errorf("event line = %q", got)
 	}
 }

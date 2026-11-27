@@ -83,6 +83,7 @@ type reviewAttemptProgress struct {
 	jobID    string // the server's job ID; tags the pane for the review popup
 	attempt  string // the server's attempt ID, named in the event log
 	binary   string // the harness binary's resolved path, for diagnostics
+	claim    string // the claim call's event line, logged before the reporter existed
 	provider string
 	started  time.Time
 	deadline func() time.Time
@@ -128,6 +129,9 @@ func (r *reviewAttemptProgress) start() {
 		_ = os.WriteFile(filepath.Join(dir, reviewEventsFile), nil, 0600)
 	}
 	r.event(fmt.Sprintf("attempt %s started with %s", reviewEventText(r.attempt), r.provider))
+	if r.claim != "" {
+		r.event(r.claim) // the claim ran before this attempt's reporter existed (#5602)
+	}
 	r.mu.Lock()
 	r.stages = []reviewStageTime{{Name: r.stage, Label: reviewStageLabel(r.stage, r.provider), Start: r.started}}
 	r.mu.Unlock()
@@ -199,18 +203,39 @@ func (r *reviewAttemptProgress) event(line string) {
 	}
 }
 
-// requestEvent logs one review API call: method, path without its query,
-// status (or why there was none) and latency.
+// requestEvent logs one review API call.
 func (r *reviewAttemptProgress) requestEvent(method, path string, status int, took time.Duration, err error) {
 	if r == nil {
 		return
 	}
+	r.event(reviewRequestEventLine(method, path, status, took, err))
+}
+
+// reviewRequestEventLine describes one review API call: method, path
+// template (query dropped, IDs replaced), status or why there was none, and
+// latency.
+func reviewRequestEventLine(method, path string, status int, took time.Duration, err error) string {
 	path, _, _ = strings.Cut(path, "?")
 	result := fmt.Sprintf("%d", status)
 	if status == 0 && err != nil {
 		result = "no response: " + reviewEventText(err.Error())
 	}
-	r.event(fmt.Sprintf("%s %s → %s in %dms", reviewEventText(method), reviewEventText(path), result, took.Milliseconds()))
+	return fmt.Sprintf("%s %s → %s in %dms", reviewEventText(method), reviewEventText(reviewPathTemplate(path)), result, took.Milliseconds())
+}
+
+// reviewPathTemplate replaces the runner, job and attempt IDs in a review API
+// path with placeholders, so event lines read as the call they are:
+// /projects/1/pr-review-runners/{runner}/jobs/{job}/attempts/{attempt}/renew.
+func reviewPathTemplate(path string) string {
+	placeholders := map[string]string{"pr-review-runners": "{runner}", "jobs": "{job}", "attempts": "{attempt}"}
+	parts := strings.Split(path, "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if ph, ok := placeholders[parts[i]]; ok && parts[i+1] != "" {
+			parts[i+1] = ph
+			i++
+		}
+	}
+	return strings.Join(parts, "/")
 }
 
 // reviewEventText keeps an event field on one printable line of at most 300

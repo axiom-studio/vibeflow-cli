@@ -424,10 +424,14 @@ func TestReviewSlotsLogAttemptProgress(t *testing.T) {
 	}
 	// The runner's steps and server calls, through the result post (#5602).
 	events := strings.Join(readReviewEvents(filepath.Dir(transcripts[0]), 500), "\n")
-	for _, want := range []string{"started with claude", "stage checkout:", "/renew → 200 in ", "/result → 2", "finished: answered with 1 citations."} {
+	for _, want := range []string{"started with claude", "POST /projects/1/pr-review-runners/{runner}/jobs/{job}/claim → 2", "stage checkout:", "/attempts/{attempt}/renew → 200 in ", "/result → 2", "finished: answered with 1 citations."} {
 		if !strings.Contains(events, want) {
 			t.Errorf("event log lacks %q:\n%s", want, events)
 		}
+	}
+	// The claim, traced before the attempt's reporter existed, leads the log.
+	if claim, brief := strings.Index(events, "/claim → "), strings.Index(events, "/brief → "); claim < 0 || brief < 0 || claim > brief {
+		t.Errorf("claim (%d) must be logged before the brief (%d):\n%s", claim, brief, events)
 	}
 	if strings.Contains(events, "slot-token") {
 		t.Errorf("the API token reached the event log:\n%s", events)
